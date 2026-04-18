@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dih>
+	<entry id="global" description="Globale Suchpfade fuer Delphi Refactoring Light">
+		<paths>
+			<search platforms="Win32">
+				<path recursive="False">{#DcuTargetDir}</path>
+			</search>
+		</paths>
+	</entry>
+
+	<entry id="DelphiRefactoringLight" description="Delphi Refactoring Light - Rename / Find References / Extract Method via DelphiLSP">
+		<paths>
+			<browsing platforms="Win32">
+				<entry recursive="False">Source</entry>
+			</browsing>
+		</paths>
+		<build platforms="Win32">
+			<project>Packages\DelphiRefactoringLight.dproj</project>
+		</build>
+		<packages platforms="Win32">
+			<package description="Delphi Refactoring Light (Design-Time)">$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight.bpl</package>
+		</packages>
+	</entry>
+</dih>

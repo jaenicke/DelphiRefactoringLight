@@ -1,0 +1,36 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{D1E00000-D1E0-D1E0-D1E0-D1E000000001}</ProjectGuid>
+        <!-- DIH_ExeOutput can be set as environment variable before calling bds.exe -->
+        <DCC_ExeOutput Condition="'$(DIH_ExeOutput)'!=''">$(DIH_ExeOutput)</DCC_ExeOutput>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="delinst.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType>GroupProjectType</Borland.ProjectType>
+    </ProjectExtensions>
+    <Target Name="delinst">
+        <MSBuild Projects="delinst.dproj" Properties="DCC_ExeOutput=$(DCC_ExeOutput)" Condition="'$(DCC_ExeOutput)'!=''"/>
+        <MSBuild Projects="delinst.dproj" Condition="'$(DCC_ExeOutput)'==''"/>
+    </Target>
+    <Target Name="delinst:Clean">
+        <MSBuild Projects="delinst.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="delinst:Make">
+        <MSBuild Projects="delinst.dproj" Targets="Make" Properties="DCC_ExeOutput=$(DCC_ExeOutput)" Condition="'$(DCC_ExeOutput)'!=''"/>
+        <MSBuild Projects="delinst.dproj" Targets="Make" Condition="'$(DCC_ExeOutput)'==''"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="delinst"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="delinst:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="delinst:Make"/>
+    </Target>
+</Project>

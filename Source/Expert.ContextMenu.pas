@@ -1,0 +1,228 @@
+(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *)
+unit Expert.ContextMenu;
+
+{
+  Hooks a "Refactoring Light" submenu into the Delphi IDE code editor's
+  context menu (the popup that appears when right-clicking in the code
+  editor).
+
+  The IDE exposes this popup as a VCL TPopupMenu component on one of the
+  running forms (typically named "EditorLocalMenu"). We locate it via
+  Screen.CustomForms at package load time and append our submenu.
+
+  Because the popup may not exist yet when the package's Register
+  procedure runs (the editor is not always initialized when design-time
+  packages load), the install attempt is retried via a TTimer until the
+  menu is found or a timeout is reached.
+}
+
+interface
+
+uses
+  System.Classes, Vcl.Menus, Vcl.ExtCtrls;
+
+type
+  TContextMenuInstaller = class
+  private
+    FSubmenu: TMenuItem;
+    FSeparator: TMenuItem;
+    FPopupMenu: TPopupMenu;
+    FRetryTimer: TTimer;
+    FRetryCount: Integer;
+    procedure OnRename(Sender: TObject);
+    procedure OnFindReferences(Sender: TObject);
+    procedure OnFindImplementations(Sender: TObject);
+    procedure OnExtractMethod(Sender: TObject);
+    procedure OnCompletion(Sender: TObject);
+    procedure OnRetryTimer(Sender: TObject);
+    function FindEditorPopupMenu: TPopupMenu;
+    function CreateItem(AParent: TMenuItem; const ACaption: string;
+      AShortcut: TShortCut; AOnClick: TNotifyEvent): TMenuItem;
+    procedure TryInstall;
+  public
+    destructor Destroy; override;
+    procedure Install;
+    procedure Uninstall;
+  end;
+
+var
+  ContextMenuInstance: TContextMenuInstaller;
+
+implementation
+
+uses
+  System.SysUtils, System.UITypes, Winapi.Windows,
+  Vcl.Forms, Vcl.Controls,
+  Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
+  Expert.FindReferencesWizard, Expert.FindImplementationsWizard;
+
+const
+  /// <summary>Maximum retry attempts when the editor popup is not yet
+  ///  available. With a 500 ms interval, 40 retries give up to 20 s.</summary>
+  MaxRetries = 40;
+
+{ TContextMenuInstaller }
+
+destructor TContextMenuInstaller.Destroy;
+begin
+  Uninstall;
+  inherited;
+end;
+
+function TContextMenuInstaller.FindEditorPopupMenu: TPopupMenu;
+var
+  I, J: Integer;
+  Form: TCustomForm;
+  Comp: TComponent;
+begin
+  Result := nil;
+  for I := 0 to Screen.CustomFormCount - 1 do
+  begin
+    Form := Screen.CustomForms[I];
+    for J := 0 to Form.ComponentCount - 1 do
+    begin
+      Comp := Form.Components[J];
+      if (Comp is TPopupMenu) and
+         SameText(Comp.Name, 'EditorLocalMenu') then
+        Exit(TPopupMenu(Comp));
+    end;
+  end;
+end;
+
+function TContextMenuInstaller.CreateItem(AParent: TMenuItem;
+  const ACaption: string; AShortcut: TShortCut;
+  AOnClick: TNotifyEvent): TMenuItem;
+begin
+  Result := TMenuItem.Create(AParent);
+  Result.Caption := ACaption;
+  Result.ShortCut := AShortcut;
+  Result.OnClick := AOnClick;
+end;
+
+procedure TContextMenuInstaller.Install;
+begin
+  if FSubmenu <> nil then Exit; // already installed
+
+  // Try once immediately; if the popup is not yet available, start a
+  // timer that keeps retrying until it shows up.
+  TryInstall;
+  if FSubmenu <> nil then Exit;
+
+  if FRetryTimer = nil then
+  begin
+    FRetryTimer := TTimer.Create(nil);
+    FRetryTimer.Interval := 500;
+    FRetryTimer.OnTimer := OnRetryTimer;
+  end;
+  FRetryCount := 0;
+  FRetryTimer.Enabled := True;
+end;
+
+procedure TContextMenuInstaller.OnRetryTimer(Sender: TObject);
+begin
+  TryInstall;
+  if (FSubmenu <> nil) or (FRetryCount >= MaxRetries) then
+    FRetryTimer.Enabled := False
+  else
+    Inc(FRetryCount);
+end;
+
+procedure TContextMenuInstaller.TryInstall;
+begin
+  if FSubmenu <> nil then Exit;
+
+  FPopupMenu := FindEditorPopupMenu;
+  if FPopupMenu = nil then Exit;
+
+  // Build our submenu
+  FSubmenu := TMenuItem.Create(FPopupMenu);
+  FSubmenu.Caption := 'Refactoring Light';
+
+  FSubmenu.Add(CreateItem(FSubmenu, 'Rename...',
+    ShortCut(Ord('R'), [ssCtrl, ssShift]), OnRename));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Find References',
+    ShortCut(Ord('U'), [ssCtrl, ssShift]), OnFindReferences));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Find Implementations',
+    ShortCut(Ord('I'), [ssCtrl, ssShift]), OnFindImplementations));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Extract Method',
+    ShortCut(Ord('M'), [ssCtrl, ssShift]), OnExtractMethod));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
+    ShortCut(VK_SPACE, [ssCtrl, ssShift]), OnCompletion));
+
+  // Separator above our submenu so it is visually grouped
+  FSeparator := TMenuItem.Create(FPopupMenu);
+  FSeparator.Caption := '-';
+
+  FPopupMenu.Items.Add(FSeparator);
+  FPopupMenu.Items.Add(FSubmenu);
+end;
+
+procedure TContextMenuInstaller.Uninstall;
+begin
+  if FRetryTimer <> nil then
+  begin
+    FRetryTimer.Enabled := False;
+    FreeAndNil(FRetryTimer);
+  end;
+
+  if FPopupMenu <> nil then
+  begin
+    if FSubmenu <> nil then
+    begin
+      FPopupMenu.Items.Remove(FSubmenu);
+      FreeAndNil(FSubmenu);
+    end;
+    if FSeparator <> nil then
+    begin
+      FPopupMenu.Items.Remove(FSeparator);
+      FreeAndNil(FSeparator);
+    end;
+  end
+  else
+  begin
+    // Popup was never hooked; just release our orphan items (should not
+    // normally happen, but defensive).
+    FreeAndNil(FSubmenu);
+    FreeAndNil(FSeparator);
+  end;
+
+  FPopupMenu := nil;
+end;
+
+procedure TContextMenuInstaller.OnRename(Sender: TObject);
+begin
+  if WizardInstance <> nil then
+    WizardInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnFindReferences(Sender: TObject);
+begin
+  if FindReferencesInstance <> nil then
+    FindReferencesInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnFindImplementations(Sender: TObject);
+begin
+  if FindImplementationsInstance <> nil then
+    FindImplementationsInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnExtractMethod(Sender: TObject);
+begin
+  if ExtractMethodInstance <> nil then
+    ExtractMethodInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnCompletion(Sender: TObject);
+begin
+  if CompletionWizardInstance <> nil then
+    CompletionWizardInstance.Execute;
+end;
+
+end.

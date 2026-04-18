@@ -19,16 +19,27 @@ type
     FPanelBottom: TPanel;
     FLblMethodName: TLabel;
     FEdtMethodName: TEdit;
+    FLblNameCheck: TLabel;
     FProgressBar: TProgressBar;
     FLblStatus: TLabel;
     FMemoPreview: TMemo;
     FBtnExtract: TButton;
     FBtnCancel: TButton;
+    FCheckTimer: TTimer;
+    FCurrentFile: string;
+    FCurrentFileText: string;
+    FProjectFiles: TArray<string>;
     procedure DoMethodNameChange(Sender: TObject);
     procedure DoFormShow(Sender: TObject);
+    procedure DoCheckTimer(Sender: TObject);
+    procedure RunIdentifierCheck;
   public
     OnNameChanged: TNotifyEvent;
     constructor CreateDialog(AOwner: TComponent; const ADefaultName: string);
+
+    /// <summary>Configure the live identifier check. See
+    ///  TRenameDialog.SetCheckContext.</summary>
+    procedure SetCheckContext(const ACurrentFile: string; const AProjectFiles: TArray<string>);
 
     function GetMethodName: string;
     procedure SetStatus(const AText: string);
@@ -41,7 +52,7 @@ type
 implementation
 
 uses
-  Vcl.Graphics;
+  System.IOUtils, Vcl.Graphics, Expert.IdentifierCheck;
 
 constructor TExtractMethodDialog.CreateDialog(AOwner: TComponent; const ADefaultName: string);
 begin
@@ -57,7 +68,7 @@ begin
   FPanelTop := TPanel.Create(Self);
   FPanelTop.Parent := Self;
   FPanelTop.Align := alTop;
-  FPanelTop.Height := 70;
+  FPanelTop.Height := 94;
   FPanelTop.BevelOuter := bvNone;
 
   FLblMethodName := TLabel.Create(Self);
@@ -74,6 +85,20 @@ begin
   FEdtMethodName.Font.Size := 10;
   FEdtMethodName.Text := ADefaultName;
   FEdtMethodName.OnChange := DoMethodNameChange;
+
+  FLblNameCheck := TLabel.Create(Self);
+  FLblNameCheck.Parent := FPanelTop;
+  FLblNameCheck.Left := 12;
+  FLblNameCheck.Top := 56;
+  FLblNameCheck.AutoSize := False;
+  FLblNameCheck.Width := 676;
+  FLblNameCheck.Height := 16;
+  FLblNameCheck.Caption := '';
+
+  FCheckTimer := TTimer.Create(Self);
+  FCheckTimer.Enabled := False;
+  FCheckTimer.Interval := 350;
+  FCheckTimer.OnTimer := DoCheckTimer;
 
   FBtnExtract := TButton.Create(Self);
   FBtnExtract.Parent := FPanelTop;
@@ -153,6 +178,54 @@ procedure TExtractMethodDialog.DoMethodNameChange(Sender: TObject);
 begin
   if Assigned(OnNameChanged) then
     OnNameChanged(Self);
+
+  FCheckTimer.Enabled := False;
+  if FCurrentFile <> '' then
+  begin
+    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Caption := 'Checking...';
+    FCheckTimer.Enabled := True;
+  end;
+end;
+
+procedure TExtractMethodDialog.DoCheckTimer(Sender: TObject);
+begin
+  FCheckTimer.Enabled := False;
+  RunIdentifierCheck;
+end;
+
+procedure TExtractMethodDialog.RunIdentifierCheck;
+var
+  Res: TIdentifierCheckResult;
+begin
+  Res := TIdentifierChecker.Check(FEdtMethodName.Text, '',
+    FCurrentFileText, FProjectFiles, FCurrentFile);
+
+  case Res.Status of
+    icsOk:        FLblNameCheck.Font.Color := clGreen;
+    icsInProject: FLblNameCheck.Font.Color := $00008CFF;
+  else
+    FLblNameCheck.Font.Color := clRed;
+  end;
+  FLblNameCheck.Font.Style := [fsBold];
+  FLblNameCheck.Caption := Res.Message;
+end;
+
+procedure TExtractMethodDialog.SetCheckContext(const ACurrentFile: string;
+  const AProjectFiles: TArray<string>);
+begin
+  FCurrentFile := ACurrentFile;
+  FProjectFiles := AProjectFiles;
+  FCurrentFileText := '';
+  if (ACurrentFile <> '') and TFile.Exists(ACurrentFile) then
+  begin
+    try
+      FCurrentFileText := TFile.ReadAllText(ACurrentFile);
+    except
+    end;
+  end;
+  FCheckTimer.Enabled := False;
+  RunIdentifierCheck;
 end;
 
 function TExtractMethodDialog.GetMethodName: string;

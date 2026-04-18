@@ -1074,6 +1074,7 @@ begin
   FDialog := TExtractMethodDialog.CreateDialog(Application.MainForm, 'ExtractedMethod');
   try
     FDialog.OnNameChanged := OnMethodNameChange;
+    FDialog.SetCheckContext(Info.FileName, TEditorHelper.GetProjectSourceFiles);
     FDialog.Show;
     Application.ProcessMessages;
     DoAnalyzeAndPreview(Info);

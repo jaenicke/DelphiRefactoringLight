@@ -35,6 +35,7 @@ type
     FEdtOldName: TEdit;
     FLblNewName: TLabel;
     FEdtNewName: TEdit;
+    FLblNameCheck: TLabel;
     FChkBackup: TCheckBox;
     FBtnPreview: TButton;
     FBtnRename: TButton;
@@ -48,14 +49,28 @@ type
     FTabDetails: TTabSheet;
     FListView: TListView;
     FMemoDetails: TMemo;
+    FCheckTimer: TTimer;
+    FOldName: string;
+    FCurrentFile: string;
+    FCurrentFileText: string;
+    FProjectFiles: TArray<string>;
     procedure DoFormShow(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
     procedure DoNewNameChange(Sender: TObject);
+    procedure DoCheckTimer(Sender: TObject);
+    procedure RunIdentifierCheck;
     function CommonPathPrefix(const AItems: TRenamePreviewItems): string;
   public
     OnPreviewRequested: TNotifyEvent;
 
     constructor CreateDialog(AOwner: TComponent; const AOldName: string);
+
+    /// <summary>Configure the live identifier check. ACurrentFile is the
+    ///  active unit (excluded from the project-wide scan). AProjectFiles is
+    ///  the full list of project source files. When set, a debounced
+    ///  validity + collision check runs on every keystroke and the status
+    ///  is displayed below the "New name" edit.</summary>
+    procedure SetCheckContext(const ACurrentFile: string; const AProjectFiles: TArray<string>);
 
     function GetNewName: string;
     function GetCreateBackup: Boolean;
@@ -81,7 +96,7 @@ type
 implementation
 
 uses
-  System.UITypes;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Expert.IdentifierCheck;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -102,8 +117,10 @@ begin
   FPanelTop := TPanel.Create(Self);
   FPanelTop.Parent := Self;
   FPanelTop.Align := alTop;
-  FPanelTop.Height := 136;
+  FPanelTop.Height := 160;
   FPanelTop.BevelOuter := bvNone;
+
+  FOldName := AOldName;
 
   FLblOldName := TLabel.Create(Self);
   FLblOldName.Parent := FPanelTop;
@@ -138,10 +155,25 @@ begin
   FEdtNewName.Font.Size := 10;
   FEdtNewName.OnChange := DoNewNameChange;
 
+  FLblNameCheck := TLabel.Create(Self);
+  FLblNameCheck.Parent := FPanelTop;
+  FLblNameCheck.Left := 12;
+  FLblNameCheck.Top := 102;
+  FLblNameCheck.AutoSize := False;
+  FLblNameCheck.Width := ClientWidth - 24;
+  FLblNameCheck.Height := 16;
+  FLblNameCheck.Anchors := [akLeft, akTop, akRight];
+  FLblNameCheck.Caption := '';
+
+  FCheckTimer := TTimer.Create(Self);
+  FCheckTimer.Enabled := False;
+  FCheckTimer.Interval := 350;
+  FCheckTimer.OnTimer := DoCheckTimer;
+
   FChkBackup := TCheckBox.Create(Self);
   FChkBackup.Parent := FPanelTop;
   FChkBackup.Left := 12;
-  FChkBackup.Top := 106;
+  FChkBackup.Top := 128;
   FChkBackup.Width := 200;
   FChkBackup.Caption := 'Create backup';
   FChkBackup.Checked := True;
@@ -150,7 +182,7 @@ begin
   FBtnCancel.Parent := FPanelTop;
   FBtnCancel.Width := 90;
   FBtnCancel.Height := 28;
-  FBtnCancel.Top := 102;
+  FBtnCancel.Top := 124;
   FBtnCancel.Anchors := [akTop, akRight];
   FBtnCancel.Left := ClientWidth - FBtnCancel.Width - 12;
   FBtnCancel.Caption := 'Cancel';
@@ -161,7 +193,7 @@ begin
   FBtnRename.Parent := FPanelTop;
   FBtnRename.Width := 96;
   FBtnRename.Height := 28;
-  FBtnRename.Top := 102;
+  FBtnRename.Top := 124;
   FBtnRename.Anchors := [akTop, akRight];
   FBtnRename.Left := FBtnCancel.Left - FBtnRename.Width - 6;
   FBtnRename.Caption := 'Rename';
@@ -173,7 +205,7 @@ begin
   FBtnPreview.Parent := FPanelTop;
   FBtnPreview.Width := 90;
   FBtnPreview.Height := 28;
-  FBtnPreview.Top := 102;
+  FBtnPreview.Top := 124;
   FBtnPreview.Anchors := [akTop, akRight];
   FBtnPreview.Left := FBtnRename.Left - FBtnPreview.Width - 6;
   FBtnPreview.Caption := 'Preview';
@@ -279,6 +311,57 @@ begin
   FMemoDetails.Clear;
   FBtnRename.Enabled := False;
   FLblStatus.Caption := 'Ready.';
+
+  // Debounce the live identifier check
+  FCheckTimer.Enabled := False;
+  if FCurrentFile <> '' then
+  begin
+    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Caption := 'Checking...';
+    FCheckTimer.Enabled := True;
+  end;
+end;
+
+procedure TRenameDialog.DoCheckTimer(Sender: TObject);
+begin
+  FCheckTimer.Enabled := False;
+  RunIdentifierCheck;
+end;
+
+procedure TRenameDialog.RunIdentifierCheck;
+var
+  Res: TIdentifierCheckResult;
+begin
+  Res := TIdentifierChecker.Check(FEdtNewName.Text, FOldName,
+    FCurrentFileText, FProjectFiles, FCurrentFile);
+
+  case Res.Status of
+    icsOk:        FLblNameCheck.Font.Color := clGreen;
+    icsUnchanged: FLblNameCheck.Font.Color := clGrayText;
+    icsInProject: FLblNameCheck.Font.Color := $00008CFF; // orange-ish
+  else
+    FLblNameCheck.Font.Color := clRed;
+  end;
+  FLblNameCheck.Font.Style := [fsBold];
+  FLblNameCheck.Caption := Res.Message;
+end;
+
+procedure TRenameDialog.SetCheckContext(const ACurrentFile: string;
+  const AProjectFiles: TArray<string>);
+begin
+  FCurrentFile := ACurrentFile;
+  FProjectFiles := AProjectFiles;
+  FCurrentFileText := '';
+  if (ACurrentFile <> '') and TFile.Exists(ACurrentFile) then
+  begin
+    try
+      FCurrentFileText := TFile.ReadAllText(ACurrentFile);
+    except
+    end;
+  end;
+  // Run an initial check right away
+  FCheckTimer.Enabled := False;
+  RunIdentifierCheck;
 end;
 
 function TRenameDialog.GetNewName: string;

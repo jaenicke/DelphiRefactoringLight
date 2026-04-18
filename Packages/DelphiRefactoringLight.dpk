@@ -58,6 +58,7 @@ contains
   Expert.ImplementationFinder in '..\Source\Expert.ImplementationFinder.pas',
   Expert.FindImplementationsWizard in '..\Source\Expert.FindImplementationsWizard.pas',
   Expert.ContextMenu in '..\Source\Expert.ContextMenu.pas',
-  Expert.UnitRenameWatcher in '..\Source\Expert.UnitRenameWatcher.pas';
+  Expert.UnitRenameWatcher in '..\Source\Expert.UnitRenameWatcher.pas',
+  Expert.IdentifierCheck in '..\Source\Expert.IdentifierCheck.pas';
 
 end.

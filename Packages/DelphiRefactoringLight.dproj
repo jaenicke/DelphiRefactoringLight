@@ -117,6 +117,7 @@
         <DCCReference Include="..\Source\Expert.FindImplementationsWizard.pas"/>
         <DCCReference Include="..\Source\Expert.ContextMenu.pas"/>
         <DCCReference Include="..\Source\Expert.UnitRenameWatcher.pas"/>
+        <DCCReference Include="..\Source\Expert.IdentifierCheck.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

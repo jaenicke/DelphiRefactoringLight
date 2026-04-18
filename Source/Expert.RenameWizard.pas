@@ -128,6 +128,7 @@ begin
   FDialog := TRenameDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
   try
     FDialog.OnPreviewRequested := DoPreview;
+    FDialog.SetCheckContext(FContext.FileName, TEditorHelper.GetProjectSourceFiles);
     if FDialog.ShowModal = mrOk then
       ApplyFEdit;
   finally
@@ -487,9 +488,17 @@ begin
 
     var OwnerType := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
     FDiagLog := FDiagLog + 'Owner type for impl verification: ' +
-      IfThen(OwnerType <> '', OwnerType, '(none - all impls accepted)') + sLineBreak;
+      IfThen(OwnerType <> '', OwnerType, '(none - free procedure, impl scan skipped)') + sLineBreak;
 
-    ImplCandidates := FindImplementations(FContext.WordAtCursor, ProjFiles, OwnerType);
+    // Only do the class-method implementation scan when the declaration is
+    // actually a class/interface method. For free procedures there are no
+    // "TClass.Method" implementations to find; scanning with an empty owner
+    // type would otherwise accept unrelated same-named class methods in
+    // other units.
+    if OwnerType <> '' then
+      ImplCandidates := FindImplementations(FContext.WordAtCursor, ProjFiles, OwnerType)
+    else
+      ImplCandidates := nil;
 
     // Track impl files separately - used in VerifyWithLsp as additional
     // accepted GotoDefinition targets (DelphiLSP resolves class-bound

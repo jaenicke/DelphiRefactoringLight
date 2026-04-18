@@ -1,6 +1,6 @@
 # Delphi Refactoring Light
 
-WARNING: **This is an experimental preview version. Please use with caution.**
+WARNING: **This is an experimental preview version. Please use with caution. The code completion is meant as an experiment and will most likely be removed later.**
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide Five refactoring features directly in the editor:
 

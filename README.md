@@ -1,8 +1,8 @@
 # Delphi Refactoring Light
 
-WARNING: **This is an experimental preview version. Please use with caution.**
+WARNING: **This is an experimental preview version. Please use with caution. The code completion is meant as an experiment and will most likely be removed later.**
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide Five refactoring features directly in the editor:
+A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide Five refactoring features directly in the editor (also inside the popup menu):
 
 | Shortcut           | Feature                                                        |
 |--------------------|----------------------------------------------------------------|
@@ -58,7 +58,7 @@ Unlike purely text-based tools, this package uses the actual LSP requests `textD
 
 ## Requirements
 
-- **RAD Studio 12 Athens** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
+- **Delphi 13** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
 - One `*.delphilsp.json` per project next to the `.dpr`/`.dpk` (see `DelphiRefactoringLight.delphilsp.json` for an example). The package hands this file to the LSP via `workspace/didChangeConfiguration`.
 
 ## Installation
@@ -139,7 +139,6 @@ DelphiRefactoringLight/
 |   `-- closedialog.ps1                      # helper script for bds.exe
 |
 |-- DelphiRefactoringLight.xml               # DIH configuration
-|-- DelphiRefactoringLight.delphilsp.json    # LSP server configuration
 |-- install.cmd                              # Install via DIH
 |-- uninstall.cmd                            # Uninstall via DIH
 `-- rebuild.cmd                              # Build only

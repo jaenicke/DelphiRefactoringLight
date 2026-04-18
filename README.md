@@ -139,7 +139,6 @@ DelphiRefactoringLight/
 |   `-- closedialog.ps1                      # helper script for bds.exe
 |
 |-- DelphiRefactoringLight.xml               # DIH configuration
-|-- DelphiRefactoringLight.delphilsp.json    # LSP server configuration
 |-- install.cmd                              # Install via DIH
 |-- uninstall.cmd                            # Uninstall via DIH
 `-- rebuild.cmd                              # Build only

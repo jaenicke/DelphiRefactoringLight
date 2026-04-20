@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
+ * Copyright (c) 2026 Sebastian JÃ¤nicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -129,7 +129,6 @@ begin
   // Flush editor changes to the file system, otherwise the text scan would
   // see stale content.
   FDialog.SetStatus('Saving all files...');
-  Application.ProcessMessages;
   TEditorHelper.SaveAllFiles;
 
   ProjFiles := TEditorHelper.GetProjectSourceFiles;
@@ -149,7 +148,6 @@ begin
   // type THERE.
   OwnerType := '';
   FDialog.SetStatus('Resolving method declaration via LSP...');
-  Application.ProcessMessages;
 
   try
     var DelphiLspJson := TEditorHelper.FindDelphiLspJson;
@@ -162,7 +160,6 @@ begin
       var WasRunning := TLspManager.Instance.IsAlive;
       if not WasRunning then
         FDialog.SetStatus('Starting LSP server (one-time)...');
-      Application.ProcessMessages;
 
       var Client: TLspClient := TLspManager.Instance.GetClient(RootPath, FContext.ProjectFile, DelphiLspJson);
       Client.RefreshDocument(FContext.FileName);
@@ -209,7 +206,6 @@ begin
       [OwnerType, FContext.WordAtCursor, System.Length(ProjFiles)]))
   else
     FDialog.SetStatus(Format('Owner type not resolvable, searching all implementations of "%s"...', [FContext.WordAtCursor]));
-  Application.ProcessMessages;
 
   // Text+syntax scan with verification:
   // For each line like 'procedure TClass.Method' we check whether

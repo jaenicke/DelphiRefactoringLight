@@ -28,17 +28,50 @@ type
     class function IsValidIdentifier(const AName: string): Boolean; static;
     class function IsPascalKeyword(const AName: string): Boolean; static;
     class function CountInText(const AText, AIdent: string): Integer; static;
-    class function CountInFiles(const AFiles: TArray<string>;
-      const AIdent: string; out AFilesWithHit: Integer): Integer; static;
 
-    /// <summary>Full synchronous check. ACurrentFileText is the current
+    /// <summary>Full in-memory check. ACurrentFileText is the current
     ///  unit's full source (for in-unit collision detection).
-    ///  AProjectFiles are scanned for project-wide occurrences (skip the
-    ///  current unit). AOldName (may be empty) is the identifier being
-    ///  renamed, used for "unchanged" detection and to discount its own
-    ///  occurrences.</summary>
+    ///  AOtherContents are the pre-loaded contents of all OTHER project
+    ///  files (current file already excluded). AOldName (may be empty) is
+    ///  the identifier being renamed, used for "unchanged" detection.</summary>
     class function Check(const ANewName, AOldName, ACurrentFileText: string;
-      const AProjectFiles: TArray<string>; const ACurrentFile: string): TIdentifierCheckResult; static;
+      const AOtherContents: TArray<string>): TIdentifierCheckResult; static;
+  end;
+
+  TProjectIndexBuildThread = class(TThread)
+  private
+    FProjectFiles: TArray<string>;
+    FExcludeFile: string;
+    FResultFiles: TArray<string>;
+    FResultContents: TArray<string>;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AProjectFiles: TArray<string>; const AExcludeFile: string);
+    property ResultFiles: TArray<string> read FResultFiles;
+    property ResultContents: TArray<string> read FResultContents;
+  end;
+
+  /// <summary>Background-loaded cache of all project file contents. The
+  ///  main thread calls Build once, then polls via PollReady on each
+  ///  check attempt. Once ready, OtherContents is safe to read.</summary>
+  TProjectTextIndex = class
+  private
+    FThread: TProjectIndexBuildThread;
+    FOtherFiles: TArray<string>;
+    FOtherContents: TArray<string>;
+    FReady: Boolean;
+    procedure Stop;
+  public
+    destructor Destroy; override;
+    procedure Build(const AProjectFiles: TArray<string>; const ACurrentFile: string);
+    /// <summary>Called from the main thread. Returns True once the
+    ///  background load has finished; first such call moves results into
+    ///  OtherFiles/OtherContents and frees the thread.</summary>
+    function PollReady: Boolean;
+    property IsReady: Boolean read FReady;
+    property OtherFiles: TArray<string> read FOtherFiles;
+    property OtherContents: TArray<string> read FOtherContents;
   end;
 
 implementation
@@ -103,7 +136,6 @@ begin
   begin
     if UText[I] = UIdent[1] then
     begin
-      // word-boundary before
       Matches := (I = 1);
       if not Matches then
       begin
@@ -130,37 +162,11 @@ begin
   end;
 end;
 
-class function TIdentifierChecker.CountInFiles(const AFiles: TArray<string>;
-  const AIdent: string; out AFilesWithHit: Integer): Integer;
-var
-  F, Content: string;
-  C: Integer;
-begin
-  Result := 0;
-  AFilesWithHit := 0;
-  for F in AFiles do
-  begin
-    try
-      Content := TFile.ReadAllText(F);
-    except
-      Continue;
-    end;
-    C := CountInText(Content, AIdent);
-    if C > 0 then
-    begin
-      Inc(Result, C);
-      Inc(AFilesWithHit);
-    end;
-  end;
-end;
-
 class function TIdentifierChecker.Check(const ANewName, AOldName, ACurrentFileText: string;
-  const AProjectFiles: TArray<string>; const ACurrentFile: string): TIdentifierCheckResult;
+  const AOtherContents: TArray<string>): TIdentifierCheckResult;
 var
   Trimmed: string;
-  InUnitTotal, InUnitSelf: Integer;
-  OtherFiles: TArray<string>;
-  F: string;
+  InUnitTotal, C, I: Integer;
   ProjHits, ProjFilesWith: Integer;
 begin
   Result := Default(TIdentifierCheckResult);
@@ -194,39 +200,26 @@ begin
     Exit;
   end;
 
-  // In-unit collision (subtract occurrences of AOldName-matched identifier)
   InUnitTotal := CountInText(ACurrentFileText, Trimmed);
-  InUnitSelf := 0;
-  if AOldName <> '' then
-    InUnitSelf := CountInText(ACurrentFileText, AOldName);
-  // Heuristic: if rename and new != old, any occurrences already in the unit
-  // are true collisions. Otherwise (extract method with no old name),
-  // same semantics.
   Result.InUnitCount := InUnitTotal;
   if InUnitTotal > 0 then
   begin
-    // If the old name equals the new name's count inside the file, we consider
-    // those occurrences are the pre-existing ones of AOldName and therefore
-    // not a collision. We already returned early for SameText above, so any
-    // InUnitTotal > 0 here means "some symbol with that new name exists".
     Result.Status := icsInUnit;
     Result.Message := Format('"%s" already appears %d time(s) in this unit.',
       [Trimmed, InUnitTotal]);
-    // do not return yet - still report project count
   end;
-  // silence hint about InUnitSelf
-  if InUnitSelf < 0 then ;
 
-  // Project-wide (skip the current file)
-  SetLength(OtherFiles, 0);
-  for F in AProjectFiles do
-    if not SameText(F, ACurrentFile) then
+  ProjHits := 0;
+  ProjFilesWith := 0;
+  for I := 0 to High(AOtherContents) do
+  begin
+    C := CountInText(AOtherContents[I], Trimmed);
+    if C > 0 then
     begin
-      SetLength(OtherFiles, Length(OtherFiles) + 1);
-      OtherFiles[High(OtherFiles)] := F;
+      Inc(ProjHits, C);
+      Inc(ProjFilesWith);
     end;
-
-  ProjHits := CountInFiles(OtherFiles, Trimmed, ProjFilesWith);
+  end;
   Result.InProjectFileCount := ProjFilesWith;
 
   if Result.Status = icsInUnit then Exit;
@@ -241,6 +234,89 @@ begin
 
   Result.Status := icsOk;
   Result.Message := Format('"%s" is available.', [Trimmed]);
+end;
+
+{ TProjectIndexBuildThread }
+
+constructor TProjectIndexBuildThread.Create(const AProjectFiles: TArray<string>;
+  const AExcludeFile: string);
+begin
+  inherited Create(True);
+  FProjectFiles := AProjectFiles;
+  FExcludeFile := AExcludeFile;
+  FreeOnTerminate := False;
+end;
+
+procedure TProjectIndexBuildThread.Execute;
+var
+  Paths, Contents: TArray<string>;
+  N, K, I: Integer;
+  Content: string;
+begin
+  N := Length(FProjectFiles);
+  SetLength(Paths, N);
+  SetLength(Contents, N);
+  K := 0;
+  for I := 0 to N - 1 do
+  begin
+    if Terminated then Break;
+    if SameText(FProjectFiles[I], FExcludeFile) then Continue;
+    try
+      Content := TFile.ReadAllText(FProjectFiles[I]);
+    except
+      Content := '';
+    end;
+    Paths[K] := FProjectFiles[I];
+    Contents[K] := Content;
+    Inc(K);
+  end;
+  SetLength(Paths, K);
+  SetLength(Contents, K);
+  FResultFiles := Paths;
+  FResultContents := Contents;
+end;
+
+{ TProjectTextIndex }
+
+destructor TProjectTextIndex.Destroy;
+begin
+  Stop;
+  inherited;
+end;
+
+procedure TProjectTextIndex.Stop;
+begin
+  if Assigned(FThread) then
+  begin
+    FThread.Terminate;
+    FThread.WaitFor;
+    FreeAndNil(FThread);
+  end;
+end;
+
+procedure TProjectTextIndex.Build(const AProjectFiles: TArray<string>; const ACurrentFile: string);
+begin
+  Stop;
+  FOtherFiles := nil;
+  FOtherContents := nil;
+  FReady := False;
+  FThread := TProjectIndexBuildThread.Create(AProjectFiles, ACurrentFile);
+  FThread.Start;
+end;
+
+function TProjectTextIndex.PollReady: Boolean;
+begin
+  if FReady then Exit(True);
+  if not Assigned(FThread) then Exit(False);
+  if FThread.Finished then
+  begin
+    FOtherFiles := FThread.ResultFiles;
+    FOtherContents := FThread.ResultContents;
+    FreeAndNil(FThread);
+    FReady := True;
+    Exit(True);
+  end;
+  Result := False;
 end;
 
 end.

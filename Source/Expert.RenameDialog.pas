@@ -10,7 +10,8 @@ unit Expert.RenameDialog;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls;
+  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
+  Expert.IdentifierCheck;
 
 type
   /// <summary>A single entry for the rename preview list.</summary>
@@ -53,7 +54,7 @@ type
     FOldName: string;
     FCurrentFile: string;
     FCurrentFileText: string;
-    FProjectFiles: TArray<string>;
+    FIndex: TProjectTextIndex;
     procedure DoFormShow(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
     procedure DoNewNameChange(Sender: TObject);
@@ -64,6 +65,7 @@ type
     OnPreviewRequested: TNotifyEvent;
 
     constructor CreateDialog(AOwner: TComponent; const AOldName: string);
+    destructor Destroy; override;
 
     /// <summary>Configure the live identifier check. ACurrentFile is the
     ///  active unit (excluded from the project-wide scan). AProjectFiles is
@@ -96,7 +98,7 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, Vcl.Graphics, Expert.IdentifierCheck;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -291,6 +293,14 @@ begin
   FMemoDetails.WordWrap := False;
 
   FPageControl.ActivePage := FTabChanges;
+
+  FIndex := TProjectTextIndex.Create;
+end;
+
+destructor TRenameDialog.Destroy;
+begin
+  FIndex.Free;
+  inherited;
 end;
 
 procedure TRenameDialog.DoFormShow(Sender: TObject);
@@ -325,6 +335,16 @@ end;
 procedure TRenameDialog.DoCheckTimer(Sender: TObject);
 begin
   FCheckTimer.Enabled := False;
+  if not FIndex.PollReady then
+  begin
+    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Style := [];
+    FLblNameCheck.Caption := 'Indexing project for collision check...';
+    FCheckTimer.Interval := 200;
+    FCheckTimer.Enabled := True;
+    Exit;
+  end;
+  FCheckTimer.Interval := 350;
   RunIdentifierCheck;
 end;
 
@@ -333,7 +353,7 @@ var
   Res: TIdentifierCheckResult;
 begin
   Res := TIdentifierChecker.Check(FEdtNewName.Text, FOldName,
-    FCurrentFileText, FProjectFiles, FCurrentFile);
+    FCurrentFileText, FIndex.OtherContents);
 
   case Res.Status of
     icsOk:        FLblNameCheck.Font.Color := clGreen;
@@ -350,7 +370,6 @@ procedure TRenameDialog.SetCheckContext(const ACurrentFile: string;
   const AProjectFiles: TArray<string>);
 begin
   FCurrentFile := ACurrentFile;
-  FProjectFiles := AProjectFiles;
   FCurrentFileText := '';
   if (ACurrentFile <> '') and TFile.Exists(ACurrentFile) then
   begin
@@ -359,9 +378,10 @@ begin
     except
     end;
   end;
-  // Run an initial check right away
+  FIndex.Build(AProjectFiles, ACurrentFile);
   FCheckTimer.Enabled := False;
-  RunIdentifierCheck;
+  // Kick off timer; it will poll the index until ready, then run check.
+  DoCheckTimer(nil);
 end;
 
 function TRenameDialog.GetNewName: string;
@@ -446,13 +466,13 @@ begin
   FProgressBar.Visible := AMax > 0;
   FProgressBar.Max := AMax;
   FProgressBar.Position := AValue;
-  Application.ProcessMessages;
+  FProgressBar.Update;
 end;
 
 procedure TRenameDialog.SetStatus(const AText: string);
 begin
   FLblStatus.Caption := AText;
-  Application.ProcessMessages;
+  FLblStatus.Update;
 end;
 
 procedure TRenameDialog.EnableRename(AEnabled: Boolean);
@@ -470,7 +490,6 @@ begin
     Screen.Cursor := crHourGlass
   else
     Screen.Cursor := crDefault;
-  Application.ProcessMessages;
 end;
 
 end.

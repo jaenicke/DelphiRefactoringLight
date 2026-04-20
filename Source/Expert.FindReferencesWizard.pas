@@ -136,7 +136,6 @@ begin
 
   // Save all editor changes
   FDialog.SetStatus('Saving all files...');
-  Application.ProcessMessages;
   TEditorHelper.SaveAllFiles;
 
   // Start LSP
@@ -145,7 +144,6 @@ begin
     FDialog.SetStatus('LSP already running. Opening file...')
   else
     FDialog.SetStatus('Starting LSP server (one-time)...');
-  Application.ProcessMessages;
 
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
@@ -178,7 +176,6 @@ begin
   if Client.SupportsReferences then
   begin
     FDialog.SetStatus('Querying LSP server for references...');
-    Application.ProcessMessages;
     try
       LspLocations := Client.FindReferences(FContext.FileName,
         LspLine, LspCol, True);
@@ -187,7 +184,6 @@ begin
       begin
         FDialog.SetStatus('LSP error on references: ' + E.Message
           + ' - switching to fallback...');
-        Application.ProcessMessages;
         SetLength(LspLocations, 0);
       end;
     end;
@@ -203,7 +199,6 @@ begin
 
   // Strategy 2: fallback - text search + GotoDefinition verification
   FDialog.SetStatus('Fallback: text search in project...');
-  Application.ProcessMessages;
 
   ProjFiles := TEditorHelper.GetProjectSourceFiles;
 
@@ -218,7 +213,6 @@ begin
 
   // Resolve the declaration (for verification comparison)
   FDialog.SetStatus('Finding declaration...');
-  Application.ProcessMessages;
   var DefLocs := Client.GotoDefinition(FContext.FileName, LspLine, LspCol);
   if Length(DefLocs) > 0 then
     DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri)

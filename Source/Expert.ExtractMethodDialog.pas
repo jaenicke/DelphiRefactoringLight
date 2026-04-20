@@ -10,7 +10,8 @@ unit Expert.ExtractMethodDialog;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls;
+  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
+  Expert.IdentifierCheck;
 
 type
   TExtractMethodDialog = class(TForm)
@@ -28,7 +29,7 @@ type
     FCheckTimer: TTimer;
     FCurrentFile: string;
     FCurrentFileText: string;
-    FProjectFiles: TArray<string>;
+    FIndex: TProjectTextIndex;
     procedure DoMethodNameChange(Sender: TObject);
     procedure DoFormShow(Sender: TObject);
     procedure DoCheckTimer(Sender: TObject);
@@ -36,6 +37,7 @@ type
   public
     OnNameChanged: TNotifyEvent;
     constructor CreateDialog(AOwner: TComponent; const ADefaultName: string);
+    destructor Destroy; override;
 
     /// <summary>Configure the live identifier check. See
     ///  TRenameDialog.SetCheckContext.</summary>
@@ -52,7 +54,7 @@ type
 implementation
 
 uses
-  System.IOUtils, Vcl.Graphics, Expert.IdentifierCheck;
+  System.IOUtils, Vcl.Graphics;
 
 constructor TExtractMethodDialog.CreateDialog(AOwner: TComponent; const ADefaultName: string);
 begin
@@ -158,6 +160,14 @@ begin
   FMemoPreview.Font.Name := 'Consolas';
   FMemoPreview.Font.Size := 9;
   FMemoPreview.WordWrap := False;
+
+  FIndex := TProjectTextIndex.Create;
+end;
+
+destructor TExtractMethodDialog.Destroy;
+begin
+  FIndex.Free;
+  inherited;
 end;
 
 procedure TExtractMethodDialog.DoFormShow(Sender: TObject);
@@ -191,6 +201,16 @@ end;
 procedure TExtractMethodDialog.DoCheckTimer(Sender: TObject);
 begin
   FCheckTimer.Enabled := False;
+  if not FIndex.PollReady then
+  begin
+    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Style := [];
+    FLblNameCheck.Caption := 'Indexing project for collision check...';
+    FCheckTimer.Interval := 200;
+    FCheckTimer.Enabled := True;
+    Exit;
+  end;
+  FCheckTimer.Interval := 350;
   RunIdentifierCheck;
 end;
 
@@ -199,7 +219,7 @@ var
   Res: TIdentifierCheckResult;
 begin
   Res := TIdentifierChecker.Check(FEdtMethodName.Text, '',
-    FCurrentFileText, FProjectFiles, FCurrentFile);
+    FCurrentFileText, FIndex.OtherContents);
 
   case Res.Status of
     icsOk:        FLblNameCheck.Font.Color := clGreen;
@@ -215,7 +235,6 @@ procedure TExtractMethodDialog.SetCheckContext(const ACurrentFile: string;
   const AProjectFiles: TArray<string>);
 begin
   FCurrentFile := ACurrentFile;
-  FProjectFiles := AProjectFiles;
   FCurrentFileText := '';
   if (ACurrentFile <> '') and TFile.Exists(ACurrentFile) then
   begin
@@ -224,8 +243,9 @@ begin
     except
     end;
   end;
+  FIndex.Build(AProjectFiles, ACurrentFile);
   FCheckTimer.Enabled := False;
-  RunIdentifierCheck;
+  DoCheckTimer(nil);
 end;
 
 function TExtractMethodDialog.GetMethodName: string;
@@ -236,7 +256,7 @@ end;
 procedure TExtractMethodDialog.SetStatus(const AText: string);
 begin
   FLblStatus.Caption := AText;
-  Application.ProcessMessages;
+  FLblStatus.Update;
 end;
 
 procedure TExtractMethodDialog.SetProgress(AValue, AMax: Integer);
@@ -244,7 +264,7 @@ begin
   FProgressBar.Visible := AMax > 0;
   FProgressBar.Max := AMax;
   FProgressBar.Position := AValue;
-  Application.ProcessMessages;
+  FProgressBar.Update;
 end;
 
 procedure TExtractMethodDialog.SetPreviewText(const AText: string);
@@ -267,7 +287,6 @@ begin
   end
   else
     Screen.Cursor := crDefault;
-  Application.ProcessMessages;
 end;
 
 end.

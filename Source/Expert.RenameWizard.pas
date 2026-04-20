@@ -268,8 +268,6 @@ begin
       'Text search (whole-word, skipping strings and comments)...' + sLineBreak;
 
     FDialog.SetStatus(Format('Scanning %d project file(s)...', [Length(ProjFiles)]));
-    Application.ProcessMessages;
-
     Candidates := FindCandidates(FContext.WordAtCursor, ProjFiles);
     FDiagLog := FDiagLog + 'Text candidates: ' + IntToStr(Length(Candidates)) + sLineBreak;
 
@@ -392,7 +390,6 @@ begin
   try
     // Save all unsaved files (so LSP sees the current state)
     FDialog.SetStatus('Saving all files...');
-    Application.ProcessMessages;
     TEditorHelper.SaveAllFiles;
 
     FDiagLog := '=== Diagnostics ===' + sLineBreak +
@@ -407,7 +404,6 @@ begin
 
     // Phase 1: text search over project files
     FDialog.SetStatus('Phase 1: text search...');
-    Application.ProcessMessages;
     Candidates := FindCandidates(FContext.WordAtCursor, ProjFiles);
     FDiagLog := FDiagLog + 'Text candidates: ' + IntToStr(Length(Candidates)) + sLineBreak + sLineBreak;
 
@@ -426,7 +422,6 @@ begin
       FDialog.SetStatus('LSP already running. Opening file...')
     else
       FDialog.SetStatus('Starting LSP server (one-time)...');
-    Application.ProcessMessages;
 
     Client := TLspManager.Instance.GetClient(
       RootPath, FContext.ProjectFile, DelphiLspJson);
@@ -460,7 +455,6 @@ begin
 
     // Phase 2b: find declaration
     FDialog.SetStatus('Finding declaration...');
-    Application.ProcessMessages;
 
     var LspLine := FContext.Line - 1;
     var LspCol := FContext.Column - 1;
@@ -484,7 +478,6 @@ begin
     // like 'procedure TClass.Method'. Only classes that implement the
     // container (owner) type of the method are kept.
     FDialog.SetStatus('Searching for interface implementations...');
-    Application.ProcessMessages;
 
     var OwnerType := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
     FDiagLog := FDiagLog + 'Owner type for impl verification: ' +
@@ -531,7 +524,6 @@ begin
 
       // Phase 3: LSP verification
       FDialog.SetStatus(Format('%d candidate(s). Verifying...', [Length(Candidates)]));
-      Application.ProcessMessages;
 
       ImplFilesArray := ImplFilesList.ToArray;
       FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, DefFilePath, ImplFilesArray, Client);

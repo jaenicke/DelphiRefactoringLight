@@ -15,7 +15,8 @@ implementation
 
 uses
   System.SysUtils, ToolsAPI, Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard,
-  Expert.FindImplementationsWizard, Expert.KeyBinding, Expert.RestartHint, Expert.ContextMenu, Expert.UnitRenameWatcher;
+  Expert.FindImplementationsWizard, Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint, Expert.ContextMenu,
+  Expert.UnitRenameWatcher;
 
 var
   KeyBindingIndex: Integer = -1;
@@ -40,12 +41,16 @@ begin
   // Create the find-implementations wizard
   FindImplementationsInstance := TLspFindImplementationsWizard.Create;
 
+  // Create the signature-check wizard
+  SignatureCheckInstance := TLspSignatureCheckWizard.Create;
+
   // Register keyboard shortcuts
-  // Ctrl+Shift+R     -> Rename
-  // Ctrl+Shift+Space -> Completion
-  // Ctrl+Shift+M     -> Extract Method
-  // Ctrl+Shift+U     -> Find References (Usages)
-  // Ctrl+Shift+I     -> Find Implementations
+  // Ctrl+Alt+Shift+R     -> Rename
+  // Ctrl+Alt+Shift+Space -> Completion
+  // Ctrl+Alt+Shift+M     -> Extract Method
+  // Ctrl+Alt+Shift+U     -> Find References (Usages)
+  // Ctrl+Alt+Shift+I     -> Find Implementations
+  // Ctrl+Alt+Shift+A     -> Align method signature
   if Supports(BorlandIDEServices, IOTAKeyboardServices, Services) then
     KeyBindingIndex := Services.AddKeyboardBinding(TLspKeyBinding.Create);
 
@@ -67,6 +72,7 @@ initialization
 finalization
   FreeAndNil(UnitRenameWatcherInstance);
   FreeAndNil(ContextMenuInstance);
+  FreeAndNil(SignatureCheckInstance);
   FreeAndNil(FindImplementationsInstance);
   FreeAndNil(FindReferencesInstance);
   FreeAndNil(ExtractMethodInstance);

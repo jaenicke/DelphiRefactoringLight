@@ -40,6 +40,7 @@ type
     procedure OnFindImplementations(Sender: TObject);
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
+    procedure OnSignatureCheck(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     function FindEditorPopupMenu: TPopupMenu;
     function CreateItem(AParent: TMenuItem; const ACaption: string;
@@ -60,7 +61,8 @@ uses
   System.SysUtils, System.UITypes, Winapi.Windows,
   Vcl.Forms, Vcl.Controls,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
-  Expert.FindReferencesWizard, Expert.FindImplementationsWizard;
+  Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
+  Expert.SignatureCheckWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -145,15 +147,17 @@ begin
   FSubmenu.Caption := 'Refactoring Light';
 
   FSubmenu.Add(CreateItem(FSubmenu, 'Rename...',
-    ShortCut(Ord('R'), [ssCtrl, ssShift]), OnRename));
+    ShortCut(Ord('R'), [ssCtrl, ssAlt, ssShift]), OnRename));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find References',
-    ShortCut(Ord('U'), [ssCtrl, ssShift]), OnFindReferences));
+    ShortCut(Ord('U'), [ssCtrl, ssAlt, ssShift]), OnFindReferences));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find Implementations',
-    ShortCut(Ord('I'), [ssCtrl, ssShift]), OnFindImplementations));
+    ShortCut(Ord('I'), [ssCtrl, ssAlt, ssShift]), OnFindImplementations));
   FSubmenu.Add(CreateItem(FSubmenu, 'Extract Method',
-    ShortCut(Ord('M'), [ssCtrl, ssShift]), OnExtractMethod));
+    ShortCut(Ord('M'), [ssCtrl, ssAlt, ssShift]), OnExtractMethod));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Align method signature...',
+    ShortCut(Ord('A'), [ssCtrl, ssAlt, ssShift]), OnSignatureCheck));
   FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
-    ShortCut(VK_SPACE, [ssCtrl, ssShift]), OnCompletion));
+    ShortCut(VK_SPACE, [ssCtrl, ssAlt, ssShift]), OnCompletion));
 
   // Separator above our submenu so it is visually grouped
   FSeparator := TMenuItem.Create(FPopupMenu);
@@ -223,6 +227,12 @@ procedure TContextMenuInstaller.OnCompletion(Sender: TObject);
 begin
   if CompletionWizardInstance <> nil then
     CompletionWizardInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnSignatureCheck(Sender: TObject);
+begin
+  if SignatureCheckInstance <> nil then
+    SignatureCheckInstance.Execute;
 end;
 
 end.

@@ -121,6 +121,10 @@ type
     /// <summary>Requests code completion. Returns a JSON array of items.</summary>
     function GetCompletion(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
 
+    /// <summary>Returns the document's symbol tree (textDocument/documentSymbol).
+    ///  Caller owns the returned array and must free it.</summary>
+    function GetDocumentSymbols(const AFilePath: string): TJSONArray;
+
     /// <summary>Returns the server capabilities as a JSON string (debugging).</summary>
     function GetServerCapabilities: string;
 
@@ -894,6 +898,32 @@ begin
   Response := SendRequest('textDocument/completion', Params);
   // Ownership passes to the caller
   Result := Response;
+end;
+
+function TLspClient.GetDocumentSymbols(const AFilePath: string): TJSONArray;
+var
+  Params, TextDoc: TJSONObject;
+  Response: TJSONObject;
+  ResultVal: TJSONValue;
+  Arr: TJSONArray;
+begin
+  Result := nil;
+  TextDoc := TJSONObject.Create;
+  TextDoc.AddPair('uri', TLspUri.PathToFileUri(ExpandFileName(AFilePath)));
+  Params := TJSONObject.Create;
+  Params.AddPair('textDocument', TextDoc);
+
+  Response := SendRequest('textDocument/documentSymbol', Params);
+  try
+    ResultVal := Response.GetValue('result');
+    if ResultVal is TJSONArray then
+    begin
+      Arr := TJSONArray(ResultVal.Clone);
+      Result := Arr;
+    end;
+  finally
+    Response.Free;
+  end;
 end;
 
 function TLspClient.GetServerCapabilities: string;

@@ -20,6 +20,7 @@ type
     procedure ExtractMethodKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure FindReferencesKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure FindImplementationsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure SignatureCheckKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
   public
     function GetBindingType: TBindingType;
     function GetDisplayName: string;
@@ -30,7 +31,8 @@ type
 implementation
 
 uses
-  Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard;
+  Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
+  Expert.SignatureCheckWizard;
 
 { TLspKeyBinding }
 
@@ -69,6 +71,13 @@ begin
     FindImplementationsInstance.Execute;
 end;
 
+procedure TLspKeyBinding.SignatureCheckKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if SignatureCheckInstance <> nil then
+    SignatureCheckInstance.Execute;
+end;
+
 function TLspKeyBinding.GetBindingType: TBindingType;
 begin
   Result := btPartial;
@@ -87,20 +96,23 @@ end;
 procedure TLspKeyBinding.BindKeyboard(
   const BindingServices: IOTAKeyBindingServices);
 begin
-  // Ctrl+Shift+R -> Rename
-  BindingServices.AddKeyBinding([ShortCut(Ord('R'), [ssCtrl, ssShift])], RenameKeyProc, nil);
+  // Ctrl+Alt+Shift+R -> Rename
+  BindingServices.AddKeyBinding([ShortCut(Ord('R'), [ssCtrl, ssAlt, ssShift])], RenameKeyProc, nil);
 
-  // Ctrl+Shift+Space -> Completion
-  BindingServices.AddKeyBinding([ShortCut(VK_SPACE, [ssCtrl, ssShift])], CompletionKeyProc, nil);
+  // Ctrl+Alt+Shift+Space -> Completion
+  BindingServices.AddKeyBinding([ShortCut(VK_SPACE, [ssCtrl, ssAlt, ssShift])], CompletionKeyProc, nil);
 
-  // Ctrl+Shift+M -> Extract Method
-  BindingServices.AddKeyBinding([ShortCut(Ord('M'), [ssCtrl, ssShift])], ExtractMethodKeyProc, nil);
+  // Ctrl+Alt+Shift+M -> Extract Method
+  BindingServices.AddKeyBinding([ShortCut(Ord('M'), [ssCtrl, ssAlt, ssShift])], ExtractMethodKeyProc, nil);
 
-  // Ctrl+Shift+U -> Find References (Usages)
-  BindingServices.AddKeyBinding([ShortCut(Ord('U'), [ssCtrl, ssShift])], FindReferencesKeyProc, nil);
+  // Ctrl+Alt+Shift+U -> Find References (Usages)
+  BindingServices.AddKeyBinding([ShortCut(Ord('U'), [ssCtrl, ssAlt, ssShift])], FindReferencesKeyProc, nil);
 
-  // Ctrl+Shift+I -> Find Implementations
-  BindingServices.AddKeyBinding([ShortCut(Ord('I'), [ssCtrl, ssShift])], FindImplementationsKeyProc, nil);
+  // Ctrl+Alt+Shift+I -> Find Implementations
+  BindingServices.AddKeyBinding([ShortCut(Ord('I'), [ssCtrl, ssAlt, ssShift])], FindImplementationsKeyProc, nil);
+
+  // Ctrl+Alt+Shift+A -> Align method signature
+  BindingServices.AddKeyBinding([ShortCut(Ord('A'), [ssCtrl, ssAlt, ssShift])], SignatureCheckKeyProc, nil);
 end;
 
 end.

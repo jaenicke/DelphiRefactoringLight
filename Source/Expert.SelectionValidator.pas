@@ -293,6 +293,37 @@ var
   RepeatDepth: Integer;
   ForeignFinallyExceptFound: Boolean;
   InsideCase: Boolean;
+  // Control-flow tracking (Exit/Break/Continue/goto/raise)
+  BlockStack: TList<Integer>;
+  LoopHeaderPending: Boolean;  // saw FOR/WHILE, waiting for DO
+  ExpectLoopBody: Boolean;     // saw DO, next BEGIN opens a loop body
+  ExitCount, GotoCount: Integer;
+  BreakOutsideLoop, ContinueOutsideLoop: Integer;
+  BareRaiseOutsideExcept: Integer;
+  PendingBareRaise: Boolean;
+  PendingBareRaiseInExcept: Boolean;
+
+const
+  bkBegin = 0; bkLoopBegin = 1; bkRepeat = 2;
+  bkTry = 3;   bkExcept = 4;    bkFinally = 5; bkCase = 6;
+
+  function StackContains(AKind: Integer): Boolean;
+  var K: Integer;
+  begin
+    Result := False;
+    for K in BlockStack do
+      if K = AKind then Exit(True);
+  end;
+
+  function InLoop: Boolean;
+  begin
+    Result := StackContains(bkLoopBegin) or StackContains(bkRepeat);
+  end;
+
+  function InExcept: Boolean;
+  begin
+    Result := StackContains(bkExcept);
+  end;
 
   /// <summary>Pre-scans the file text BEFORE the selection to determine
   ///  the innermost open structural block (begin / case / try / repeat)
@@ -394,6 +425,17 @@ begin
     RepeatDepth := 0;
     ForeignFinallyExceptFound := False;
 
+    BlockStack := TList<Integer>.Create;
+    LoopHeaderPending := False;
+    ExpectLoopBody := False;
+    ExitCount := 0;
+    GotoCount := 0;
+    BreakOutsideLoop := 0;
+    ContinueOutsideLoop := 0;
+    BareRaiseOutsideExcept := 0;
+    PendingBareRaise := False;
+    PendingBareRaiseInExcept := False;
+
     Scanner := TPascalScanner.Create(ASelectedText);
     try
       while Scanner.NextToken(Token) do
@@ -443,9 +485,96 @@ begin
         else if Token = ')' then Dec(ParenDepth)
         else if Token = '[' then Inc(BracketDepth)
         else if Token = ']' then Dec(BracketDepth);
+
+        // --- Control-flow state machine (independent of existing depth counters) ---
+
+        // Close any pending bare-raise check: if the token after RAISE is a
+        // statement terminator, the raise was bare ("raise;"); otherwise
+        // it's "raise SomeException.Create(...)" which is always fine.
+        if PendingBareRaise then
+        begin
+          if (Token = ';') or (Token = 'END') or (Token = 'ELSE') or
+             (Token = 'UNTIL') or (Token = 'FINALLY') or (Token = 'EXCEPT') then
+          begin
+            if not PendingBareRaiseInExcept then
+              Inc(BareRaiseOutsideExcept);
+          end;
+          PendingBareRaise := False;
+        end;
+
+        // Block-stack maintenance
+        if Token = 'FOR' then LoopHeaderPending := True
+        else if Token = 'WHILE' then LoopHeaderPending := True
+        else if Token = 'DO' then
+        begin
+          if LoopHeaderPending then
+          begin
+            ExpectLoopBody := True;
+            LoopHeaderPending := False;
+          end;
+        end
+        else if Token = 'BEGIN' then
+        begin
+          if ExpectLoopBody then
+          begin
+            BlockStack.Add(bkLoopBegin);
+            ExpectLoopBody := False;
+          end
+          else
+            BlockStack.Add(bkBegin);
+        end
+        else if Token = 'REPEAT' then BlockStack.Add(bkRepeat)
+        else if Token = 'TRY' then BlockStack.Add(bkTry)
+        else if Token = 'CASE' then BlockStack.Add(bkCase)
+        else if Token = 'EXCEPT' then
+        begin
+          if (BlockStack.Count > 0) and (BlockStack.Last = bkTry) then
+            BlockStack[BlockStack.Count - 1] := bkExcept;
+        end
+        else if Token = 'FINALLY' then
+        begin
+          if (BlockStack.Count > 0) and (BlockStack.Last = bkTry) then
+            BlockStack[BlockStack.Count - 1] := bkFinally;
+        end
+        else if Token = 'END' then
+        begin
+          if BlockStack.Count > 0 then
+            BlockStack.Delete(BlockStack.Count - 1);
+        end
+        else if Token = 'UNTIL' then
+        begin
+          if (BlockStack.Count > 0) and (BlockStack.Last = bkRepeat) then
+            BlockStack.Delete(BlockStack.Count - 1);
+        end
+        // Control-flow keywords
+        else if Token = 'EXIT' then Inc(ExitCount)
+        else if Token = 'BREAK' then
+        begin
+          if not InLoop then Inc(BreakOutsideLoop);
+        end
+        else if Token = 'CONTINUE' then
+        begin
+          if not InLoop then Inc(ContinueOutsideLoop);
+        end
+        else if Token = 'GOTO' then Inc(GotoCount)
+        else if Token = 'RAISE' then
+        begin
+          PendingBareRaise := True;
+          PendingBareRaiseInExcept := InExcept;
+        end;
+
+        // Cancel ExpectLoopBody if the token after DO isn't BEGIN
+        // (single-statement loop body - we don't track inside it).
+        if ExpectLoopBody and (Token <> 'DO') and (Token <> 'BEGIN') then
+          ExpectLoopBody := False;
       end;
+
+      // End-of-stream: a pending bare raise with nothing after is bare too.
+      if PendingBareRaise and not PendingBareRaiseInExcept then
+        Inc(BareRaiseOutsideExcept);
     finally
       Scanner.Free;
+      BlockStack.Free;
     end;
 
     // Structural errors
@@ -455,6 +584,23 @@ begin
       AddError('"until" without matching "repeat" inside the block - block is part of a repeat-statement.');
     if ForeignFinallyExceptFound then
       AddError('"except" or "finally" without matching "try" inside the block - block is part of a try-statement.');
+
+    // Control-flow issues: extracting would break compile or change semantics.
+    if ExitCount > 0 then
+      AddError(Format('Selection contains %d "Exit" call(s) - extraction would change semantics ' +
+        '(Exit would leave only the extracted method, not the original enclosing one).', [ExitCount]));
+    if BreakOutsideLoop > 0 then
+      AddError(Format('Selection contains %d "Break" without an enclosing loop inside the selection - ' +
+        'would not compile after extraction.', [BreakOutsideLoop]));
+    if ContinueOutsideLoop > 0 then
+      AddError(Format('Selection contains %d "Continue" without an enclosing loop inside the selection - ' +
+        'would not compile after extraction.', [ContinueOutsideLoop]));
+    if BareRaiseOutsideExcept > 0 then
+      AddError(Format('Selection contains bare "raise;" outside of an except-block inside the selection - ' +
+        'would not compile after extraction.', [BareRaiseOutsideExcept]));
+    if GotoCount > 0 then
+      AddWarning(Format('Selection contains %d "goto" - label targets are not verified; ' +
+        'ensure all referenced labels stay in scope after extraction.', [GotoCount]));
 
     // 5. Bracket balance
     if ParenDepth > 0 then

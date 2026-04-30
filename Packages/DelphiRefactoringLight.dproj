@@ -118,6 +118,9 @@
         <DCCReference Include="..\Source\Expert.ContextMenu.pas"/>
         <DCCReference Include="..\Source\Expert.UnitRenameWatcher.pas"/>
         <DCCReference Include="..\Source\Expert.IdentifierCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.SignatureCheckDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.SignatureCheckWizard.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

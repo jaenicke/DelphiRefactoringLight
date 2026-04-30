@@ -2,21 +2,22 @@
 
 WARNING: **This is an experimental preview version. Please use with caution. The code completion is meant as an experiment and will most likely be removed later.**
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide Five refactoring features directly in the editor (also inside the popup menu):
+A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide six refactoring features directly in the editor:
 
 | Shortcut           | Feature                                                        |
 |--------------------|----------------------------------------------------------------|
-| `Ctrl+Shift+R`     | **Rename** &mdash; rename an identifier project-wide, semantically (including interface implementations) |
-| `Ctrl+Shift+U`     | **Find References** &mdash; list every occurrence of an identifier |
-| `Ctrl+Shift+I`     | **Find Implementations** &mdash; list all class implementations of an interface/virtual method |
-| `Ctrl+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP          |
-| `Ctrl+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method |
+| `Ctrl+Alt+Shift+R`     | **Rename** &mdash; rename an identifier project-wide, semantically (including interface implementations) |
+| `Ctrl+Alt+Shift+U`     | **Find References** &mdash; list every occurrence of an identifier |
+| `Ctrl+Alt+Shift+I`     | **Find Implementations** &mdash; list all class implementations of an interface/virtual method |
+| `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP          |
+| `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method |
+| `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches |
 
 Unlike purely text-based tools, this package uses the actual LSP requests `textDocument/rename`, `textDocument/references`, `textDocument/implementation`, `textDocument/completion`, `textDocument/hover`, and `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
 ## Features in Detail
 
-### Rename (`Ctrl+Shift+R`)
+### Rename (`Ctrl+Alt+Shift+R`)
 - Reads the editor position and picks up the identifier under the cursor.
 - Runs a text search across all project files, then verifies each candidate semantically via `textDocument/definition`.
 - Extends the candidate set via `TImplementationFinder` with class method implementations &mdash; so renaming an interface method also renames the implementations in every class that implements that interface.
@@ -24,14 +25,14 @@ Unlike purely text-based tools, this package uses the actual LSP requests `textD
 - Optional per-file backup.
 - Applies the changes byte-precisely via `IOTAEditWriter` and reloads modified modules in the IDE.
 
-### Find References (`Ctrl+Shift+U`)
+### Find References (`Ctrl+Alt+Shift+U`)
 - Reads the identifier under the cursor.
 - Tries `textDocument/references` on the LSP server first.
 - If that returns nothing (or the server does not support it), falls back to the same strategy as Rename: project-wide text search plus per-candidate verification via `textDocument/definition`.
 - Shows the results in a dialog (file, line, column, line preview).
 - **Double-click** or **Enter** jumps to the location.
 
-### Find Implementations (`Ctrl+Shift+I`)
+### Find Implementations (`Ctrl+Alt+Shift+I`)
 - Place the cursor on an **interface method declaration** or on a **call** of an interface/virtual method.
 - Uses LSP `textDocument/definition` to reach the actual method declaration (so calls like `aa.Bar` inside `TXyz.Test` resolve correctly to `ITest.Bar` rather than to the containing class).
 - Determines the containing type at the declaration (e.g. `ITest`).
@@ -40,12 +41,22 @@ Unlike purely text-based tools, this package uses the actual LSP requests `textD
 - **Double-click** or **Enter** jumps to the implementation.
 - The same `TImplementationFinder` class is also used internally by the Rename feature.
 
-### Code Completion (`Ctrl+Shift+Space`)
+### Code Completion (`Ctrl+Alt+Shift+Space`)
 - Queries `textDocument/completion` at the cursor position.
 - Displays suggestions in an owner-drawn popup (sort, filter, detail tooltip).
 - Inserts the chosen entry into the editor cleanly (via `IOTAEditWriter`, byte-precise, no Auto-Indent interference).
 
-### Extract Method (`Ctrl+Shift+M`)
+### Align Method Signature (`Ctrl+Alt+Shift+A`)
+- Place the cursor on a method name (in the class/interface declaration or on the implementation).
+- Queries `textDocument/documentSymbol` for the current file and walks the tree to collect every match: methods inside class types, methods inside interface types, and stand-alone implementations.
+- Resolves the counterpart in another unit via `textDocument/definition` and queries that file as well.
+- The actual signature text is read **directly from the saved source file**, not from the LSP's `name` field &mdash; DelphiLSP serves that field from a symbol cache that lags behind editor edits, so reading the file gives the truth on disk.
+- Each entry is normalized (whitespace and case folded, leading `TClass.` qualifier stripped) and compared against the majority signature.
+- The interactive dialog lists every entry with role (`Class decl.`, `Interface decl.`, `Implementation`), container, file, line, match flag and the full signature. Rows that differ from the majority are tinted red.
+- **Double-click** to jump to a location (dialog stays open), **Enter** to jump and close.
+- v1 is diagnostic only &mdash; no automatic rewriting; review and fix the mismatches yourself.
+
+### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
 - For every identifier in the selection, asks LSP `textDocument/hover` for the symbol kind (local / parameter / field / global) and `textDocument/definition` for the declaration site.
 - Determines:
@@ -115,6 +126,9 @@ DelphiRefactoringLight/
 |   |-- Expert.FindReferencesDialog.pas      # Results dialog with list view
 |   |-- Expert.ImplementationFinder.pas      # Shared impl finder (rename + find-impl)
 |   |-- Expert.FindImplementationsWizard.pas # Find-implementations wizard
+|   |-- Expert.SignatureCheck.pas            # Signature collection / normalization
+|   |-- Expert.SignatureCheckDialog.pas      # Align-signature dialog
+|   |-- Expert.SignatureCheckWizard.pas      # Align-signature wizard
 |   |-- Expert.KeyBinding.pas                # Shortcut registration
 |   |-- Expert.EditorHelper.pas              # ToolsAPI wrappers
 |   |-- Expert.LspManager.pas                # LSP client singleton

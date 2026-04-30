@@ -59,6 +59,9 @@ contains
   Expert.FindImplementationsWizard in '..\Source\Expert.FindImplementationsWizard.pas',
   Expert.ContextMenu in '..\Source\Expert.ContextMenu.pas',
   Expert.UnitRenameWatcher in '..\Source\Expert.UnitRenameWatcher.pas',
-  Expert.IdentifierCheck in '..\Source\Expert.IdentifierCheck.pas';
+  Expert.IdentifierCheck in '..\Source\Expert.IdentifierCheck.pas',
+  Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
+  Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
+  Expert.SignatureCheckWizard in '..\Source\Expert.SignatureCheckWizard.pas';
 
 end.

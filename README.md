@@ -13,7 +13,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches |
 
-Unlike purely text-based tools, this package uses the actual LSP requests `textDocument/rename`, `textDocument/references`, `textDocument/implementation`, `textDocument/completion`, `textDocument/hover`, and `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
+Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, and `textDocument/completion`. DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
 ## Features in Detail
 

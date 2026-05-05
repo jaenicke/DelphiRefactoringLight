@@ -227,10 +227,21 @@ end;
 function TUnitRenameWatcher.IsAttachedTo(const AFileName: string): Boolean;
 var
   Entry: TAttachedEntry;
+  EntryName: string;
 begin
   for Entry in FAttached do
-    if (Entry.Module <> nil) and SameText(Entry.Module.FileName, AFileName) then
+  begin
+    if Entry.Module = nil then Continue;
+    EntryName := '';
+    try
+      EntryName := Entry.Module.FileName;
+    except
+      // module may be partially constructed/destructed - skip
+      Continue;
+    end;
+    if SameText(EntryName, AFileName) then
       Exit(True);
+  end;
   Result := False;
 end;
 
@@ -238,12 +249,21 @@ procedure TUnitRenameWatcher.AttachToModule(AModule: IOTAModule);
 var
   Notifier: IOTAModuleNotifier;
   Entry: TAttachedEntry;
+  ModuleFileName: string;
 begin
   if AModule = nil then Exit;
-  if AModule.FileName = '' then Exit;
-  if IsAttachedTo(AModule.FileName) then Exit;
 
-  Notifier := TModuleRenameNotifier.Create(Self, AModule.FileName);
+  ModuleFileName := '';
+  try
+    ModuleFileName := AModule.FileName;
+  except
+    // module not fully constructed yet
+    Exit;
+  end;
+  if ModuleFileName = '' then Exit;
+  if IsAttachedTo(ModuleFileName) then Exit;
+
+  Notifier := TModuleRenameNotifier.Create(Self, ModuleFileName);
   Entry.Module := AModule;
   try
     Entry.NotifierIndex := AModule.AddNotifier(Notifier);
@@ -255,15 +275,30 @@ end;
 
 procedure TUnitRenameWatcher.HandleFileOpened(const AFileName: string);
 var
-  ModuleServices: IOTAModuleServices;
-  Module: IOTAModule;
+  FileNameCopy: string;
 begin
   if AFileName = '' then Exit;
-  if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
-    Exit;
-  Module := ModuleServices.FindModule(AFileName);
-  if Module <> nil then
-    AttachToModule(Module);
+  // The IDE fires ofnFileOpened from inside TBaseProject.AfterConstruction,
+  // before the module is fully usable. Reading IOTAModule.FileName too early
+  // crashes in TCustomCodeIProject.IBaseModule_GetFileName. Defer the attach
+  // to the next message-loop tick so construction is finished.
+  FileNameCopy := AFileName;
+  TThread.ForceQueue(nil,
+    procedure
+    var
+      ModuleServices: IOTAModuleServices;
+      Module: IOTAModule;
+    begin
+      if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
+        Exit;
+      try
+        Module := ModuleServices.FindModule(FileNameCopy);
+      except
+        Module := nil;
+      end;
+      if Module <> nil then
+        AttachToModule(Module);
+    end);
 end;
 
 procedure TUnitRenameWatcher.HandleRename(const AOldFileName, ANewFileName: string);

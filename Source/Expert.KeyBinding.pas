@@ -31,6 +31,7 @@ type
 implementation
 
 uses
+  Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard;
 
@@ -97,22 +98,22 @@ procedure TLspKeyBinding.BindKeyboard(
   const BindingServices: IOTAKeyBindingServices);
 begin
   // Ctrl+Alt+Shift+R -> Rename
-  BindingServices.AddKeyBinding([ShortCut(Ord('R'), [ssCtrl, ssAlt, ssShift])], RenameKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scRename], RenameKeyProc, nil);
 
   // Ctrl+Alt+Shift+Space -> Completion
-  BindingServices.AddKeyBinding([ShortCut(VK_SPACE, [ssCtrl, ssAlt, ssShift])], CompletionKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scCompletion], CompletionKeyProc, nil);
 
   // Ctrl+Alt+Shift+M -> Extract Method
-  BindingServices.AddKeyBinding([ShortCut(Ord('M'), [ssCtrl, ssAlt, ssShift])], ExtractMethodKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scExtract], ExtractMethodKeyProc, nil);
 
   // Ctrl+Alt+Shift+U -> Find References (Usages)
-  BindingServices.AddKeyBinding([ShortCut(Ord('U'), [ssCtrl, ssAlt, ssShift])], FindReferencesKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scFindRef], FindReferencesKeyProc, nil);
 
   // Ctrl+Alt+Shift+I -> Find Implementations
-  BindingServices.AddKeyBinding([ShortCut(Ord('I'), [ssCtrl, ssAlt, ssShift])], FindImplementationsKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scFindImp], FindImplementationsKeyProc, nil);
 
   // Ctrl+Alt+Shift+A -> Align method signature
-  BindingServices.AddKeyBinding([ShortCut(Ord('A'), [ssCtrl, ssAlt, ssShift])], SignatureCheckKeyProc, nil);
+  BindingServices.AddKeyBinding([TExpertsShortCut.scAlign], SignatureCheckKeyProc, nil);
 end;
 
 end.

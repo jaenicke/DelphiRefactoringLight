@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -60,6 +60,7 @@ implementation
 uses
   System.SysUtils, System.UITypes, Winapi.Windows,
   Vcl.Forms, Vcl.Controls,
+  Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard;
@@ -147,17 +148,17 @@ begin
   FSubmenu.Caption := 'Refactoring Light';
 
   FSubmenu.Add(CreateItem(FSubmenu, 'Rename...',
-    ShortCut(Ord('R'), [ssCtrl, ssAlt, ssShift]), OnRename));
+    TExpertsShortCut.scRename, OnRename));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find References',
-    ShortCut(Ord('U'), [ssCtrl, ssAlt, ssShift]), OnFindReferences));
+    TExpertsShortCut.scFindRef, OnFindReferences));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find Implementations',
-    ShortCut(Ord('I'), [ssCtrl, ssAlt, ssShift]), OnFindImplementations));
+    TExpertsShortCut.scFindImp, OnFindImplementations));
   FSubmenu.Add(CreateItem(FSubmenu, 'Extract Method',
-    ShortCut(Ord('M'), [ssCtrl, ssAlt, ssShift]), OnExtractMethod));
+    TExpertsShortCut.scExtract, OnExtractMethod));
   FSubmenu.Add(CreateItem(FSubmenu, 'Align method signature...',
-    ShortCut(Ord('A'), [ssCtrl, ssAlt, ssShift]), OnSignatureCheck));
+    TExpertsShortCut.scAlign, OnSignatureCheck));
   FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
-    ShortCut(VK_SPACE, [ssCtrl, ssAlt, ssShift]), OnCompletion));
+    TExpertsShortCut.scCompletion, OnCompletion));
 
   // Separator above our submenu so it is visually grouped
   FSeparator := TMenuItem.Create(FPopupMenu);

@@ -25,8 +25,9 @@ package DelphiRefactoringLight;
 {$IMAGEBASE $400000}
 {$ENDIF IMPLICITBUILDING}
 {$DESCRIPTION 'Delphi Refactoring Light - Rename / Find References / Extract Method via DelphiLSP'}
+{$LIBSUFFIX AUTO}
 {$DESIGNONLY}
-{$IMPLICITBUILD OFF}
+{$IMPLICITBUILD ON}
 
 requires
   rtl,
@@ -45,6 +46,7 @@ contains
   Lsp.Client in '..\Source\Lsp.Client.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',
   Delphi.FileEncoding in '..\Source\Delphi.FileEncoding.pas',
+  Expert.Shortcuts in '..\Source\Expert.Shortcuts.pas',
   Expert.LspManager in '..\Source\Expert.LspManager.pas',
   Expert.IdeCodeInsight in '..\Source\Expert.IdeCodeInsight.pas',
   Expert.CompletionPopup in '..\Source\Expert.CompletionPopup.pas',

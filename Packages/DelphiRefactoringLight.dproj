@@ -121,6 +121,12 @@
         <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheckDialog.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheckWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.OptionsFrame.pas">
+            <Form>LspOptionsFrame</Form>
+            <FormType>dfm</FormType>
+            <DesignClass>TFrame</DesignClass>
+        </DCCReference>
+        <DCCReference Include="..\Source\Expert.OptionsPage.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

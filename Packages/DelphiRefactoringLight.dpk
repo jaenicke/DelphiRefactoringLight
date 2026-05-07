@@ -64,6 +64,8 @@ contains
   Expert.IdentifierCheck in '..\Source\Expert.IdentifierCheck.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
-  Expert.SignatureCheckWizard in '..\Source\Expert.SignatureCheckWizard.pas';
+  Expert.SignatureCheckWizard in '..\Source\Expert.SignatureCheckWizard.pas',
+  Expert.OptionsFrame in '..\Source\Expert.OptionsFrame.pas' {LspOptionsFrame: TFrame},
+  Expert.OptionsPage in '..\Source\Expert.OptionsPage.pas';
 
 end.

@@ -25,7 +25,7 @@ unit Expert.ContextMenu;
 interface
 
 uses
-  System.Classes, Vcl.Menus, Vcl.ExtCtrls;
+  System.Classes, Vcl.Menus, Vcl.ExtCtrls, Expert.Shortcuts;
 
 type
   TContextMenuInstaller = class
@@ -44,12 +44,15 @@ type
     procedure OnRetryTimer(Sender: TObject);
     function FindEditorPopupMenu: TPopupMenu;
     function CreateItem(AParent: TMenuItem; const ACaption: string;
-      AShortcut: TShortCut; AOnClick: TNotifyEvent): TMenuItem;
+      AKind: TShortcutKind; AOnClick: TNotifyEvent): TMenuItem;
     procedure TryInstall;
   public
     destructor Destroy; override;
     procedure Install;
     procedure Uninstall;
+    /// <summary>Re-applies the shortcuts from Expert.Shortcuts to all
+    ///  menu items. Call after the user changed the shortcut settings.</summary>
+    procedure RefreshShortcuts;
   end;
 
 var
@@ -60,7 +63,6 @@ implementation
 uses
   System.SysUtils, System.UITypes, Winapi.Windows,
   Vcl.Forms, Vcl.Controls,
-  Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard;
@@ -99,13 +101,34 @@ begin
 end;
 
 function TContextMenuInstaller.CreateItem(AParent: TMenuItem;
-  const ACaption: string; AShortcut: TShortCut;
+  const ACaption: string; AKind: TShortcutKind;
   AOnClick: TNotifyEvent): TMenuItem;
 begin
   Result := TMenuItem.Create(AParent);
   Result.Caption := ACaption;
-  Result.ShortCut := AShortcut;
+  // Tag stores the shortcut kind so RefreshShortcuts can find this item.
+  // Encoded as Ord+1 so 0 means "no shortcut tracked".
+  Result.Tag := Ord(AKind) + 1;
+  Result.ShortCut := TExpertsShortCut.Shortcuts[AKind];
   Result.OnClick := AOnClick;
+end;
+
+procedure TContextMenuInstaller.RefreshShortcuts;
+var
+  I: Integer;
+  Item: TMenuItem;
+  Kind: TShortcutKind;
+begin
+  if FSubmenu = nil then Exit;
+  for I := 0 to FSubmenu.Count - 1 do
+  begin
+    Item := FSubmenu.Items[I];
+    if (Item.Tag >= 1) and (Item.Tag <= Ord(High(TShortcutKind)) + 1) then
+    begin
+      Kind := TShortcutKind(Item.Tag - 1);
+      Item.ShortCut := TExpertsShortCut.Shortcuts[Kind];
+    end;
+  end;
 end;
 
 procedure TContextMenuInstaller.Install;
@@ -148,17 +171,17 @@ begin
   FSubmenu.Caption := 'Refactoring Light';
 
   FSubmenu.Add(CreateItem(FSubmenu, 'Rename...',
-    TExpertsShortCut.scRename, OnRename));
+    skRename, OnRename));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find References',
-    TExpertsShortCut.scFindRef, OnFindReferences));
+    skFindRef, OnFindReferences));
   FSubmenu.Add(CreateItem(FSubmenu, 'Find Implementations',
-    TExpertsShortCut.scFindImp, OnFindImplementations));
+    skFindImp, OnFindImplementations));
   FSubmenu.Add(CreateItem(FSubmenu, 'Extract Method',
-    TExpertsShortCut.scExtract, OnExtractMethod));
+    skExtract, OnExtractMethod));
   FSubmenu.Add(CreateItem(FSubmenu, 'Align method signature...',
-    TExpertsShortCut.scAlign, OnSignatureCheck));
+    skAlign, OnSignatureCheck));
   FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
-    TExpertsShortCut.scCompletion, OnCompletion));
+    skCompletion, OnCompletion));
 
   // Separator above our submenu so it is visually grouped
   FSeparator := TMenuItem.Create(FPopupMenu);

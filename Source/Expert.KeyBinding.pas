@@ -28,6 +28,15 @@ type
     procedure BindKeyboard(const BindingServices: IOTAKeyBindingServices);
   end;
 
+/// <summary>Installs the keyboard binding and remembers the index so it
+///  can be re-installed when the user changes shortcuts.</summary>
+procedure InstallKeyBinding;
+/// <summary>Removes the current keyboard binding (if any).</summary>
+procedure UninstallKeyBinding;
+/// <summary>Removes the binding and adds a fresh one. Call after the
+///  shortcut settings have changed.</summary>
+procedure RebindKeyBinding;
+
 implementation
 
 uses
@@ -114,6 +123,40 @@ begin
 
   // Ctrl+Alt+Shift+A -> Align method signature
   BindingServices.AddKeyBinding([TExpertsShortCut.scAlign], SignatureCheckKeyProc, nil);
+end;
+
+var
+  KeyBindingIndex: Integer = -1;
+
+procedure InstallKeyBinding;
+var
+  Services: IOTAKeyboardServices;
+begin
+  if KeyBindingIndex >= 0 then Exit;
+  if Supports(BorlandIDEServices, IOTAKeyboardServices, Services) then
+    KeyBindingIndex := Services.AddKeyboardBinding(TLspKeyBinding.Create);
+end;
+
+procedure UninstallKeyBinding;
+var
+  Services: IOTAKeyboardServices;
+begin
+  if KeyBindingIndex < 0 then Exit;
+  if Supports(BorlandIDEServices, IOTAKeyboardServices, Services) then
+  try
+    Services.RemoveKeyboardBinding(KeyBindingIndex);
+  except
+    // ignore - binding may already be gone during shutdown
+  end;
+  KeyBindingIndex := -1;
+end;
+
+procedure RebindKeyBinding;
+begin
+  // The IDE freezes the shortcut list at AddKeyboardBinding time, so the
+  // only way to switch to new shortcuts is to remove and re-add.
+  UninstallKeyBinding;
+  InstallKeyBinding;
 end;
 
 end.

@@ -1,5 +1,5 @@
-﻿(*
- * Copyright (c) 2026 Sebastian J�nicke (github.com/jaenicke)
+(*
+ * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -14,17 +14,34 @@ procedure Register;
 implementation
 
 uses
-  System.SysUtils, ToolsAPI, Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard,
-  Expert.FindImplementationsWizard, Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint, Expert.ContextMenu,
-  Expert.UnitRenameWatcher;
+  System.SysUtils, ToolsAPI,
+  Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
+  Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
+  Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint,
+  Expert.ContextMenu, Expert.UnitRenameWatcher,
+  Expert.Shortcuts, Expert.OptionsPage;
 
-var
-  KeyBindingIndex: Integer = -1;
+type
+  TShortcutChangeHook = class
+    class procedure HandleChanged;
+  end;
+
+class procedure TShortcutChangeHook.HandleChanged;
+begin
+  // Re-create the keyboard binding (the IDE caches its shortcut list)
+  // and refresh the context-menu items.
+  RebindKeyBinding;
+  if ContextMenuInstance <> nil then
+    ContextMenuInstance.RefreshShortcuts;
+end;
 
 procedure Register;
-var
-  Services: IOTAKeyboardServices;
 begin
+  // Load configurable shortcut values from the registry first so all
+  // installs below see the user's preferred bindings.
+  TExpertsShortCut.LoadFromRegistry;
+  TExpertsShortCut.AddListener(TShortcutChangeHook.HandleChanged);
+
   // Register the menu wizard (shows up under the Help menu)
   WizardInstance := TLspRenameWizard.Create;
   RegisterPackageWizard(WizardInstance);
@@ -44,19 +61,16 @@ begin
   // Create the signature-check wizard
   SignatureCheckInstance := TLspSignatureCheckWizard.Create;
 
-  // Register keyboard shortcuts
-  // Ctrl+Alt+Shift+R     -> Rename
-  // Ctrl+Alt+Shift+Space -> Completion
-  // Ctrl+Alt+Shift+M     -> Extract Method
-  // Ctrl+Alt+Shift+U     -> Find References (Usages)
-  // Ctrl+Alt+Shift+I     -> Find Implementations
-  // Ctrl+Alt+Shift+A     -> Align method signature
-  if Supports(BorlandIDEServices, IOTAKeyboardServices, Services) then
-    KeyBindingIndex := Services.AddKeyboardBinding(TLspKeyBinding.Create);
+  // Register keyboard shortcuts (defaults are Ctrl+Alt+Shift + R/Space/M/U/I/A,
+  // user-configurable via Tools > Options > Refactoring Light).
+  InstallKeyBinding;
 
   // Install the "Refactoring Light" submenu into the editor context menu
   ContextMenuInstance := TContextMenuInstaller.Create;
   ContextMenuInstance.Install;
+
+  // Add the options page (Tools > Options > Third Party > Refactoring Light)
+  RegisterOptionsPage;
 
   // Unit rename watcher: offers rename when a unit is renamed in the IDE
   // (File > Save As etc.).
@@ -70,6 +84,8 @@ end;
 initialization
 
 finalization
+  TExpertsShortCut.RemoveListener(TShortcutChangeHook.HandleChanged);
+  UnregisterOptionsPage;
   FreeAndNil(UnitRenameWatcherInstance);
   FreeAndNil(ContextMenuInstance);
   FreeAndNil(SignatureCheckInstance);
@@ -77,11 +93,5 @@ finalization
   FreeAndNil(FindReferencesInstance);
   FreeAndNil(ExtractMethodInstance);
   FreeAndNil(CompletionWizardInstance);
-
-  if KeyBindingIndex >= 0 then
-  begin
-    var Services: IOTAKeyboardServices;
-    if Supports(BorlandIDEServices, IOTAKeyboardServices, Services) then
-      Services.RemoveKeyboardBinding(KeyBindingIndex);
-  end;
+  UninstallKeyBinding;
 end.

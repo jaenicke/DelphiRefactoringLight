@@ -186,7 +186,13 @@ begin
               CharInSet(ALine[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
           Inc(I);
         Word := Copy(ALine, Start, I - Start);
-        if SameText(Word, AIdent) then
+        // Do not rename member accesses ('Log.Log' -> only the first
+        // 'Log' is the variable; the second is the method name after the
+        // dot and must stay as-is). '&' is the Delphi escape prefix for
+        // reserved-word identifiers.
+        var IsMemberAccess := (Start > 1) and
+          ((ALine[Start - 1] = '.') or (ALine[Start - 1] = '&'));
+        if SameText(Word, AIdent) and not IsMemberAccess then
           SB.Append(ANew)
         else
           SB.Append(Word);
@@ -298,13 +304,28 @@ end;
 /// <summary>Finds the end of the surrounding method (the line with the
 ///  matching "end;" of the procedure).</summary>
 class function TExtractMethodHelper.FindMethodEnd(const AFileLines: TArray<string>; AStartLine: Integer): Integer;
+
+  function HasKeyword(const AUpper, AKeyword: string): Boolean;
+  // Whitespace-bounded keyword detection on a line. AUpper is already
+  // uppercased and trimmed.
+  begin
+    Result :=
+      (AUpper = AKeyword) or
+      AUpper.StartsWith(AKeyword + ' ') or
+      AUpper.EndsWith(' ' + AKeyword) or
+      (Pos(' ' + AKeyword + ' ', ' ' + AUpper + ' ') > 0);
+  end;
+
 var
-  BeginDepth: Integer;
+  BlockDepth: Integer;
   Upper: string;
   InBegin: Boolean;
 begin
-  // AStartLine is 1-based. Search forward for begin, then balance begin/end
-  BeginDepth := 0;
+  // AStartLine is 1-based. Walk forward and balance opener/closer
+  // keywords. Openers are BEGIN, TRY, CASE, ASM (they all close with
+  // END). Without counting TRY/CASE we'd exit too early as soon as a
+  // try-block inside the method closes more ENDs than there are BEGINs.
+  BlockDepth := 0;
   InBegin := False;
   for var I := AStartLine - 1 to Length(AFileLines) - 1 do
   begin
@@ -316,17 +337,29 @@ begin
        (I > AStartLine - 1) then
       Exit(I); // 0-based, returned as 1-based: I (line BEFORE next method)
 
-    if (Upper = 'BEGIN') or Upper.StartsWith('BEGIN ') or Upper.EndsWith(' BEGIN') or
-       (Pos(' BEGIN ', ' ' + Upper + ' ') > 0) then
+    if HasKeyword(Upper, 'BEGIN') then
     begin
-      Inc(BeginDepth);
+      Inc(BlockDepth);
       InBegin := True;
     end;
-
-    if InBegin and ((Upper = 'END;') or (Upper = 'END.') or Upper.StartsWith('END ')) then
+    if InBegin then
     begin
-      Dec(BeginDepth);
-      if BeginDepth <= 0 then
+      // try / case / asm also close with end; count them so the
+      // depth stays balanced.
+      if HasKeyword(Upper, 'TRY') then Inc(BlockDepth);
+      if HasKeyword(Upper, 'ASM') then Inc(BlockDepth);
+      // 'case ... of' is the form that opens a block. A bare 'case'
+      // also appears in variant records, but those live at type level
+      // and never inside a method body, so counting any 'CASE' as
+      // opener is safe here.
+      if HasKeyword(Upper, 'CASE') then Inc(BlockDepth);
+    end;
+
+    if InBegin and ((Upper = 'END;') or (Upper = 'END.') or Upper.StartsWith('END ') or
+                    Upper.StartsWith('END;') or Upper.StartsWith('END.')) then
+    begin
+      Dec(BlockDepth);
+      if BlockDepth <= 0 then
         Exit(I + 1); // 1-based
     end;
   end;

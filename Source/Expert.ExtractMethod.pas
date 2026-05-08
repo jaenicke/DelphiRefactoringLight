@@ -56,6 +56,16 @@ type
     procedure OnMethodNameChange(Sender: TObject);
     function GetSelectedBlock(out AInfo: TExtractMethodInfo): Boolean;
     function AnalyzeVariables(var AInfo: TExtractMethodInfo; AClient: TLspClient): Boolean;
+    /// <summary>LSP-verified version of IdentUsedOutsideBlock used for
+    ///  inline variables. For each textual match of AIdent outside the
+    ///  block, sends textDocument/definition and counts the occurrence
+    ///  only if it resolves to AOriginalDefFile/Line. Slow but scope-aware
+    ///  (handles shadowing 'for var I' / 'for var I' correctly).</summary>
+    function IdentUsedOutsideBlockLSP(AClient: TLspClient;
+      const AFileLines: TArray<string>;
+      const AFileName, AIdent: string;
+      AMethodStart, AMethodEnd, ABlockStart, ABlockEnd, ADefLine: Integer;
+      const AOriginalDefFile: string; AOriginalDefLine: Integer): Boolean;
     function FindInsertPoint(var AInfo: TExtractMethodInfo): Boolean;
     function BuildParamSignature(const AInfo: TExtractMethodInfo): string;
     function GenerateMethod(const AInfo: TExtractMethodInfo): string;
@@ -103,6 +113,16 @@ type
     class function IdentUsedOutsideBlock(const AFileLines: TArray<string>;
       const AIdent: string; AMethodStart, AMethodEnd, ABlockStart, ABlockEnd, ADefLine: Integer): Boolean; static;
     class function FindMethodEnd(const AFileLines: TArray<string>; AStartLine: Integer): Integer; static;
+    /// <summary>Returns the 1-based line number of the method's first
+    ///  BEGIN, searching forward from AInsertLine. Used to tell inline
+    ///  vars (declared after BEGIN) from classical var-block declarations
+    ///  (declared between procedure header and BEGIN).</summary>
+    class function FindMethodBeginLine(const AFileLines: TArray<string>; AInsertLine: Integer): Integer; static;
+    /// <summary>True iff ADefLine lies inside the method body (after the
+    ///  method's first BEGIN), which marks an inline variable. False for
+    ///  parameters and classical var-block declarations.</summary>
+    class function IsInlineVar(const AFileLines: TArray<string>;
+      AInsertLine, ADefLine: Integer): Boolean; static;
     class function MakeHoverParams(const AFileName: string; ALine, ACol: Integer): TJSONObject; static;
   end;
 
@@ -291,7 +311,11 @@ begin
       var AfterPos := Pos_ + Length(AIdent);
       var AfterOk := (AfterPos > Length(Line)) or
         not CharInSet(Line[AfterPos], ['A'..'Z','a'..'z','0'..'9','_']);
-      if BeforeOk and AfterOk and not TExtractMethodHelper.IsInsideStringOrComment(Line, Pos_) then
+      // Member access 'Foo.Bar' must not match when AIdent='Bar'.
+      var MemberAccess := (Pos_ > 1) and
+        ((Line[Pos_ - 1] = '.') or (Line[Pos_ - 1] = '&'));
+      if BeforeOk and AfterOk and (not MemberAccess) and
+         not TExtractMethodHelper.IsInsideStringOrComment(Line, Pos_) then
         Exit(True);
       // Continue searching
       var NextPos := System.Pos(UpperName, UpperCase(Copy(Line, Pos_ + Length(AIdent))));
@@ -366,6 +390,36 @@ begin
   Result := Length(AFileLines);
 end;
 
+class function TExtractMethodHelper.FindMethodBeginLine(const AFileLines: TArray<string>; AInsertLine: Integer): Integer;
+var
+  Upper: string;
+  I: Integer;
+begin
+  // Walk forward from the procedure header line until we find the line
+  // that opens the method body. Returns 1-based line number or 0 if no
+  // BEGIN was found (degenerate case - falls back to "no inline vars").
+  Result := 0;
+  for I := AInsertLine - 1 to Length(AFileLines) - 1 do
+  begin
+    if I < 0 then Continue;
+    Upper := UpperCase(Trim(AFileLines[I]));
+    if (Upper = 'BEGIN') or Upper.StartsWith('BEGIN ') or Upper.EndsWith(' BEGIN') or
+       (Pos(' BEGIN ', ' ' + Upper + ' ') > 0) then
+      Exit(I + 1);
+  end;
+end;
+
+class function TExtractMethodHelper.IsInlineVar(const AFileLines: TArray<string>;
+  AInsertLine, ADefLine: Integer): Boolean;
+var
+  BeginLine: Integer;
+begin
+  if (ADefLine <= 0) or (AInsertLine <= 0) then Exit(False);
+  BeginLine := FindMethodBeginLine(AFileLines, AInsertLine);
+  // Inline var: declaration is BELOW the method's first BEGIN.
+  Result := (BeginLine > 0) and (ADefLine > BeginLine);
+end;
+
 class function TExtractMethodHelper.IsInsideStringOrComment(const ALine: string; APos: Integer): Boolean;
 var
   I: Integer;
@@ -437,6 +491,72 @@ begin
   AInfo.Indent := StringOfChar(' ', MinI);
   AInfo.MethodName := 'ExtractedMethod';
   Result := True;
+end;
+
+function TLspExtractMethodWizard.IdentUsedOutsideBlockLSP(AClient: TLspClient;
+  const AFileLines: TArray<string>;
+  const AFileName, AIdent: string;
+  AMethodStart, AMethodEnd, ABlockStart, ABlockEnd, ADefLine: Integer;
+  const AOriginalDefFile: string; AOriginalDefLine: Integer): Boolean;
+// For each whole-word textual match of AIdent on lines outside the block,
+// query LSP for its definition and only count it if it resolves to the
+// same (file, line) as the in-block reference. This is what makes shadowing
+// inline-vars (e.g. multiple 'for var I := ...' loops) work correctly.
+var
+  UpperName, Line: string;
+  I, Pos_, AfterPos, NextPos: Integer;
+begin
+  Result := False;
+  UpperName := UpperCase(AIdent);
+  for I := AMethodStart - 1 to AMethodEnd - 1 do
+  begin
+    if I < 0 then Continue;
+    if I >= Length(AFileLines) then Break;
+    if (I + 1 >= ABlockStart) and (I + 1 <= ABlockEnd) then Continue;
+    if (ADefLine > 0) and (I + 1 = ADefLine) then Continue;
+
+    Line := AFileLines[I];
+    Pos_ := System.Pos(UpperName, UpperCase(Line));
+    while Pos_ > 0 do
+    begin
+      var BeforeOk := (Pos_ = 1) or
+        not CharInSet(Line[Pos_ - 1], ['A'..'Z','a'..'z','0'..'9','_']);
+      AfterPos := Pos_ + Length(AIdent);
+      var AfterOk := (AfterPos > Length(Line)) or
+        not CharInSet(Line[AfterPos], ['A'..'Z','a'..'z','0'..'9','_']);
+      var MemberAccess := (Pos_ > 1) and
+        ((Line[Pos_ - 1] = '.') or (Line[Pos_ - 1] = '&'));
+
+      if BeforeOk and AfterOk and (not MemberAccess) and
+         not TExtractMethodHelper.IsInsideStringOrComment(Line, Pos_) then
+      begin
+        // Ask LSP whether THIS occurrence resolves to the same definition
+        // as the in-block reference. Cancel-on-new-request quirks of
+        // DelphiLSP are not an issue here because we send strictly one
+        // request at a time.
+        try
+          var Locs := AClient.GotoDefinition(AFileName, I, Pos_ - 1);
+          for var LO in Locs do
+          begin
+            var LF := TLspUri.FileUriToPath(LO.Uri);
+            var LL := LO.Range.Start.Line + 1;
+            if SameText(ExpandFileName(LF), ExpandFileName(AOriginalDefFile)) and
+               (LL = AOriginalDefLine) then
+              Exit(True);
+          end;
+        except
+          // LSP error: be safe and treat the match as "used outside" so
+          // we don't accidentally move a variable that is referenced
+          // elsewhere.
+          Exit(True);
+        end;
+      end;
+
+      NextPos := System.Pos(UpperName, UpperCase(Copy(Line, Pos_ + Length(AIdent))));
+      if NextPos = 0 then Break;
+      Pos_ := Pos_ + Length(AIdent) + NextPos - 1;
+    end;
+  end;
 end;
 
 function TLspExtractMethodWizard.AnalyzeVariables(var AInfo: TExtractMethodInfo; AClient: TLspClient): Boolean;
@@ -628,9 +748,25 @@ begin
       if DSF and (TI.DefLine>=AInfo.InsertLine) and (TI.DefLine<AInfo.StartLine) then
       begin
         // Local var of the method: is it used OUTSIDE the block?
-        var UsedOutside := TExtractMethodHelper.IdentUsedOutsideBlock(FileLines, TI.Ident,
-          AInfo.InsertLine, MethodEnd, AInfo.StartLine, AInfo.EndLine,
-          TI.DefLine);
+        // For inline vars (declared after the method's BEGIN), the same
+        // identifier name may legitimately reappear in a sibling scope
+        // ('for var I := ...' twice). A pure text scan would treat that
+        // shadowing var as "used outside". Use LSP-verified scope check
+        // for inline vars; classical var-block declarations stay on the
+        // fast text path.
+        var Inline_ := TExtractMethodHelper.IsInlineVar(FileLines, AInfo.InsertLine, TI.DefLine);
+        var UsedOutside: Boolean;
+        if Inline_ then
+        begin
+          AInfo.DiagLog := AInfo.DiagLog + '    (inline var - LSP-verified scope check)' + sLineBreak;
+          UsedOutside := IdentUsedOutsideBlockLSP(AClient, FileLines, AInfo.FileName,
+            TI.Ident, AInfo.InsertLine, MethodEnd, AInfo.StartLine, AInfo.EndLine,
+            TI.DefLine, TI.DefFile, TI.DefLine);
+        end
+        else
+          UsedOutside := TExtractMethodHelper.IdentUsedOutsideBlock(FileLines, TI.Ident,
+            AInfo.InsertLine, MethodEnd, AInfo.StartLine, AInfo.EndLine,
+            TI.DefLine);
         if UsedOutside then
         begin
           // Variable is also used outside -> parameter

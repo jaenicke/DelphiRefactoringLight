@@ -1,7 +1,5 @@
 # Delphi Refactoring Light
 
-WARNING: **This is an experimental preview version. Please use with caution. The code completion is meant as an experiment and will most likely be removed later.**
-
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide six refactoring features directly in the editor:
 
 | Shortcut           | Feature                                                        |
@@ -14,6 +12,10 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches |
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, and `textDocument/completion`. DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
+
+In the last three weeks I tested with big projects and used it myself in real life. A few fixes were neccessary, but now it should be a good help though it might not work in all cases. Important is, that you can always use undo, because changes are applied in a way to make this work.
+
+**If you encounter any problems, please let me now, so I can fix it.**
 
 ## Features in Detail
 

@@ -104,7 +104,12 @@ function TContextMenuInstaller.CreateItem(AParent: TMenuItem;
   const ACaption: string; AKind: TShortcutKind;
   AOnClick: TNotifyEvent): TMenuItem;
 begin
-  Result := TMenuItem.Create(AParent);
+  // Owner = nil so the item does NOT pollute the IDE's component
+  // bookkeeping (EditorLocalMenu.Components / its Owner.Components).
+  // Some IDE features iterate that list per popup-open and choke when
+  // they see foreign components in there. We free our items manually
+  // in Uninstall.
+  Result := TMenuItem.Create(nil);
   Result.Caption := ACaption;
   // Tag stores the shortcut kind so RefreshShortcuts can find this item.
   // Encoded as Ord+1 so 0 means "no shortcut tracked".
@@ -166,8 +171,8 @@ begin
   FPopupMenu := FindEditorPopupMenu;
   if FPopupMenu = nil then Exit;
 
-  // Build our submenu
-  FSubmenu := TMenuItem.Create(FPopupMenu);
+  // Build our submenu. Owner = nil — see CreateItem for why.
+  FSubmenu := TMenuItem.Create(nil);
   FSubmenu.Caption := 'Refactoring Light';
 
   FSubmenu.Add(CreateItem(FSubmenu, 'Rename...',
@@ -183,8 +188,9 @@ begin
   FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
     skCompletion, OnCompletion));
 
-  // Separator above our submenu so it is visually grouped
-  FSeparator := TMenuItem.Create(FPopupMenu);
+  // Separator above our submenu so it is visually grouped.
+  // Owner = nil — see CreateItem for why.
+  FSeparator := TMenuItem.Create(nil);
   FSeparator.Caption := '-';
 
   FPopupMenu.Items.Add(FSeparator);
@@ -199,25 +205,46 @@ begin
     FreeAndNil(FRetryTimer);
   end;
 
+  // During IDE shutdown the editor popup may have been cleared or torn
+  // down before our finalization runs. Items.Remove then raises
+  // "Submenu is not in menu" (EMenuError). Treat any failure as
+  // "already gone" - the IDE is destroying everything anyway.
   if FPopupMenu <> nil then
   begin
     if FSubmenu <> nil then
     begin
-      FPopupMenu.Items.Remove(FSubmenu);
-      FreeAndNil(FSubmenu);
+      try
+        if FPopupMenu.Items.IndexOf(FSubmenu) >= 0 then
+          FPopupMenu.Items.Remove(FSubmenu);
+      except
+        // popup already gone
+      end;
+      try
+        FreeAndNil(FSubmenu);
+      except
+        FSubmenu := nil;
+      end;
     end;
     if FSeparator <> nil then
     begin
-      FPopupMenu.Items.Remove(FSeparator);
-      FreeAndNil(FSeparator);
+      try
+        if FPopupMenu.Items.IndexOf(FSeparator) >= 0 then
+          FPopupMenu.Items.Remove(FSeparator);
+      except
+        // popup already gone
+      end;
+      try
+        FreeAndNil(FSeparator);
+      except
+        FSeparator := nil;
+      end;
     end;
   end
   else
   begin
-    // Popup was never hooked; just release our orphan items (should not
-    // normally happen, but defensive).
-    FreeAndNil(FSubmenu);
-    FreeAndNil(FSeparator);
+    // Popup was never hooked; just release our orphan items.
+    try FreeAndNil(FSubmenu);   except FSubmenu := nil;   end;
+    try FreeAndNil(FSeparator); except FSeparator := nil; end;
   end;
 
   FPopupMenu := nil;

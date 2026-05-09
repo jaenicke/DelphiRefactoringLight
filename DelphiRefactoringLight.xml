@@ -18,7 +18,7 @@
 			<project>Packages\DelphiRefactoringLight.dproj</project>
 		</build>
 		<packages platforms="Win32">
-			<package description="Delphi Refactoring Light (Design-Time)">$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight.bpl</package>
+			<package description="Delphi Refactoring Light (Design-Time)">$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight370.bpl</package>
 		</packages>
 	</entry>
 </dih>

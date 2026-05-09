@@ -24,7 +24,7 @@ uses
   Vcl.Menus;
 
 type
-  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign);
+  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith);
 
   TShortcutChangedProc = procedure of object;
 
@@ -68,6 +68,7 @@ type
     class function scFindRef: TShortCut; static;
     class function scFindImp: TShortCut; static;
     class function scAlign: TShortCut; static;
+    class function scRemoveWith: TShortCut; static;
   end;
 
 implementation
@@ -82,12 +83,14 @@ const
     TShortCut(vkM     or scAlt or scCtrl or scShift),
     TShortCut(vkU     or scAlt or scCtrl or scShift),
     TShortCut(vkI     or scAlt or scCtrl or scShift),
-    TShortCut(vkA     or scAlt or scCtrl or scShift)
+    TShortCut(vkA     or scAlt or scCtrl or scShift),
+    TShortCut(vkW     or scAlt or scCtrl or scShift)
   );
 
   ValueNames: array[TShortcutKind] of string = (
     'Rename', 'Completion', 'ExtractMethod',
-    'FindReferences', 'FindImplementations', 'AlignSignature'
+    'FindReferences', 'FindImplementations', 'AlignSignature',
+    'RemoveWith'
   );
 
   DisplayNames: array[TShortcutKind] of string = (
@@ -96,7 +99,8 @@ const
     'Extract method',
     'Find references',
     'Find implementations',
-    'Align method signature'
+    'Align method signature',
+    'Remove with (project-wide)'
   );
 
 { TExpertsShortCut }
@@ -267,6 +271,11 @@ end;
 class function TExpertsShortCut.scAlign: TShortCut;
 begin
   Result := FShortcuts[skAlign];
+end;
+
+class function TExpertsShortCut.scRemoveWith: TShortCut;
+begin
+  Result := FShortcuts[skRemoveWith];
 end;
 
 end.

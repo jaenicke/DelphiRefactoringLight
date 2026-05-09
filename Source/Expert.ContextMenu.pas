@@ -41,6 +41,7 @@ type
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
+    procedure OnRemoveWith(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     function FindEditorPopupMenu: TPopupMenu;
     function CreateItem(AParent: TMenuItem; const ACaption: string;
@@ -65,7 +66,7 @@ uses
   Vcl.Forms, Vcl.Controls,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
-  Expert.SignatureCheckWizard;
+  Expert.SignatureCheckWizard, Expert.WithRefactorWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -187,6 +188,8 @@ begin
     skAlign, OnSignatureCheck));
   FSubmenu.Add(CreateItem(FSubmenu, 'Code Completion',
     skCompletion, OnCompletion));
+  FSubmenu.Add(CreateItem(FSubmenu, 'Remove with (project-wide)...',
+    skRemoveWith, OnRemoveWith));
 
   // Separator above our submenu so it is visually grouped.
   // Owner = nil — see CreateItem for why.
@@ -284,6 +287,12 @@ procedure TContextMenuInstaller.OnSignatureCheck(Sender: TObject);
 begin
   if SignatureCheckInstance <> nil then
     SignatureCheckInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnRemoveWith(Sender: TObject);
+begin
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.Execute;
 end;
 
 end.

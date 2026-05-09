@@ -18,7 +18,7 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint,
-  Expert.ContextMenu, Expert.UnitRenameWatcher,
+  Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.WithRefactorWizard,
   Expert.Shortcuts, Expert.OptionsPage;
 
 type
@@ -61,6 +61,9 @@ begin
   // Create the signature-check wizard
   SignatureCheckInstance := TLspSignatureCheckWizard.Create;
 
+  // Create the project-wide remove-with wizard
+  WithRefactorInstance := TLspWithRefactorWizard.Create;
+
   // Register keyboard shortcuts (defaults are Ctrl+Alt+Shift + R/Space/M/U/I/A,
   // user-configurable via Tools > Options > Refactoring Light).
   InstallKeyBinding;
@@ -88,6 +91,7 @@ finalization
   UnregisterOptionsPage;
   FreeAndNil(UnitRenameWatcherInstance);
   FreeAndNil(ContextMenuInstance);
+  FreeAndNil(WithRefactorInstance);
   FreeAndNil(SignatureCheckInstance);
   FreeAndNil(FindImplementationsInstance);
   FreeAndNil(FindReferencesInstance);

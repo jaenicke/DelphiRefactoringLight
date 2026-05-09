@@ -21,6 +21,7 @@ type
     procedure FindReferencesKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure FindImplementationsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure SignatureCheckKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
   public
     function GetBindingType: TBindingType;
     function GetDisplayName: string;
@@ -42,7 +43,7 @@ implementation
 uses
   Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
-  Expert.SignatureCheckWizard;
+  Expert.SignatureCheckWizard, Expert.WithRefactorWizard;
 
 { TLspKeyBinding }
 
@@ -88,6 +89,13 @@ begin
     SignatureCheckInstance.Execute;
 end;
 
+procedure TLspKeyBinding.RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.Execute;
+end;
+
 function TLspKeyBinding.GetBindingType: TBindingType;
 begin
   Result := btPartial;
@@ -123,6 +131,9 @@ begin
 
   // Ctrl+Alt+Shift+A -> Align method signature
   BindingServices.AddKeyBinding([TExpertsShortCut.scAlign], SignatureCheckKeyProc, nil);
+
+  // Ctrl+Alt+Shift+W -> Remove with (project-wide)
+  BindingServices.AddKeyBinding([TExpertsShortCut.scRemoveWith], RemoveWithKeyProc, nil);
 end;
 
 var

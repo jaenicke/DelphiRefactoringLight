@@ -36,6 +36,8 @@ type
     edtFindImp: TEdit;
     lblAlign: TLabel;
     edtAlign: TEdit;
+    lblRemoveWith: TLabel;
+    edtRemoveWith: TEdit;
     lblHint: TLabel;
     btnDefaults: TButton;
     procedure ShortcutEditKeyDown(Sender: TObject; var Key: Word;
@@ -70,6 +72,7 @@ begin
     skFindRef:    Result := edtFindRef;
     skFindImp:    Result := edtFindImp;
     skAlign:      Result := edtAlign;
+    skRemoveWith: Result := edtRemoveWith;
   else
     Result := nil;
   end;

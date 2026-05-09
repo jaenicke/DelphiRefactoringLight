@@ -2,13 +2,13 @@ object LspOptionsFrame: TLspOptionsFrame
   Left = 0
   Top = 0
   Width = 520
-  Height = 320
+  Height = 352
   TabOrder = 0
   object grpShortcuts: TGroupBox
     Left = 8
     Top = 8
     Width = 504
-    Height = 256
+    Height = 288
     Caption = ' Keyboard shortcuts '
     TabOrder = 0
     object lblRename: TLabel
@@ -53,9 +53,16 @@ object LspOptionsFrame: TLspOptionsFrame
       Height = 13
       Caption = 'Align method signature:'
     end
+    object lblRemoveWith: TLabel
+      Left = 16
+      Top = 220
+      Width = 130
+      Height = 13
+      Caption = 'Remove with (project-wide):'
+    end
     object lblHint: TLabel
       Left = 16
-      Top = 224
+      Top = 256
       Width = 480
       Height = 13
       Caption =
@@ -117,10 +124,19 @@ object LspOptionsFrame: TLspOptionsFrame
       OnKeyDown = ShortcutEditKeyDown
       OnKeyPress = ShortcutEditKeyPress
     end
+    object edtRemoveWith: TEdit
+      Left = 160
+      Top = 216
+      Width = 200
+      Height = 21
+      TabOrder = 6
+      OnKeyDown = ShortcutEditKeyDown
+      OnKeyPress = ShortcutEditKeyPress
+    end
   end
   object btnDefaults: TButton
     Left = 8
-    Top = 280
+    Top = 312
     Width = 145
     Height = 25
     Caption = 'Restore defaults'

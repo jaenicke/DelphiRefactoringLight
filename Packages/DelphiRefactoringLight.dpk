@@ -66,6 +66,10 @@ contains
   Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
   Expert.SignatureCheckWizard in '..\Source\Expert.SignatureCheckWizard.pas',
   Expert.OptionsFrame in '..\Source\Expert.OptionsFrame.pas' {LspOptionsFrame: TFrame},
-  Expert.OptionsPage in '..\Source\Expert.OptionsPage.pas';
+  Expert.OptionsPage in '..\Source\Expert.OptionsPage.pas',
+  Expert.WithScanner in '..\Source\Expert.WithScanner.pas',
+  Expert.WithRewriter in '..\Source\Expert.WithRewriter.pas',
+  Expert.WithRefactorDialog in '..\Source\Expert.WithRefactorDialog.pas',
+  Expert.WithRefactorWizard in '..\Source\Expert.WithRefactorWizard.pas';
 
 end.

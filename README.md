@@ -1,6 +1,6 @@
 # Delphi Refactoring Light
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide six refactoring features directly in the editor:
+A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide seven refactoring features directly in the editor:
 
 | Shortcut           | Feature                                                        |
 |--------------------|----------------------------------------------------------------|
@@ -10,6 +10,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP          |
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches |
+| `Ctrl+Alt+Shift+W`     | **Remove with (project-wide)** &mdash; rewrite every `with` statement in the project as inline-vars + qualified accesses |
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, and `textDocument/completion`. DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
@@ -57,6 +58,23 @@ In the last three weeks I tested with big projects and used it myself in real li
 - The interactive dialog lists every entry with role (`Class decl.`, `Interface decl.`, `Implementation`), container, file, line, match flag and the full signature. Rows that differ from the majority are tinted red.
 - **Double-click** to jump to a location (dialog stays open), **Enter** to jump and close.
 - v1 is diagnostic only &mdash; no automatic rewriting; review and fix the mismatches yourself.
+
+### Remove with (`Ctrl+Alt+Shift+W`)
+- Operates **project-wide** &mdash; no editor cursor needed. Resolves the project source files, saves any unsaved editor buffers, starts/reuses DelphiLSP and ensures the project is indexed.
+- Scans every `*.pas` / `*.dpr` / `*.dpk` for `with ... do` statements (single- and multi-target, with full block / single-statement bodies).
+- For each occurrence, hoists the with-target(s) into Pascal **inline variables** at the with-statement location (Delphi 10.3+ syntax) and rewrites every body identifier with the appropriate qualifying prefix:
+  - Single-letter targets (`a`, `x`) keep the prefix directly &mdash; no temp variable.
+  - Dotted paths (`Self.FFoo.Bar`) become an `L<LastSegment>` inline-var (with leading `F` stripped, e.g. `LBar`).
+  - Function calls / index expressions become `__withN`, so the original side-effect runs exactly once.
+  - Cross-target name collisions and collisions with body-identifiers fall back to `__withN`.
+- Body identifiers are mapped to the right target via two strategies, in order:
+  1. **Direct member parsing** of each target's class/record body (rightmost-target-wins, matching Pascal `with` semantics). This is independent of LSP.
+  2. **`textDocument/definition`** as fallback for inherited members (e.g. `TButton.Caption` is declared in `TControl`, not in `TButton`'s own body &mdash; LSP handles that case).
+- Review dialog with two tabs:
+  - **Diff** &mdash; before / after side by side, per occurrence.
+  - **Debug** &mdash; per-target type info (resolved type file, class line range, parsed direct members, chosen inline-var name, qualify-prefix) and per-body-identifier resolution (LSP result, match source, applied prefix). Useful for verifying the rewrite is sound before applying.
+- **Apply selected**, **Apply all** or **Close**. Applied edits go through `IOTAEditWriter` so they are individually undoable in the IDE.
+- v1 limitations: nested `with`-statements inside the body are flagged as multi-target / manual review.
 
 ### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
@@ -131,6 +149,12 @@ DelphiRefactoringLight/
 |   |-- Expert.SignatureCheck.pas            # Signature collection / normalization
 |   |-- Expert.SignatureCheckDialog.pas      # Align-signature dialog
 |   |-- Expert.SignatureCheckWizard.pas      # Align-signature wizard
+|   |-- Expert.WithScanner.pas               # Tokenizer for `with` occurrences
+|   |-- Expert.WithRewriter.pas              # Per-occurrence inline-var + prefix rewrite
+|   |-- Expert.WithRefactorDialog.pas        # Review dialog (Diff / Debug tabs)
+|   |-- Expert.WithRefactorWizard.pas        # Project-wide remove-with orchestrator
+|   |-- Expert.ContextMenu.pas               # "Refactoring Light" submenu in the editor popup
+|   |-- Expert.Shortcuts.pas                 # User-configurable shortcut storage
 |   |-- Expert.KeyBinding.pas                # Shortcut registration
 |   |-- Expert.EditorHelper.pas              # ToolsAPI wrappers
 |   |-- Expert.LspManager.pas                # LSP client singleton

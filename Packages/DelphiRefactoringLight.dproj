@@ -127,6 +127,10 @@
             <DesignClass>TFrame</DesignClass>
         </DCCReference>
         <DCCReference Include="..\Source\Expert.OptionsPage.pas"/>
+        <DCCReference Include="..\Source\Expert.WithScanner.pas"/>
+        <DCCReference Include="..\Source\Expert.WithRewriter.pas"/>
+        <DCCReference Include="..\Source\Expert.WithRefactorDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.WithRefactorWizard.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

@@ -133,9 +133,12 @@ end;
 function TContextMenuInstaller.CreateItem(const ACaption: string;
   AKind: TShortcutKind; AOnClick: TNotifyEvent): TMenuItem;
 begin
-  // Owner = nil: we manage these items ourselves and free them in
-  // Uninstall. They are not permanent children of FPopupMenu.
-  Result := TMenuItem.Create(nil);
+  // Owner = FPopupMenu so the items live in FPopupMenu.Components from
+  // creation onward. Items.Remove / Items.Add only changes the menu
+  // hierarchy, never Components, so the IDE's bookkeeping (which may
+  // walk Components for popup integration) sees a stable picture.
+  // FPopupMenu frees the items at IDE shutdown.
+  Result := TMenuItem.Create(FPopupMenu);
   Result.Caption := ACaption;
   // Tag stores the shortcut kind so RefreshShortcuts can find this item.
   // Encoded as Ord+1 so 0 means "no shortcut tracked".
@@ -167,7 +170,8 @@ begin
   if Length(FItems) > 0 then Exit;
 
   // The visible top-level entry: a submenu carrying all our actions.
-  Submenu := TMenuItem.Create(nil);
+  // Owner = FPopupMenu (see CreateItem comment).
+  Submenu := TMenuItem.Create(FPopupMenu);
   Submenu.Caption := 'Refactoring Light';
   Submenu.Tag := 0; // no shortcut tracked for the parent
 
@@ -179,7 +183,7 @@ begin
   Submenu.Add(CreateItem('Code Completion',                 skCompletion, OnCompletion));
   Submenu.Add(CreateItem('Remove with (project-wide)...',   skRemoveWith, OnRemoveWith));
 
-  FSeparator := TMenuItem.Create(nil);
+  FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
 
   // FItems holds exactly the top-level items we add to FPopupMenu.Items
@@ -218,13 +222,18 @@ end;
 
 procedure TContextMenuInstaller.DoOnPopup(Sender: TObject);
 begin
-  // Re-entrancy guard: a forwarded OnPopup must not loop back into us.
+  // Re-entrancy / cycle guard.
+  //
+  // Other plugins (Parnassus, CnPack) install OnPopup hooks the same
+  // way we do. When their SyncTimers run in an unfavorable order the
+  // saved FOldOnPopup chain forms a CYCLE:
+  //   ours -> Parnassus -> CnPack -> ours -> ...
+  // Forwarding to FOldOnPopup again here would restart the cycle and
+  // produce a stack overflow. So on re-entry we MUST NOT forward; we
+  // simply return. The outer DoOnPopup invocation continues normally
+  // and AddOurItems still runs at the end.
   if FInPopup then
-  begin
-    if Assigned(FOldOnPopup) then
-      FOldOnPopup(Sender);
     Exit;
-  end;
 
   FInPopup := True;
   try
@@ -233,8 +242,10 @@ begin
     RemoveOurItems;
 
     // 2. Run the original handler the IDE installed.
+    //    Guard against a self-reference (FOldOnPopup pointing back to
+    //    our own DoOnPopup) - that would also recurse.
     try
-      if Assigned(FOldOnPopup) then
+      if Assigned(FOldOnPopup) and not IsOurHandler(FOldOnPopup) then
         FOldOnPopup(Sender);
     except
       // never let an IDE handler exception escape into VCL's popup loop
@@ -305,15 +316,34 @@ begin
 end;
 
 procedure TContextMenuInstaller.OnSyncTimer(Sender: TObject);
+var
+  Current: TNotifyEvent;
 begin
   // Another plugin may have replaced OnPopup with its own handler
   // after we installed ours. Detect and re-hook on top.
+  //
+  // CAREFUL: if their handler internally chains to ours (e.g. they
+  // saved our DoOnPopup as their FOldOnPopup), then naively saving
+  // their handler as our new FOldOnPopup would create a cycle:
+  // we'd call them, they'd call us, we'd call them, ...
+  // The guard in DoOnPopup (re-entry returns immediately, and we
+  // never forward to a self-reference) is what actually breaks the
+  // cycle at runtime; but we still try to keep FOldOnPopup honest.
   if (FPopupMenu = nil) or not FHooked then Exit;
-  if not IsOurHandler(FPopupMenu.OnPopup) then
+  Current := FPopupMenu.OnPopup;
+  if not Assigned(Current) then
   begin
-    FOldOnPopup := FPopupMenu.OnPopup;
+    // Someone cleared the handler entirely - just put ours back.
     FPopupMenu.OnPopup := DoOnPopup;
+    Exit;
   end;
+  if IsOurHandler(Current) then Exit; // already in place
+
+  // Save the new top-of-chain as our old, install ourselves on top.
+  // The DoOnPopup guards prevent runaway recursion if Current
+  // transitively chains back to us.
+  FOldOnPopup := Current;
+  FPopupMenu.OnPopup := DoOnPopup;
 end;
 
 procedure TContextMenuInstaller.TryInstall;
@@ -338,7 +368,6 @@ end;
 
 procedure TContextMenuInstaller.Uninstall;
 var
-  Item: TMenuItem;
   I: Integer;
 begin
   if FRetryTimer <> nil then
@@ -369,18 +398,12 @@ begin
     end;
   end;
 
-  // Free our items (Owner = nil, so we own them).
+  // Items are owned by FPopupMenu - DO NOT free them here. FPopupMenu
+  // frees its Components when it is itself destroyed by the IDE at
+  // shutdown. Freeing them earlier would crash the IDE if it still
+  // holds references through Items[] or Action lists.
   for I := 0 to High(FItems) do
-  begin
-    Item := FItems[I];
-    if Item = nil then Continue;
-    try
-      Item.Free;
-    except
-      // ignore
-    end;
     FItems[I] := nil;
-  end;
   FItems := nil;
   FSeparator := nil;
 

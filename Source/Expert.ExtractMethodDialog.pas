@@ -54,7 +54,8 @@ type
 implementation
 
 uses
-  System.IOUtils, Vcl.Graphics;
+  System.IOUtils, Vcl.Graphics,
+  Expert.IdeThemes;
 
 constructor TExtractMethodDialog.CreateDialog(AOwner: TComponent; const ADefaultName: string);
 begin
@@ -161,6 +162,7 @@ begin
   FMemoPreview.Font.Size := 9;
   FMemoPreview.WordWrap := False;
 
+  Expert.IdeThemes.EnableThemes(Self);
   FIndex := TProjectTextIndex.Create;
 end;
 
@@ -192,7 +194,7 @@ begin
   FCheckTimer.Enabled := False;
   if FCurrentFile <> '' then
   begin
-    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Color := GetThemedColor(clGrayText);
     FLblNameCheck.Caption := 'Checking...';
     FCheckTimer.Enabled := True;
   end;
@@ -203,7 +205,7 @@ begin
   FCheckTimer.Enabled := False;
   if not FIndex.PollReady then
   begin
-    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Color := GetThemedColor(clGrayText);
     FLblNameCheck.Font.Style := [];
     FLblNameCheck.Caption := 'Indexing project for collision check...';
     FCheckTimer.Interval := 200;

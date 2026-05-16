@@ -62,7 +62,7 @@ type
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils, Expert.IdeThemes;
 
 { TFindReferencesDialog }
 
@@ -81,6 +81,7 @@ begin
   OnKeyDown := DoFormKeyDown;
 
   CreateControls;
+  Expert.IdeThemes.EnableThemes(Self);
 end;
 
 procedure TFindReferencesDialog.CreateControls;

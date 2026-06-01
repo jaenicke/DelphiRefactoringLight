@@ -69,7 +69,14 @@ type
     ///  through end keyword, BodyInnerRange is what's between them.</summary>
     wbkBeginEnd,
     /// <summary>Body is a single statement terminated by ';' or eof.</summary>
-    wbkSingle
+    wbkSingle,
+    /// <summary>Body is a compound non-begin..end statement: try..end,
+    ///  case..end, asm..end. BodyRange and BodyInnerRange both cover
+    ///  the whole block (from the opening keyword through the closing
+    ///  'end'). The rewriter emits any inline-var declarations BEFORE
+    ///  the body, since wrapping a 'try' in a redundant 'begin..end'
+    ///  would be ugly.</summary>
+    wbkCompound
   );
 
   TWithOccurrence = record
@@ -492,12 +499,25 @@ begin
     SaveIdx := Cur.Idx;
     SaveLine := Cur.Line;
     SaveCol := Cur.Col;
+    var OpenerStartPos := Cur.Pos;
     Ident := ReadIdent(Cur, IdentStart);
-    if SameKeyword(Ident, 'begin') then
+    var IsBeginEnd := SameKeyword(Ident, 'begin');
+    var IsCompound := SameKeyword(Ident, 'try')
+                   or SameKeyword(Ident, 'case')
+                   or SameKeyword(Ident, 'asm');
+    if IsBeginEnd or IsCompound then
     begin
-      // begin..end body. Walk until block depth balances.
-      AOcc.BodyKind := wbkBeginEnd;
-      InnerStart := Cur.Pos;
+      // Block-shape body. Walk until block depth balances.
+      if IsBeginEnd then
+      begin
+        AOcc.BodyKind := wbkBeginEnd;
+        InnerStart := Cur.Pos;          // just after 'begin'
+      end
+      else
+      begin
+        AOcc.BodyKind := wbkCompound;
+        InnerStart := OpenerStartPos;   // include the 'try'/'case'/'asm'
+      end;
       BlockDepth := 1;
       while (not Cur.Eof) and (BlockDepth > 0) do
       begin
@@ -520,18 +540,29 @@ begin
               if BlockDepth = 0 then
               begin
                 EndPos.Line := IdentStart.Line;
-                EndPos.Col := IdentStart.Col + 2; // 'end' is 3 chars; last col = start+2
-                InnerEnd.Line := IdentStart.Line;
-                InnerEnd.Col := IdentStart.Col - 1;
+                EndPos.Col := IdentStart.Col + 2; // 'end' is 3 chars
                 AOcc.BodyRange.StartPos := StartPos;
                 AOcc.BodyRange.EndPos := EndPos;
-                AOcc.BodyInnerRange.StartPos := InnerStart;
-                AOcc.BodyInnerRange.EndPos := InnerEnd;
+                if AOcc.BodyKind = wbkBeginEnd then
+                begin
+                  InnerEnd.Line := IdentStart.Line;
+                  InnerEnd.Col := IdentStart.Col - 1;
+                  AOcc.BodyInnerRange.StartPos := InnerStart;
+                  AOcc.BodyInnerRange.EndPos := InnerEnd;
+                end
+                else
+                begin
+                  // wbkCompound: InnerRange covers the whole block
+                  // (opener through 'end' inclusive) so the rewriter
+                  // emits 'try ... end' verbatim, qualifying body refs
+                  // in place.
+                  AOcc.BodyInnerRange.StartPos := InnerStart;
+                  AOcc.BodyInnerRange.EndPos := EndPos;
+                end;
                 Exit(True);
               end;
             end;
             // otherwise: just an identifier, keep going
-            // (suppress hint about WordStart being unused in some configs)
             if WordStart < 0 then ;
           end
           else
@@ -543,7 +574,7 @@ begin
     end
     else
     begin
-      // Not 'begin' — single-statement body. Roll back and consume up to ';'
+      // Not a block opener — single-statement body. Roll back and consume up to ';'
       Cur.Idx := SaveIdx;
       Cur.Line := SaveLine;
       Cur.Col := SaveCol;

@@ -58,6 +58,8 @@ type
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
     procedure OnRemoveWith(Sender: TObject);
+    procedure OnUnitRefs(Sender: TObject);
+    procedure OnMoveToUnit(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -90,7 +92,8 @@ uses
   Vcl.Forms, Vcl.Controls,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
-  Expert.SignatureCheckWizard, Expert.WithRefactorWizard;
+  Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
+  Expert.MoveToUnitWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -182,6 +185,8 @@ begin
   Submenu.Add(CreateItem('Align method signature...',       skAlign,      OnSignatureCheck));
   Submenu.Add(CreateItem('Code Completion',                 skCompletion, OnCompletion));
   Submenu.Add(CreateItem('Remove with (project-wide)...',   skRemoveWith, OnRemoveWith));
+  Submenu.Add(CreateItem('Move to unit...',                 skMoveToUnit, OnMoveToUnit));
+  Submenu.Add(CreateItem('Find unit references...',         skUnitRefs,   OnUnitRefs));
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -450,6 +455,18 @@ procedure TContextMenuInstaller.OnRemoveWith(Sender: TObject);
 begin
   if WithRefactorInstance <> nil then
     WithRefactorInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnUnitRefs(Sender: TObject);
+begin
+  if UnitReferencesInstance <> nil then
+    UnitReferencesInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);
+begin
+  if MoveToUnitInstance <> nil then
+    MoveToUnitInstance.Execute;
 end;
 
 end.

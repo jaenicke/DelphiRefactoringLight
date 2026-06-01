@@ -54,7 +54,7 @@ type
 implementation
 
 uses
-  System.IOUtils, Vcl.Graphics;
+  System.IOUtils, Vcl.Graphics, Expert.DialogHelper;
 
 constructor TExtractMethodDialog.CreateDialog(AOwner: TComponent; const ADefaultName: string);
 begin
@@ -162,6 +162,8 @@ begin
   FMemoPreview.WordWrap := False;
 
   FIndex := TProjectTextIndex.Create;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 destructor TExtractMethodDialog.Destroy;
@@ -288,5 +290,8 @@ begin
   else
     Screen.Cursor := crDefault;
 end;
+
+initialization
+  RegisterDialogClass(TExtractMethodDialog);
 
 end.

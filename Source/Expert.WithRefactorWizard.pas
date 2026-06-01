@@ -86,36 +86,295 @@ end;
 
 { ---------- Apply phase ---------- }
 
-/// <summary>Sorts edits by file (asc) and within a file by replace
-///  range start (DESCENDING) so applying them top-to-bottom does not
-///  invalidate offsets of later edits.</summary>
-procedure SortForApply(var AEdits: TArray<TWithRewriteResult>);
+type
+  /// <summary>One concrete text edit to apply via
+  ///  TEditorHelper.ApplyEditViaEditor. Position is 1-based here; the
+  ///  apply step converts to 0-based.</summary>
+  TPlainEdit = record
+    FileName: string;
+    Line: Integer;
+    Col: Integer;
+    OldText: string;
+    NewText: string;
+  end;
+
+/// <summary>Builds the var-section insertion text for a method that
+///  ALREADY has a 'var' section. Returns a block of new lines that
+///  should be inserted after the column-after-the-last-var-decl-line.
+///  Each decl is prefixed with AIndent and terminated with ';' + CRLF.</summary>
+function MakeVarLinesAppend(const AIndent: string;
+  const ADecls: TArray<TClassicVarDecl>): string;
+var
+  I: Integer;
+  SB: TStringBuilder;
+begin
+  SB := TStringBuilder.Create;
+  try
+    for I := 0 to High(ADecls) do
+      SB.Append(#13#10).Append(AIndent)
+        .Append(ADecls[I].Name).Append(': ').Append(ADecls[I].TypeName)
+        .Append(';');
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
+end;
+
+/// <summary>Builds the new 'var' section to insert before the method's
+///  'begin' when no var section exists yet. Each decl is on its own
+///  line indented by AIndent. The block ends with a CRLF so the
+///  following 'begin' starts on a fresh line.</summary>
+function MakeVarSectionNew(const AIndent: string;
+  const ABeginCol: Integer;
+  const ADecls: TArray<TClassicVarDecl>): string;
+var
+  I: Integer;
+  SB: TStringBuilder;
+  HeaderIndent: string;
+begin
+  // 'var' keyword aligns with the column of the method's 'begin'.
+  HeaderIndent := StringOfChar(' ', Max(0, ABeginCol - 1));
+  SB := TStringBuilder.Create;
+  try
+    SB.Append('var');
+    for I := 0 to High(ADecls) do
+      SB.Append(#13#10).Append(AIndent)
+        .Append(ADecls[I].Name).Append(': ').Append(ADecls[I].TypeName)
+        .Append(';');
+    SB.Append(#13#10).Append(HeaderIndent);
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
+end;
+
+/// <summary>Aggregates per-item Classic data into one flat edit list.
+///  Per-method var declarations and per-file uses additions are
+///  combined so each method gets exactly one var-section edit and
+///  each file gets at most one uses-clause edit.</summary>
+procedure BuildClassicEdits(const AItems: TArray<TWithRewriteResult>;
+  out AEdits: TArray<TPlainEdit>);
+type
+  TMethodAgg = record
+    AnyItem: TWithRewriteResult;
+    AllDecls: TArray<TClassicVarDecl>;
+  end;
+  TFileAgg = record
+    AnyItem: TWithRewriteResult;
+    UnitsToAdd: TArray<string>;
+  end;
+var
+  ByMethod: TDictionary<string, TMethodAgg>;
+  ByFile: TDictionary<string, TFileAgg>;
+  Edits: TList<TPlainEdit>;
+  Item: TWithRewriteResult;
+  Edit: TPlainEdit;
+
+  function HasUnit(const AArr: TArray<string>; const AUnit: string): Boolean;
+  var K: Integer;
+  begin
+    for K := 0 to High(AArr) do
+      if SameText(AArr[K], AUnit) then Exit(True);
+    Result := False;
+  end;
+
+  procedure AppendDecl(var AArr: TArray<TClassicVarDecl>;
+    const ADecl: TClassicVarDecl);
+  var K: Integer;
+  begin
+    for K := 0 to High(AArr) do
+      if SameText(AArr[K].Name, ADecl.Name) then Exit;
+    SetLength(AArr, Length(AArr) + 1);
+    AArr[High(AArr)] := ADecl;
+  end;
+
+  procedure AppendUnit(var AArr: TArray<string>; const AUnit: string);
+  begin
+    if HasUnit(AArr, AUnit) then Exit;
+    SetLength(AArr, Length(AArr) + 1);
+    AArr[High(AArr)] := AUnit;
+  end;
+
+var
+  MA: TMethodAgg;
+  FA: TFileAgg;
+  PairM: TPair<string, TMethodAgg>;
+  PairF: TPair<string, TFileAgg>;
+  J: Integer;
+  KeyF: string;
+begin
+  ByMethod := TDictionary<string, TMethodAgg>.Create;
+  ByFile := TDictionary<string, TFileAgg>.Create;
+  Edits := TList<TPlainEdit>.Create;
+  try
+    for Item in AItems do
+    begin
+      if not Item.Classic.Supported then Continue;
+
+      // 1) Body-replacement edit.
+      Edit.FileName := Item.FileName;
+      Edit.Line := Item.ReplaceRange.StartPos.Line;
+      Edit.Col := Item.ReplaceRange.StartPos.Col;
+      Edit.OldText := Item.OriginalText;
+      Edit.NewText := Item.Classic.BodyText;
+      Edits.Add(Edit);
+
+      // 2) Aggregate var-section additions per method.
+      if Item.Classic.MethodKey <> '' then
+      begin
+        if not ByMethod.TryGetValue(Item.Classic.MethodKey, MA) then
+          MA := Default(TMethodAgg);
+        MA.AnyItem := Item;
+        for J := 0 to High(Item.Classic.VarDecls) do
+          AppendDecl(MA.AllDecls, Item.Classic.VarDecls[J]);
+        ByMethod.AddOrSetValue(Item.Classic.MethodKey, MA);
+      end;
+
+      // 3) Aggregate uses additions per file.
+      if Length(Item.Classic.AddUnits) > 0 then
+      begin
+        KeyF := Item.FileName;
+        if not ByFile.TryGetValue(KeyF, FA) then
+          FA := Default(TFileAgg);
+        FA.AnyItem := Item;
+        for J := 0 to High(Item.Classic.AddUnits) do
+          AppendUnit(FA.UnitsToAdd, Item.Classic.AddUnits[J]);
+        ByFile.AddOrSetValue(KeyF, FA);
+      end;
+    end;
+
+    // Emit method var-section edits.
+    for PairM in ByMethod do
+    begin
+      Item := PairM.Value.AnyItem;
+      if PairM.Value.AllDecls = nil then Continue;
+      if Item.Classic.HasVarSection
+         and (Item.Classic.VarSectionLastLine > 0) then
+      begin
+        // Append after the last var-decl line. Insert at column 1 of the
+        // NEXT line; OldText = '' so it's a pure insertion.
+        Edit.FileName := Item.FileName;
+        Edit.Line := Item.Classic.VarSectionLastLine + 1;
+        Edit.Col := 1;
+        Edit.OldText := '';
+        Edit.NewText := Copy(MakeVarLinesAppend(Item.Classic.LocalIndent,
+          PairM.Value.AllDecls), 3, MaxInt) + #13#10; // strip leading CRLF, end with CRLF
+        Edits.Add(Edit);
+      end
+      else
+      begin
+        // No var section yet. Insert before the 'begin' line.
+        Edit.FileName := Item.FileName;
+        Edit.Line := Item.Classic.MethodBodyBeginLine;
+        Edit.Col := 1;
+        Edit.OldText := '';
+        Edit.NewText := MakeVarSectionNew(Item.Classic.LocalIndent,
+          Item.Classic.MethodBodyBeginCol, PairM.Value.AllDecls);
+        Edits.Add(Edit);
+      end;
+    end;
+
+    // Emit uses-clause edits.
+    for PairF in ByFile do
+    begin
+      Item := PairF.Value.AnyItem;
+      if PairF.Value.UnitsToAdd = nil then Continue;
+      if Item.Classic.ImplUsesFound then
+      begin
+        // Append ", U1, U2, ..." after last unit name (before ';').
+        var SB := TStringBuilder.Create;
+        try
+          for J := 0 to High(PairF.Value.UnitsToAdd) do
+            SB.Append(', ').Append(PairF.Value.UnitsToAdd[J]);
+          Edit.FileName := Item.FileName;
+          Edit.Line := Item.Classic.ImplUsesLastLine;
+          Edit.Col := Item.Classic.ImplUsesLastCol + 1;
+          Edit.OldText := '';
+          Edit.NewText := SB.ToString;
+        finally
+          SB.Free;
+        end;
+        Edits.Add(Edit);
+      end
+      else if Item.Classic.ImplKeywordLine > 0 then
+      begin
+        // No implementation uses; create a new clause right after the
+        // 'implementation' keyword.
+        var SB := TStringBuilder.Create;
+        try
+          SB.Append(#13#10).Append(#13#10).Append('uses').Append(#13#10)
+            .Append('  ');
+          for J := 0 to High(PairF.Value.UnitsToAdd) do
+          begin
+            if J > 0 then SB.Append(', ');
+            SB.Append(PairF.Value.UnitsToAdd[J]);
+          end;
+          SB.Append(';');
+          Edit.FileName := Item.FileName;
+          Edit.Line := Item.Classic.ImplKeywordLine;
+          Edit.Col := Item.Classic.ImplKeywordCol + Length('implementation');
+          Edit.OldText := '';
+          Edit.NewText := SB.ToString;
+        finally
+          SB.Free;
+        end;
+        Edits.Add(Edit);
+      end
+      else if Item.Classic.IntfUsesFound then
+      begin
+        // No implementation keyword, no implementation uses; fall back
+        // to appending to interface uses (e.g. .dpr).
+        var SB := TStringBuilder.Create;
+        try
+          for J := 0 to High(PairF.Value.UnitsToAdd) do
+            SB.Append(', ').Append(PairF.Value.UnitsToAdd[J]);
+          Edit.FileName := Item.FileName;
+          Edit.Line := Item.Classic.IntfUsesLastLine;
+          Edit.Col := Item.Classic.IntfUsesLastCol + 1;
+          Edit.OldText := '';
+          Edit.NewText := SB.ToString;
+        finally
+          SB.Free;
+        end;
+        Edits.Add(Edit);
+      end;
+    end;
+
+    AEdits := Edits.ToArray;
+  finally
+    Edits.Free;
+    ByFile.Free;
+    ByMethod.Free;
+  end;
+end;
+
+/// <summary>Sorts a flat edit list by file (asc) and within each file
+///  by (line, col) DESCENDING so applying edits top-to-bottom does not
+///  invalidate offsets of later edits in the same file.</summary>
+procedure SortPlainEdits(var AEdits: TArray<TPlainEdit>);
 
   procedure SwapAt(I, J: Integer);
   var
-    Tmp: TWithRewriteResult;
+    Tmp: TPlainEdit;
   begin
     Tmp := AEdits[I];
     AEdits[I] := AEdits[J];
     AEdits[J] := Tmp;
   end;
 
-  function Less(const A, B: TWithRewriteResult): Boolean;
+  function Less(const A, B: TPlainEdit): Boolean;
   var
     Cmp: Integer;
   begin
     Cmp := CompareText(A.FileName, B.FileName);
     if Cmp <> 0 then Exit(Cmp < 0);
-    if A.ReplaceRange.StartPos.Line <> B.ReplaceRange.StartPos.Line then
-      Exit(A.ReplaceRange.StartPos.Line > B.ReplaceRange.StartPos.Line);
-    Result := A.ReplaceRange.StartPos.Col > B.ReplaceRange.StartPos.Col;
+    if A.Line <> B.Line then Exit(A.Line > B.Line);
+    Result := A.Col > B.Col;
   end;
 
 var
   I, J: Integer;
 begin
-  // Tiny insertion sort - the list is small (one entry per applied
-  // with-statement, typically <100).
   for I := 1 to High(AEdits) do
   begin
     J := I;
@@ -127,35 +386,66 @@ begin
   end;
 end;
 
-/// <summary>Applies one rewrite using the IDE editor APIs so the change
-///  is undoable. Returns True on success.</summary>
-function ApplyOneEdit(const AItem: TWithRewriteResult): Boolean;
-begin
-  // ApplyEditViaEditor wants 0-based line / 0-based column on the start
-  // position, plus the literal old text and new text.
-  Result := TEditorHelper.ApplyEditViaEditor(
-    AItem.FileName,
-    AItem.ReplaceRange.StartPos.Line - 1,
-    AItem.ReplaceRange.StartPos.Col - 1,
-    AItem.OriginalText,
-    AItem.NewText);
-end;
-
-procedure ApplyEdits(const AItems: TArray<TWithRewriteResult>;
+procedure ApplyPlainEdits(const AEdits: TArray<TPlainEdit>;
   out AOk, AFailed: Integer);
 var
-  Sorted: TArray<TWithRewriteResult>;
+  Sorted: TArray<TPlainEdit>;
   I: Integer;
 begin
   AOk := 0;
   AFailed := 0;
-  Sorted := Copy(AItems);
-  SortForApply(Sorted);
+  Sorted := Copy(AEdits);
+  SortPlainEdits(Sorted);
   for I := 0 to High(Sorted) do
-    if ApplyOneEdit(Sorted[I]) then
+    if TEditorHelper.ApplyEditViaEditor(
+        Sorted[I].FileName,
+        Sorted[I].Line - 1,
+        Sorted[I].Col - 1,
+        Sorted[I].OldText,
+        Sorted[I].NewText) then
       Inc(AOk)
     else
       Inc(AFailed);
+end;
+
+/// <summary>Inline-mode apply: one edit per item, replacing the
+///  with-block with the inline-var NewText.</summary>
+procedure ApplyEditsInline(const AItems: TArray<TWithRewriteResult>;
+  out AOk, AFailed: Integer);
+var
+  Edits: TArray<TPlainEdit>;
+  Edit: TPlainEdit;
+  Item: TWithRewriteResult;
+  I: Integer;
+begin
+  SetLength(Edits, Length(AItems));
+  I := 0;
+  for Item in AItems do
+  begin
+    Edit.FileName := Item.FileName;
+    Edit.Line := Item.ReplaceRange.StartPos.Line;
+    Edit.Col := Item.ReplaceRange.StartPos.Col;
+    Edit.OldText := Item.OriginalText;
+    Edit.NewText := Item.NewText;
+    Edits[I] := Edit;
+    Inc(I);
+  end;
+  ApplyPlainEdits(Edits, AOk, AFailed);
+end;
+
+procedure ApplyEdits(const AItems: TArray<TWithRewriteResult>;
+  AUseInlineVars: Boolean;
+  out AOk, AFailed: Integer);
+var
+  Edits: TArray<TPlainEdit>;
+begin
+  if AUseInlineVars then
+    ApplyEditsInline(AItems, AOk, AFailed)
+  else
+  begin
+    BuildClassicEdits(AItems, Edits);
+    ApplyPlainEdits(Edits, AOk, AFailed);
+  end;
 end;
 
 { ---------- Scan phase ---------- }
@@ -189,6 +479,7 @@ begin
   Dialog := TWithRefactorDialog.CreateDialog(Application.MainForm);
   try
     Dialog.SetStatus('Resolving project source files...');
+    TLspManager.Instance.ApplyStatusToCaption(Dialog);
     Dialog.Show;
     Application.ProcessMessages;
 
@@ -259,6 +550,13 @@ begin
           Dialog.SetStatus('Indexing partial: ' + E.Message);
       end;
 
+      // Diagnostic-Aufwaermphase ist file-individuell: DelphiLSP pusht
+      // publishDiagnostics in der Reihenfolge wie er Files analysiert
+      // (Sekunden bis Minuten pro File). Wir warten hier nicht global -
+      // stattdessen wartet die per-File-Verarbeitungsschleife unten
+      // gezielt auf "Diagnostics fuer DIESES File angekommen?", bevor
+      // sie IsLineInactive prueft.
+
       // Scan + rewrite.
       Results := TList<TWithRewriteResult>.Create;
       try
@@ -268,6 +566,10 @@ begin
           Dialog.SetStatus(Format('Scanning %d/%d: %s',
             [FileIdx + 1, ScanFiles.Count, ExtractFileName(ScanFiles[FileIdx])]));
           Dialog.SetProgress(FileIdx + 1, ScanFiles.Count);
+          // Caption-Status (im Title-Bar) reflektiert den aktuellen
+          // LSP-Stand (Diagnostics-Count, inaktive Regionen). Wird jeden
+          // File aktualisiert damit der User die Live-Entwicklung sieht.
+          TLspManager.Instance.ApplyStatusToCaption(Dialog);
           if (FileIdx mod 3 = 0) then Application.ProcessMessages;
 
           try
@@ -279,11 +581,43 @@ begin
           Occs := TWithScanner.ScanSource(Source);
           if Length(Occs) = 0 then Continue;
 
+          // Bevor wir Occurrences gegen inaktive Regionen pruefen, geben
+          // wir DelphiLSP Zeit, dieses File zu analysieren. Bis zu 30 s
+          // pro File - das deckt auch grosse Units (GExperts) ab, ohne
+          // den happy path zu blockieren (Files die LSP schon kennt
+          // returnen sofort).
+          if not Client.HasReceivedDiagnostics(ScanFiles[FileIdx]) then
+          begin
+            Dialog.SetStatus(Format('Waiting for LSP diagnostics: %s...',
+              [ExtractFileName(ScanFiles[FileIdx])]));
+            Application.ProcessMessages;
+            Client.WaitForDiagnostics(ScanFiles[FileIdx], 30000);
+          end;
+
           for Occ in Occs do
           begin
+            // Skip occurrences inside inactive {$IFDEF}-regions:
+            // DelphiLSP pushes those as diagnostics with code H2655/H2656
+            // and tag=Unnecessary. We pre-populate the LSP-client's
+            // inactive-range table; if the with-keyword line falls into
+            // one, the rewriter would produce noise on dead code.
+            // KeywordPos.Line is 1-based, IsLineInactive expects 0-based.
+            if Client.IsLineInactive(ScanFiles[FileIdx], Occ.KeywordPos.Line - 1) then
+            begin
+              Rewrite := Default(TWithRewriteResult);
+              Rewrite.FileName := ScanFiles[FileIdx];
+              Rewrite.Occurrence := Occ;
+              Include(Rewrite.Issues, wriInactiveRegion);
+              Rewrite.OriginalText :=
+                'with-statement inside an inactive {$IFDEF}-region '
+                + '(DelphiLSP H2655/H2656). Skipped.';
+              Results.Add(Rewrite);
+              Continue;
+            end;
             try
               Rewrite := TWithRewriter.Rewrite(Client,
-                ScanFiles[FileIdx], Source, Occ);
+                ScanFiles[FileIdx], Source, Occ,
+                TWithRewriteSettings.Defaults);
             except
               on E: Exception do
               begin
@@ -306,6 +640,9 @@ begin
           [Results.Count, AutoCount]));
         Dialog.SetProgress(0, 0);
         Dialog.SetItems(Results.ToArray);
+        // Letzter Caption-Refresh vor der Modal-Phase, damit der User
+        // den endgueltigen LSP-Status sieht (z.B. "ready - 312 diags").
+        TLspManager.Instance.ApplyStatusToCaption(Dialog);
 
         // Switch to modal for review.
         Dialog.Hide;
@@ -339,7 +676,7 @@ begin
 
         if Length(ItemsToApply) > 0 then
         begin
-          ApplyEdits(ItemsToApply, ApplyOk, ApplyFailed);
+          ApplyEdits(ItemsToApply, Dialog.UseInlineVars, ApplyOk, ApplyFailed);
           if ApplyFailed > 0 then
             MessageDlg(Format('Applied %d edit(s); %d failed.',
               [ApplyOk, ApplyFailed]), mtWarning, [mbOK], 0);

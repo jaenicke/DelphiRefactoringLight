@@ -61,6 +61,8 @@ contains
   Expert.FindImplementationsWizard in '..\Source\Expert.FindImplementationsWizard.pas',
   Expert.ContextMenu in '..\Source\Expert.ContextMenu.pas',
   Expert.UnitRenameWatcher in '..\Source\Expert.UnitRenameWatcher.pas',
+  Expert.PluginSettings in '..\Source\Expert.PluginSettings.pas',
+  Expert.LspPrewarmer in '..\Source\Expert.LspPrewarmer.pas',
   Expert.IdentifierCheck in '..\Source\Expert.IdentifierCheck.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
@@ -70,6 +72,12 @@ contains
   Expert.WithScanner in '..\Source\Expert.WithScanner.pas',
   Expert.WithRewriter in '..\Source\Expert.WithRewriter.pas',
   Expert.WithRefactorDialog in '..\Source\Expert.WithRefactorDialog.pas',
-  Expert.WithRefactorWizard in '..\Source\Expert.WithRefactorWizard.pas';
+  Expert.WithRefactorWizard in '..\Source\Expert.WithRefactorWizard.pas',
+  Expert.UnitReferencesDialog in '..\Source\Expert.UnitReferencesDialog.pas',
+  Expert.UnitReferencesWizard in '..\Source\Expert.UnitReferencesWizard.pas',
+  Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas',
+  Expert.MoveToUnit in '..\Source\Expert.MoveToUnit.pas',
+  Expert.MoveToUnitDialog in '..\Source\Expert.MoveToUnitDialog.pas',
+  Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas';
 
 end.

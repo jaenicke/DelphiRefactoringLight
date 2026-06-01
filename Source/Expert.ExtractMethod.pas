@@ -1244,6 +1244,7 @@ begin
   try
     FDialog.OnNameChanged := OnMethodNameChange;
     FDialog.SetCheckContext(Info.FileName, TEditorHelper.GetProjectSourceFiles);
+    TLspManager.Instance.ApplyStatusToCaption(FDialog);
     FDialog.Show;
     Application.ProcessMessages;
     DoAnalyzeAndPreview(Info);

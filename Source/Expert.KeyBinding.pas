@@ -22,6 +22,8 @@ type
     procedure FindImplementationsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure SignatureCheckKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure MoveToUnitKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
   public
     function GetBindingType: TBindingType;
     function GetDisplayName: string;
@@ -43,7 +45,8 @@ implementation
 uses
   Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
-  Expert.SignatureCheckWizard, Expert.WithRefactorWizard;
+  Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
+  Expert.MoveToUnitWizard;
 
 { TLspKeyBinding }
 
@@ -96,6 +99,20 @@ begin
     WithRefactorInstance.Execute;
 end;
 
+procedure TLspKeyBinding.UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if UnitReferencesInstance <> nil then
+    UnitReferencesInstance.Execute;
+end;
+
+procedure TLspKeyBinding.MoveToUnitKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if Assigned(MoveToUnitInstance) then
+    MoveToUnitInstance.Execute;
+end;
+
 function TLspKeyBinding.GetBindingType: TBindingType;
 begin
   Result := btPartial;
@@ -134,6 +151,12 @@ begin
 
   // Ctrl+Alt+Shift+W -> Remove with (project-wide)
   BindingServices.AddKeyBinding([TExpertsShortCut.scRemoveWith], RemoveWithKeyProc, nil);
+
+  // Ctrl+Alt+Shift+F -> Find unit references (project-wide)
+  BindingServices.AddKeyBinding([TExpertsShortCut.scUnitRefs], UnitRefsKeyProc, nil);
+
+  // Ctrl+Shift+M -> Move to unit (project-wide)
+  BindingServices.AddKeyBinding([TExpertsShortCut.scMoveToUnit], MoveToUnitKeyProc, nil);
 end;
 
 var

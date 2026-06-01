@@ -250,8 +250,17 @@ var
   Notifier: IOTAModuleNotifier;
   Entry: TAttachedEntry;
   ModuleFileName: string;
+  Dummy: IOTAProject;
 begin
   if AModule = nil then Exit;
+
+  // Skip project modules entirely. TCustomCodeIProject's GetFileName has
+  // been observed to access-violate when invoked during/just after
+  // ofnFileOpened (vtable call through [ecx+$1c] on a half-constructed
+  // project object inside coreide370.bpl). We only need to track .pas
+  // units anyway - rename events for projects don't interest us.
+  if Supports(AModule, IOTAProject, Dummy) then Exit;
+  Dummy := nil;
 
   ModuleFileName := '';
   try
@@ -261,6 +270,9 @@ begin
     Exit;
   end;
   if ModuleFileName = '' then Exit;
+  // Only Pascal source files need rename tracking - bypass forms,
+  // resource modules, project groups, etc. before we touch them further.
+  if not SameText(ExtractFileExt(ModuleFileName), '.pas') then Exit;
   if IsAttachedTo(ModuleFileName) then Exit;
 
   Notifier := TModuleRenameNotifier.Create(Self, ModuleFileName);
@@ -278,6 +290,12 @@ var
   FileNameCopy: string;
 begin
   if AFileName = '' then Exit;
+  // Cheap pre-filter: skip anything that isn't a Pascal source file
+  // BEFORE we ever look up the module. ofnFileOpened fires for .dpr,
+  // .dproj, .groupproj, .dfm, ..., and looking up a project module via
+  // FindModule and then reading its FileName has been observed to
+  // crash inside coreide370 when the project is still being built up.
+  if not SameText(ExtractFileExt(AFileName), '.pas') then Exit;
   // The IDE fires ofnFileOpened from inside TBaseProject.AfterConstruction,
   // before the module is fully usable. Reading IOTAModule.FileName too early
   // crashes in TCustomCodeIProject.IBaseModule_GetFileName. Defer the attach

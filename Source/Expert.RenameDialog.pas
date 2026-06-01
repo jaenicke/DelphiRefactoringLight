@@ -98,7 +98,7 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -295,6 +295,8 @@ begin
   FPageControl.ActivePage := FTabChanges;
 
   FIndex := TProjectTextIndex.Create;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 destructor TRenameDialog.Destroy;
@@ -491,5 +493,8 @@ begin
   else
     Screen.Cursor := crDefault;
 end;
+
+initialization
+  RegisterDialogClass(TRenameDialog);
 
 end.

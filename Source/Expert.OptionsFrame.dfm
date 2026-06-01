@@ -2,13 +2,13 @@ object LspOptionsFrame: TLspOptionsFrame
   Left = 0
   Top = 0
   Width = 520
-  Height = 352
+  Height = 448
   TabOrder = 0
   object grpShortcuts: TGroupBox
     Left = 8
     Top = 8
     Width = 504
-    Height = 288
+    Height = 320
     Caption = ' Keyboard shortcuts '
     TabOrder = 0
     object lblRename: TLabel
@@ -60,9 +60,16 @@ object LspOptionsFrame: TLspOptionsFrame
       Height = 13
       Caption = 'Remove with (project-wide):'
     end
+    object lblMoveToUnit: TLabel
+      Left = 16
+      Top = 252
+      Width = 130
+      Height = 13
+      Caption = 'Move to unit (project-wide):'
+    end
     object lblHint: TLabel
       Left = 16
-      Top = 256
+      Top = 288
       Width = 480
       Height = 13
       Caption =
@@ -133,14 +140,42 @@ object LspOptionsFrame: TLspOptionsFrame
       OnKeyDown = ShortcutEditKeyDown
       OnKeyPress = ShortcutEditKeyPress
     end
+    object edtMoveToUnit: TEdit
+      Left = 160
+      Top = 248
+      Width = 200
+      Height = 21
+      TabOrder = 7
+      OnKeyDown = ShortcutEditKeyDown
+      OnKeyPress = ShortcutEditKeyPress
+    end
+  end
+  object grpLsp: TGroupBox
+    Left = 8
+    Top = 340
+    Width = 504
+    Height = 65
+    Caption = ' LSP '
+    TabOrder = 1
+    object cbxPrewarmLsp: TCheckBox
+      Left = 16
+      Top = 24
+      Width = 470
+      Height = 17
+      Caption =
+        'Pre-warm DelphiLSP in the background when a project is opened (' +
+        'speeds up the first refactoring action; costs one extra LSP pro' +
+        'cess)'
+      TabOrder = 0
+    end
   end
   object btnDefaults: TButton
     Left = 8
-    Top = 312
+    Top = 415
     Width = 145
     Height = 25
     Caption = 'Restore defaults'
-    TabOrder = 1
+    TabOrder = 2
     OnClick = btnDefaultsClick
   end
 end

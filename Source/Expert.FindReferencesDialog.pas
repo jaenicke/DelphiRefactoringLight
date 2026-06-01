@@ -37,12 +37,16 @@ type
     FBtnClose: TButton;
     FItems: TFindReferenceItems;
     FOnGotoLocation: TProc<TFindReferenceItem>;
+    FOnDialogClose: TNotifyEvent;
+    FAllowFree: Boolean;
+    FCloseRequested: Boolean;
 
     procedure CreateControls;
     procedure DoListDblClick(Sender: TObject);
     procedure DoBtnGotoClick(Sender: TObject);
     procedure DoBtnCloseClick(Sender: TObject);
     procedure DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure DoListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     function CommonPathPrefix(const AItems: TFindReferenceItems): string;
     procedure GotoSelected;
@@ -56,13 +60,19 @@ type
     procedure SetStatus(const AText: string);
     procedure SetProgress(ACurrent, ATotal: Integer);
 
+    /// <summary>Switches the dialog into "review mode": from now on,
+    ///  closing the dialog actually frees it.</summary>
+    procedure SetClosable;
+
     property OnGotoLocation: TProc<TFindReferenceItem> read FOnGotoLocation write FOnGotoLocation;
+    /// <summary>Fired right before the dialog is destroyed.</summary>
+    property OnDialogClose: TNotifyEvent read FOnDialogClose write FOnDialogClose;
   end;
 
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils, Expert.DialogHelper;
 
 { TFindReferencesDialog }
 
@@ -79,8 +89,11 @@ begin
   Constraints.MinHeight := 280;
   KeyPreview := True;
   OnKeyDown := DoFormKeyDown;
+  OnClose := DoFormClose;
 
   CreateControls;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TFindReferencesDialog.CreateControls;
@@ -267,16 +280,36 @@ end;
 
 procedure TFindReferencesDialog.DoBtnCloseClick(Sender: TObject);
 begin
-  ModalResult := mrCancel;
+  Close;
 end;
 
 procedure TFindReferencesDialog.DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
   if Key = VK_ESCAPE then
   begin
-    ModalResult := mrCancel;
+    Close;
     Key := 0;
   end;
+end;
+
+procedure TFindReferencesDialog.DoFormClose(Sender: TObject; var Action: TCloseAction);
+begin
+  if not FAllowFree then
+  begin
+    FCloseRequested := True;
+    Hide;
+    Action := caNone;
+    Exit;
+  end;
+  if Assigned(FOnDialogClose) then FOnDialogClose(Self);
+  Action := caFree;
+end;
+
+procedure TFindReferencesDialog.SetClosable;
+begin
+  FAllowFree := True;
+  if FCloseRequested then
+    Close;
 end;
 
 procedure TFindReferencesDialog.DoListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -284,9 +317,11 @@ begin
   if Key = VK_RETURN then
   begin
     GotoSelected;
-    ModalResult := mrOk;
     Key := 0;
   end;
 end;
+
+initialization
+  RegisterDialogClass(TFindReferencesDialog);
 
 end.

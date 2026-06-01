@@ -18,7 +18,9 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint,
-  Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.WithRefactorWizard,
+  Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.LspPrewarmer,
+  Expert.WithRefactorWizard,
+  Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage;
 
 type
@@ -64,6 +66,12 @@ begin
   // Create the project-wide remove-with wizard
   WithRefactorInstance := TLspWithRefactorWizard.Create;
 
+  // Create the find-unit-references wizard (project-wide cross-references)
+  UnitReferencesInstance := TLspFindUnitReferencesWizard.Create;
+
+  // Create the move-to-unit wizard
+  MoveToUnitInstance := TLspMoveToUnitWizard.Create;
+
   // Register keyboard shortcuts (defaults are Ctrl+Alt+Shift + R/Space/M/U/I/A,
   // user-configurable via Tools > Options > Refactoring Light).
   InstallKeyBinding;
@@ -80,6 +88,11 @@ begin
   UnitRenameWatcherInstance := TUnitRenameWatcher.Create;
   UnitRenameWatcherInstance.Install;
 
+  // Pre-warm our DelphiLSP when a project is opened, so the first
+  // refactoring action doesn't have to pay the cold-start cost.
+  LspPrewarmerInstance := TLspPrewarmer.Create;
+  LspPrewarmerInstance.Install;
+
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;
 end;
@@ -89,8 +102,11 @@ initialization
 finalization
   TExpertsShortCut.RemoveListener(TShortcutChangeHook.HandleChanged);
   UnregisterOptionsPage;
+  FreeAndNil(LspPrewarmerInstance);
   FreeAndNil(UnitRenameWatcherInstance);
   FreeAndNil(ContextMenuInstance);
+  FreeAndNil(MoveToUnitInstance);
+  FreeAndNil(UnitReferencesInstance);
   FreeAndNil(WithRefactorInstance);
   FreeAndNil(SignatureCheckInstance);
   FreeAndNil(FindImplementationsInstance);

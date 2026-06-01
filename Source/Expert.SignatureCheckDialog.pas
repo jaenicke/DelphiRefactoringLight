@@ -55,7 +55,7 @@ type
 implementation
 
 uses
-  Winapi.UxTheme;
+  Winapi.UxTheme, Expert.DialogHelper;
 
 { TSignatureCheckDialog }
 
@@ -75,6 +75,8 @@ begin
   OnKeyDown := DoFormKeyDown;
 
   CreateControls;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSignatureCheckDialog.CreateControls;
@@ -289,5 +291,8 @@ begin
     Key := 0;
   end;
 end;
+
+initialization
+  RegisterDialogClass(TSignatureCheckDialog);
 
 end.

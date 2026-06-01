@@ -129,6 +129,7 @@ begin
   try
     FDialog.OnPreviewRequested := DoPreview;
     FDialog.SetCheckContext(FContext.FileName, TEditorHelper.GetProjectSourceFiles);
+    TLspManager.Instance.ApplyStatusToCaption(FDialog);
     if FDialog.ShowModal = mrOk then
       ApplyFEdit;
   finally
@@ -153,6 +154,7 @@ begin
     try
       FDialog.OnPreviewRequested := DoPreview;
       FDialog.SetNewName(ANewUnitName);
+      TLspManager.Instance.ApplyStatusToCaption(FDialog);
       if FDialog.ShowModal = mrOk then
         ApplyFEdit;
     finally

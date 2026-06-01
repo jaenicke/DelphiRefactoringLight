@@ -133,7 +133,8 @@ type
 
     /// <summary>Returns the document's symbol tree (textDocument/documentSymbol).
     ///  Caller owns the returned array and must free it.</summary>
-    function GetDocumentSymbols(const AFilePath: string): TJSONArray;
+    function GetDocumentSymbols(const AFilePath: string;
+      ATimeoutMs: Cardinal = 60000): TJSONArray;
 
     /// <summary>Returns the server capabilities as a JSON string (debugging).</summary>
     function GetServerCapabilities: string;
@@ -955,7 +956,8 @@ begin
   Result := Response;
 end;
 
-function TLspClient.GetDocumentSymbols(const AFilePath: string): TJSONArray;
+function TLspClient.GetDocumentSymbols(const AFilePath: string;
+  ATimeoutMs: Cardinal): TJSONArray;
 var
   Params, TextDoc: TJSONObject;
   Response: TJSONObject;
@@ -968,7 +970,7 @@ begin
   Params := TJSONObject.Create;
   Params.AddPair('textDocument', TextDoc);
 
-  Response := SendRequest('textDocument/documentSymbol', Params);
+  Response := SendRequest('textDocument/documentSymbol', Params, ATimeoutMs);
   try
     ResultVal := Response.GetValue('result');
     if ResultVal is TJSONArray then

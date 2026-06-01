@@ -35,6 +35,23 @@ uses
   Vcl.Forms, ToolsAPI;
 
 type
+  /// <summary>Scope of a remove-with run. Determines which source
+  ///  files are scanned for occurrences.</summary>
+  TWithRefactorScope = (
+    /// <summary>Every scannable project source file (the original
+    ///  behaviour). Slow on large projects.</summary>
+    wrsProject,
+    /// <summary>Only the currently active editor file.</summary>
+    wrsCurrentUnit,
+    /// <summary>A user-selected subset of project source files,
+    ///  chosen via a multi-select dialog.</summary>
+    wrsSelectedUnits,
+    /// <summary>Only the with-statement that encloses the editor
+    ///  caret position. If no with-statement encloses the caret, the
+    ///  whole current unit is scanned as a graceful fallback.</summary>
+    wrsCursor
+  );
+
   TLspWithRefactorWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
   public
     procedure AfterSave;
@@ -44,8 +61,25 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
+    /// <summary>Legacy entry point - delegates to ExecuteAtCursor (the
+    ///  fastest single-action default).</summary>
     procedure Execute;
     function GetMenuText: string;
+
+    /// <summary>Scans the entire project. Slow on big code bases.</summary>
+    procedure ExecuteProjectWide;
+    /// <summary>Scans only the currently active editor file.</summary>
+    procedure ExecuteCurrentUnit;
+    /// <summary>Opens a multi-select dialog of project files and
+    ///  scans only the chosen ones.</summary>
+    procedure ExecuteSelectedUnits;
+    /// <summary>Scans only the with-statement that encloses the
+    ///  cursor (falls back to the current unit when no with is at
+    ///  the cursor).</summary>
+    procedure ExecuteAtCursor;
+  private
+    procedure RunWithScope(AScope: TWithRefactorScope;
+      const AExtraFiles: TArray<string>);
   end;
 
 var
@@ -54,7 +88,7 @@ var
 implementation
 
 uses
-  System.UITypes, System.IOUtils, System.Math,
+  System.UITypes, System.IOUtils, System.Math, System.JSON,
   Vcl.Dialogs, Vcl.Controls,
   Expert.EditorHelper, Expert.LspManager, Lsp.Client,
   Expert.WithScanner, Expert.WithRewriter, Expert.WithRefactorDialog;
@@ -461,6 +495,70 @@ begin
 end;
 
 procedure TLspWithRefactorWizard.Execute;
+begin
+  // Default shortcut behaviour: cursor-only (fastest, most common
+  // single-edit case). The submenu items in the editor context menu
+  // expose the other scopes (current unit / selected units / project
+  // wide). On very large projects, project-wide can take many
+  // minutes and should be triggered explicitly.
+  ExecuteAtCursor;
+end;
+
+procedure TLspWithRefactorWizard.ExecuteProjectWide;
+begin
+  RunWithScope(wrsProject, nil);
+end;
+
+procedure TLspWithRefactorWizard.ExecuteCurrentUnit;
+begin
+  RunWithScope(wrsCurrentUnit, nil);
+end;
+
+procedure TLspWithRefactorWizard.ExecuteSelectedUnits;
+var
+  AllFiles, Selected: TArray<string>;
+begin
+  AllFiles := TEditorHelper.GetProjectSourceFiles;
+  if Length(AllFiles) = 0 then
+  begin
+    MessageDlg('No project source files found.', mtInformation, [mbOK], 0);
+    Exit;
+  end;
+  // Filter to scannable files first so the user only sees what we
+  // could actually process.
+  var Filtered: TArray<string>;
+  for var F in AllFiles do
+    if IsScannableSource(F) and TFile.Exists(F) then
+      Filtered := Filtered + [F];
+  if Length(Filtered) = 0 then
+  begin
+    MessageDlg('No scannable .pas/.dpr/.dpk files in this project.',
+      mtInformation, [mbOK], 0);
+    Exit;
+  end;
+  if not TWithRefactorDialog.PickFiles(Application.MainForm, Filtered, Selected)
+  then Exit;
+  if Length(Selected) = 0 then Exit;
+  RunWithScope(wrsSelectedUnits, Selected);
+end;
+
+procedure TLspWithRefactorWizard.ExecuteAtCursor;
+var
+  Ctx: TEditorContext;
+begin
+  Ctx := TEditorHelper.GetCurrentContext;
+  if (Ctx.FileName = '') or not IsScannableSource(Ctx.FileName) then
+  begin
+    MessageDlg('No Pascal file is currently active.', mtInformation, [mbOK], 0);
+    Exit;
+  end;
+  // RunWithScope detects wrsCursor and uses GetCurrentContext to find
+  // which occurrence is at the caret.
+  RunWithScope(wrsCursor, [Ctx.FileName]);
+end;
+
+procedure TLspWithRefactorWizard.RunWithScope(AScope: TWithRefactorScope;
+  const AExtraFiles: TArray<string>);
 var
   Dialog: TWithRefactorDialog;
   ProjFiles: TArray<string>;
@@ -478,21 +576,62 @@ var
 begin
   Dialog := TWithRefactorDialog.CreateDialog(Application.MainForm);
   try
-    Dialog.SetStatus('Resolving project source files...');
+    case AScope of
+      wrsProject:
+        begin
+          Dialog.Caption := 'Remove with - project-wide review';
+          Dialog.SetStatus('Resolving project source files (project-wide)...');
+        end;
+      wrsCurrentUnit:
+        begin
+          Dialog.Caption := 'Remove with - current unit';
+          Dialog.SetStatus('Scanning current unit...');
+        end;
+      wrsSelectedUnits:
+        begin
+          Dialog.Caption := Format('Remove with - %d selected unit(s)',
+            [Length(AExtraFiles)]);
+          Dialog.SetStatus(Format('Scanning %d selected unit(s)...',
+            [Length(AExtraFiles)]));
+        end;
+      wrsCursor:
+        begin
+          Dialog.Caption := 'Remove with - at cursor';
+          Dialog.SetStatus('Scanning at cursor...');
+        end;
+    end;
     TLspManager.Instance.ApplyStatusToCaption(Dialog);
     Dialog.Show;
     Application.ProcessMessages;
 
-    ProjFiles := TEditorHelper.GetProjectSourceFiles;
     ScanFiles := TList<string>.Create;
     try
-      for I := 0 to High(ProjFiles) do
-        if IsScannableSource(ProjFiles[I]) and TFile.Exists(ProjFiles[I]) then
-          ScanFiles.Add(ProjFiles[I]);
+      case AScope of
+        wrsProject:
+          begin
+            ProjFiles := TEditorHelper.GetProjectSourceFiles;
+            for I := 0 to High(ProjFiles) do
+              if IsScannableSource(ProjFiles[I]) and TFile.Exists(ProjFiles[I]) then
+                ScanFiles.Add(ProjFiles[I]);
+          end;
+        wrsCurrentUnit, wrsCursor:
+          begin
+            var Ctx := TEditorHelper.GetCurrentContext;
+            if (Ctx.FileName <> '') and IsScannableSource(Ctx.FileName)
+              and TFile.Exists(Ctx.FileName) then
+              ScanFiles.Add(Ctx.FileName);
+          end;
+        wrsSelectedUnits:
+          begin
+            for I := 0 to High(AExtraFiles) do
+              if IsScannableSource(AExtraFiles[I]) and TFile.Exists(AExtraFiles[I]) then
+                ScanFiles.Add(AExtraFiles[I]);
+          end;
+      end;
 
       if ScanFiles.Count = 0 then
       begin
-        Dialog.SetStatus('No project source files found.');
+        Dialog.SetStatus('No source files to scan for this scope.');
         Dialog.Hide;
         Dialog.ShowModal;
         Exit;
@@ -581,17 +720,64 @@ begin
           Occs := TWithScanner.ScanSource(Source);
           if Length(Occs) = 0 then Continue;
 
-          // Bevor wir Occurrences gegen inaktive Regionen pruefen, geben
-          // wir DelphiLSP Zeit, dieses File zu analysieren. Bis zu 30 s
-          // pro File - das deckt auch grosse Units (GExperts) ab, ohne
-          // den happy path zu blockieren (Files die LSP schon kennt
-          // returnen sofort).
+          // In wrsCursor mode we filter Occs down to the single
+          // with-statement that ENCLOSES the editor caret position. If
+          // none does, we leave Occs untouched so the user at least
+          // gets the whole current unit (graceful fallback).
+          if AScope = wrsCursor then
+          begin
+            var Ctx := TEditorHelper.GetCurrentContext;
+            // Only filter when we're scanning the file the caret is in
+            // (otherwise leave Occs alone - same unit fallback).
+            if SameText(Ctx.FileName, ScanFiles[FileIdx]) then
+            begin
+              var Picked: TArray<TWithOccurrence>;
+              for var O in Occs do
+                if (Ctx.Line >= O.KeywordPos.Line)
+                  and (Ctx.Line <= O.BodyRange.EndPos.Line) then
+                  Picked := Picked + [O];
+              if Length(Picked) > 0 then
+                Occs := Picked;
+              // else: keep full Occs as fallback
+            end;
+          end;
+
+          // Bevor wir Occurrences gegen inaktive Regionen pruefen,
+          // braucht DelphiLSP eine durchgefuehrte Analyse des Files.
+          //
+          // Eine passive WaitForDiagnostics-Schleife reicht nicht: in
+          // grossen Projekten serialisiert DelphiLSP die Analyse stark
+          // (im Test ~22 s pro File). Wir koennen aber AKTIV blockieren
+          // indem wir 'textDocument/documentSymbol' synchron anfordern -
+          // LSP MUSS dafuer das File analysieren, sonst kommt keine
+          // Antwort. Mit Timeout 90 s (30 s im Project-Scope).
+          // Anschliessend kurz auf publishDiagnostics warten (die
+          // kommen direkt nach der Analyse - max. 10 s).
           if not Client.HasReceivedDiagnostics(ScanFiles[FileIdx]) then
           begin
-            Dialog.SetStatus(Format('Waiting for LSP diagnostics: %s...',
+            Dialog.SetStatus(Format('Waiting for LSP to analyse: %s...',
               [ExtractFileName(ScanFiles[FileIdx])]));
             Application.ProcessMessages;
-            Client.WaitForDiagnostics(ScanFiles[FileIdx], 30000);
+            try
+              Client.RefreshDocument(ScanFiles[FileIdx]);
+            except
+              // Refresh-Fehler ist nicht kritisch
+            end;
+            // Aktive Analyse-Anfrage: documentSymbol BLOCKIERT bis LSP
+            // antwortet. Wir verwerfen das Ergebnis - es geht uns nur
+            // darum, dass LSP den File durchparst.
+            var SymTimeoutMs: Cardinal;
+            if AScope = wrsProject then SymTimeoutMs := 30000 else SymTimeoutMs := 120000;
+            var SymJson: TJSONArray := nil;
+            try
+              SymJson := Client.GetDocumentSymbols(ScanFiles[FileIdx], SymTimeoutMs);
+            except
+              // Timeout / Fehler: wir versuchen trotzdem weiterzumachen.
+            end;
+            if SymJson <> nil then SymJson.Free;
+            // Nach documentSymbol ist DelphiLSP soweit. Diagnostics
+            // kommen typisch in den naechsten Sekunden hinterher.
+            Client.WaitForDiagnostics(ScanFiles[FileIdx], 15000);
           end;
 
           for Occ in Occs do

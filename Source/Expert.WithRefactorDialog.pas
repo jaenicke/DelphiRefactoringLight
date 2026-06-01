@@ -103,6 +103,14 @@ type
   public
     constructor CreateDialog(AOwner: TComponent); reintroduce;
 
+    /// <summary>Pops up a modal multi-select dialog listing the given
+    ///  Pascal source files (display: basename + folder). Returns
+    ///  True on OK with the user's selection in AChosen; False on
+    ///  Cancel.</summary>
+    class function PickFiles(AOwner: TComponent;
+      const AAllFiles: TArray<string>;
+      out AChosen: TArray<string>): Boolean; static;
+
     /// <summary>Replaces the current item list and updates the UI.</summary>
     procedure SetItems(const AItems: TArray<TWithRewriteResult>);
 
@@ -126,14 +134,17 @@ type
 implementation
 
 uses
-  System.IOUtils, Expert.DialogHelper;
+  System.IOUtils, Vcl.CheckLst,
+  Expert.DialogHelper;
 
 { TWithRefactorDialog }
 
 constructor TWithRefactorDialog.CreateDialog(AOwner: TComponent);
 begin
   inherited CreateNew(AOwner);
-  Caption := 'Remove with - project-wide review';
+  // Default caption - the caller (TLspWithRefactorWizard.RunWithScope)
+  // overrides this with a scope-aware text right after construction.
+  Caption := 'Remove with - review';
   Position := poOwnerFormCenter;
   BorderStyle := bsSizeable;
   BorderIcons := [biSystemMenu];
@@ -767,6 +778,84 @@ begin
   // so the Before-panel is wide enough to read on common dialog widths.
   if (FDiffPanel <> nil) and (FDiffPanel.Width > 0) and (FBeforePanel <> nil) then
     FBeforePanel.Width := FDiffPanel.Width div 2;
+end;
+
+class function TWithRefactorDialog.PickFiles(AOwner: TComponent;
+  const AAllFiles: TArray<string>;
+  out AChosen: TArray<string>): Boolean;
+// Self-contained modal dialog: TForm with a CheckListBox + Select All /
+// Deselect All / OK / Cancel buttons. Sorted alphabetically by basename;
+// the folder is appended in parentheses to disambiguate duplicates.
+var
+  Form: TForm;
+  CLB: TCheckListBox;
+  BtnOk, BtnCancel: TButton;
+  Lbl: TLabel;
+  I, K: Integer;
+begin
+  Result := False;
+  AChosen := nil;
+  Form := TForm.Create(AOwner);
+  try
+    Form.Caption := 'Remove with - select units to scan';
+    Form.Position := poOwnerFormCenter;
+    Form.BorderStyle := bsSizeable;
+    Form.Width := 640;
+    Form.Height := 480;
+    Form.PopupMode := pmAuto;
+
+    Lbl := TLabel.Create(Form);
+    Lbl.Parent := Form;
+    Lbl.SetBounds(12, 8, 600, 17);
+    Lbl.Caption := Format('%d files in this project. Check the ones to scan:',
+      [Length(AAllFiles)]);
+
+    CLB := TCheckListBox.Create(Form);
+    CLB.Parent := Form;
+    CLB.SetBounds(12, 30, 612, 360);
+    CLB.Anchors := [akLeft, akTop, akRight, akBottom];
+    CLB.Sorted := True;
+    for I := 0 to High(AAllFiles) do
+      CLB.Items.AddObject(
+        Format('%s   (%s)', [ExtractFileName(AAllFiles[I]),
+          ExcludeTrailingPathDelimiter(ExtractFilePath(AAllFiles[I]))]),
+        TObject(NativeInt(I)));
+
+    // Default: nothing checked - user picks the units they want.
+    // No "Select All" / "Deselect All" buttons - keep it simple;
+    // multi-select is easy enough with mouse / keyboard.
+
+    BtnCancel := TButton.Create(Form);
+    BtnCancel.Parent := Form;
+    BtnCancel.SetBounds(454, 400, 80, 25);
+    BtnCancel.Anchors := [akRight, akBottom];
+    BtnCancel.Caption := 'Cancel';
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.Cancel := True;
+
+    BtnOk := TButton.Create(Form);
+    BtnOk.Parent := Form;
+    BtnOk.SetBounds(540, 400, 80, 25);
+    BtnOk.Anchors := [akRight, akBottom];
+    BtnOk.Caption := 'Scan';
+    BtnOk.ModalResult := mrOk;
+    BtnOk.Default := True;
+
+    if Form.ShowModal <> mrOk then Exit;
+
+    K := 0;
+    SetLength(AChosen, CLB.Items.Count);
+    for I := 0 to CLB.Items.Count - 1 do
+      if CLB.Checked[I] then
+      begin
+        AChosen[K] := AAllFiles[NativeInt(CLB.Items.Objects[I])];
+        Inc(K);
+      end;
+    SetLength(AChosen, K);
+    Result := True;
+  finally
+    Form.Free;
+  end;
 end;
 
 initialization

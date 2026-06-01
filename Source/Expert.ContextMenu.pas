@@ -58,6 +58,10 @@ type
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
     procedure OnRemoveWith(Sender: TObject);
+    procedure OnRemoveWithProjectWide(Sender: TObject);
+    procedure OnRemoveWithCurrentUnit(Sender: TObject);
+    procedure OnRemoveWithSelectedUnits(Sender: TObject);
+    procedure OnRemoveWithAtCursor(Sender: TObject);
     procedure OnUnitRefs(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
@@ -184,7 +188,30 @@ begin
   Submenu.Add(CreateItem('Extract Method',                  skExtract,    OnExtractMethod));
   Submenu.Add(CreateItem('Align method signature...',       skAlign,      OnSignatureCheck));
   Submenu.Add(CreateItem('Code Completion',                 skCompletion, OnCompletion));
-  Submenu.Add(CreateItem('Remove with (project-wide)...',   skRemoveWith, OnRemoveWith));
+  // 'Remove with' is a nested submenu - the project-wide scan can
+  // take many minutes on big code bases, so we expose narrower
+  // scopes as separate menu entries. Only the first sub-item carries
+  // the registered Ctrl+Alt+Shift+W shortcut (the global keybinding
+  // also triggers ExecuteAtCursor); the other three are
+  // mouse/keyboard-navigated only.
+  var RemoveWithSub := TMenuItem.Create(FPopupMenu);
+  RemoveWithSub.Caption := 'Remove with';
+  Submenu.Add(RemoveWithSub);
+  RemoveWithSub.Add(CreateItem('At cursor only',           skRemoveWith, OnRemoveWithAtCursor));
+  // Sub-items without their own shortcut: create directly.
+  var Mi: TMenuItem;
+  Mi := TMenuItem.Create(FPopupMenu);
+  Mi.Caption := 'In current unit';
+  Mi.OnClick := OnRemoveWithCurrentUnit;
+  RemoveWithSub.Add(Mi);
+  Mi := TMenuItem.Create(FPopupMenu);
+  Mi.Caption := 'In selected units...';
+  Mi.OnClick := OnRemoveWithSelectedUnits;
+  RemoveWithSub.Add(Mi);
+  Mi := TMenuItem.Create(FPopupMenu);
+  Mi.Caption := 'In whole project...';
+  Mi.OnClick := OnRemoveWithProjectWide;
+  RemoveWithSub.Add(Mi);
   Submenu.Add(CreateItem('Move to unit...',                 skMoveToUnit, OnMoveToUnit));
   Submenu.Add(CreateItem('Find unit references...',         skUnitRefs,   OnUnitRefs));
 
@@ -453,8 +480,33 @@ end;
 
 procedure TContextMenuInstaller.OnRemoveWith(Sender: TObject);
 begin
+  // Legacy entry - kept for any callers; same as the global shortcut.
   if WithRefactorInstance <> nil then
     WithRefactorInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnRemoveWithAtCursor(Sender: TObject);
+begin
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.ExecuteAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnRemoveWithCurrentUnit(Sender: TObject);
+begin
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.ExecuteCurrentUnit;
+end;
+
+procedure TContextMenuInstaller.OnRemoveWithSelectedUnits(Sender: TObject);
+begin
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.ExecuteSelectedUnits;
+end;
+
+procedure TContextMenuInstaller.OnRemoveWithProjectWide(Sender: TObject);
+begin
+  if WithRefactorInstance <> nil then
+    WithRefactorInstance.ExecuteProjectWide;
 end;
 
 procedure TContextMenuInstaller.OnUnitRefs(Sender: TObject);

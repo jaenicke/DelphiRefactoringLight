@@ -71,36 +71,44 @@ begin
 end;
 
 procedure TLspSignatureCheckWizard.Execute;
+var
+  PrevDialog: TSignatureCheckDialog;
+  PrevContext: TEditorContext;
+  Ctx: TEditorContext;
 begin
-  FContext := TEditorHelper.GetCurrentContext;
-  if not FContext.IsValid then
+  Ctx := TEditorHelper.GetCurrentContext;
+  if not Ctx.IsValid then
   begin
     MessageDlg('No identifier found at the cursor.' + sLineBreak +
       'Please place the cursor on a method name.', mtWarning, [mbOK], 0);
     Exit;
   end;
 
-  FDialog := TSignatureCheckDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
+  // Save the wizard's fields so a nested Execute (user retriggers via
+  // shortcut while the search is pumping) doesn't clobber the running
+  // search. After return the dialog detaches via SetClosable and lives
+  // on its own.
+  PrevDialog := FDialog;
+  PrevContext := FContext;
   try
+    FContext := Ctx;
+    FDialog := TSignatureCheckDialog.CreateDialog(Application.MainForm, Ctx.WordAtCursor);
     FDialog.OnGotoLocation := DoGotoLocation;
     TLspManager.Instance.ApplyStatusToCaption(FDialog);
     FDialog.Show;
     try
       Application.ProcessMessages;
       CollectAndShow;
-      FDialog.Hide;
-      FDialog.ShowModal;
     except
       on E: Exception do
-      begin
-        FDialog.SetStatus('Error: ' + E.Message);
-        FDialog.Hide;
-        FDialog.ShowModal;
-      end;
+        if FDialog <> nil then
+          FDialog.SetStatus('Error: ' + E.Message);
     end;
+    if FDialog <> nil then
+      FDialog.SetClosable;
   finally
-    FDialog.Free;
-    FDialog := nil;
+    FDialog := PrevDialog;
+    FContext := PrevContext;
   end;
 end;
 

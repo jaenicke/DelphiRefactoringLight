@@ -571,8 +571,7 @@ var
   Occs: TArray<TWithOccurrence>;
   Occ: TWithOccurrence;
   Rewrite: TWithRewriteResult;
-  AutoCount, ApplyOk, ApplyFailed, ModalRes, SelIdx: Integer;
-  ItemsToApply: TArray<TWithRewriteResult>;
+  AutoCount: Integer;
 begin
   Dialog := TWithRefactorDialog.CreateDialog(Application.MainForm);
   try
@@ -826,47 +825,53 @@ begin
           [Results.Count, AutoCount]));
         Dialog.SetProgress(0, 0);
         Dialog.SetItems(Results.ToArray);
-        // Letzter Caption-Refresh vor der Modal-Phase, damit der User
-        // den endgueltigen LSP-Status sieht (z.B. "ready - 312 diags").
         TLspManager.Instance.ApplyStatusToCaption(Dialog);
 
-        // Switch to modal for review.
-        Dialog.Hide;
-        ModalRes := Dialog.ShowModal;
-
-        // Apply.
-        ItemsToApply := nil;
-        case ModalRes of
-          mrOk:
-            begin
-              SetLength(ItemsToApply, AutoCount);
-              var K := 0;
-              for I := 0 to High(Dialog.Items) do
-                if Dialog.Items[I].IsAutoRewritable then
-                begin
-                  ItemsToApply[K] := Dialog.Items[I];
-                  Inc(K);
-                end;
-            end;
-          mrApplySelected:
-            begin
-              SelIdx := Dialog.SelectedIndex;
-              if (SelIdx >= 0) and (SelIdx <= High(Dialog.Items))
-                and Dialog.Items[SelIdx].IsAutoRewritable then
-              begin
-                SetLength(ItemsToApply, 1);
-                ItemsToApply[0] := Dialog.Items[SelIdx];
-              end;
-            end;
-        end;
-
-        if Length(ItemsToApply) > 0 then
-        begin
-          ApplyEdits(ItemsToApply, Dialog.UseInlineVars, ApplyOk, ApplyFailed);
-          if ApplyFailed > 0 then
-            MessageDlg(Format('Applied %d edit(s); %d failed.',
-              [ApplyOk, ApplyFailed]), mtWarning, [mbOK], 0);
-        end;
+        // Non-modal review: wire double-click-goto + apply callback,
+        // hand ownership to the dialog so it free's itself when the
+        // user closes it. Execute returns; the dialog lives on its
+        // own. Multiple Remove-with dialogs can be open at the same
+        // time - each one captures its own copy of the relevant state.
+        Dialog.OnGoto :=
+          procedure(const AItem: TWithRewriteResult)
+          begin
+            // Jump to the with-keyword position in the source file.
+            TEditorHelper.GotoLocation(
+              AItem.FileName,
+              AItem.Occurrence.KeywordPos.Line - 1,
+              AItem.Occurrence.KeywordPos.Col - 1,
+              0);
+          end;
+        Dialog.OnApply :=
+          procedure(const ARequested: TArray<TWithRewriteResult>;
+            AUseInlineVars: Boolean;
+            out AApplied: TArray<TWithRewriteResult>)
+          var
+            ROk, RFailed: Integer;
+          begin
+            AApplied := nil;
+            if Length(ARequested) = 0 then Exit;
+            ApplyEdits(ARequested, AUseInlineVars, ROk, RFailed);
+            if RFailed > 0 then
+              MessageDlg(Format('Applied %d edit(s); %d failed.',
+                [ROk, RFailed]), mtWarning, [mbOK], 0);
+            // We don't actually know which individual items failed
+            // vs succeeded here; the rewriter applies them in order
+            // and bails on first error, so the first ROk items are
+            // good and the rest stay in the dialog. Conservative: only
+            // report success when nothing failed; otherwise the user
+            // can re-trigger and we'll re-run on the remaining items.
+            if RFailed = 0 then
+              AApplied := ARequested;
+          end;
+        // Reuse vorhandener "hand off ownership" Mechanik aus Find Refs:
+        // ab jetzt schliesst der User den Dialog und der Dialog free't
+        // sich selbst.
+        Dialog.SetClosable;
+        Dialog.Show;
+        // Lokale Dialog-Referenz NICHT freigeben - der Dialog managed
+        // sich selbst.
+        Dialog := nil;
       finally
         Results.Free;
       end;
@@ -874,7 +879,10 @@ begin
       ScanFiles.Free;
     end;
   finally
-    Dialog.Free;
+    // Wenn Dialog nicht auf nil gesetzt wurde (frueher Exit / Fehler),
+    // muessen wir trotzdem freigeben.
+    if Dialog <> nil then
+      Dialog.Free;
   end;
 end;
 

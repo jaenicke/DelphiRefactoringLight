@@ -17,10 +17,12 @@ uses
 type
   TLspFindReferencesWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
   private
+    // Bezeichnet nur den GERADE laufenden Search. Verschachtelte
+    // Execute-Calls speichern den Vorgaengerwert auf dem Stack und
+    // restaurieren ihn am Ende.
     FDialog: TFindReferencesDialog;
     FContext: TEditorContext;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
-    procedure DoDialogClose(Sender: TObject);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName, ADefFilePath: string;
@@ -74,44 +76,62 @@ begin
 end;
 
 procedure TLspFindReferencesWizard.Execute;
+var
+  PrevDialog: TFindReferencesDialog;
+  PrevContext: TEditorContext;
+  Ctx: TEditorContext;
 begin
-  FContext := TEditorHelper.GetCurrentContext;
+  Ctx := TEditorHelper.GetCurrentContext;
 
-  if not FContext.IsValid then
+  if not Ctx.IsValid then
   begin
     MessageDlg('No identifier found at the cursor.' + sLineBreak + 'Please place the cursor on an identifier.', mtWarning, [mbOK], 0);
     Exit;
   end;
 
-  FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
-  FDialog.OnGotoLocation := DoGotoLocation;
-  FDialog.OnDialogClose := DoDialogClose;
-  TLspManager.Instance.ApplyStatusToCaption(FDialog);
-  // Show non-modal so the user can interact with the editor (e.g. jump
-  // to a found location and edit it) while the result list stays open.
-  FDialog.Show;
+  // Save the fields so a nested Execute (e.g. user triggers Find References
+  // again via shortcut while ProcessMessages is pumping) doesn't clobber
+  // the currently-running search. After this Execute returns, the dialog
+  // is detached (SetClosable) and continues to live on its own - that's
+  // what gives us multiple-dialogs-at-once support.
+  PrevDialog := FDialog;
+  PrevContext := FContext;
   try
-    Application.ProcessMessages;
-    SearchAndShow;
-  except
-    on E: Exception do
-      if FDialog <> nil then
-        FDialog.SetStatus('Error: ' + E.Message);
+    FContext := Ctx;
+    FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm, Ctx.WordAtCursor);
+    FDialog.OnGotoLocation := DoGotoLocation;
+    // No OnDialogClose: each dialog manages its own free via
+    // SetClosable + caFree once the search is done.
+    TLspManager.Instance.ApplyStatusToCaption(FDialog);
+    // Show non-modal so the user can interact with the editor (e.g.
+    // jump to a found location and edit it) while the result list
+    // stays open. Multiple dialogs may co-exist - each search is
+    // tracked by its own FDialog/FContext during this Execute call.
+    FDialog.Show;
+    try
+      Application.ProcessMessages;
+      SearchAndShow;
+    except
+      on E: Exception do
+        if FDialog <> nil then
+          FDialog.SetStatus('Error: ' + E.Message);
+    end;
+    // Hand off ownership: from now on closing the dialog frees it. If
+    // the user already clicked X / Close during the scan, this
+    // releases it now.
+    if FDialog <> nil then
+      FDialog.SetClosable;
+  finally
+    FDialog := PrevDialog;
+    FContext := PrevContext;
   end;
-  // Hand off ownership: from now on closing the dialog frees it. If the
-  // user already clicked X during the scan, this closes it now.
-  if FDialog <> nil then
-    FDialog.SetClosable;
-end;
-
-procedure TLspFindReferencesWizard.DoDialogClose(Sender: TObject);
-begin
-  // Called from the dialog's OnClose right before it frees itself.
-  FDialog := nil;
 end;
 
 procedure TLspFindReferencesWizard.DoGotoLocation(AItem: TFindReferenceItem);
 begin
+  // Static-style: uses only the item's own location data. Safe to be
+  // assigned as a callback to dialog instances that may outlive the
+  // particular Execute call that opened them.
   TEditorHelper.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
 end;
 

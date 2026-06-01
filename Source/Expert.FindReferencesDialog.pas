@@ -281,7 +281,18 @@ end;
 
 procedure TFindReferencesDialog.DoBtnCloseClick(Sender: TObject);
 begin
-  Close;
+  // Defensive: route through DoFormClose-style logic directly. The
+  // plain Close call has been reported as unresponsive while the
+  // synchronous search loop is running - hiding the form here makes
+  // the user feedback immediate; the actual free happens later when
+  // SetClosable kicks in (or right away if we're already past it).
+  FCloseRequested := True;
+  Hide;
+  if FAllowFree then
+  begin
+    if Assigned(FOnDialogClose) then FOnDialogClose(Self);
+    Release;  // queued free; safe even when called from a button handler
+  end;
 end;
 
 procedure TFindReferencesDialog.DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);

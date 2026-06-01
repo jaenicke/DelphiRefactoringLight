@@ -32,6 +32,8 @@ type
     FEntries: TSignatureEntries;
     FOnGotoLocation: TProc<TSignatureEntry>;
     FReferenceNormalized: string;
+    FAllowFree: Boolean;
+    FCloseRequested: Boolean;
 
     procedure CreateControls;
     procedure DoListDblClick(Sender: TObject);
@@ -41,6 +43,7 @@ type
     procedure DoListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure DoListCustomDrawItem(Sender: TCustomListView; Item: TListItem;
       State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure GotoSelected;
     function PickReference(const AEntries: TSignatureEntries): string;
   public
@@ -48,6 +51,12 @@ type
 
     procedure SetEntries(const AEntries: TSignatureEntries);
     procedure SetStatus(const AText: string);
+
+    /// <summary>Hands the dialog ownership over to itself: closing
+    ///  (X / Close / Esc) frees the dialog. Before SetClosable is
+    ///  called, close requests are deferred so the still-running
+    ///  search loop doesn't operate on a freed dialog.</summary>
+    procedure SetClosable;
 
     property OnGotoLocation: TProc<TSignatureEntry> read FOnGotoLocation write FOnGotoLocation;
   end;
@@ -73,6 +82,7 @@ begin
   Constraints.MinHeight := 240;
   KeyPreview := True;
   OnKeyDown := DoFormKeyDown;
+  OnClose := DoFormClose;
 
   CreateControls;
   Expert.IdeThemes.EnableThemes(Self);
@@ -271,14 +281,40 @@ end;
 
 procedure TSignatureCheckDialog.DoBtnCloseClick(Sender: TObject);
 begin
-  ModalResult := mrCancel;
+  // Defensive: hide first so the user sees immediate feedback even
+  // while the wizard's synchronous search loop is still pumping
+  // messages. The actual free happens via DoFormClose when FAllowFree
+  // is True (SetClosable already called).
+  FCloseRequested := True;
+  Hide;
+  if FAllowFree then Release;
+end;
+
+procedure TSignatureCheckDialog.DoFormClose(Sender: TObject;
+  var Action: TCloseAction);
+begin
+  if not FAllowFree then
+  begin
+    FCloseRequested := True;
+    Hide;
+    Action := caNone;
+    Exit;
+  end;
+  Action := caFree;
+end;
+
+procedure TSignatureCheckDialog.SetClosable;
+begin
+  FAllowFree := True;
+  if FCloseRequested then
+    Close;
 end;
 
 procedure TSignatureCheckDialog.DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
   if Key = VK_ESCAPE then
   begin
-    ModalResult := mrCancel;
+    Close;
     Key := 0;
   end;
 end;

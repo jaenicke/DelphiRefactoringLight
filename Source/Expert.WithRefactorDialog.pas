@@ -55,6 +55,19 @@ const
   mrApplySelected = 100;
 
 type
+  /// <summary>Fired on double-click / Enter on a list row. The wizard
+  ///  jumps to the with-statement's source position in the IDE.</summary>
+  TWithGotoEvent = reference to procedure(const AItem: TWithRewriteResult);
+
+  /// <summary>Fired when the user picks "Apply selected" / "Apply all".
+  ///  The wizard performs the actual edits and returns the items that
+  ///  were applied successfully (so the dialog can drop them from its
+  ///  list). Items that fail stay visible.</summary>
+  TWithApplyEvent = reference to procedure(
+    const ARequested: TArray<TWithRewriteResult>;
+    AUseInlineVars: Boolean;
+    out AApplied: TArray<TWithRewriteResult>);
+
   TWithRefactorDialog = class(TForm)
   private
     FStatusLabel: TLabel;
@@ -82,6 +95,13 @@ type
     FItems: TArray<TWithRewriteResult>;
     FAutoRewritableCount: Integer;
     FCommonPathPrefix: string;
+    FOnGoto: TWithGotoEvent;
+    FOnApply: TWithApplyEvent;
+    FAllowFree: Boolean;
+    FCloseRequested: Boolean;
+    procedure DoListDblClick(Sender: TObject);
+    procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
+    procedure RemoveItems(const AApplied: TArray<TWithRewriteResult>);
 
     procedure CreateControls;
     procedure DoChkUseInlineVarsClick(Sender: TObject);
@@ -129,6 +149,25 @@ type
 
     /// <summary>The full item list (read-only).</summary>
     property Items: TArray<TWithRewriteResult> read FItems;
+
+    /// <summary>Hands the dialog ownership over to itself: once
+    ///  SetClosable has been called, closing the form (via the bottom
+    ///  Close button, the title-bar X, or Escape) frees it. Before
+    ///  that, close requests are deferred (Hide + FCloseRequested) so
+    ///  the wizard's still-running scan loop doesn't operate on a
+    ///  freed dialog. Idempotent.</summary>
+    procedure SetClosable;
+
+    /// <summary>Called by the dialog on double-click / Enter on a
+    ///  list row.</summary>
+    property OnGoto: TWithGotoEvent read FOnGoto write FOnGoto;
+
+    /// <summary>Called by the dialog when the user requests an
+    ///  apply. The handler performs the edits and reports back via
+    ///  AApplied which items succeeded so the dialog can remove them
+    ///  from the list. Items the handler couldn't apply remain
+    ///  visible.</summary>
+    property OnApply: TWithApplyEvent read FOnApply write FOnApply;
   end;
 
 implementation
@@ -155,6 +194,7 @@ begin
   KeyPreview := True;
   OnKeyDown := DoFormKeyDown;
   OnShow := DoFormShow;
+  OnClose := DoFormClose;
 
   CreateControls;
   UpdateApplyButtons;
@@ -365,6 +405,7 @@ begin
   FListView.HideSelection := False;
   FListView.GridLines := True;
   FListView.OnSelectItem := DoListSelect;
+  FListView.OnDblClick := DoListDblClick;
 
   Col := FListView.Columns.Add;
   Col.Caption := 'File';
@@ -746,29 +787,120 @@ begin
 end;
 
 procedure TWithRefactorDialog.DoBtnApplySelectedClick(Sender: TObject);
+var
+  Requested, Applied: TArray<TWithRewriteResult>;
 begin
-  if (SelectedIndex >= 0) and FItems[SelectedIndex].IsAutoRewritable then
-    ModalResult := mrApplySelected;
+  if (SelectedIndex < 0)
+    or not FItems[SelectedIndex].IsAutoRewritable
+    or not Assigned(FOnApply) then Exit;
+  SetLength(Requested, 1);
+  Requested[0] := FItems[SelectedIndex];
+  FOnApply(Requested, UseInlineVars, Applied);
+  RemoveItems(Applied);
 end;
 
 procedure TWithRefactorDialog.DoBtnApplyAllClick(Sender: TObject);
+var
+  Requested, Applied: TArray<TWithRewriteResult>;
+  K, I: Integer;
 begin
-  if FAutoRewritableCount > 0 then
-    ModalResult := mrOk;
+  if (FAutoRewritableCount = 0) or not Assigned(FOnApply) then Exit;
+  SetLength(Requested, FAutoRewritableCount);
+  K := 0;
+  for I := 0 to High(FItems) do
+    if FItems[I].IsAutoRewritable then
+    begin
+      Requested[K] := FItems[I];
+      Inc(K);
+    end;
+  FOnApply(Requested, UseInlineVars, Applied);
+  RemoveItems(Applied);
 end;
 
 procedure TWithRefactorDialog.DoBtnCloseClick(Sender: TObject);
 begin
-  ModalResult := mrCancel;
+  // Non-modal: just close the form. DoFormClose decides whether to
+  // free (FAllowFree) or merely hide (search phase still running).
+  Close;
 end;
 
 procedure TWithRefactorDialog.DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
   if Key = VK_ESCAPE then
   begin
-    ModalResult := mrCancel;
+    Close;
     Key := 0;
+  end
+  else if (Key = VK_RETURN) and (Shift = []) then
+  begin
+    // Enter on a list row -> jump to source (mirrors DoListDblClick).
+    if (SelectedIndex >= 0) and Assigned(FOnGoto) then
+    begin
+      FOnGoto(FItems[SelectedIndex]);
+      Key := 0;
+    end;
   end;
+end;
+
+procedure TWithRefactorDialog.DoListDblClick(Sender: TObject);
+begin
+  if (SelectedIndex >= 0) and Assigned(FOnGoto) then
+    FOnGoto(FItems[SelectedIndex]);
+end;
+
+procedure TWithRefactorDialog.DoFormClose(Sender: TObject;
+  var Action: TCloseAction);
+begin
+  if not FAllowFree then
+  begin
+    FCloseRequested := True;
+    Hide;
+    Action := caNone;
+    Exit;
+  end;
+  Action := caFree;
+end;
+
+procedure TWithRefactorDialog.SetClosable;
+begin
+  FAllowFree := True;
+  if FCloseRequested then
+    Close;
+end;
+
+procedure TWithRefactorDialog.RemoveItems(
+  const AApplied: TArray<TWithRewriteResult>);
+var
+  Survivors: TArray<TWithRewriteResult>;
+  I, J: Integer;
+  Drop: Boolean;
+begin
+  if Length(AApplied) = 0 then Exit;
+  SetLength(Survivors, Length(FItems));
+  J := 0;
+  for I := 0 to High(FItems) do
+  begin
+    Drop := False;
+    for var A in AApplied do
+      // Identity by FileName + with-keyword position (the same fields
+      // the wizard uses when constructing the items).
+      if SameText(A.FileName, FItems[I].FileName)
+        and (A.Occurrence.KeywordPos.Line = FItems[I].Occurrence.KeywordPos.Line)
+        and (A.Occurrence.KeywordPos.Col  = FItems[I].Occurrence.KeywordPos.Col) then
+      begin
+        Drop := True;
+        Break;
+      end;
+    if not Drop then
+    begin
+      Survivors[J] := FItems[I];
+      Inc(J);
+    end;
+  end;
+  SetLength(Survivors, J);
+  SetItems(Survivors);
+  SetStatus(Format('%d applied. %d with-statement(s) remaining.',
+    [Length(AApplied), J]));
 end;
 
 procedure TWithRefactorDialog.DoFormShow(Sender: TObject);

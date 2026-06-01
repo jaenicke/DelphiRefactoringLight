@@ -78,10 +78,14 @@ begin
 end;
 
 procedure TLspFindImplementationsWizard.Execute;
+var
+  PrevDialog: TFindReferencesDialog;
+  PrevContext: TEditorContext;
+  Ctx: TEditorContext;
 begin
-  FContext := TEditorHelper.GetCurrentContext;
+  Ctx := TEditorHelper.GetCurrentContext;
 
-  if not FContext.IsValid then
+  if not Ctx.IsValid then
   begin
     MessageDlg('No identifier found at the cursor.' + sLineBreak +
       'Please place the cursor on an interface method, or on a call to an ' +
@@ -90,29 +94,34 @@ begin
     Exit;
   end;
 
-  FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm,
-    FContext.WordAtCursor, 'Implementations');
+  // Save the fields so a nested Execute doesn't clobber the running
+  // search. After return, the dialog detaches via SetClosable and
+  // lives on its own - enabling multiple result dialogs at the same
+  // time.
+  PrevDialog := FDialog;
+  PrevContext := FContext;
   try
+    FContext := Ctx;
+    FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm,
+      Ctx.WordAtCursor, 'Implementations');
     FDialog.OnGotoLocation := DoGotoLocation;
     TLspManager.Instance.ApplyStatusToCaption(FDialog);
-    // Show dialog + run search + switch dialog to modal
     FDialog.Show;
     try
       Application.ProcessMessages;
       SearchAndShow;
-      FDialog.Hide;
-      FDialog.ShowModal;
     except
       on E: Exception do
-      begin
-        FDialog.SetStatus('Error: ' + E.Message);
-        FDialog.Hide;
-        FDialog.ShowModal;
-      end;
+        if FDialog <> nil then
+          FDialog.SetStatus('Error: ' + E.Message);
     end;
+    // Hand off ownership: closing the dialog now frees it. If the user
+    // already requested close during the scan, this performs it now.
+    if FDialog <> nil then
+      FDialog.SetClosable;
   finally
-    FDialog.Free;
-    FDialog := nil;
+    FDialog := PrevDialog;
+    FContext := PrevContext;
   end;
 end;
 

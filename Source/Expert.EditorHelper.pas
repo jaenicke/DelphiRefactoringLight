@@ -127,18 +127,48 @@ begin
   if Module <> nil then
     Result.FileName := Module.FileName;
 
-  // Bezeichner unter dem Cursor via EditPosition
+  // Bezeichner unter dem Cursor via EditPosition.
+  //
+  // Drei Cursorzustaende, die wir korrekt behandeln muessen:
+  //   1) Cursor IN einem Wort (z.B. auf 's' in 'RegisterDC') -> Standard,
+  //      walk back to start.
+  //   2) Cursor am ANFANG eines Wortes (auf 'R' in 'RegisterDC') ->
+  //      analog zu (1), die Walk-back-Schleife endet sofort.
+  //   3) Cursor am ENDE eines Wortes (auf '(' nach 'RegisterDC',
+  //      typischer Zustand nach Doppelklick / Strg-Rechts) -> die alte
+  //      Logik ist hier vorwaerts gelaufen und hat den NAECHSTEN Token
+  //      erwischt (z.B. den ersten Parameter). Wir muessen statt dessen
+  //      RUECKWAERTS in das vorhergehende Wort hineinwandern.
   EditPosition := EditBuffer.EditPosition;
   if EditPosition <> nil then
   begin
     EditPosition.Save;
     try
-      // Zum Anfang des Wortes zurueck
+      // Wenn wir aktuell nicht auf einem Wortzeichen sind: einmal
+      // RUECK, um Fall (3) abzudecken. Wir bleiben auf der gleichen
+      // Zeile - falls die Rueckbewegung in die vorherige Zeile fuehren
+      // wuerde, schlaegt MoveRelative gar nicht erst an (oder wir
+      // landen am Zeilenanfang, was wiederum kein Wortzeichen ist und
+      // unten gracefully zu einem leeren Word fuehrt).
+      if (not EditPosition.IsWordCharacter) and (EditPosition.Column > 1) then
+        EditPosition.MoveRelative(0, -1);
+
+      // Jetzt vom aktuellen Wortzeichen (falls eines) zum Wortanfang.
       while EditPosition.IsWordCharacter and (EditPosition.Column > 1) do
         EditPosition.MoveRelative(0, -1);
       if not EditPosition.IsWordCharacter then
         EditPosition.MoveRelative(0, 1);
-      // Wort zeichenweise lesen
+
+      // Wort zeichenweise lesen. Falls wir tatsaechlich auf einem
+      // Identifier-Zeichen stehen, ueberschreiben wir auch Line/Column
+      // mit dem Wortanfang - so treffen nachfolgende LSP-Queries den
+      // Identifier statt das Interpunktionszeichen, auf dem der Cursor
+      // ggf. ursprunglich stand.
+      if EditPosition.IsWordCharacter then
+      begin
+        Result.Line := EditPosition.Row;
+        Result.Column := EditPosition.Column;
+      end;
       var Word := '';
       while EditPosition.IsWordCharacter do
       begin

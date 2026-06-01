@@ -259,6 +259,164 @@ begin
     Result := M.Groups[1].Value;
 end;
 
+/// <summary>Synthesizes a hover-like string from a declaration line +
+///  the identifier we care about. Used as a fallback when DelphiLSP's
+///  textDocument/hover returns "Internal server error" (frequent in
+///  serverType=controller mode). The output format matches what
+///  ClassifyHover / ExtractTypeFromHover expect, so the rest of the
+///  Extract-Method pipeline works unchanged.</summary>
+function SynthesizeHoverFromDeclLine(const ADeclLine, AIdent: string): string;
+
+  function IsIdCh(C: Char): Boolean; inline;
+  begin Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']) end;
+
+  function IsIdStart(C: Char): Boolean; inline;
+  begin Result := CharInSet(C, ['A'..'Z', 'a'..'z', '_']) end;
+
+  function FindIdent(const ALine, AName: string; out APos: Integer): Boolean;
+  // Word-boundary case-insensitive find of AName in ALine.
+  var P, L, N: Integer; Before, After: Char;
+  begin
+    Result := False;
+    L := Length(AName);
+    if L = 0 then Exit;
+    N := Length(ALine);
+    P := 1;
+    while P <= N - L + 1 do
+    begin
+      if SameText(Copy(ALine, P, L), AName) then
+      begin
+        Before := #0;
+        if P > 1 then Before := ALine[P - 1];
+        After := #0;
+        if P + L <= N then After := ALine[P + L];
+        if (not IsIdCh(Before)) and (not IsIdCh(After)) then
+        begin
+          APos := P;
+          Exit(True);
+        end;
+      end;
+      Inc(P);
+    end;
+  end;
+
+  function ExtractParamTypeAt(const ALine: string; AIdentPos: Integer): string;
+  // ALine is a method header like
+  //   "procedure TFoo.Bar(const A, B: Integer; var C: string);"
+  // AIdentPos is 1-based start of the identifier (e.g. position of 'B').
+  // Returns the type for that identifier ('Integer'), '' on parse fail.
+  var
+    Depth, I, N: Integer;
+    TypeStart, TypeEnd: Integer;
+  begin
+    Result := '';
+    N := Length(ALine);
+    // From AIdentPos, walk forward to the next ':' at the same paren depth.
+    Depth := 0;
+    I := AIdentPos;
+    while I <= N do
+    begin
+      case ALine[I] of
+        '(': Inc(Depth);
+        ')': if Depth > 0 then Dec(Depth) else Exit;
+        ':': if Depth = 0 then Break;
+      end;
+      Inc(I);
+    end;
+    if (I > N) or (ALine[I] <> ':') then Exit;
+    Inc(I); // skip ':'
+    while (I <= N) and CharInSet(ALine[I], [' ', #9]) do Inc(I);
+    if (I > N) or not IsIdStart(ALine[I]) then Exit;
+    TypeStart := I;
+    // Read type ident, allow dotted names and angle-bracket generics.
+    while I <= N do
+    begin
+      if IsIdCh(ALine[I]) or (ALine[I] = '.') then
+        Inc(I)
+      else if ALine[I] = '<' then
+      begin
+        // Skip to matching '>'.
+        var GD := 1;
+        Inc(I);
+        while (I <= N) and (GD > 0) do
+        begin
+          if ALine[I] = '<' then Inc(GD)
+          else if ALine[I] = '>' then Dec(GD);
+          Inc(I);
+        end;
+      end
+      else
+        Break;
+    end;
+    TypeEnd := I - 1;
+    if TypeEnd >= TypeStart then
+      Result := Copy(ALine, TypeStart, TypeEnd - TypeStart + 1);
+  end;
+
+var
+  Trimmed, Upper: string;
+  IdentPos: Integer;
+  ParamType: string;
+begin
+  Result := '';
+  Trimmed := TrimLeft(ADeclLine);
+  Upper := UpperCase(Trimmed);
+
+  // 1) Method header? Then the ident is (likely) a parameter -> extract
+  //    its type from the parameter list.
+  if Upper.StartsWith('PROCEDURE ') or Upper.StartsWith('FUNCTION ')
+    or Upper.StartsWith('CONSTRUCTOR ') or Upper.StartsWith('DESTRUCTOR ')
+    or Upper.StartsWith('CLASS PROCEDURE ') or Upper.StartsWith('CLASS FUNCTION ') then
+  begin
+    if FindIdent(ADeclLine, AIdent, IdentPos) then
+    begin
+      // If the identifier is INSIDE the param-list parens, treat as param.
+      // Otherwise it's the method name itself -> classify as procedure.
+      var OpenParen := Pos('(', ADeclLine);
+      if (OpenParen > 0) and (IdentPos > OpenParen) then
+      begin
+        ParamType := ExtractParamTypeAt(ADeclLine, IdentPos);
+        if ParamType <> '' then
+          Exit(Format('var %s: %s', [AIdent, ParamType]));
+      end;
+      Exit(Format('procedure %s', [AIdent]));
+    end;
+    Exit;
+  end;
+
+  // 2) Type declaration line: "TFoo = class(...)" / "TFoo = interface" /
+  //    "TFoo = record" / "TFoo = type ...".
+  if Pos(' = CLASS', Upper) > 0 then Exit(Format('type %s = class', [AIdent]));
+  if Pos(' = INTERFACE', Upper) > 0 then Exit(Format('type %s = interface', [AIdent]));
+  if Pos(' = RECORD', Upper) > 0 then Exit(Format('type %s = record', [AIdent]));
+
+  // 3) Property declaration: "property Foo: TBar read ... write ...;"
+  if Upper.StartsWith('PROPERTY ') then
+  begin
+    if FindIdent(ADeclLine, AIdent, IdentPos) then
+    begin
+      ParamType := ExtractParamTypeAt(ADeclLine, IdentPos);
+      if ParamType <> '' then
+        Exit(Format('property %s: %s', [AIdent, ParamType]));
+      Exit(Format('property %s', [AIdent]));
+    end;
+    Exit;
+  end;
+
+  // 4) Plain var / const / field declaration: "Foo: TBar;" or
+  //    "Foo: TBar = value;" or after a 'var'/'const' keyword on its own.
+  if FindIdent(ADeclLine, AIdent, IdentPos) then
+  begin
+    ParamType := ExtractParamTypeAt(ADeclLine, IdentPos);
+    if ParamType <> '' then
+    begin
+      if Upper.StartsWith('CONST ') or (Pos('CONST ', Upper) = 1) then
+        Exit(Format('const %s: %s', [AIdent, ParamType]));
+      Exit(Format('var %s: %s', [AIdent, ParamType]));
+    end;
+  end;
+end;
+
 class function TExtractMethodHelper.IsPascalKeyword(const AUpper: string): Boolean;
 const
   Keywords: array[0..64] of string = (
@@ -1172,21 +1330,48 @@ begin
     FDialog.SetStatus('Saving files...'); TEditorHelper.SaveAllFiles;
     FDialog.SetStatus('Connecting to LSP...');
     Client := TLspManager.Instance.GetClient(RP, TEditorHelper.GetCurrentProjectDproj, DJ);
-    FDialog.SetStatus('Refreshing source file...'); Client.RefreshDocument(AInfo.FileName); Sleep(500);
+    FDialog.SetStatus('Refreshing source file...'); Client.RefreshDocument(AInfo.FileName);
 
-    // LSP-Warmup: Wait until ready (first request often returns "Request removed")
-    FDialog.SetStatus('Waiting for LSP readiness...');
-    for var Retry := 1 to 15 do
+    // Aktive Analyse-Anfrage: DelphiLSP im 'controller'-Mode antwortet
+    // 'Internal server error' auf Hover-Requests fuer Files, die er
+    // noch nicht analysiert hat. documentSymbol ist eine synchrone
+    // Anfrage, die LSP zwingt, das File zu parsen. Wir verwerfen das
+    // Ergebnis - es geht uns nur darum, dass LSP danach hover-bereit
+    // ist. Timeout 60 s.
+    FDialog.SetStatus('Waiting for LSP to analyse file...');
+    try
+      var SymArr := Client.GetDocumentSymbols(AInfo.FileName, 60000);
+      if SymArr <> nil then SymArr.Free;
+    except
+      // Timeout / Server-Fehler: wir versuchen trotzdem weiterzumachen
+    end;
+    // Zusaetzlich: kurz auf publishDiagnostics warten. DelphiLSP
+    // pusht die direkt nach der Datei-Analyse - sobald die da sind,
+    // ist Hover stabil.
+    Client.WaitForDiagnostics(AInfo.FileName, 15000);
+
+    // Sekundaerer Warmup-Test gegen "Server not running" / sporadische
+    // Race-Conditions: bis zu 5 Hover-Versuche mit Retry, diesmal
+    // gegen ein Position, das WIRKLICH ein Identifier ist (nicht col
+    // 0). Wir nehmen den allerersten Token nach Methodenkopf.
+    FDialog.SetStatus('Verifying LSP readiness...');
+    for var Retry := 1 to 5 do
     begin
       try
-        var H := Client.GetHover(AInfo.FileName, AInfo.StartLine-1, 0);
-        // Any response (even empty) without exception means the LSP is ready
+        // Probe: hover am ersten Identifier-aehnlichen Char in der
+        // Block-Startzeile. Wenn das durchgeht (auch leer), ist LSP
+        // wirklich bereit.
+        var ProbeLine := AInfo.StartLine - 1;
+        var ProbeCol  := 2; // Nahe Anfang - meistens auf einem
+                             // Identifier oder einer ID-Fortsetzung.
+        var H := Client.GetHover(AInfo.FileName, ProbeLine, ProbeCol);
+        if H = '' then ; // ignorieren
         Break;
       except
         on E: Exception do
         begin
-          FDialog.SetStatus(Format('LSP warmup %d/15: %s', [Retry, E.Message]));
-          Sleep(500);
+          FDialog.SetStatus(Format('LSP warmup %d/5: %s', [Retry, E.Message]));
+          Sleep(1000);
         end;
       end;
     end;

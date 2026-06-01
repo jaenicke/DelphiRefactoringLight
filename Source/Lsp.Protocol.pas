@@ -259,7 +259,9 @@ end;
 class function TLspProtocol.BuildClientCapabilities: TJSONObject;
 var
   TextDoc, Rename, Sync, Workspace, WsEdit, PubDiag, TagSupport: TJSONObject;
-  TagValueSet: TJSONArray;
+  Hover, Completion, CompletionItem, SignatureHelp, SigInfo: TJSONObject;
+  DocSymbol, References, DocHighlight, Definition, Implementation_: TJSONObject;
+  TagValueSet, ContentFormat, DocFormat: TJSONArray;
 begin
   Rename := TJSONObject.Create;
   Rename.AddPair('prepareSupport', TJSONBool.Create(True));
@@ -269,10 +271,8 @@ begin
   Sync.AddPair('willSave', TJSONBool.Create(False));
   Sync.AddPair('willSaveWaitUntil', TJSONBool.Create(False));
 
-  // Wir interessieren uns explizit fuer Diagnostic-Tags - DelphiLSP
-  // markiert inaktive {$IFDEF}-Bereiche mit tag=1 ("Unnecessary") und
-  // Source="DelphiLSP", Code="H2655"/"H2656". Ohne diese Capability
-  // verschluckt der Server die Tags.
+  // publishDiagnostics + Tags - braucht DelphiLSP fuer inaktive
+  // {$IFDEF}-Bloecke (tag=1 Unnecessary).
   TagValueSet := TJSONArray.Create;
   TagValueSet.Add(1); // Unnecessary
   TagValueSet.Add(2); // Deprecated
@@ -282,10 +282,68 @@ begin
   PubDiag.AddPair('relatedInformation', TJSONBool.Create(True));
   PubDiag.AddPair('tagSupport', TagSupport);
 
+  // WICHTIG: DelphiLSP antwortet auf Anfragen NUR, wenn der Client
+  // die entsprechende Capability in seinen clientCapabilities
+  // deklariert hat. Konkret: ohne explizite 'hover'-Deklaration mit
+  // contentFormat returnt der Server -32603 "Internal server error"
+  // auf jeden Hover-Request - statt z.B. 'method not supported'. Die
+  // IDE-Implementierung sendet immer das volle Set; wir machen es
+  // genauso.
+  ContentFormat := TJSONArray.Create;
+  ContentFormat.Add('plaintext');
+  Hover := TJSONObject.Create;
+  Hover.AddPair('dynamicRegistration', TJSONBool.Create(False));
+  Hover.AddPair('contentFormat', ContentFormat);
+
+  DocFormat := TJSONArray.Create;
+  DocFormat.Add('plaintext');
+  CompletionItem := TJSONObject.Create;
+  CompletionItem.AddPair('snippetSupport', TJSONBool.Create(False));
+  CompletionItem.AddPair('commitCharactersSupport', TJSONBool.Create(True));
+  CompletionItem.AddPair('documentationFormat', DocFormat);
+  CompletionItem.AddPair('deprecatedSupport', TJSONBool.Create(True));
+  CompletionItem.AddPair('preselectSupport', TJSONBool.Create(True));
+  Completion := TJSONObject.Create;
+  Completion.AddPair('dynamicRegistration', TJSONBool.Create(False));
+  Completion.AddPair('contextSupport', TJSONBool.Create(False));
+  Completion.AddPair('completionItem', CompletionItem);
+
+  SigInfo := TJSONObject.Create;
+  var SigDocFormat: TJSONArray := TJSONArray.Create;
+  SigDocFormat.Add('plaintext');
+  SigInfo.AddPair('documentationFormat', SigDocFormat);
+  SignatureHelp := TJSONObject.Create;
+  SignatureHelp.AddPair('dynamicRegistration', TJSONBool.Create(False));
+  SignatureHelp.AddPair('signatureInformation', SigInfo);
+
+  DocSymbol := TJSONObject.Create;
+  DocSymbol.AddPair('dynamicRegistration', TJSONBool.Create(False));
+  DocSymbol.AddPair('hierarchicalDocumentSymbolSupport', TJSONBool.Create(True));
+
+  References := TJSONObject.Create;
+  References.AddPair('dynamicRegistration', TJSONBool.Create(False));
+
+  DocHighlight := TJSONObject.Create;
+  DocHighlight.AddPair('dynamicRegistration', TJSONBool.Create(False));
+
+  Definition := TJSONObject.Create;
+  Definition.AddPair('dynamicRegistration', TJSONBool.Create(False));
+
+  Implementation_ := TJSONObject.Create;
+  Implementation_.AddPair('dynamicRegistration', TJSONBool.Create(False));
+
   TextDoc := TJSONObject.Create;
   TextDoc.AddPair('rename', Rename);
   TextDoc.AddPair('synchronization', Sync);
   TextDoc.AddPair('publishDiagnostics', PubDiag);
+  TextDoc.AddPair('hover', Hover);
+  TextDoc.AddPair('completion', Completion);
+  TextDoc.AddPair('signatureHelp', SignatureHelp);
+  TextDoc.AddPair('documentSymbol', DocSymbol);
+  TextDoc.AddPair('references', References);
+  TextDoc.AddPair('documentHighlight', DocHighlight);
+  TextDoc.AddPair('definition', Definition);
+  TextDoc.AddPair('implementation', Implementation_);
 
   WsEdit := TJSONObject.Create;
   WsEdit.AddPair('documentChanges', TJSONBool.Create(True));
@@ -301,15 +359,16 @@ end;
 class function TLspProtocol.BuildInitializationOptions(const ADprojPath: string; const ASearchPath: string = ''): TJSONObject;
 begin
   Result := TJSONObject.Create;
-  // Schalte DelphiLSP in den "controller"-Modus - das ist was die
-  // Delphi-IDE selbst tut, und nur in diesem Modus pusht DelphiLSP
-  // publishDiagnostics fuer inaktive {$IFDEF}-Bereiche und liefert
-  // verlaesslich GotoDef-Ergebnisse fuer lokale Identifier.
-  Result.AddPair('serverType', 'controller');
-  Result.AddPair('agentCount', TJSONNumber.Create(2));
-  Result.AddPair('returnDccFlags', TJSONBool.Create(True));
-  Result.AddPair('returnHoverModel', TJSONBool.Create(True));
-  Result.AddPair('storeProjectSettings', TJSONBool.Create(True));
+  // BEWUSST KEIN serverType=controller. Empirisch verifiziert
+  // (TestHoverModes.dpr in C:\Beispiele\DelphiLspRename): in
+  // controller-Mode antwortet DelphiLSP konsistent mit
+  //   -32603 "Internal server error"
+  // auf JEDEN textDocument/hover-Request bei einem Identifier. Das
+  // bricht Extract Method (Klassifizierung der Identifier per Hover)
+  // und alle Wizards die Hover brauchen.
+  // Trade-off: ohne controller-Mode bekommen wir keine
+  // publishDiagnostics fuer inaktive {$IFDEF}-Bereiche - das wird
+  // ueber andere Mechanismen (text-basierter $IFDEF-Scanner) ersetzt.
   // ADprojPath/ASearchPath sind in der eigentlichen Konfiguration via
   // workspace/didChangeConfiguration drin - hier nicht relevant.
   if ADprojPath = '' then ;

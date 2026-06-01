@@ -473,6 +473,8 @@ begin
         Result := 'ok';
     end;
   end
+  else if wriLspNoDiagnostics in AItem.Issues then
+    Result := 'LSP no diagnostics - skipped (dead-code unknown)'
   else if wriInactiveRegion in AItem.Issues then
     Result := 'inactive $IFDEF region - skipped'
   else if wriMultipleTargets in AItem.Issues then

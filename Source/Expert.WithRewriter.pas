@@ -74,7 +74,13 @@ type
     ///  region (DelphiLSP-Diagnostic H2655/H2656, tag=Unnecessary).
     ///  The code is dead for the current build configuration; rewriting
     ///  it would be misleading. Left untouched.</summary>
-    wriInactiveRegion
+    wriInactiveRegion,
+    /// <summary>DelphiLSP has not delivered any publishDiagnostics for
+    ///  this file within the wait window, so we cannot tell whether the
+    ///  with-statement sits inside an inactive {$IFDEF}-region. To be
+    ///  safe we leave the occurrence untouched - rewriting code that
+    ///  might be dead would silently produce wrong output.</summary>
+    wriLspNoDiagnostics
   );
 
   /// <summary>Caller-controlled toggles for the rewriter.</summary>

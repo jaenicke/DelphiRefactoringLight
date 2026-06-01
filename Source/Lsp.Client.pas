@@ -679,10 +679,36 @@ begin
 end;
 
 procedure TLspClient.RefreshDocument(const AFilePath: string);
+var
+  Params, TextDocObj: TJSONObject;
+  ChangesArr: TJSONArray;
+  ChangeObj: TJSONObject;
+  Content: string;
+  AbsPath: string;
 begin
   CloseDocument(AFilePath);
   Sleep(50);
   OpenDocument(AFilePath);
+  // Im Anschluss noch ein didChange mit identischem Inhalt schicken.
+  // DelphiLSP im controller-Modus beantwortet textDocument/hover sonst
+  // konsistent mit -32603 "Internal server error" - die echte Delphi-
+  // IDE schickt vor dem ersten Hover IMMER ein didChange, und nur in
+  // diesem Modus wird der File-State so weit aufgesetzt, dass Hover
+  // funktioniert. Identischer Text + Version 2 ist ein No-Op
+  // semantisch, aber bringt den Server in den erwarteten Zustand.
+  AbsPath := ExpandFileName(AFilePath);
+  Content := Delphi.FileEncoding.ReadDelphiFile(AbsPath);
+  TextDocObj := TJSONObject.Create;
+  TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
+  TextDocObj.AddPair('version', TJSONNumber.Create(2));
+  ChangeObj := TJSONObject.Create;
+  ChangeObj.AddPair('text', Content);
+  ChangesArr := TJSONArray.Create;
+  ChangesArr.AddElement(ChangeObj);
+  Params := TJSONObject.Create;
+  Params.AddPair('textDocument', TextDocObj);
+  Params.AddPair('contentChanges', ChangesArr);
+  SendNotification('textDocument/didChange', Params);
 end;
 
 function TLspClient.SupportsPrepareRename: Boolean;

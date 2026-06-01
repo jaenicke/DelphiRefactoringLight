@@ -779,8 +779,31 @@ begin
             Client.WaitForDiagnostics(ScanFiles[FileIdx], 15000);
           end;
 
+          // Wenn DelphiLSP fuer dieses File ueberhaupt keine
+          // publishDiagnostics geliefert hat, koennen wir nicht
+          // sicherstellen, dass die with-Statements nicht in einem
+          // inaktiven {$IFDEF}/{$IF defined(...)}-Block stehen. Eigene
+          // Textanalyse waere unzuverlaessig (verschachtelte $IF,
+          // $IF defined, $IFOPT, projektspezifische Defines, ...).
+          // Wir markieren in dem Fall alle Occurrences als skipped.
+          var FileHasDiagnostics: Boolean := Client.HasReceivedDiagnostics(ScanFiles[FileIdx]);
+
           for Occ in Occs do
           begin
+            if not FileHasDiagnostics then
+            begin
+              Rewrite := Default(TWithRewriteResult);
+              Rewrite.FileName := ScanFiles[FileIdx];
+              Rewrite.Occurrence := Occ;
+              Include(Rewrite.Issues, wriLspNoDiagnostics);
+              Rewrite.OriginalText :=
+                'DelphiLSP delivered no diagnostics for this file - '
+                + 'cannot determine whether the with-statement is inside '
+                + 'an inactive {$IFDEF}/{$IF defined(...)} region. '
+                + 'Skipped to avoid rewriting potentially dead code.';
+              Results.Add(Rewrite);
+              Continue;
+            end;
             // Skip occurrences inside inactive {$IFDEF}-regions:
             // DelphiLSP pushes those as diagnostics with code H2655/H2656
             // and tag=Unnecessary. We pre-populate the LSP-client's

@@ -54,8 +54,7 @@ type
 implementation
 
 uses
-  System.IOUtils, Vcl.Graphics,
-  Expert.IdeThemes;
+  System.IOUtils, Vcl.Graphics, Expert.DialogHelper, Expert.IdeThemes;
 
 constructor TExtractMethodDialog.CreateDialog(AOwner: TComponent; const ADefaultName: string);
 begin
@@ -164,6 +163,8 @@ begin
 
   Expert.IdeThemes.EnableThemes(Self);
   FIndex := TProjectTextIndex.Create;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 destructor TExtractMethodDialog.Destroy;
@@ -290,5 +291,8 @@ begin
   else
     Screen.Cursor := crDefault;
 end;
+
+initialization
+  RegisterDialogClass(TExtractMethodDialog);
 
 end.

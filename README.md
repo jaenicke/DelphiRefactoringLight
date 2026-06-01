@@ -1,18 +1,22 @@
 # Delphi Refactoring Light
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide seven refactoring features directly in the editor:
+A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide nine refactoring features directly in the editor:
 
-| Shortcut           | Feature                                                        |
-|--------------------|----------------------------------------------------------------|
-| `Ctrl+Alt+Shift+R`     | **Rename** &mdash; rename an identifier project-wide, semantically (including interface implementations) |
-| `Ctrl+Alt+Shift+U`     | **Find References** &mdash; list every occurrence of an identifier |
-| `Ctrl+Alt+Shift+I`     | **Find Implementations** &mdash; list all class implementations of an interface/virtual method |
-| `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP          |
-| `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method |
-| `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches |
-| `Ctrl+Alt+Shift+W`     | **Remove with (project-wide)** &mdash; rewrite every `with` statement in the project as inline-vars + qualified accesses |
+| Shortcut               | Feature                                                                                                                                              |
+|------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Ctrl+Alt+Shift+R`     | **Rename** &mdash; rename an identifier project-wide, semantically (including interface implementations)                                             |
+| `Ctrl+Alt+Shift+U`     | **Find References** &mdash; list every occurrence of an identifier                                                                                   |
+| `Ctrl+Alt+Shift+F`     | **Find Unit References (project-wide)** &mdash; list every file in the project that imports the current unit, with each identifier of that unit it actually uses |
+| `Ctrl+Alt+Shift+I`     | **Find Implementations** &mdash; list all class implementations of an interface/virtual method                                                       |
+| `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP                                                                                                |
+| `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method                                                                                 |
+| `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
+| `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
+| `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
 
-Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, and `textDocument/completion`. DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
+Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/completion`, and the **`publishDiagnostics`** push notifications (used to detect inactive `{$IFDEF}` regions &mdash; DelphiLSP marks them with diagnostic code `H2655`/`H2656` and tag `Unnecessary`). DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
+
+The package starts its own DelphiLSP session in `serverType: controller` mode (the same mode the IDE itself uses) so that local identifiers, inherited members and inactive-region diagnostics all resolve reliably. By default the LSP is **pre-warmed automatically when a project opens**, so the first refactoring action does not have to pay the cold-start cost; this can be turned off in *Tools &rarr; Options &rarr; Refactoring Light*. Every refactoring dialog shows the current LSP warm-up status in its title bar.
 
 In the last three weeks I tested with big projects and used it myself in real life. A few fixes were neccessary, but now it should be a good help though it might not work in all cases. Important is, that you can always use undo, because changes are applied in a way to make this work.
 
@@ -34,6 +38,14 @@ In the last three weeks I tested with big projects and used it myself in real li
 - If that returns nothing (or the server does not support it), falls back to the same strategy as Rename: project-wide text search plus per-candidate verification via `textDocument/definition`.
 - Shows the results in a dialog (file, line, column, line preview).
 - **Double-click** or **Enter** jumps to the location.
+
+### Find Unit References (`Ctrl+Alt+Shift+F`)
+- Works on the **active unit** &mdash; no editor cursor needed.
+- Step 1 (textual): scans every project source file's `uses` clauses (interface + implementation) for the current unit's name. Files with a `uses` entry but no actual symbol usage get a single "dead reference" row.
+- Step 2 (LSP): queries `textDocument/documentSymbol` for the unit, builds the set of exported identifier names, then scans every using-file for matching tokens (comment- and string-aware).
+- Step 3 (LSP verify): for every candidate it asks `textDocument/definition` and only keeps hits that resolve back into the original unit. Common names like `Create` / `Free` that happen to live in another unit get filtered out.
+- Result list: one row per occurrence with file, line, column, identifier and line preview; dead-reference rows show "&lt;unit&gt; is listed in the uses clause but no symbols of it are used here".
+- **Double-click** / **Enter** jumps to the location.
 
 ### Find Implementations (`Ctrl+Alt+Shift+I`)
 - Place the cursor on an **interface method declaration** or on a **call** of an interface/virtual method.
@@ -60,19 +72,37 @@ In the last three weeks I tested with big projects and used it myself in real li
 - v1 is diagnostic only &mdash; no automatic rewriting; review and fix the mismatches yourself.
 
 ### Remove with (`Ctrl+Alt+Shift+W`)
-- Operates **project-wide** &mdash; no editor cursor needed. Resolves the project source files, saves any unsaved editor buffers, starts/reuses DelphiLSP and ensures the project is indexed.
-- Scans every `*.pas` / `*.dpr` / `*.dpk` for `with ... do` statements (single- and multi-target, with full block / single-statement bodies).
+- The editor context menu exposes the action as a submenu with four scopes:
+  - **At cursor only** &mdash; just the `with`-statement that encloses the caret. Default for the global shortcut, since it's the fastest single-edit case. If no `with` encloses the caret, falls back to the current unit.
+  - **In current unit** &mdash; the active editor file.
+  - **In selected units...** &mdash; opens a multi-select list of all project source files; scan only the chosen ones.
+  - **In whole project...** &mdash; project-wide scan. On very large code bases (10k+ files) this can take many minutes; that's why it now requires an explicit submenu pick instead of being the default action.
+- Saves any unsaved editor buffers, starts / reuses DelphiLSP and ensures the chosen file set is indexed. Per-file: triggers `RefreshDocument` so DelphiLSP analyses the file with priority, then waits up to 90 s (30 s per file in project-wide scope) for its inactive-region diagnostics. The dialog title bar reflects the active scope and the current LSP warm-up status.
+- Scans every `*.pas` / `*.dpr` / `*.dpk` in the chosen scope for `with ... do` statements:
+  - **`begin..end`** bodies &mdash; full block.
+  - **Single statement** bodies &mdash; one expression terminated by `;`.
+  - **Compound bodies** &mdash; `try..end` / `case..end` / `asm..end`. The block is kept verbatim and var-decls are emitted right above it (no redundant `begin..end` wrapping). Body indentation is left-shifted by the difference between the original opener column and the new with-keyword column.
 - For each occurrence, hoists the with-target(s) into Pascal **inline variables** at the with-statement location (Delphi 10.3+ syntax) and rewrites every body identifier with the appropriate qualifying prefix:
-  - Single-letter targets (`a`, `x`) keep the prefix directly &mdash; no temp variable.
-  - Dotted paths (`Self.FFoo.Bar`) become an `L<LastSegment>` inline-var (with leading `F` stripped, e.g. `LBar`).
-  - Function calls / index expressions become `__withN`, so the original side-effect runs exactly once.
-  - Cross-target name collisions and collisions with body-identifiers fall back to `__withN`.
-- Body identifiers are mapped to the right target via two strategies, in order:
-  1. **Direct member parsing** of each target's class/record body (rightmost-target-wins, matching Pascal `with` semantics). This is independent of LSP.
-  2. **`textDocument/definition`** as fallback for inherited members (e.g. `TButton.Caption` is declared in `TControl`, not in `TButton`'s own body &mdash; LSP handles that case).
+  - Side-effect-free single identifiers (`FParser`, `Self.FFoo`, `p^`, `Self.FNode^`) keep the prefix directly &mdash; no temp variable.
+  - Multi-segment dotted paths and any expression with parens / brackets / `as`-cast are forced into a temp var so each side-effect runs exactly once.
+  - Temp-var naming uses the LSP-resolved type when known (e.g. `Form.GetBitmap()` &rarr; `LBitmap`, `TRegIniFile.Create(...)` &rarr; `LRegIniFile`); leading `F` (field convention) and `T` (type convention) are stripped. A textual fallback ("walk back to the last identifier in the expression") covers cases where LSP cannot help. Final-fallback name is `LWithN` (1-based). Names never start with `_` &mdash; the Delphi style guide prefers leading capital letters.
+  - Cross-target collisions and collisions with body-identifiers append the target index to disambiguate (`LAdd` / `LAdd2`).
+- Target-type resolution chain &mdash; on top of the basic `textDocument/definition` query, the engine walks several Pascal-specific shapes:
+  1. **Pointer / simple aliases** (`tLiFo = _L_List;`, `_L_List = ^_L_List_Node;`) are hopped through (max 4 hops) with a text-fallback for the DelphiLSP self-reference quirk.
+  2. **Constructor targets** (`with TFoo.Create(...) do`) are recognised by parsing `constructor TFoo.Create(...)` lines &mdash; the class qualifier is the implicit return type.
+  3. **`as`-cast targets** (`with Comp as TWinControl do`) follow LSP to the class declaration directly.
+  4. **Inheritance walk** &mdash; up to 6 ancestors via `class(Parent)` so inherited members match (e.g. `RowCount` on a local `TStringGrid` descendant resolves against `Vcl.Grids.TStringGrid`).
+  5. **Parent-unit hints** &mdash; when LSP self-refs on a `class(UnitX.TBar)` parent, the unit qualifier is stored as a fallback hint: any body-ref whose LSP result lands in a file with that name segment matches.
+  6. **Pre-compiled types** (e.g. `TDockableForm` from `DockForm.dcu` in `DesignIde.bpl`, no `.pas` shipped) &mdash; resolved partially via the constructor / decl-line heuristic, temp var is still emitted; body refs the engine cannot prove stay unqualified for manual review.
+- Body identifiers are mapped to the right target via four strategies, in order:
+  1. **Direct member parsing** of each target's class/record body (rightmost-target-wins, matching Pascal `with` semantics).
+  2. **`textDocument/definition`** as fallback for inherited members (in the direct class range or any ancestor's range).
+  3. **`DeclFile` soft match** for cases where the type's full source is unavailable but the decl file is known.
+  4. **`ParentUnitHints`** (basename of the body-ref's LSP result vs the parent's unit qualifier).
+- **Inactive `{$IFDEF}`-region detection**: DelphiLSP pushes `publishDiagnostics` with code `H2655`/`H2656` and tag `Unnecessary` for inactive code. The wizard waits per-file for the diagnostics, then skips any `with`-statement inside an inactive region with status "inactive $IFDEF region &mdash; skipped".
 - Review dialog with two tabs:
   - **Diff** &mdash; before / after side by side, per occurrence.
-  - **Debug** &mdash; per-target type info (resolved type file, class line range, parsed direct members, chosen inline-var name, qualify-prefix) and per-body-identifier resolution (LSP result, match source, applied prefix). Useful for verifying the rewrite is sound before applying.
+  - **Debug** &mdash; per-target type info (resolved type file, class line range, parsed direct members, chosen inline-var name, qualify-prefix, ancestor list, parent hints, resolve note) and per-body-identifier resolution (LSP result, match source, applied prefix). Useful for verifying the rewrite is sound before applying.
 - **Apply selected**, **Apply all** or **Close**. Applied edits go through `IOTAEditWriter` so they are individually undoable in the IDE.
 - v1 limitations: nested `with`-statements inside the body are flagged as multi-target / manual review.
 
@@ -86,6 +116,23 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Parameters are prefixed with `A` in the new method signature and body (Delphi convention, e.g. `ACertFilename` instead of `CertFilename`); the call site keeps the original variable names.
 - Generates the new method (class-qualified if applicable), replaces the selected block with the call, and removes the now-unused `var` entries in the original method.
 - Refreshes the form and class structure in the IDE (`Module.Refresh(False)`, `FormEditor.MarkModified`).
+
+### Move identifier to other unit (`Ctrl+Shift+M`)
+- Place the cursor on a top-level symbol to move: **type / class / interface / record**, **routine** (`function`/`procedure`), **constant**, **variable**, or **resource string**. For classes, the move includes the class declaration *and* every method-implementation block in the same unit (matched by `TClass.Method` qualifier; overloads with the same name move together).
+- A modal dialog lists the project's other `.pas` files; pick the target unit. Existing units only &mdash; new ones are not created.
+- The engine performs the move:
+  1. **Locate** the declaration range (interface section, including any preceding `type` / `var` / `const` keyword as appropriate) and the impl block range(s).
+  2. **Collect required uses**: for each identifier referenced inside the moved range it asks `textDocument/definition` and records the declaring file's unit name. Identifiers that resolve to `System` (built-ins like `Length`, `IntToStr`, ...) are filtered out. Identifiers whose declaration falls **inside the moved range itself** (local vars, parameters, the symbol's own type members) are also filtered.
+  3. **Insert** the declaration into the target's interface section (just before `implementation`) with one blank line of padding on each side; insert the impl block(s) just before the final `end.`. A section header (`type` / `var` / `const` / `resourcestring`) is prepended automatically if needed.
+  4. **Add required `uses`** to the target: interface-side uses for identifiers referenced from the moved declaration (visible-surface types), implementation-side uses for identifiers referenced only from the impl body. Avoids double-imports.
+  5. **Remove** the declaration and impl block(s) from the source. The cleanup pass strips orphan `{ TClassName }` class-marker comments above moved method blocks, drops now-empty section headers (`type`/`var`/`const`/`resourcestring` with no body below them), and collapses runs of blank lines.
+  6. **Update consumer `uses`**: every other project file that already referenced the moved symbol via the old unit name gets the target unit added to its interface uses. If the source unit is no longer referenced from that consumer at all, it is removed.
+- Source-unit `uses` are intentionally left intact (over-imports are harmless; the engine does not attempt to prove unused-uses safety here).
+- Edits are applied via `IOTAEditWriter` and individually undoable.
+- v1 limitations:
+  - No new-unit creation.
+  - Cross-unit qualified references (`SourceUnit.X`) in consumers are not rewritten &mdash; only the `uses` clause is adjusted.
+  - The cleanup is heuristic; review the diff before committing.
 
 ## Requirements
 
@@ -153,11 +200,21 @@ DelphiRefactoringLight/
 |   |-- Expert.WithRewriter.pas              # Per-occurrence inline-var + prefix rewrite
 |   |-- Expert.WithRefactorDialog.pas        # Review dialog (Diff / Debug tabs)
 |   |-- Expert.WithRefactorWizard.pas        # Project-wide remove-with orchestrator
+|   |-- Expert.UnitReferencesWizard.pas      # Find-unit-references wizard
+|   |-- Expert.UnitReferencesDialog.pas      # Find-unit-references dialog
+|   |-- Expert.UnitRenameWatcher.pas         # Catches IDE unit-renames -> rename wizard
+|   |-- Expert.MoveToUnit.pas                # Move-identifier engine
+|   |-- Expert.MoveToUnitDialog.pas          # Target-unit picker dialog
+|   |-- Expert.MoveToUnitWizard.pas          # Move-identifier wizard
+|   |-- Expert.LspPrewarmer.pas              # IOTAIDENotifier: pre-warms LSP on project open
+|   |-- Expert.PluginSettings.pas            # Plugin settings (registry-backed)
+|   |-- Expert.OptionsFrame.pas / .dfm       # Tools > Options > Refactoring Light page
+|   |-- Expert.OptionsPage.pas               # ToolsAPI options-page registration
 |   |-- Expert.ContextMenu.pas               # "Refactoring Light" submenu in the editor popup
 |   |-- Expert.Shortcuts.pas                 # User-configurable shortcut storage
 |   |-- Expert.KeyBinding.pas                # Shortcut registration
 |   |-- Expert.EditorHelper.pas              # ToolsAPI wrappers
-|   |-- Expert.LspManager.pas                # LSP client singleton
+|   |-- Expert.LspManager.pas                # LSP client singleton + project indexer
 |   |-- Expert.IdeCodeInsight.pas            # IDE-internal code insight wrapper
 |   |-- Expert.RestartHint.pas               # PID-based restart hint
 |   |-- Lsp.Client.pas                       # LSP client (asynchronous)
@@ -187,7 +244,11 @@ DelphiRefactoringLight/
 ## Architecture Notes
 
 - **Singleton LSP client** (`TLspManager`): one `DelphiLSP.exe` instance shared across all requests. LSP executable path is resolved from the registry via `IOTAServices.GetBaseRegistryKey`, with a fallback to `GetRootDirectory` and a last-resort hard-coded path.
+- **`serverType: controller` mode**: the package sends the same `initializationOptions` that the IDE itself uses (`serverType: controller`, `agentCount: 2`, ...). This is what unlocks reliable local-identifier resolution and the inactive-region diagnostics; in the default single-process mode DelphiLSP silently degrades both.
 - **Sequential requests**: DelphiLSP does not tolerate parallel requests &mdash; the client uses `BatchSize = 1`.
+- **Project-open LSP pre-warmer** (`TLspPrewarmer`): an `IOTAIDENotifier` listens for `ofnFileOpened` of `.dproj`/`.dpr` files and kicks off a background thread (priority `THREAD_PRIORITY_BELOW_NORMAL`) that calls `EnsureProjectIndexed`. By the time the user triggers their first refactoring, DelphiLSP usually has the project fully analysed. Opt out via *Tools &rarr; Options &rarr; Refactoring Light &rarr; "Pre-warm DelphiLSP ..."*.
+- **Per-file diagnostic wait**: refactoring wizards that depend on diagnostics (currently the *Remove with* wizard, for inactive-region detection) explicitly block until `publishDiagnostics` for the file in question has arrived (up to 30 s timeout per file). Idempotent: files that already have diagnostics return instantly.
+- **Inactive `{$IFDEF}`-region tracking**: `TLspClient` parses every `publishDiagnostics` notification, filters for `source = "DelphiLSP"` + `tag = Unnecessary` (or `code = H2655`/`H2656`), and stores the resulting line-range table per file. `IsLineInactive(file, line)` is a direct lookup.
 - **`IOTAEditWriter`** instead of `InsertText`: byte-precise edits without IDE auto-indent interference.
 - **`Module.Refresh(False)`** instead of `True`: reloads the form module without discarding in-editor changes.
 - **PID-based restart hint**: a marker file in `%TEMP%` stores the process ID; if it matches the current IDE, the package was re-installed during the running session and a restart hint is shown.

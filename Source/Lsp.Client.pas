@@ -58,10 +58,20 @@ type
     FOnLog: TLspLogEvent;
     FVerbose: Boolean;
     FServerCapabilities: TJSONObject;
+    /// <summary>Map: uppercase absolute file path -> array of inactive
+    ///  ranges. Populated by HandlePublishDiagnostics from DelphiLSP
+    ///  diagnostics with code 'H2655'/'H2656' and tag=1.</summary>
+    FInactiveRanges: TObjectDictionary<string, TList<TLspRange>>;
+    FInactiveRangesLock: TCriticalSection;
+    FDiagnosticsCount: Integer;
+    /// <summary>Set of uppercase file paths that have received at least
+    ///  one publishDiagnostics notification.</summary>
+    FFilesWithDiagnostics: TDictionary<string, Boolean>;
 
     function NextRequestId: Integer;
     procedure DispatchResponse(AMsg: TJSONObject);
     procedure HandleServerRequest(AMsg: TJSONObject);
+    procedure HandlePublishDiagnostics(AParams: TJSONObject);
     procedure Log(const ADirection, AMethod, ABody: string);
   public
     constructor Create(const ALspExePath: string);
@@ -123,10 +133,40 @@ type
 
     /// <summary>Returns the document's symbol tree (textDocument/documentSymbol).
     ///  Caller owns the returned array and must free it.</summary>
-    function GetDocumentSymbols(const AFilePath: string): TJSONArray;
+    function GetDocumentSymbols(const AFilePath: string;
+      ATimeoutMs: Cardinal = 60000): TJSONArray;
 
     /// <summary>Returns the server capabilities as a JSON string (debugging).</summary>
     function GetServerCapabilities: string;
+
+    /// <summary>Returns the inactive {$IFDEF}-region ranges that DelphiLSP
+    ///  has reported for AFilePath, as 0-based LSP positions. Empty when
+    ///  the server has not yet pushed diagnostics for this file.</summary>
+    function GetInactiveRanges(const AFilePath: string): TArray<TLspRange>;
+
+    /// <summary>True iff the 0-based line ALine lies inside one of the
+    ///  inactive ranges DelphiLSP reported for AFilePath.</summary>
+    function IsLineInactive(const AFilePath: string; ALine: Integer): Boolean;
+
+    /// <summary>Number of textDocument/publishDiagnostics notifications
+    ///  received so far (incl. empty ones). Lets the caller detect that
+    ///  the server actually pushes diagnostics. 0 == controller-mode
+    ///  may not be active or the server hasn't analysed yet.</summary>
+    function GetDiagnosticsCount: Integer;
+
+    /// <summary>Total inactive ranges across all known files.</summary>
+    function GetInactiveRangesTotal: Integer;
+
+    /// <summary>True iff DelphiLSP has pushed at least one
+    ///  publishDiagnostics notification for AFilePath (even if empty).
+    ///  Used to decide whether IsLineInactive is meaningful or still
+    ///  awaiting server analysis.</summary>
+    function HasReceivedDiagnostics(const AFilePath: string): Boolean;
+
+    /// <summary>Blocks until HasReceivedDiagnostics(AFilePath) becomes
+    ///  True or ATimeoutMs elapses. Returns True on success.</summary>
+    function WaitForDiagnostics(const AFilePath: string;
+      ATimeoutMs: Cardinal): Boolean;
 
     /// <summary>Shuts the server down cleanly.</summary>
     procedure Shutdown;
@@ -198,6 +238,9 @@ begin
   FNextId := 0;
   FPending := TObjectDictionary<Integer, TPendingRequest>.Create([doOwnsValues]);
   FPendingLock := TCriticalSection.Create;
+  FInactiveRanges := TObjectDictionary<string, TList<TLspRange>>.Create([doOwnsValues]);
+  FInactiveRangesLock := TCriticalSection.Create;
+  FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
   FProcessHandle := INVALID_HANDLE_VALUE;
   FStdinWrite := INVALID_HANDLE_VALUE;
   FStdoutRead := INVALID_HANDLE_VALUE;
@@ -232,6 +275,9 @@ begin
   FreeAndNil(FServerCapabilities);
   FPending.Free;
   FPendingLock.Free;
+  FInactiveRanges.Free;
+  FInactiveRangesLock.Free;
+  FFilesWithDiagnostics.Free;
   inherited;
 end;
 
@@ -259,6 +305,16 @@ begin
   begin
     var Method := AMsg.GetValue<string>('method', '');
     Log('<--', Method, AMsg.ToJSON);
+    if SameText(Method, 'textDocument/publishDiagnostics') then
+    begin
+      var ParamsObj: TJSONObject;
+      if AMsg.TryGetValue<TJSONObject>('params', ParamsObj) then
+      try
+        HandlePublishDiagnostics(ParamsObj);
+      except
+        // Diagnostic-Parsing-Fehler darf den Reader-Thread nicht killen
+      end;
+    end;
     AMsg.Free;
     Exit;
   end;
@@ -900,7 +956,8 @@ begin
   Result := Response;
 end;
 
-function TLspClient.GetDocumentSymbols(const AFilePath: string): TJSONArray;
+function TLspClient.GetDocumentSymbols(const AFilePath: string;
+  ATimeoutMs: Cardinal): TJSONArray;
 var
   Params, TextDoc: TJSONObject;
   Response: TJSONObject;
@@ -913,7 +970,7 @@ begin
   Params := TJSONObject.Create;
   Params.AddPair('textDocument', TextDoc);
 
-  Response := SendRequest('textDocument/documentSymbol', Params);
+  Response := SendRequest('textDocument/documentSymbol', Params, ATimeoutMs);
   try
     ResultVal := Response.GetValue('result');
     if ResultVal is TJSONArray then
@@ -962,6 +1019,163 @@ begin
   begin
     if WaitForSingleObject(FProcessHandle, 5000) = WAIT_TIMEOUT then
       TerminateProcess(FProcessHandle, 1);
+  end;
+end;
+
+procedure TLspClient.HandlePublishDiagnostics(AParams: TJSONObject);
+// Erwartet das params-Objekt einer textDocument/publishDiagnostics-
+// Notification. Extrahiert alle Diagnostics mit Source='DelphiLSP' und
+// Code in {H2655,H2656} (oder allgemein Tag=1 Unnecessary) als
+// "inactive ranges" und speichert sie pro Datei. Ueberschreibt bei
+// erneutem Diagnostics-Push die alten Werte fuer diese Datei.
+var
+  Uri: string;
+  Path: string;
+  DiagArr: TJSONArray;
+  DiagVal: TJSONValue;
+  DiagObj: TJSONObject;
+  RangeObj, StartObj, EndObj: TJSONObject;
+  Source, Code: string;
+  TagArr: TJSONArray;
+  HasUnnecessaryTag: Boolean;
+  R: TLspRange;
+  List: TList<TLspRange>;
+  UpKey: string;
+begin
+  if AParams = nil then Exit;
+  if not AParams.TryGetValue<string>('uri', Uri) then Exit;
+  if not AParams.TryGetValue<TJSONArray>('diagnostics', DiagArr) then Exit;
+
+  TInterlocked.Increment(FDiagnosticsCount);
+
+  Path := TLspUri.FileUriToPath(Uri);
+  if Path = '' then Exit;
+  UpKey := AnsiUpperCase(Path);
+
+  FInactiveRangesLock.Enter;
+  try
+    FFilesWithDiagnostics.AddOrSetValue(UpKey, True);
+    if FInactiveRanges.TryGetValue(UpKey, List) then
+      List.Clear
+    else
+    begin
+      List := TList<TLspRange>.Create;
+      FInactiveRanges.Add(UpKey, List);
+    end;
+
+    for DiagVal in DiagArr do
+    begin
+      if not (DiagVal is TJSONObject) then Continue;
+      DiagObj := TJSONObject(DiagVal);
+
+      // Match: Source='DelphiLSP' AND (Code in {H2655,H2656} OR tag=1)
+      Source := DiagObj.GetValue<string>('source', '');
+      Code := DiagObj.GetValue<string>('code', '');
+      HasUnnecessaryTag := False;
+      if DiagObj.TryGetValue<TJSONArray>('tags', TagArr) then
+        for var T: TJSONValue in TagArr do
+          if (T is TJSONNumber) and (TJSONNumber(T).AsInt = 1) then
+          begin
+            HasUnnecessaryTag := True;
+            Break;
+          end;
+
+      if not (SameText(Source, 'DelphiLSP')
+              and (HasUnnecessaryTag
+                   or SameText(Code, 'H2655')
+                   or SameText(Code, 'H2656'))) then
+        Continue;
+
+      if not DiagObj.TryGetValue<TJSONObject>('range', RangeObj) then Continue;
+      if not RangeObj.TryGetValue<TJSONObject>('start', StartObj) then Continue;
+      if not RangeObj.TryGetValue<TJSONObject>('end', EndObj) then Continue;
+      R.Start.Line       := StartObj.GetValue<Integer>('line', -1);
+      R.Start.Character  := StartObj.GetValue<Integer>('character', 0);
+      R.End_.Line        := EndObj.GetValue<Integer>('line', -1);
+      R.End_.Character   := EndObj.GetValue<Integer>('character', 0);
+      if (R.Start.Line < 0) or (R.End_.Line < 0) then Continue;
+      List.Add(R);
+    end;
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.GetInactiveRanges(const AFilePath: string): TArray<TLspRange>;
+var
+  UpKey: string;
+  List: TList<TLspRange>;
+begin
+  SetLength(Result, 0);
+  if AFilePath = '' then Exit;
+  UpKey := AnsiUpperCase(ExpandFileName(AFilePath));
+  FInactiveRangesLock.Enter;
+  try
+    if FInactiveRanges.TryGetValue(UpKey, List) then
+      Result := List.ToArray;
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.IsLineInactive(const AFilePath: string; ALine: Integer): Boolean;
+var
+  Ranges: TArray<TLspRange>;
+begin
+  Result := False;
+  Ranges := GetInactiveRanges(AFilePath);
+  for var R in Ranges do
+    if (ALine >= R.Start.Line) and (ALine <= R.End_.Line) then
+      Exit(True);
+end;
+
+function TLspClient.GetDiagnosticsCount: Integer;
+begin
+  Result := FDiagnosticsCount;
+end;
+
+function TLspClient.GetInactiveRangesTotal: Integer;
+var
+  L: TList<TLspRange>;
+begin
+  Result := 0;
+  FInactiveRangesLock.Enter;
+  try
+    for L in FInactiveRanges.Values do
+      Inc(Result, L.Count);
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.HasReceivedDiagnostics(const AFilePath: string): Boolean;
+var
+  UpKey: string;
+begin
+  Result := False;
+  if AFilePath = '' then Exit;
+  UpKey := AnsiUpperCase(ExpandFileName(AFilePath));
+  FInactiveRangesLock.Enter;
+  try
+    Result := FFilesWithDiagnostics.ContainsKey(UpKey);
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.WaitForDiagnostics(const AFilePath: string;
+  ATimeoutMs: Cardinal): Boolean;
+var
+  Deadline: TDateTime;
+begin
+  Result := HasReceivedDiagnostics(AFilePath);
+  if Result then Exit;
+  Deadline := Now + ATimeoutMs / 86400000;
+  while not Result do
+  begin
+    Sleep(100);
+    Result := HasReceivedDiagnostics(AFilePath);
+    if Now > Deadline then Break;
   end;
 end;
 

@@ -78,16 +78,21 @@ type
     FBeforePanel: TPanel;
     FAfterPanel: TPanel;
     FBtnPanel: TPanel;
+    FChkUseInlineVars: TCheckBox;
     FItems: TArray<TWithRewriteResult>;
     FAutoRewritableCount: Integer;
     FCommonPathPrefix: string;
 
     procedure CreateControls;
+    procedure DoChkUseInlineVarsClick(Sender: TObject);
+    procedure RecomputeInlineVarIssues;
+    procedure RefreshAllListItems;
     procedure DoListSelect(Sender: TObject; AItem: TListItem; Selected: Boolean);
     procedure DoBtnApplySelectedClick(Sender: TObject);
     procedure DoBtnApplyAllClick(Sender: TObject);
     procedure DoBtnCloseClick(Sender: TObject);
     procedure DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure DoFormShow(Sender: TObject);
     procedure UpdatePreview(AIndex: Integer);
     procedure UpdateDebug(AIndex: Integer);
     procedure UpdateApplyButtons;
@@ -98,8 +103,19 @@ type
   public
     constructor CreateDialog(AOwner: TComponent); reintroduce;
 
+    /// <summary>Pops up a modal multi-select dialog listing the given
+    ///  Pascal source files (display: basename + folder). Returns
+    ///  True on OK with the user's selection in AChosen; False on
+    ///  Cancel.</summary>
+    class function PickFiles(AOwner: TComponent;
+      const AAllFiles: TArray<string>;
+      out AChosen: TArray<string>): Boolean; static;
+
     /// <summary>Replaces the current item list and updates the UI.</summary>
     procedure SetItems(const AItems: TArray<TWithRewriteResult>);
+
+    /// <summary>True iff the user wants inline-var emission (checkbox).</summary>
+    function UseInlineVars: Boolean;
 
     /// <summary>Updates the status text shown above the list.</summary>
     procedure SetStatus(const AText: string);
@@ -118,14 +134,17 @@ type
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils, Vcl.CheckLst,
+  Expert.DialogHelper;
 
 { TWithRefactorDialog }
 
 constructor TWithRefactorDialog.CreateDialog(AOwner: TComponent);
 begin
   inherited CreateNew(AOwner);
-  Caption := 'Remove with - project-wide review';
+  // Default caption - the caller (TLspWithRefactorWizard.RunWithScope)
+  // overrides this with a scope-aware text right after construction.
+  Caption := 'Remove with - review';
   Position := poOwnerFormCenter;
   BorderStyle := bsSizeable;
   BorderIcons := [biSystemMenu];
@@ -135,9 +154,12 @@ begin
   Constraints.MinHeight := 460;
   KeyPreview := True;
   OnKeyDown := DoFormKeyDown;
+  OnShow := DoFormShow;
 
   CreateControls;
   UpdateApplyButtons;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TWithRefactorDialog.CreateControls;
@@ -170,14 +192,31 @@ begin
   FBtnPanel.Height := 44;
   FBtnPanel.BevelOuter := bvNone;
 
+  // Linke Seite: Inline-Var-Toggle. Bei abgeschaltetem Toggle werden
+  // Eintraege, die eine Inline-Variable benoetigen, als nicht
+  // auto-rewritbar markiert (Kompatibilitaet zu Delphi < 10.3).
+  FChkUseInlineVars := TCheckBox.Create(Self);
+  FChkUseInlineVars.Parent := FBtnPanel;
+  FChkUseInlineVars.Caption := 'Inline-Variablen verwenden (Delphi 10.3+)';
+  FChkUseInlineVars.Align := alLeft;
+  FChkUseInlineVars.AlignWithMargins := True;
+  FChkUseInlineVars.Margins.SetBounds(8, 12, 0, 12);
+  FChkUseInlineVars.Width := 280;
+  FChkUseInlineVars.Checked := True;
+  FChkUseInlineVars.OnClick := DoChkUseInlineVarsClick;
+
+  // Buttons werden via alRight in der Erzeugungsreihenfolge gestapelt
+  // (Close rechts aussen, dann ApplyAll links davon, dann ApplySelected).
+  // Damit funktioniert das Layout unabhaengig von DPI-Skalierung und
+  // ohne dass die Panel-Breite zum Konstruktionszeitpunkt schon stimmt.
   FBtnClose := TButton.Create(Self);
   FBtnClose.Parent := FBtnPanel;
   FBtnClose.Caption := 'Close';
   FBtnClose.Width := 110;
   FBtnClose.Height := 30;
-  FBtnClose.Top := 8;
-  FBtnClose.Anchors := [akTop, akRight];
-  FBtnClose.Left := FBtnPanel.Width - FBtnClose.Width - 8;
+  FBtnClose.Align := alRight;
+  FBtnClose.AlignWithMargins := True;
+  FBtnClose.Margins.SetBounds(0, 8, 8, 6);
   FBtnClose.OnClick := DoBtnCloseClick;
   FBtnClose.Cancel := True;
 
@@ -186,9 +225,9 @@ begin
   FBtnApplyAll.Caption := 'Apply all';
   FBtnApplyAll.Width := 130;
   FBtnApplyAll.Height := 30;
-  FBtnApplyAll.Top := 8;
-  FBtnApplyAll.Anchors := [akTop, akRight];
-  FBtnApplyAll.Left := FBtnClose.Left - FBtnApplyAll.Width - 6;
+  FBtnApplyAll.Align := alRight;
+  FBtnApplyAll.AlignWithMargins := True;
+  FBtnApplyAll.Margins.SetBounds(0, 8, 0, 6);
   FBtnApplyAll.OnClick := DoBtnApplyAllClick;
 
   FBtnApplySelected := TButton.Create(Self);
@@ -196,9 +235,9 @@ begin
   FBtnApplySelected.Caption := 'Apply selected';
   FBtnApplySelected.Width := 130;
   FBtnApplySelected.Height := 30;
-  FBtnApplySelected.Top := 8;
-  FBtnApplySelected.Anchors := [akTop, akRight];
-  FBtnApplySelected.Left := FBtnApplyAll.Left - FBtnApplySelected.Width - 6;
+  FBtnApplySelected.Align := alRight;
+  FBtnApplySelected.AlignWithMargins := True;
+  FBtnApplySelected.Margins.SetBounds(0, 8, 6, 6);
   FBtnApplySelected.OnClick := DoBtnApplySelectedClick;
   FBtnApplySelected.Default := True;
 
@@ -238,11 +277,14 @@ begin
   FDiffPanel.Align := alClient;
   FDiffPanel.BevelOuter := bvNone;
 
-  // Before-panel (left)
+  // Before-panel (left). Wir setzen die Breite hier auf einen festen
+  // (design-PPI-) Wert, weil FDiffPanel.Width zu diesem Zeitpunkt noch
+  // den Default haelt — alClient wurde noch nicht ausgewertet. VCL
+  // skaliert die Breite spaeter automatisch fuer das Ziel-DPI.
   FBeforePanel := TPanel.Create(Self);
   FBeforePanel.Parent := FDiffPanel;
   FBeforePanel.Align := alLeft;
-  FBeforePanel.Width := FDiffPanel.Width div 2;
+  FBeforePanel.Width := 480;
   FBeforePanel.BevelOuter := bvNone;
 
   FBeforeLabel := TLabel.Create(Self);
@@ -269,7 +311,7 @@ begin
   FSplitterPreview := TSplitter.Create(Self);
   FSplitterPreview.Parent := FDiffPanel;
   FSplitterPreview.Align := alLeft;
-  FSplitterPreview.Width := 4;
+  FSplitterPreview.Width := 6;
   FSplitterPreview.MinSize := 120;
   FSplitterPreview.ResizeStyle := rsUpdate;
 
@@ -363,14 +405,35 @@ begin
   end;
 end;
 
+/// <summary>True iff at least one target of the occurrence required a
+///  temp variable (was assigned an InlineVarName by the rewriter).
+///  Used to decide whether the wriRequiresInlineVar issue applies.</summary>
+function RewriteUsesInlineVar(const AItem: TWithRewriteResult): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 0 to High(AItem.Debug.Targets) do
+    if AItem.Debug.Targets[I].InlineVarName <> '' then Exit(True);
+end;
+
 function TWithRefactorDialog.StatusTextOf(const AItem: TWithRewriteResult): string;
 begin
   if AItem.IsAutoRewritable then
   begin
     Result := 'ok';
-    if Pos('__with', AItem.NewText) > 0 then
-      Result := 'ok (inline-var)';
+    if RewriteUsesInlineVar(AItem) then
+    begin
+      if FChkUseInlineVars.Checked then
+        Result := 'ok (inline-var)'
+      else if AItem.Classic.Supported then
+        Result := 'ok (classic var)'
+      else
+        Result := 'ok';
+    end;
   end
+  else if wriInactiveRegion in AItem.Issues then
+    Result := 'inactive $IFDEF region - skipped'
   else if wriMultipleTargets in AItem.Issues then
     Result := 'multi-target - manual review'
   else if wriTypeUnresolved in AItem.Issues then
@@ -379,8 +442,64 @@ begin
     Result := 'class range unknown'
   else if wriNameClash in AItem.Issues then
     Result := 'name clash'
+  else if wriRequiresInlineVar in AItem.Issues then
+    Result := 'needs inline-var (Delphi 10.3+)'
   else
     Result := 'no rewrite';
+end;
+
+procedure TWithRefactorDialog.RecomputeInlineVarIssues;
+var
+  I: Integer;
+  NeedsInline: Boolean;
+begin
+  for I := 0 to High(FItems) do
+  begin
+    NeedsInline := RewriteUsesInlineVar(FItems[I]);
+    // wriRequiresInlineVar nur dann, wenn der Rewriter Inline-Vars bräuchte,
+    // der Anwender keine Inline-Vars will UND der Classic-Modus nicht
+    // unterstützt wird (Methode nicht gefunden / Typ-Unit nicht auflösbar).
+    if NeedsInline and (not FChkUseInlineVars.Checked)
+       and (not FItems[I].Classic.Supported) then
+      Include(FItems[I].Issues, wriRequiresInlineVar)
+    else
+      Exclude(FItems[I].Issues, wriRequiresInlineVar);
+  end;
+end;
+
+function TWithRefactorDialog.UseInlineVars: Boolean;
+begin
+  Result := FChkUseInlineVars.Checked;
+end;
+
+procedure TWithRefactorDialog.RefreshAllListItems;
+var
+  I: Integer;
+begin
+  FAutoRewritableCount := 0;
+  FListView.Items.BeginUpdate;
+  try
+    for I := 0 to High(FItems) do
+    begin
+      if I < FListView.Items.Count then
+      begin
+        // SubItem[2] = status column
+        if FListView.Items[I].SubItems.Count >= 3 then
+          FListView.Items[I].SubItems[2] := StatusTextOf(FItems[I]);
+      end;
+      if FItems[I].IsAutoRewritable then
+        Inc(FAutoRewritableCount);
+    end;
+  finally
+    FListView.Items.EndUpdate;
+  end;
+  UpdateApplyButtons;
+end;
+
+procedure TWithRefactorDialog.DoChkUseInlineVarsClick(Sender: TObject);
+begin
+  RecomputeInlineVarIssues;
+  RefreshAllListItems;
 end;
 
 function TWithRefactorDialog.TargetSummaryOf(const AItem: TWithRewriteResult): string;
@@ -522,6 +641,8 @@ begin
       T := AItem.Debug.Targets[I];
       SB.Append('  [').Append(I).Append('] ').AppendLine(T.Expression);
       SB.Append('       resolved      : ').AppendLine(BoolToStr(T.Resolved, True));
+      if T.ResolveNote <> '' then
+        SB.Append('       resolve note  : ').AppendLine(T.ResolveNote);
       SB.Append('       type file     : ').AppendLine(T.TypeFile);
       SB.Append('       class lines   : ')
         .Append(T.ClassStartLine).Append('..').AppendLine(IntToStr(T.ClassEndLine));
@@ -531,6 +652,29 @@ begin
       else
         SB.AppendLine(T.InlineVarName);
       SB.Append('       qualify-prefix: ').AppendLine(T.QualifyPrefix);
+      if Length(T.Ancestors) > 0 then
+      begin
+        SB.Append('       ancestors (').Append(Length(T.Ancestors)).Append('): ');
+        for var AI := 0 to High(T.Ancestors) do
+        begin
+          if AI > 0 then SB.Append(', ');
+          SB.Append(ExtractFileName(T.Ancestors[AI].TypeFile))
+            .Append(' [').Append(T.Ancestors[AI].ClassStartLine)
+            .Append('..').Append(IntToStr(T.Ancestors[AI].ClassEndLine))
+            .Append(']');
+        end;
+        SB.AppendLine;
+      end;
+      if Length(T.ParentUnitHints) > 0 then
+      begin
+        SB.Append('       parent hints  : ');
+        for var HI := 0 to High(T.ParentUnitHints) do
+        begin
+          if HI > 0 then SB.Append(', ');
+          SB.Append(T.ParentUnitHints[HI]);
+        end;
+        SB.AppendLine;
+      end;
       SB.Append('       direct members (').Append(Length(T.Members)).Append('): ');
       if Length(T.Members) = 0 then
         SB.AppendLine('<none / parser found nothing>')
@@ -570,7 +714,7 @@ begin
       end
       else if R.MatchSource <> dmMember then
       begin
-        SB.AppendLine('       LSP result    : <none / not queried>');
+        SB.AppendLine('       LSP result    : 0 locations (LSP could not resolve)');
       end;
     end;
 
@@ -626,5 +770,95 @@ begin
     Key := 0;
   end;
 end;
+
+procedure TWithRefactorDialog.DoFormShow(Sender: TObject);
+begin
+  // FDiffPanel.Width is only known after the form is shown (alClient
+  // resolved). Split the Diff tab roughly 50/50 between Before and After
+  // so the Before-panel is wide enough to read on common dialog widths.
+  if (FDiffPanel <> nil) and (FDiffPanel.Width > 0) and (FBeforePanel <> nil) then
+    FBeforePanel.Width := FDiffPanel.Width div 2;
+end;
+
+class function TWithRefactorDialog.PickFiles(AOwner: TComponent;
+  const AAllFiles: TArray<string>;
+  out AChosen: TArray<string>): Boolean;
+// Self-contained modal dialog: TForm with a CheckListBox + Select All /
+// Deselect All / OK / Cancel buttons. Sorted alphabetically by basename;
+// the folder is appended in parentheses to disambiguate duplicates.
+var
+  Form: TForm;
+  CLB: TCheckListBox;
+  BtnOk, BtnCancel: TButton;
+  Lbl: TLabel;
+  I, K: Integer;
+begin
+  Result := False;
+  AChosen := nil;
+  Form := TForm.Create(AOwner);
+  try
+    Form.Caption := 'Remove with - select units to scan';
+    Form.Position := poOwnerFormCenter;
+    Form.BorderStyle := bsSizeable;
+    Form.Width := 640;
+    Form.Height := 480;
+    Form.PopupMode := pmAuto;
+
+    Lbl := TLabel.Create(Form);
+    Lbl.Parent := Form;
+    Lbl.SetBounds(12, 8, 600, 17);
+    Lbl.Caption := Format('%d files in this project. Check the ones to scan:',
+      [Length(AAllFiles)]);
+
+    CLB := TCheckListBox.Create(Form);
+    CLB.Parent := Form;
+    CLB.SetBounds(12, 30, 612, 360);
+    CLB.Anchors := [akLeft, akTop, akRight, akBottom];
+    CLB.Sorted := True;
+    for I := 0 to High(AAllFiles) do
+      CLB.Items.AddObject(
+        Format('%s   (%s)', [ExtractFileName(AAllFiles[I]),
+          ExcludeTrailingPathDelimiter(ExtractFilePath(AAllFiles[I]))]),
+        TObject(NativeInt(I)));
+
+    // Default: nothing checked - user picks the units they want.
+    // No "Select All" / "Deselect All" buttons - keep it simple;
+    // multi-select is easy enough with mouse / keyboard.
+
+    BtnCancel := TButton.Create(Form);
+    BtnCancel.Parent := Form;
+    BtnCancel.SetBounds(454, 400, 80, 25);
+    BtnCancel.Anchors := [akRight, akBottom];
+    BtnCancel.Caption := 'Cancel';
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.Cancel := True;
+
+    BtnOk := TButton.Create(Form);
+    BtnOk.Parent := Form;
+    BtnOk.SetBounds(540, 400, 80, 25);
+    BtnOk.Anchors := [akRight, akBottom];
+    BtnOk.Caption := 'Scan';
+    BtnOk.ModalResult := mrOk;
+    BtnOk.Default := True;
+
+    if Form.ShowModal <> mrOk then Exit;
+
+    K := 0;
+    SetLength(AChosen, CLB.Items.Count);
+    for I := 0 to CLB.Items.Count - 1 do
+      if CLB.Checked[I] then
+      begin
+        AChosen[K] := AAllFiles[NativeInt(CLB.Items.Objects[I])];
+        Inc(K);
+      end;
+    SetLength(AChosen, K);
+    Result := True;
+  finally
+    Form.Free;
+  end;
+end;
+
+initialization
+  RegisterDialogClass(TWithRefactorDialog);
 
 end.

@@ -98,8 +98,7 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme,
-  Expert.IdeThemes;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -297,6 +296,8 @@ begin
   Expert.IdeThemes.EnableThemes(Self);
 
   FIndex := TProjectTextIndex.Create;
+
+  PrepareDialog(Self, AOwner);
 end;
 
 destructor TRenameDialog.Destroy;
@@ -493,5 +494,8 @@ begin
   else
     Screen.Cursor := crDefault;
 end;
+
+initialization
+  RegisterDialogClass(TRenameDialog);
 
 end.

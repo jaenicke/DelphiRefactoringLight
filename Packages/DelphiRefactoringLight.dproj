@@ -117,6 +117,8 @@
         <DCCReference Include="..\Source\Expert.FindImplementationsWizard.pas"/>
         <DCCReference Include="..\Source\Expert.ContextMenu.pas"/>
         <DCCReference Include="..\Source\Expert.UnitRenameWatcher.pas"/>
+        <DCCReference Include="..\Source\Expert.PluginSettings.pas"/>
+        <DCCReference Include="..\Source\Expert.LspPrewarmer.pas"/>
         <DCCReference Include="..\Source\Expert.IdentifierCheck.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheckDialog.pas"/>
@@ -131,6 +133,13 @@
         <DCCReference Include="..\Source\Expert.WithRewriter.pas"/>
         <DCCReference Include="..\Source\Expert.WithRefactorDialog.pas"/>
         <DCCReference Include="..\Source\Expert.WithRefactorWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitReferencesDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitReferencesWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.Shortcuts.pas"/>
+        <DCCReference Include="..\Source\Expert.DialogHelper.pas"/>
+        <DCCReference Include="..\Source\Expert.MoveToUnit.pas"/>
+        <DCCReference Include="..\Source\Expert.MoveToUnitDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.MoveToUnitWizard.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

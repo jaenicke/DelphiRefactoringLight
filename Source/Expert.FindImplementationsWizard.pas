@@ -94,6 +94,7 @@ begin
     FContext.WordAtCursor, 'Implementations');
   try
     FDialog.OnGotoLocation := DoGotoLocation;
+    TLspManager.Instance.ApplyStatusToCaption(FDialog);
     // Show dialog + run search + switch dialog to modal
     FDialog.Show;
     try

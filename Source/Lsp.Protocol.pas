@@ -258,7 +258,8 @@ end;
 
 class function TLspProtocol.BuildClientCapabilities: TJSONObject;
 var
-  TextDoc, Rename, Sync, Workspace, WsEdit: TJSONObject;
+  TextDoc, Rename, Sync, Workspace, WsEdit, PubDiag, TagSupport: TJSONObject;
+  TagValueSet: TJSONArray;
 begin
   Rename := TJSONObject.Create;
   Rename.AddPair('prepareSupport', TJSONBool.Create(True));
@@ -268,9 +269,23 @@ begin
   Sync.AddPair('willSave', TJSONBool.Create(False));
   Sync.AddPair('willSaveWaitUntil', TJSONBool.Create(False));
 
+  // Wir interessieren uns explizit fuer Diagnostic-Tags - DelphiLSP
+  // markiert inaktive {$IFDEF}-Bereiche mit tag=1 ("Unnecessary") und
+  // Source="DelphiLSP", Code="H2655"/"H2656". Ohne diese Capability
+  // verschluckt der Server die Tags.
+  TagValueSet := TJSONArray.Create;
+  TagValueSet.Add(1); // Unnecessary
+  TagValueSet.Add(2); // Deprecated
+  TagSupport := TJSONObject.Create;
+  TagSupport.AddPair('valueSet', TagValueSet);
+  PubDiag := TJSONObject.Create;
+  PubDiag.AddPair('relatedInformation', TJSONBool.Create(True));
+  PubDiag.AddPair('tagSupport', TagSupport);
+
   TextDoc := TJSONObject.Create;
   TextDoc.AddPair('rename', Rename);
   TextDoc.AddPair('synchronization', Sync);
+  TextDoc.AddPair('publishDiagnostics', PubDiag);
 
   WsEdit := TJSONObject.Create;
   WsEdit.AddPair('documentChanges', TJSONBool.Create(True));
@@ -286,8 +301,19 @@ end;
 class function TLspProtocol.BuildInitializationOptions(const ADprojPath: string; const ASearchPath: string = ''): TJSONObject;
 begin
   Result := TJSONObject.Create;
-  // No serverType/agentCount -> simple single-process mode.
-  // The real configuration is pushed via workspace/didChangeConfiguration.
+  // Schalte DelphiLSP in den "controller"-Modus - das ist was die
+  // Delphi-IDE selbst tut, und nur in diesem Modus pusht DelphiLSP
+  // publishDiagnostics fuer inaktive {$IFDEF}-Bereiche und liefert
+  // verlaesslich GotoDef-Ergebnisse fuer lokale Identifier.
+  Result.AddPair('serverType', 'controller');
+  Result.AddPair('agentCount', TJSONNumber.Create(2));
+  Result.AddPair('returnDccFlags', TJSONBool.Create(True));
+  Result.AddPair('returnHoverModel', TJSONBool.Create(True));
+  Result.AddPair('storeProjectSettings', TJSONBool.Create(True));
+  // ADprojPath/ASearchPath sind in der eigentlichen Konfiguration via
+  // workspace/didChangeConfiguration drin - hier nicht relevant.
+  if ADprojPath = '' then ;
+  if ASearchPath = '' then ;
 end;
 
 end.

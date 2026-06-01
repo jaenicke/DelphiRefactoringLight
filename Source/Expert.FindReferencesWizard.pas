@@ -20,6 +20,7 @@ type
     FDialog: TFindReferencesDialog;
     FContext: TEditorContext;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
+    procedure DoDialogClose(Sender: TObject);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName, ADefFilePath: string;
@@ -83,29 +84,30 @@ begin
   end;
 
   FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
+  FDialog.OnGotoLocation := DoGotoLocation;
+  FDialog.OnDialogClose := DoDialogClose;
+  TLspManager.Instance.ApplyStatusToCaption(FDialog);
+  // Show non-modal so the user can interact with the editor (e.g. jump
+  // to a found location and edit it) while the result list stays open.
+  FDialog.Show;
   try
-    FDialog.OnGotoLocation := DoGotoLocation;
-    // Run the search right after showing - the dialog loop is kept alive
-    // via ProcessMessages while we search.
-    FDialog.Show;
-    try
-      Application.ProcessMessages;
-      SearchAndShow;
-      // After the search switch to modal so the dialog blocks
-      FDialog.Hide;
-      FDialog.ShowModal;
-    except
-      on E: Exception do
-      begin
+    Application.ProcessMessages;
+    SearchAndShow;
+  except
+    on E: Exception do
+      if FDialog <> nil then
         FDialog.SetStatus('Error: ' + E.Message);
-        FDialog.Hide;
-        FDialog.ShowModal;
-      end;
-    end;
-  finally
-    FDialog.Free;
-    FDialog := nil;
   end;
+  // Hand off ownership: from now on closing the dialog frees it. If the
+  // user already clicked X during the scan, this closes it now.
+  if FDialog <> nil then
+    FDialog.SetClosable;
+end;
+
+procedure TLspFindReferencesWizard.DoDialogClose(Sender: TObject);
+begin
+  // Called from the dialog's OnClose right before it frees itself.
+  FDialog := nil;
 end;
 
 procedure TLspFindReferencesWizard.DoGotoLocation(AItem: TFindReferenceItem);

@@ -59,6 +59,23 @@ type
     /// <summary>Beendet den LSP-Client (z.B. beim Entladen des Experts).</summary>
     procedure Shutdown;
 
+    /// <summary>Setzt den LSP-Warmup-Status als Suffix der Dialog-
+    ///  Caption an, damit der User beim Start einer Aktion sieht, ob
+    ///  LSP bereit ist. ADialog muss eine TCustomForm-Instanz sein.
+    ///  Ueberschreibt eine evtl. schon angeklebte Status-Klammer am
+    ///  Ende der Caption.</summary>
+    procedure ApplyStatusToCaption(ADialog: TObject);
+
+    /// <summary>Kurzer menschenlesbarer Status fuer Dialog-Anzeigen:
+    ///   "LSP not started"
+    ///   "LSP cold-starting"
+    ///   "LSP indexing - N diagnostics, M inactive ranges so far"
+    ///   "LSP ready - N diagnostics, M inactive ranges"
+    /// Soll an die erste Status-Zeile eines Wizard-Dialogs angeklebt
+    /// werden, damit der User vor dem Start einer Aktion sieht, ob der
+    /// LSP-Pre-Warmer schon durch ist.</summary>
+    function GetWarmupStatusLine: string;
+
     /// <summary>Setzt den internen Zustand zurueck (erzwingt Neustart beim naechsten Aufruf).</summary>
     procedure Reset;
 
@@ -72,7 +89,9 @@ type
 implementation
 
 uses
-  Winapi.Windows, System.IOUtils, System.Win.Registry, ToolsAPI, Expert.EditorHelper;
+  Winapi.Windows, System.IOUtils, System.DateUtils, System.JSON,
+  System.Win.Registry, System.TypInfo,
+  ToolsAPI, Expert.EditorHelper;
 
 const
   /// <summary>Absolute Notfall-Fallback, falls weder Registry noch ToolsAPI
@@ -297,8 +316,84 @@ begin
     end;
   end;
 
-  // LSP noch kurz parsen lassen bevor die Query kommt
-  Sleep(500);
+  // Aktiv warten, bis der LSP-Index wirklich nutzbar ist. didOpen liefert
+  // sofort zurueck, aber DelphiLSP indexiert erst danach (Cold-Start dauert
+  // bei brandneuen Projekten leicht 10-30 s, weil VCL eingelesen werden
+  // muss). Zwei Stufen, weil documentSymbol frueher antwortet als
+  // definition / references (beobachtet: erste GotoDefinition-Anfrage
+  // schlaegt mit 'Server not responding' fehl, zweite klappt).
+  //   Stufe 1: documentSymbol liefert nicht-leere Symbol-Liste
+  //   Stufe 2: GotoDefinition fuer ein bekanntes Symbol antwortet ohne
+  //            Timeout. Position = Anfang des ersten Symbols.
+  // Max. 30 s gesamt, in 500 ms-Schritten.
+  begin
+    var ProbeFile := AProjectFiles[0];
+    var Deadline := Now + 30 / SecsPerDay;
+    var SymbolsReady := False;
+    var ProbeLine: Integer := 0;
+    var ProbeCol: Integer := 0;
+    while (not SymbolsReady) and (Now < Deadline) do
+    begin
+      try
+        var SymJson := FClient.GetDocumentSymbols(ProbeFile);
+        try
+          if (SymJson <> nil) and (SymJson.Count > 0) then
+          begin
+            SymbolsReady := True;
+            // Erste 'selectionRange.start' aus der Symbolliste merken
+            // (wenn nicht da, bleibt es bei 0:0 - LSP antwortet eh nur
+            // mit 0 Treffern, aber das ist auch ein gueltiges Signal).
+            var First := SymJson.Items[0];
+            if First is TJSONObject then
+            begin
+              var SR := TJSONObject(First).GetValue('selectionRange');
+              if SR is TJSONObject then
+              begin
+                var SP := TJSONObject(SR).GetValue('start');
+                if SP is TJSONObject then
+                begin
+                  ProbeLine := TJSONObject(SP).GetValue<Integer>('line', 0);
+                  ProbeCol  := TJSONObject(SP).GetValue<Integer>('character', 0);
+                end;
+              end;
+            end;
+          end;
+        finally
+          SymJson.Free;
+        end;
+      except
+        // Probe-Fehler nicht weiterreichen
+      end;
+      if not SymbolsReady then
+      begin
+        if Assigned(AProgress) then
+          AProgress(N, N, 'Waiting for LSP symbols...');
+        Sleep(500);
+      end;
+    end;
+
+    // Stufe 2: GotoDefinition aktivieren. Wir akzeptieren JEDE Antwort,
+    // die keine Exception/Timeout ist - leeres Locations-Array ist OK
+    // (LSP arbeitet, kennt das Symbol vielleicht nur nicht).
+    var DefReady := False;
+    while (not DefReady) and (Now < Deadline) do
+    begin
+      try
+        var Defs := FClient.GotoDefinition(ProbeFile, ProbeLine, ProbeCol);
+        // Kein Throw == Server antwortet. Locations-Count egal.
+        DefReady := True;
+        if Length(Defs) = 0 then ; // explizit ignorieren
+      except
+        // Server not responding -> nochmal warten
+      end;
+      if not DefReady then
+      begin
+        if Assigned(AProgress) then
+          AProgress(N, N, 'Waiting for LSP index...');
+        Sleep(500);
+      end;
+    end;
+  end;
 
   if Assigned(AProgress) then
     AProgress(N, N, '');
@@ -329,6 +424,47 @@ begin
   FIsReady := False;
   FProjectIndexed := False;
   FCurrentProject := '';
+end;
+
+procedure TLspManager.ApplyStatusToCaption(ADialog: TObject);
+var
+  CapProp: string;
+  StatusBracketStart: Integer;
+begin
+  if not (ADialog is TComponent) then Exit;
+  // We use RTTI-free access via VCL.Forms TForm - but to avoid dragging
+  // VCL.Forms into LspManager, we just use a published 'Caption' string
+  // property via SetPropValue. Component-level access is fine for any
+  // TForm/TFrame.
+  if not IsPublishedProp(ADialog, 'Caption') then Exit;
+  CapProp := GetStrProp(ADialog, 'Caption');
+  // Strip a previously appended status (anything in trailing '  [...]').
+  StatusBracketStart := LastDelimiter('[', CapProp);
+  if (StatusBracketStart > 1)
+    and (Copy(CapProp, StatusBracketStart - 2, 2) = '  ') then
+    CapProp := TrimRight(Copy(CapProp, 1, StatusBracketStart - 1));
+  SetStrProp(ADialog, 'Caption', CapProp + '  [' + GetWarmupStatusLine + ']');
+end;
+
+function TLspManager.GetWarmupStatusLine: string;
+var
+  Diag, Inactive: Integer;
+begin
+  if FClient = nil then
+    Exit('LSP not started yet - first action will trigger a cold start (~10-30 s).');
+  Diag := FClient.GetDiagnosticsCount;
+  Inactive := FClient.GetInactiveRangesTotal;
+  if Diag = 0 then
+    Result := 'LSP cold-starting (no diagnostics received yet). First action may be slow.'
+  else if not FProjectIndexed then
+    Result := Format(
+      'LSP warming up - %d diagnostics, %d inactive regions analysed so far. ' +
+      'First action may have to wait for the rest of the project.',
+      [Diag, Inactive])
+  else
+    Result := Format(
+      'LSP ready - %d diagnostics, %d inactive regions analysed.',
+      [Diag, Inactive]);
 end;
 
 initialization

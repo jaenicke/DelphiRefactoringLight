@@ -38,7 +38,11 @@ type
     edtAlign: TEdit;
     lblRemoveWith: TLabel;
     edtRemoveWith: TEdit;
+    lblMoveToUnit: TLabel;
+    edtMoveToUnit: TEdit;
     lblHint: TLabel;
+    grpLsp: TGroupBox;
+    cbxPrewarmLsp: TCheckBox;
     btnDefaults: TButton;
     procedure ShortcutEditKeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
@@ -59,7 +63,7 @@ implementation
 {$R *.dfm}
 
 uses
-  Winapi.Windows, Vcl.Graphics;
+  Winapi.Windows, Vcl.Graphics, Expert.PluginSettings;
 
 { TLspOptionsFrame }
 
@@ -73,6 +77,7 @@ begin
     skFindImp:    Result := edtFindImp;
     skAlign:      Result := edtAlign;
     skRemoveWith: Result := edtRemoveWith;
+    skMoveToUnit: Result := edtMoveToUnit;
   else
     Result := nil;
   end;
@@ -99,6 +104,7 @@ var
 begin
   for K := Low(TShortcutKind) to High(TShortcutKind) do
     ApplyToEdit(K);
+  cbxPrewarmLsp.Checked := TPluginSettings.PrewarmLspOnProjectOpen;
 end;
 
 procedure TLspOptionsFrame.StoreToSettings;
@@ -114,6 +120,7 @@ begin
     SC := TextToShortCut(E.Text);
     TExpertsShortCut.Shortcuts[K] := SC;
   end;
+  TPluginSettings.PrewarmLspOnProjectOpen := cbxPrewarmLsp.Checked;
 end;
 
 procedure TLspOptionsFrame.ShortcutEditKeyDown(Sender: TObject; var Key: Word;
@@ -165,6 +172,7 @@ begin
     if E <> nil then
       E.Text := ShortCutToText(TExpertsShortCut.Default(K));
   end;
+  cbxPrewarmLsp.Checked := TPluginSettings.DefaultPrewarm;
 end;
 
 end.

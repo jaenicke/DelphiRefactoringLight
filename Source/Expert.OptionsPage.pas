@@ -42,7 +42,7 @@ implementation
 
 uses
   Winapi.Windows, System.SysUtils,
-  Expert.OptionsFrame, Expert.Shortcuts;
+  Expert.OptionsFrame, Expert.Shortcuts, Expert.PluginSettings;
 
 var
   OptionsAddIn: INTAAddInOptions;
@@ -87,6 +87,7 @@ begin
     TLspOptionsFrame(FFrame).StoreToSettings;
     TExpertsShortCut.SaveToRegistry;
     TExpertsShortCut.NotifyChanged;
+    TPluginSettings.Save;
   end;
   FFrame := nil;
 end;

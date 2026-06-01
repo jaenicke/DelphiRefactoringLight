@@ -55,7 +55,7 @@ type
 implementation
 
 uses
-  Winapi.UxTheme, Expert.IdeThemes;
+  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
 
 { TSignatureCheckDialog }
 
@@ -76,6 +76,8 @@ begin
 
   CreateControls;
   Expert.IdeThemes.EnableThemes(Self);
+
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSignatureCheckDialog.CreateControls;
@@ -290,5 +292,8 @@ begin
     Key := 0;
   end;
 end;
+
+initialization
+  RegisterDialogClass(TSignatureCheckDialog);
 
 end.

@@ -83,6 +83,7 @@ begin
   FDialog := TSignatureCheckDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
   try
     FDialog.OnGotoLocation := DoGotoLocation;
+    TLspManager.Instance.ApplyStatusToCaption(FDialog);
     FDialog.Show;
     try
       Application.ProcessMessages;

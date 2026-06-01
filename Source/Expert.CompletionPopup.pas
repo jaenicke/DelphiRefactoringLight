@@ -72,6 +72,9 @@ type
 
 implementation
 
+uses
+  Expert.IdeThemes;
+
 { TCompletionItems }
 
 class function TCompletionItems.KindToPrefix(AKind: Integer): string;
@@ -152,7 +155,7 @@ begin
   FormStyle := fsStayOnTop;
   Width := 450;
   Height := 320;
-  Color := clWindow;
+  Color := GetThemedColor(clWindow);
   OnDeactivate := DoFormDeactivate;
 
   FFilteredItems := TList<TCompletionItem>.Create;
@@ -174,7 +177,7 @@ begin
   FDetailLabel.Height := 22;
   FDetailLabel.Font.Name := 'Consolas';
   FDetailLabel.Font.Size := 9;
-  FDetailLabel.Font.Color := clGray;
+  FDetailLabel.Font.Color := GetThemedColor(clGrayText);
   FDetailLabel.AutoSize := False;
   FDetailLabel.Caption := '';
   FDetailLabel.Layout := tlCenter;
@@ -190,6 +193,8 @@ begin
   FListBox.OnDblClick := DoListBoxDblClick;
   FListBox.OnKeyDown := DoKeyDown;
   FListBox.OnDrawItem := DoListBoxDrawItem;
+
+  Expert.IdeThemes.EnableThemes(Self);
 end;
 
 destructor TCompletionPopup.Destroy;
@@ -301,25 +306,25 @@ begin
 
   // Hintergrund
   if odSelected in State then
-    Canvas.Brush.Color := clHighlight
+    Canvas.Brush.Color := GetThemedColor(clHighlight)
   else
-    Canvas.Brush.Color := clWindow;
+    Canvas.Brush.Color := GetThemedColor(clWindow);
   Canvas.FillRect(Rect);
 
   // Kind-Prefix (farbig)
   Prefix := TCompletionItems.KindToPrefix(Item.Kind);
   if odSelected in State then
-    Canvas.Font.Color := clHighlightText
+    Canvas.Font.Color := GetThemedColor(clHighlightText)
   else
-    Canvas.Font.Color := clGray;
+    Canvas.Font.Color := GetThemedColor(clGrayText);
   Canvas.Font.Style := [];
   Canvas.TextOut(Rect.Left + 4, Rect.Top + 2, Prefix);
 
   // Label
   if odSelected in State then
-    Canvas.Font.Color := clHighlightText
+    Canvas.Font.Color := GetThemedColor(clHighlightText)
   else
-    Canvas.Font.Color := clWindowText;
+    Canvas.Font.Color := GetThemedColor(clWindowText);
   Canvas.Font.Style := [fsBold];
   LabelText := Item.Label_;
   Canvas.TextOut(Rect.Left + 44, Rect.Top + 2, LabelText);
@@ -329,9 +334,9 @@ begin
   begin
     DetailText := Item.Detail;
     if odSelected in State then
-      Canvas.Font.Color := clHighlightText
+      Canvas.Font.Color := GetThemedColor(clHighlightText)
     else
-      Canvas.Font.Color := clGray;
+      Canvas.Font.Color := GetThemedColor(clGrayText);
     Canvas.Font.Style := [];
     Canvas.TextOut(Rect.Left + 46 + Canvas.TextWidth(LabelText) + 8,
       Rect.Top + 2, DetailText);

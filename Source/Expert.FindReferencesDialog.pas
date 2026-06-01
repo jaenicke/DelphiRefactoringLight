@@ -72,7 +72,7 @@ type
 implementation
 
 uses
-  System.IOUtils, Expert.DialogHelper;
+  System.IOUtils, Expert.IdeThemes, Expert.DialogHelper;
 
 { TFindReferencesDialog }
 
@@ -92,6 +92,7 @@ begin
   OnClose := DoFormClose;
 
   CreateControls;
+  Expert.IdeThemes.EnableThemes(Self);
 
   PrepareDialog(Self, AOwner);
 end;

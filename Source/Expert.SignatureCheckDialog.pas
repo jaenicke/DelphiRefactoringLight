@@ -55,7 +55,7 @@ type
 implementation
 
 uses
-  Winapi.UxTheme, Expert.DialogHelper;
+  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
 
 { TSignatureCheckDialog }
 
@@ -75,6 +75,7 @@ begin
   OnKeyDown := DoFormKeyDown;
 
   CreateControls;
+  Expert.IdeThemes.EnableThemes(Self);
 
   PrepareDialog(Self, AOwner);
 end;
@@ -242,7 +243,7 @@ begin
     if FEntries[Item.Index].Normalized <> FReferenceNormalized then
       Sender.Canvas.Brush.Color := RGB(255, 230, 230)  // light red
     else
-      Sender.Canvas.Brush.Color := clWindow;
+      Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
   end;
   DefaultDraw := True;
 end;

@@ -98,7 +98,7 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -293,6 +293,7 @@ begin
   FMemoDetails.WordWrap := False;
 
   FPageControl.ActivePage := FTabChanges;
+  Expert.IdeThemes.EnableThemes(Self);
 
   FIndex := TProjectTextIndex.Create;
 
@@ -328,7 +329,7 @@ begin
   FCheckTimer.Enabled := False;
   if FCurrentFile <> '' then
   begin
-    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Color := GetThemedColor(clGrayText);
     FLblNameCheck.Caption := 'Checking...';
     FCheckTimer.Enabled := True;
   end;
@@ -339,7 +340,7 @@ begin
   FCheckTimer.Enabled := False;
   if not FIndex.PollReady then
   begin
-    FLblNameCheck.Font.Color := clGrayText;
+    FLblNameCheck.Font.Color := GetThemedColor(clGrayText);
     FLblNameCheck.Font.Style := [];
     FLblNameCheck.Caption := 'Indexing project for collision check...';
     FCheckTimer.Interval := 200;
@@ -359,7 +360,7 @@ begin
 
   case Res.Status of
     icsOk:        FLblNameCheck.Font.Color := clGreen;
-    icsUnchanged: FLblNameCheck.Font.Color := clGrayText;
+    icsUnchanged: FLblNameCheck.Font.Color := GetThemedColor(clGrayText);
     icsInProject: FLblNameCheck.Font.Color := $00008CFF; // orange-ish
   else
     FLblNameCheck.Font.Color := clRed;

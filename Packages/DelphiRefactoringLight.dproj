@@ -140,6 +140,9 @@
         <DCCReference Include="..\Source\Expert.MoveToUnit.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnitWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.ExtractInterface.pas"/>
+        <DCCReference Include="..\Source\Expert.ExtractInterfaceDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.ExtractInterfaceWizard.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

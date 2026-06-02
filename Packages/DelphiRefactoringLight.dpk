@@ -80,6 +80,9 @@ contains
   Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas',
   Expert.MoveToUnit in '..\Source\Expert.MoveToUnit.pas',
   Expert.MoveToUnitDialog in '..\Source\Expert.MoveToUnitDialog.pas',
-  Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas';
+  Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas',
+  Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',
+  Expert.ExtractInterfaceDialog in '..\Source\Expert.ExtractInterfaceDialog.pas',
+  Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas';
 
 end.

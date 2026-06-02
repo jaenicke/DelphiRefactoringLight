@@ -13,6 +13,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
+| *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised |
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/completion`, and `publishDiagnostics` push notifications (used to detect inactive `{$IFDEF}` regions when DelphiLSP delivers them &mdash; diagnostic code `H2655`/`H2656` with tag `Unnecessary`). DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
@@ -134,6 +135,33 @@ In the last three weeks I tested with big projects and used it myself in real li
   - Cross-unit qualified references (`SourceUnit.X`) in consumers are not rewritten &mdash; only the `uses` clause is adjusted.
   - The cleanup is heuristic; review the diff before committing.
 
+### Extract / extend interface (menu only)
+
+Two related actions, both reached through the editor's *Refactoring Light &rarr; Extract / extend interface* submenu (no keyboard shortcut by design &mdash; this is rarely a hot path and the wizard wants room to think). Both work on the class whose declaration the cursor is in (or just below).
+
+- **Extract new interface from class...**
+  - Parses the class declaration into a structured member list: fields, properties, methods, with their visibility (`strict private` / `private` / `protected` / `public` / `published`) and modifier (`class procedure ...`).
+  - Opens a non-modal dialog with the members listed group-by-visibility (the visibility line itself is clickable and toggles the whole section), plus preset buttons (*All public+Pub.*, *Properties*, *Fields*, ...). Preset buttons are **additive** &mdash; clicking *Properties* after *Fields* extends the selection, it does not replace it; a second click on the same preset clears that group. Every change live-updates the interface preview on the right.
+  - The default target unit is `Interfaces.<Bare>.pas` next to the source unit (e.g. `TForm11` &rarr; `Interfaces.Form11.pas`); the GUID is auto-generated and re-rollable in the dialog.
+  - On OK:
+    1. **Writes a new unit** with the interface declaration and a uses clause restricted to exactly what the interface needs. Type identifiers referenced in the interface (`TButton`, `TListView`, ...) are resolved via LSP `textDocument/definition`; the resulting unit names land in the new unit's uses. If LSP cannot resolve every type (e.g. when the source unit itself has compile errors), the new unit's uses is topped off with the source unit's own interface-uses so the result always compiles. A diagnostic dialog after the run reports `<resolved>/<attempted>` so the user knows what LSP delivered.
+    2. **Registers the new unit with the active project** (`IOTAProject.AddFile`) and opens it in the editor.
+    3. **Rewrites the class** in the source unit: adds the new interface to the ancestor list, synthesises `private function GetX: T;` / `procedure SetX(const AValue: T);` accessors (grouped under the existing `private` section &mdash; no duplicate sections) for every field and every property without explicit `read` / `write` methods, and appends matching `function TClass.GetX: T; begin Result := X; end;` implementations before the unit's `end.`. The class-side does *not* gain a parallel property declaration because a property of the same name as the field would clash with the existing field.
+    4. **Adds the new unit to the source unit's `uses`** clause (Delphi convention: at the end).
+  - All source-unit edits go through `IOTAEditWriter` (via `TEditorHelper.ReplaceFileContent`) so they are individually undoable in the IDE.
+
+- **Add to existing interface...**
+  - Scans the project for `IXxx = interface` declarations and offers them in a dropdown.
+  - The member checklist is the same as for *Extract new*, with one addition: members whose would-emit names are already declared in the selected target interface (`Button1`, `GetButton1`, `SetButton1`, ...) are auto-checked, displayed with an `[in interface]` prefix, and disabled so they cannot be re-added. Preset buttons skip them.
+  - On OK the same class-side rewrite happens, but instead of writing a new unit, the new declarations are spliced into the existing interface just before its `end;`. Type-resolution adds any missing units to the existing interface unit's own `uses` clause (via LSP, with the same source-uses safety net as *Extract new*).
+
+- Known limitations of both flows:
+  - Generic classes (`TFoo<T>`) are parsed but the generic parameter is dropped from the suggested interface name; rename in the dialog if needed.
+  - Indexed / default array properties are emitted as their source signature; no special interface-syntax handling.
+  - Class-body `{$IFDEF}` branches are not tracked &mdash; members from both branches end up in the list, even when only one is active.
+  - Overloaded methods are emitted individually (no dedup).
+  - Default member visibility for VCL classes (`$M+`, the common case) is assumed to be `published`. Pure `TObject` descendants would actually default to `public`; the dialog shows a `default visibility` header in that case so the difference is visible.
+
 ## Requirements
 
 - **Delphi 13** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
@@ -206,6 +234,9 @@ DelphiRefactoringLight/
 |   |-- Expert.MoveToUnit.pas                # Move-identifier engine
 |   |-- Expert.MoveToUnitDialog.pas          # Target-unit picker dialog
 |   |-- Expert.MoveToUnitWizard.pas          # Move-identifier wizard
+|   |-- Expert.ExtractInterface.pas          # Extract-interface engine: class parser, interface emitter, clash detection
+|   |-- Expert.ExtractInterfaceDialog.pas    # Member checklist + live preview dialog (extract / extend)
+|   |-- Expert.ExtractInterfaceWizard.pas    # Workflow: LSP type resolution, file emit, class rewrite
 |   |-- Expert.LspPrewarmer.pas              # IOTAIDENotifier: pre-warms LSP on project open
 |   |-- Expert.PluginSettings.pas            # Plugin settings (registry-backed)
 |   |-- Expert.OptionsFrame.pas / .dfm       # Tools > Options > Refactoring Light page
@@ -250,6 +281,7 @@ DelphiRefactoringLight/
 - **Project-open LSP pre-warmer** (`TLspPrewarmer`): an `IOTAIDENotifier` listens for `ofnFileOpened` of `.dproj`/`.dpr` files and kicks off a background thread (priority `THREAD_PRIORITY_BELOW_NORMAL`) that calls `EnsureProjectIndexed`. By the time the user triggers their first refactoring, DelphiLSP usually has the project fully analysed. Opt out via *Tools &rarr; Options &rarr; Refactoring Light &rarr; "Pre-warm DelphiLSP ..."*.
 - **Per-file diagnostic wait**: refactoring wizards that depend on diagnostics (currently the *Remove with* wizard, for inactive-region detection) explicitly block until `publishDiagnostics` for the file in question has arrived (up to 30 s timeout per file). Idempotent: files that already have diagnostics return instantly. When no diagnostics arrive within the window, affected occurrences are reported as *"LSP no diagnostics &mdash; skipped (dead-code unknown)"* rather than rewritten on guesswork.
 - **Inactive `{$IFDEF}`-region tracking**: `TLspClient` parses every `publishDiagnostics` notification, filters for `source = "DelphiLSP"` + `tag = Unnecessary` (or `code = H2655`/`H2656`), and stores the resulting line-range table per file. `IsLineInactive(file, line)` is a direct lookup. `HasReceivedDiagnostics(file)` tells callers whether a `False` from `IsLineInactive` means "verified active" or "no data".
+- **LSP-driven type-to-unit resolution** (Extract Interface): for each type identifier referenced by the chosen interface members, the engine collects the line of the member that introduced it, then runs `textDocument/definition` on that exact column (a localised search inside `[M.LineStart, M.LineStart+3]` avoids the off-by-line bugs that a whole-file scan would hit on mixed line endings or duplicated identifiers like `TForm` inside `TForm11`). The resulting target-file path is mapped back to a unit name. Partial-failure mode: when LSP cannot resolve every type (often because the source unit itself has compile errors), the result is unioned with the source unit's own interface-uses so the new / extended interface unit still compiles. A diagnostic dialog after the run reports `<resolved>/<attempted>` and the LSP error if any.
 - **`IOTAEditWriter`** instead of `InsertText`: byte-precise edits without IDE auto-indent interference.
 - **`Module.Refresh(False)`** instead of `True`: reloads the form module without discarding in-editor changes.
 - **PID-based restart hint**: a marker file in `%TEMP%` stores the process ID; if it matches the current IDE, the package was re-installed during the running session and a restart hint is shown.

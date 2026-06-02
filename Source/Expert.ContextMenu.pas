@@ -64,6 +64,8 @@ type
     procedure OnRemoveWithAtCursor(Sender: TObject);
     procedure OnUnitRefs(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
+    procedure OnExtractInterface(Sender: TObject);
+    procedure OnAddToExistingInterface(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -97,7 +99,7 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
-  Expert.MoveToUnitWizard;
+  Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -214,6 +216,20 @@ begin
   RemoveWithSub.Add(Mi);
   Submenu.Add(CreateItem('Move to unit...',                 skMoveToUnit, OnMoveToUnit));
   Submenu.Add(CreateItem('Find unit references...',         skUnitRefs,   OnUnitRefs));
+
+  // Extract/extend interface: no shortcut, submenu with two actions.
+  var IfaceSub := TMenuItem.Create(FPopupMenu);
+  IfaceSub.Caption := 'Extract / extend interface';
+  Submenu.Add(IfaceSub);
+  var IfaceMi: TMenuItem;
+  IfaceMi := TMenuItem.Create(FPopupMenu);
+  IfaceMi.Caption := 'Extract new interface from class...';
+  IfaceMi.OnClick := OnExtractInterface;
+  IfaceSub.Add(IfaceMi);
+  IfaceMi := TMenuItem.Create(FPopupMenu);
+  IfaceMi.Caption := 'Add to existing interface...';
+  IfaceMi.OnClick := OnAddToExistingInterface;
+  IfaceSub.Add(IfaceMi);
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -519,6 +535,16 @@ procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);
 begin
   if MoveToUnitInstance <> nil then
     MoveToUnitInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnExtractInterface(Sender: TObject);
+begin
+  Expert.ExtractInterfaceWizard.ExtractInterfaceFromClass;
+end;
+
+procedure TContextMenuInstaller.OnAddToExistingInterface(Sender: TObject);
+begin
+  Expert.ExtractInterfaceWizard.AddToExistingInterface;
 end;
 
 end.

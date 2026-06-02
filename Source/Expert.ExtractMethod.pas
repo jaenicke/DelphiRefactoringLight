@@ -1509,51 +1509,18 @@ begin
     FDialog.SetStatus('Saving files...'); TEditorHelper.SaveAllFiles;
     FDialog.SetStatus('Connecting to LSP...');
     Client := TLspManager.Instance.GetClient(RP, TEditorHelper.GetCurrentProjectDproj, DJ);
-    FDialog.SetStatus('Refreshing source file...'); Client.RefreshDocument(AInfo.FileName);
 
-    // Aktive Analyse-Anfrage: DelphiLSP im 'controller'-Mode antwortet
-    // 'Internal server error' auf Hover-Requests fuer Files, die er
-    // noch nicht analysiert hat. documentSymbol ist eine synchrone
-    // Anfrage, die LSP zwingt, das File zu parsen. Wir verwerfen das
-    // Ergebnis - es geht uns nur darum, dass LSP danach hover-bereit
-    // ist. Timeout 60 s.
-    FDialog.SetStatus('Waiting for LSP to analyse file...');
-    try
-      var SymArr := Client.GetDocumentSymbols(AInfo.FileName, 60000);
-      if SymArr <> nil then SymArr.Free;
-    except
-      // Timeout / Server-Fehler: wir versuchen trotzdem weiterzumachen
-    end;
-    // Zusaetzlich: kurz auf publishDiagnostics warten. DelphiLSP
-    // pusht die direkt nach der Datei-Analyse - sobald die da sind,
-    // ist Hover stabil.
-    Client.WaitForDiagnostics(AInfo.FileName, 15000);
-
-    // Sekundaerer Warmup-Test gegen "Server not running" / sporadische
-    // Race-Conditions: bis zu 5 Hover-Versuche mit Retry, diesmal
-    // gegen ein Position, das WIRKLICH ein Identifier ist (nicht col
-    // 0). Wir nehmen den allerersten Token nach Methodenkopf.
-    FDialog.SetStatus('Verifying LSP readiness...');
-    for var Retry := 1 to 5 do
-    begin
-      try
-        // Probe: hover am ersten Identifier-aehnlichen Char in der
-        // Block-Startzeile. Wenn das durchgeht (auch leer), ist LSP
-        // wirklich bereit.
-        var ProbeLine := AInfo.StartLine - 1;
-        var ProbeCol  := 2; // Nahe Anfang - meistens auf einem
-                             // Identifier oder einer ID-Fortsetzung.
-        var H := Client.GetHover(AInfo.FileName, ProbeLine, ProbeCol);
-        if H = '' then ; // ignorieren
-        Break;
-      except
-        on E: Exception do
-        begin
-          FDialog.SetStatus(Format('LSP warmup %d/5: %s', [Retry, E.Message]));
-          Sleep(1000);
-        end;
-      end;
-    end;
+    // Einheitlicher Warmup ueber alle Wizards. Die Status-Callbacks
+    // landen 1:1 im Dialog, damit der User dieselben Texte sieht wie im
+    // 'Remove with'-Wizard etc. - kein wizard-spezifisches Re-Wording.
+    Client.EnsureFileAnalysed(AInfo.FileName,
+      {ASymbolTimeoutMs:} 60000,
+      {ADiagnosticsTimeoutMs:} 15000,
+      procedure(S: string)
+      begin
+        FDialog.SetStatus(S);
+        Application.ProcessMessages;
+      end);
 
     FDialog.SetStatus('Finding insertion point...'); FindInsertPoint(AInfo);
 

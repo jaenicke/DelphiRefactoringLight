@@ -168,6 +168,25 @@ type
     function WaitForDiagnostics(const AFilePath: string;
       ATimeoutMs: Cardinal): Boolean;
 
+    /// <summary>Brings AFilePath into a state where hover / definition /
+    ///  documentSymbol on it are reliable. Does the full warm-up sequence
+    ///  uniformly for every wizard:
+    ///   1. RefreshDocument (didOpen + didChange v2 with full content)
+    ///   2. textDocument/documentSymbol with ASymbolTimeoutMs (blocks
+    ///      until DelphiLSP has actually parsed the file or the timeout
+    ///      hits - the request itself is the analysis trigger)
+    ///   3. WaitForDiagnostics with ADiagnosticsTimeoutMs (publishDiag-
+    ///      nostics typically arrive seconds after symbol resolution)
+    ///
+    ///  Idempotent: when HasReceivedDiagnostics(AFilePath) is already
+    ///  true the routine returns immediately. AStatusCallback (optional)
+    ///  receives a short user-facing string at each step so all dialogs
+    ///  show the same wording. Exceptions inside the warm-up are
+    ///  swallowed - the caller proceeds on best effort.</summary>
+    procedure EnsureFileAnalysed(const AFilePath: string;
+      ASymbolTimeoutMs, ADiagnosticsTimeoutMs: Cardinal;
+      AStatusCallback: TProc<string> = nil);
+
     /// <summary>Shuts the server down cleanly.</summary>
     procedure Shutdown;
 
@@ -1203,6 +1222,63 @@ begin
     Result := HasReceivedDiagnostics(AFilePath);
     if Now > Deadline then Break;
   end;
+end;
+
+procedure TLspClient.EnsureFileAnalysed(const AFilePath: string;
+  ASymbolTimeoutMs, ADiagnosticsTimeoutMs: Cardinal;
+  AStatusCallback: TProc<string>);
+
+  procedure Status(const S: string);
+  begin
+    if Assigned(AStatusCallback) then AStatusCallback(S);
+  end;
+
+var
+  FN: string;
+  Sym: TJSONArray;
+begin
+  FN := ExtractFileName(AFilePath);
+
+  // Idempotenz-Shortcut: wenn der Server fuer diese Datei schon einmal
+  // publishDiagnostics gepusht hat, ist sie analysiert - kein Bedarf,
+  // documentSymbol erneut zu erzwingen.
+  if HasReceivedDiagnostics(AFilePath) then
+  begin
+    Status('LSP: ' + FN + ' already analysed.');
+    Exit;
+  end;
+
+  Status('LSP: refreshing ' + FN + ' (didOpen + didChange v2)...');
+  try
+    RefreshDocument(AFilePath);
+  except
+    // Refresh-Fehler ist nicht fatal - wir versuchen den Rest trotzdem.
+  end;
+
+  Status(Format(
+    'LSP: requesting symbol analysis for %s (up to %d s on cold files)...',
+    [FN, ASymbolTimeoutMs div 1000]));
+  Sym := nil;
+  try
+    try
+      Sym := GetDocumentSymbols(AFilePath, ASymbolTimeoutMs);
+    except
+      // Timeout / Server-Fehler: wir machen mit Diagnostics-Wait weiter.
+    end;
+  finally
+    if Sym <> nil then Sym.Free;
+  end;
+
+  Status(Format(
+    'LSP: waiting for diagnostics on %s (up to %d s)...',
+    [FN, ADiagnosticsTimeoutMs div 1000]));
+  WaitForDiagnostics(AFilePath, ADiagnosticsTimeoutMs);
+
+  if HasReceivedDiagnostics(AFilePath) then
+    Status('LSP: ' + FN + ' ready (diagnostics received).')
+  else
+    Status('LSP: ' + FN + ' analysed but no diagnostics arrived '
+      + '(inactive-region detection unavailable).');
 end;
 
 end.

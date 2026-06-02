@@ -752,32 +752,20 @@ begin
           // Antwort. Mit Timeout 90 s (30 s im Project-Scope).
           // Anschliessend kurz auf publishDiagnostics warten (die
           // kommen direkt nach der Analyse - max. 10 s).
-          if not Client.HasReceivedDiagnostics(ScanFiles[FileIdx]) then
-          begin
-            Dialog.SetStatus(Format('Waiting for LSP to analyse: %s...',
-              [ExtractFileName(ScanFiles[FileIdx])]));
-            Application.ProcessMessages;
-            try
-              Client.RefreshDocument(ScanFiles[FileIdx]);
-            except
-              // Refresh-Fehler ist nicht kritisch
-            end;
-            // Aktive Analyse-Anfrage: documentSymbol BLOCKIERT bis LSP
-            // antwortet. Wir verwerfen das Ergebnis - es geht uns nur
-            // darum, dass LSP den File durchparst.
-            var SymTimeoutMs: Cardinal;
-            if AScope = wrsProject then SymTimeoutMs := 30000 else SymTimeoutMs := 120000;
-            var SymJson: TJSONArray := nil;
-            try
-              SymJson := Client.GetDocumentSymbols(ScanFiles[FileIdx], SymTimeoutMs);
-            except
-              // Timeout / Fehler: wir versuchen trotzdem weiterzumachen.
-            end;
-            if SymJson <> nil then SymJson.Free;
-            // Nach documentSymbol ist DelphiLSP soweit. Diagnostics
-            // kommen typisch in den naechsten Sekunden hinterher.
-            Client.WaitForDiagnostics(ScanFiles[FileIdx], 15000);
-          end;
+          // Einheitlicher Warmup ueber alle Wizards (TLspClient.Ensure-
+          // FileAnalysed). Die Status-Callbacks landen 1:1 im Dialog -
+          // damit sieht der User exakt dieselben Texte wie z.B. im
+          // Extract-Method-Wizard.
+          var SymTimeoutMs: Cardinal;
+          if AScope = wrsProject then SymTimeoutMs := 30000 else SymTimeoutMs := 120000;
+          Client.EnsureFileAnalysed(ScanFiles[FileIdx],
+            SymTimeoutMs,
+            {ADiagnosticsTimeoutMs:} 15000,
+            procedure(S: string)
+            begin
+              Dialog.SetStatus(S);
+              Application.ProcessMessages;
+            end);
 
           // Wenn DelphiLSP fuer dieses File ueberhaupt keine
           // publishDiagnostics geliefert hat, koennen wir nicht

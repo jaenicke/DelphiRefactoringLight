@@ -15,12 +15,24 @@ uses
   Expert.SelectionValidator, Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
 
 type
-  TParamMode = (pmConst, pmVar, pmLocal);
+  /// <summary>How a parameter is passed to the extracted method.
+  ///  pmNone = no modifier (Delphi default: by value, callee may modify
+  ///  its local copy). pmConst/pmVar/pmOut map to the matching Delphi
+  ///  keywords. pmLocal = sentinel for "promoted out of the param list,
+  ///  emitted as a local var of the extracted method instead".</summary>
+  TParamMode = (pmNone, pmConst, pmVar, pmOut, pmLocal);
 
   TExtractedParam = record
     Name: string;
     TypeName: string;
     Mode: TParamMode;
+    /// <summary>True if this parameter was inherited from the enclosing
+    ///  method's signature (skParameter classification). Such parameters
+    ///  must NOT be promoted to a function Result - they only forward
+    ///  the caller's storage to the extracted body. Promoting Key (an
+    ///  inherited "var Key: Word") to a Result would drop the caller-
+    ///  side write-back contract.</summary>
+    IsForwardedEnclosingParam: Boolean;
   end;
 
   TLocalVar = record
@@ -118,6 +130,14 @@ type
     ///  vars (declared after BEGIN) from classical var-block declarations
     ///  (declared between procedure header and BEGIN).</summary>
     class function FindMethodBeginLine(const AFileLines: TArray<string>; AInsertLine: Integer): Integer; static;
+    /// <summary>Parses the parameter list of the enclosing method whose
+    ///  header starts at AInsertLine (1-based) and returns the modifier
+    ///  declared for AIdent: pmVar / pmOut / pmConst / pmNone. Returns
+    ///  pmNone if the parameter is not found (defensive default - never
+    ///  produces a wrong modifier). Multi-line headers and
+    ///  multi-name groups ("var Key, Modifier: Word") are supported.</summary>
+    class function GetEnclosingParamMode(const AFileLines: TArray<string>;
+      AInsertLine: Integer; const AIdent: string): TParamMode; static;
     /// <summary>True iff ADefLine lies inside the method body (after the
     ///  method's first BEGIN), which marks an inline variable. False for
     ///  parameters and classical var-block declarations.</summary>
@@ -246,6 +266,12 @@ begin
   if Pos('UNIT ', Upper) > 0 then Exit(skUnit);
   if Pos('PROPERTY ', Upper) > 0 then Exit(skProperty);
   if Pos('CONST ', Upper) > 0 then Exit(skConst);
+  // DelphiLSP returns "param <name>: <type>" for parameters of the
+  // enclosing method. Detect this BEFORE the generic ": "-fallback
+  // (which would otherwise mis-classify parameters as plain skVariable
+  // and the Extract-Method routing would treat them as local vars).
+  if (Pos('PARAM ', Upper) > 0) or (Pos('PARAMETER ', Upper) > 0) then
+    Exit(skParameter);
   if Pos('VAR ', Upper) > 0 then Exit(skVariable);
   if Pos(': ', AHoverText) > 0 then Exit(skVariable);
 end;
@@ -564,6 +590,121 @@ begin
     if (Upper = 'BEGIN') or Upper.StartsWith('BEGIN ') or Upper.EndsWith(' BEGIN') or
        (Pos(' BEGIN ', ' ' + Upper + ' ') > 0) then
       Exit(I + 1);
+  end;
+end;
+
+class function TExtractMethodHelper.GetEnclosingParamMode(
+  const AFileLines: TArray<string>;
+  AInsertLine: Integer; const AIdent: string): TParamMode;
+var
+  I, Depth, P1, P2, GrpStart: Integer;
+  Header: string;
+  Ch: Char;
+  Params, Group, Modifier, Names, NameItem: string;
+  Parts, NameArr: TArray<string>;
+  Up, IdentUp: string;
+begin
+  Result := pmNone;
+  if (AIdent = '') or (AInsertLine <= 0) or (AInsertLine > Length(AFileLines)) then
+    Exit;
+
+  // Concatenate header lines until we have a complete '(...)' block, or
+  // we hit a ';' before any '(' (procedure with no params).
+  Header := '';
+  Depth := 0;
+  for I := AInsertLine - 1 to Length(AFileLines) - 1 do
+  begin
+    Header := Header + ' ' + AFileLines[I];
+    P1 := Pos('(', Header);
+    if P1 = 0 then
+    begin
+      // No '(' yet - if we see ';' the method has no params at all.
+      if Pos(';', Header) > 0 then Exit;
+      Continue;
+    end;
+    // Count parens from the first '(' onward.
+    Depth := 0;
+    P2 := 0;
+    for var K := P1 to Length(Header) do
+    begin
+      Ch := Header[K];
+      if Ch = '(' then Inc(Depth)
+      else if Ch = ')' then
+      begin
+        Dec(Depth);
+        if Depth = 0 then begin P2 := K; Break; end;
+      end;
+    end;
+    if P2 > 0 then Break;
+  end;
+  if (P1 = 0) or (P2 = 0) then Exit;
+
+  Params := Copy(Header, P1 + 1, P2 - P1 - 1);
+
+  // Split by ';' at top-level (no nested parens inside parameter list of
+  // a parent method typically; defaults like '= TFoo.Create' don't matter
+  // for the modifier we care about).
+  Depth := 0;
+  GrpStart := 1;
+  IdentUp := UpperCase(AIdent);
+  Parts := nil;
+  for var K := 1 to Length(Params) do
+  begin
+    Ch := Params[K];
+    if Ch = '(' then Inc(Depth)
+    else if Ch = ')' then Dec(Depth)
+    else if (Ch = ';') and (Depth = 0) then
+    begin
+      Parts := Parts + [Trim(Copy(Params, GrpStart, K - GrpStart))];
+      GrpStart := K + 1;
+    end;
+  end;
+  Parts := Parts + [Trim(Copy(Params, GrpStart, MaxInt))];
+
+  for Group in Parts do
+  begin
+    if Group = '' then Continue;
+    // Strip default value (anything after '=' at top-level of the group).
+    var GroupNoDefault := Group;
+    var EqPos := Pos('=', GroupNoDefault);
+    if EqPos > 0 then GroupNoDefault := Trim(Copy(GroupNoDefault, 1, EqPos - 1));
+
+    // Split modifier + names + type at ':'.
+    var ColonPos := Pos(':', GroupNoDefault);
+    if ColonPos = 0 then
+    begin
+      // No type? "ParamName" alone is invalid Delphi - skip.
+      Continue;
+    end;
+    var Left := Trim(Copy(GroupNoDefault, 1, ColonPos - 1));
+
+    // Leading modifier word, if any.
+    Modifier := '';
+    Names := Left;
+    var SpacePos := Pos(' ', Left);
+    if SpacePos > 0 then
+    begin
+      var First := UpperCase(Copy(Left, 1, SpacePos - 1));
+      if (First = 'VAR') or (First = 'CONST') or (First = 'OUT') then
+      begin
+        Modifier := First;
+        Names := Trim(Copy(Left, SpacePos + 1, MaxInt));
+      end;
+    end;
+
+    // Names may be comma-separated: "Key, Modifier"
+    NameArr := Names.Split([',']);
+    for NameItem in NameArr do
+    begin
+      Up := UpperCase(Trim(NameItem));
+      if Up = IdentUp then
+      begin
+        if Modifier = 'VAR' then Exit(pmVar)
+        else if Modifier = 'OUT' then Exit(pmOut)
+        else if Modifier = 'CONST' then Exit(pmConst)
+        else Exit(pmNone);
+      end;
+    end;
   end;
 end;
 
@@ -901,6 +1042,39 @@ begin
       if not (K in [skVariable,skConst,skField,skProperty,skParameter]) then Continue;
       if TN='' then Continue;
       var DSF := SameText(ExpandFileName(TI.DefFile), ExpandFileName(AInfo.FileName));
+      // Parameters of the enclosing method MUST become parameters of the
+      // extracted method - they are never local-var candidates, even if
+      // their declaration line happens to fall between InsertLine and
+      // StartLine (which it always does, since the param list sits on the
+      // method header). Without this short-circuit the routing below
+      // would treat them as method-local vars and "move" them, producing
+      // code like "var Sender: TObject;" inside the new method - which
+      // changes semantics (the caller's value is lost).
+      if K = skParameter then
+      begin
+        // Mirror the enclosing method's parameter modifier 1:1. We must
+        // not "tighten" (e.g. pmNone -> pmConst) because the extracted
+        // body may forward the value to a var-parameter of another
+        // routine (e.g. TKeyEvent's "var Key: Word"), where a const-
+        // typed local would not compile. We also must not "loosen"
+        // (e.g. var -> none), because the caller's expected write-back
+        // would be lost.
+        var P: TExtractedParam; P.Name:=TI.Ident; P.TypeName:=TN;
+        P.IsForwardedEnclosingParam := True;
+        P.Mode := TExtractMethodHelper.GetEnclosingParamMode(
+          FileLines, AInfo.InsertLine, TI.Ident);
+        var ModeStr: string;
+        case P.Mode of
+          pmVar:   ModeStr := 'var';
+          pmOut:   ModeStr := 'out';
+          pmConst: ModeStr := 'const';
+        else       ModeStr := 'none';
+        end;
+        AInfo.DiagLog := AInfo.DiagLog + '    -> parameter (enclosing-method param, mode='
+          + ModeStr + ')' + sLineBreak;
+        PL.Add(P);
+        Continue;
+      end;
       if DSF and (TI.DefLine>=AInfo.StartLine) and (TI.DefLine<=AInfo.EndLine) then
         begin AInfo.DiagLog:=AInfo.DiagLog+'    -> local'+sLineBreak; Continue; end;
       if DSF and (TI.DefLine>=AInfo.InsertLine) and (TI.DefLine<AInfo.StartLine) then
@@ -964,7 +1138,8 @@ begin
     AInfo.ReturnVarName := '';
     AInfo.ReturnVarType := '';
     for var RI := 0 to High(AInfo.Params) do
-      if AInfo.Params[RI].Mode = pmVar then
+      if (AInfo.Params[RI].Mode = pmVar)
+        and not AInfo.Params[RI].IsForwardedEnclosingParam then
       begin
         AInfo.ReturnVarName := AInfo.Params[RI].Name;
         AInfo.ReturnVarType := AInfo.Params[RI].TypeName;
@@ -1046,7 +1221,11 @@ begin
     SB.Append('('); F:=True;
     for var P in AInfo.Params do begin if P.Mode=pmLocal then Continue;
       if not F then SB.Append('; ');
-      case P.Mode of pmConst: SB.Append('const '); pmVar: SB.Append('var '); end;
+      case P.Mode of
+        pmConst: SB.Append('const ');
+        pmVar: SB.Append('var ');
+        pmOut: SB.Append('out ');
+      end;
       SB.Append(TExtractMethodHelper.ParamPrefix(P.Name)+': '+P.TypeName); F:=False; end;
     SB.Append(')'); Result := SB.ToString;
   finally SB.Free; end;

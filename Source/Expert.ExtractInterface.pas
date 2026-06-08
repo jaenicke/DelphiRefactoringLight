@@ -82,6 +82,34 @@ type
     IsReadOnly: Boolean;
   end;
 
+  /// <summary>One method declaration from an interface body. Used by
+  ///  the Delegate-Implementation wizard to stub each method in a
+  ///  helper class derived from TInterfacedObject.</summary>
+  TInterfaceMethodInfo = record
+    /// <summary>Full normalised header text (single-line, no trailing
+    ///  ';'). Example: "function GetCaption: string" or
+    ///  "procedure DoIt(const A: string; B: Integer)".</summary>
+    Signature: string;
+    /// <summary>Just the method name (e.g. "GetCaption").</summary>
+    Name: string;
+    /// <summary>True for `function`, False for `procedure`.</summary>
+    IsFunction: Boolean;
+    /// <summary>Return type for functions; empty for procedures.</summary>
+    ReturnType: string;
+  end;
+
+  /// <summary>One target interface in an Add-to-existing run. Allows
+  ///  the user to select different members for different interfaces
+  ///  the class implements, all in a single wizard pass.</summary>
+  TInterfaceTarget = record
+    InterfaceName: string;
+    FileName: string;
+    DeclLine, EndLine: Integer;
+    /// <summary>Aligned to TExtractInterfaceInfo.Members: True means
+    ///  "selected for splice into THIS target interface".</summary>
+    MemberSelected: TArray<Boolean>;
+  end;
+
   TExtractInterfaceInfo = record
     Mode: TInterfaceMode;
     SourceFile: string;
@@ -103,6 +131,13 @@ type
     ///  For eimExtractNew: ignored.</summary>
     ExistingFile: string;
     ExistingDeclLine, ExistingEndLine: Integer;
+    /// <summary>For eimAddToExisting: full set of target interfaces
+    ///  the user wants to extend. Each entry carries its own per-Member
+    ///  selection so different interfaces can receive different members
+    ///  in the same wizard run. When this array is non-empty, the
+    ///  primary ExistingFile/DeclLine/EndLine fields above are ignored
+    ///  by ApplyAddToExisting in favour of the multi-target loop.</summary>
+    Targets: TArray<TInterfaceTarget>;
     /// <summary>Unit names to include in the new unit's interface-uses
     ///  clause. The wizard typically fills this with the source unit's
     ///  own interface-uses so any type referenced by the synthesised
@@ -167,6 +202,44 @@ type
     ///  names).</summary>
     class function ClashesWithExisting(const M: TClassMember;
       const AExistingUpper: TArray<string>): Boolean;
+
+    /// <summary>Parses the "(TBase, IFoo, IBar)" tail of a class header
+    ///  line. The FIRST entry is taken as the base class (Delphi
+    ///  convention; only one class ancestor is allowed), the remaining
+    ///  entries are returned as the implemented interfaces. Returns an
+    ///  empty array if the class has no '(' / ')' or no entries beyond
+    ///  the base.</summary>
+    class function ParseClassAncestors(const AHeaderLine: string;
+      out ABaseClass: string): TArray<string>;
+
+    /// <summary>True iff the class body between AClassDeclLine and
+    ///  AClassEndLine declares a destructor (i.e. a line whose first
+    ///  word, after optional 'class' / visibility / modifier prefixes,
+    ///  is 'destructor'). Used by the Make-IInterface-compatible
+    ///  workflow to decide whether to inject a new destructor or hand
+    ///  off the cleanup to the user.</summary>
+    class function ClassHasDestructor(const AFileLines: TArray<string>;
+      AClassDeclLine, AClassEndLine: Integer): Boolean;
+
+    /// <summary>True iff the class body declares a method (procedure or
+    ///  function, optionally prefixed with `class`) named AMethodName.
+    ///  The match is whole-identifier: a method named 'NewInstancePlus'
+    ///  does NOT count when AMethodName is 'NewInstance'. Used by the
+    ///  Add-IInterface-support workflow to decide whether to add fresh
+    ///  declarations for NewInstance / AfterConstruction or splice into
+    ///  existing bodies instead.</summary>
+    class function ClassHasMethodDecl(const AFileLines: TArray<string>;
+      AClassDeclLine, AClassEndLine: Integer;
+      const AMethodName: string): Boolean;
+
+    /// <summary>Reads the body of an interface declaration in AFile
+    ///  (between ADeclLine and AEndLine) and returns every method
+    ///  declaration (procedure / function) it contains. Properties are
+    ///  skipped because interface properties always delegate to method
+    ///  accessors, which are themselves listed as methods, so stubbing
+    ///  the methods covers the whole interface contract.</summary>
+    class function ParseInterfaceMethodSignatures(const AFile: string;
+      ADeclLine, AEndLine: Integer): TArray<TInterfaceMethodInfo>;
   end;
 
   /// <summary>Tiny utility: scans an entire Pascal source file and yields
@@ -901,6 +974,180 @@ begin
   for N in Mine do
     for E in AExistingUpper do
       if SameText(N, E) then Exit(True);
+end;
+
+class function TExtractInterfaceEngine.ParseClassAncestors(
+  const AHeaderLine: string; out ABaseClass: string): TArray<string>;
+var
+  L, Inner, Item, Name: string;
+  P, Q, GenPos, I: Integer;
+  Items: TArray<string>;
+  List: TList<string>;
+begin
+  Result := nil;
+  ABaseClass := '';
+  L := StripLineComment(AHeaderLine);
+  P := Pos('(', L);
+  if P = 0 then Exit;
+  Q := Pos(')', L);
+  if Q <= P then Exit;
+  Inner := Trim(Copy(L, P + 1, Q - P - 1));
+  if Inner = '' then Exit;
+  Items := Inner.Split([',']);
+  List := TList<string>.Create;
+  try
+    for I := 0 to High(Items) do
+    begin
+      Item := Trim(Items[I]);
+      if Item = '' then Continue;
+      Name := Item;
+      // strip generic argument list
+      GenPos := Pos('<', Name);
+      if GenPos > 0 then Name := Trim(Copy(Name, 1, GenPos - 1));
+      if I = 0 then
+        ABaseClass := Name
+      else
+        List.Add(Name);
+    end;
+    Result := List.ToArray;
+  finally
+    List.Free;
+  end;
+end;
+
+class function TExtractInterfaceEngine.ClassHasDestructor(
+  const AFileLines: TArray<string>;
+  AClassDeclLine, AClassEndLine: Integer): Boolean;
+var
+  I: Integer;
+  Upper: string;
+begin
+  Result := False;
+  for I := AClassDeclLine to AClassEndLine - 2 do
+  begin
+    if (I < 0) or (I >= Length(AFileLines)) then Continue;
+    Upper := UpperCase(Trim(StripLineComment(AFileLines[I])));
+    if StartsText('DESTRUCTOR ', Upper) or
+       StartsText('CLASS DESTRUCTOR ', Upper) then
+      Exit(True);
+  end;
+end;
+
+class function TExtractInterfaceEngine.ClassHasMethodDecl(
+  const AFileLines: TArray<string>;
+  AClassDeclLine, AClassEndLine: Integer;
+  const AMethodName: string): Boolean;
+var
+  I, P: Integer;
+  Upper, NameUpper, Trimmed: string;
+  procedure TestPrefix(const APrefix: string);
+  var After: Char;
+  begin
+    if not StartsText(APrefix, Upper) then Exit;
+    P := Length(APrefix);
+    if P >= Length(Upper) then begin Result := True; Exit; end;
+    After := Upper[P + 1];
+    // whole-identifier: char right after the name must not be
+    // ident-cont (so 'NewInstancePlus' doesn't match 'NewInstance').
+    if not (After.IsLetterOrDigit or (After = '_')) then
+      Result := True;
+  end;
+begin
+  Result := False;
+  NameUpper := UpperCase(AMethodName);
+  for I := AClassDeclLine to AClassEndLine - 2 do
+  begin
+    if (I < 0) or (I >= Length(AFileLines)) then Continue;
+    Trimmed := Trim(StripLineComment(AFileLines[I]));
+    if Trimmed = '' then Continue;
+    Upper := UpperCase(Trimmed);
+    // Strip a leading 'class' modifier.
+    if StartsText('CLASS ', Upper) then
+      Upper := Trim(Copy(Upper, 7, MaxInt));
+    TestPrefix('PROCEDURE ' + NameUpper);
+    if Result then Exit;
+    TestPrefix('FUNCTION ' + NameUpper);
+    if Result then Exit;
+  end;
+end;
+
+class function TExtractInterfaceEngine.ParseInterfaceMethodSignatures(
+  const AFile: string; ADeclLine, AEndLine: Integer): TArray<TInterfaceMethodInfo>;
+var
+  Lines: TArray<string>;
+  L: TList<TInterfaceMethodInfo>;
+  I, K, Depth, LastColon: Integer;
+  Line, Trimmed, Upper, Acc, Tail, NamePart: string;
+  Info: TInterfaceMethodInfo;
+begin
+  Result := nil;
+  Lines := TDelphiFileEncoding.ReadLines(AFile);
+  L := TList<TInterfaceMethodInfo>.Create;
+  try
+    I := ADeclLine; // skip the "IFoo = interface" header itself
+    while (I < AEndLine - 1) and (I < Length(Lines)) do
+    begin
+      Line := StripLineComment(Lines[I]);
+      Trimmed := Trim(Line);
+      Upper := UpperCase(Trimmed);
+      if not (StartsText('PROCEDURE ', Upper) or StartsText('FUNCTION ', Upper)) then
+      begin
+        Inc(I);
+        Continue;
+      end;
+      // Collect the signature across lines until we see a ';' that
+      // closes the header. (Interface methods rarely have directives
+      // but we strip the trailing ';' regardless.)
+      Acc := Trimmed;
+      while Pos(';', StripLineComment(Acc)) = 0 do
+      begin
+        Inc(I);
+        if (I >= AEndLine - 1) or (I >= Length(Lines)) then Break;
+        Acc := Acc + ' ' + Trim(StripLineComment(Lines[I]));
+      end;
+      while (Acc <> '') and (Acc[Length(Acc)] = ';') do
+        Acc := Trim(Copy(Acc, 1, Length(Acc) - 1));
+
+      Info := Default(TInterfaceMethodInfo);
+      Info.Signature := Acc;
+      Info.IsFunction := StartsText('FUNCTION ', UpperCase(Acc));
+      // Method name = first identifier after the keyword.
+      K := Pos(' ', Acc);
+      if K > 0 then
+      begin
+        Tail := Trim(Copy(Acc, K, MaxInt));
+        var EndIdx: Integer := 1;
+        while (EndIdx <= Length(Tail)) and
+              (Tail[EndIdx].IsLetterOrDigit or (Tail[EndIdx] = '_')) do
+          Inc(EndIdx);
+        Info.Name := Copy(Tail, 1, EndIdx - 1);
+      end;
+      if Info.IsFunction then
+      begin
+        // Return type = text after the LAST top-level ':' in the signature.
+        Depth := 0;
+        LastColon := 0;
+        for K := 1 to Length(Acc) do
+        begin
+          case Acc[K] of
+            '(': Inc(Depth);
+            ')': Dec(Depth);
+            ':': if Depth = 0 then LastColon := K;
+          end;
+        end;
+        if LastColon > 0 then
+        begin
+          NamePart := Trim(Copy(Acc, LastColon + 1, MaxInt));
+          Info.ReturnType := NamePart;
+        end;
+      end;
+      L.Add(Info);
+      Inc(I);
+    end;
+    Result := L.ToArray;
+  finally
+    L.Free;
+  end;
 end;
 
 { ---------- TProjectInterfaceScanner ---------- }

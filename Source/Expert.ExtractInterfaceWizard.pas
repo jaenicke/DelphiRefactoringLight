@@ -33,13 +33,23 @@ interface
 
 procedure ExtractInterfaceFromClass;
 procedure AddToExistingInterface;
+/// <summary>For a class that does NOT descend from TInterfacedObject,
+///  adds full IInterface support directly to the class: `IInterface`
+///  in the ancestor list, FRefCount field, NewInstance + After-
+///  Construction overrides (to mirror TInterfacedObject's
+///  initial-refcount-1 trick) and the three IInterface methods
+///  (QueryInterface / _AddRef / _Release). Once applied the instance
+///  is held purely as an IInterface and frees itself when the last
+///  reference drops.</summary>
+procedure DelegateInterfaceImplementation;
 
 implementation
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.StrUtils,
   System.Character, System.Generics.Collections,
-  Vcl.Dialogs, Vcl.Forms, Vcl.Controls,
+  System.UITypes,
+  Vcl.Dialogs, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
   ToolsAPI,
   Expert.EditorHelper, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
   Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
@@ -936,6 +946,127 @@ end;
 
 procedure ApplyAddToExisting(const AInfo: TExtractInterfaceInfo;
   out AStats: TResolveUsesStats; AStatusCallback: TProc<string>);
+
+  /// <summary>Builds a per-target FilteredInfo from AInfo, where only
+  ///  the members selected for THIS target are marked Selected, plus
+  ///  applies clash filtering against the target's existing interface
+  ///  declarations.</summary>
+  function BuildFilteredInfoForTarget(const ATarget: TInterfaceTarget): TExtractInterfaceInfo;
+  var
+    K: Integer;
+    Existing: TArray<string>;
+  begin
+    Result := AInfo;
+    Result.InterfaceName := ATarget.InterfaceName;
+    Result.ExistingFile := ATarget.FileName;
+    Result.ExistingDeclLine := ATarget.DeclLine;
+    Result.ExistingEndLine := ATarget.EndLine;
+    // Take selections from the target only - ignore the .Selected
+    // flags carried by AInfo.Members (which reflect the last UI view).
+    for K := 0 to High(Result.Members) do
+      Result.Members[K].Selected :=
+        (K <= High(ATarget.MemberSelected)) and ATarget.MemberSelected[K];
+    Existing := TExtractInterfaceEngine.ParseExistingInterfaceNames(
+      ATarget.FileName, ATarget.DeclLine, ATarget.EndLine);
+    for K := 0 to High(Result.Members) do
+      if Result.Members[K].Selected and
+         TExtractInterfaceEngine.ClashesWithExisting(Result.Members[K], Existing) then
+        Result.Members[K].Selected := False;
+  end;
+
+  /// <summary>Splices the body of AFilteredInfo's interface text into
+  ///  the target file just before its terminating 'end;', AND extends
+  ///  the target file's uses clause with the type units AFilteredInfo
+  ///  needs. Stats are accumulated into AStats across all targets.</summary>
+  procedure SpliceIntoOneTarget(const AFilteredInfo: TExtractInterfaceInfo);
+  var
+    ExistingLines: TArray<string>;
+    EndLineIdx, I: Integer;
+    InterfaceText, Splice: string;
+    PartialStats: TResolveUsesStats;
+    Buf: TStringList;
+  begin
+    ExistingLines := ReadSourceLines(AFilteredInfo.ExistingFile);
+    EndLineIdx := AFilteredInfo.ExistingEndLine - 1;
+    if (EndLineIdx < 0) or (EndLineIdx >= Length(ExistingLines)) then Exit;
+
+    // Type resolution for THIS target's selected members.
+    var NeededUses: TArray<string> :=
+      ResolveUsesViaLsp(AFilteredInfo.SourceFile, AFilteredInfo.Members,
+        AStatusCallback, PartialStats);
+    AStats.TypesAttempted := AStats.TypesAttempted + PartialStats.TypesAttempted;
+    AStats.TypesResolved := AStats.TypesResolved + PartialStats.TypesResolved;
+    if PartialStats.LspAvailable then AStats.LspAvailable := True;
+    if (AStats.LspError = '') and (PartialStats.LspError <> '') then
+      AStats.LspError := PartialStats.LspError;
+    if (not PartialStats.LspAvailable) or
+       (PartialStats.TypesResolved < PartialStats.TypesAttempted) then
+      NeededUses := UnionUnitNames(NeededUses,
+        ExtractInterfaceUses(AFilteredInfo.SourceFile));
+
+    var ExistingUnitName := UpperCase(
+      ChangeFileExt(ExtractFileName(AFilteredInfo.ExistingFile), ''));
+    for var UN in NeededUses do
+      if not SameText(UN, ExistingUnitName) then
+        EnsureUsesContainsInLines(ExistingLines, UN);
+
+    // Re-locate the interface's 'end;' line after the uses edits.
+    begin
+      var Depth: Integer := 1;
+      var FoundEnd: Integer := -1;
+      for I := AFilteredInfo.ExistingDeclLine to High(ExistingLines) do
+      begin
+        var U := UpperCase(StripLineCommentLocal(ExistingLines[I]));
+        var P := 1;
+        while P <= Length(U) do
+        begin
+          if U[P].IsLetter or (U[P] = '_') then
+          begin
+            var Q := P;
+            while (Q <= Length(U)) and (U[Q].IsLetterOrDigit or (U[Q] = '_')) do Inc(Q);
+            var W := Copy(U, P, Q - P);
+            if (W = 'RECORD') then Inc(Depth)
+            else if (W = 'END') then
+            begin
+              Dec(Depth);
+              if Depth = 0 then begin FoundEnd := I + 1; Break; end;
+            end;
+            P := Q;
+          end
+          else
+            Inc(P);
+        end;
+        if FoundEnd > 0 then Break;
+      end;
+      if FoundEnd > 0 then EndLineIdx := FoundEnd - 1;
+    end;
+
+    InterfaceText := TExtractInterfaceEngine.BuildInterfaceText(AFilteredInfo);
+    var Body: TStringList := TStringList.Create;
+    try
+      Body.Text := InterfaceText;
+      if Body.Count > 3 then
+      begin
+        Body.Delete(0); Body.Delete(0);
+        Body.Delete(Body.Count - 1);
+      end;
+      Splice := Body.Text;
+    finally
+      Body.Free;
+    end;
+
+    Buf := TStringList.Create;
+    try
+      for I := 0 to EndLineIdx - 1 do Buf.Add(ExistingLines[I]);
+      for var SL in Splice.Split([sLineBreak]) do
+        if SL <> '' then Buf.Add(SL);
+      for I := EndLineIdx to High(ExistingLines) do Buf.Add(ExistingLines[I]);
+      WriteSourceLines(AFilteredInfo.ExistingFile, StringListToArray(Buf));
+    finally
+      Buf.Free;
+    end;
+  end;
+
 var
   ExistingLines, SrcLines: TArray<string>;
   InterfaceText, Splice: string;
@@ -946,6 +1077,54 @@ var
   I: Integer;
 begin
   AStats := Default(TResolveUsesStats);
+
+  // Multi-target path: iterate every interface the user picked members
+  // for. Each gets its own splice + uses edit; the class-side rewrite
+  // happens ONCE afterwards on the union of all targets' synth-able
+  // members so we don't synthesise duplicate Get/Set methods.
+  if Length(AInfo.Targets) > 0 then
+  begin
+    // Union of class-side selections across all targets, then class-
+    // side rewrite below.
+    var UnionMembers: TArray<TClassMember> := AInfo.Members;
+    for I := 0 to High(UnionMembers) do
+      UnionMembers[I].Selected := False;
+
+    for var Target in AInfo.Targets do
+    begin
+      var FilteredInfo := BuildFilteredInfoForTarget(Target);
+      SpliceIntoOneTarget(FilteredInfo);
+      for I := 0 to High(FilteredInfo.Members) do
+        if FilteredInfo.Members[I].Selected then
+          UnionMembers[I].Selected := True;
+    end;
+
+    // Class-side: one rewrite covering the union, plus an ancestor
+    // entry and uses entry per target interface.
+    NeedSynth := nil;
+    for M in UnionMembers do
+      if M.Selected and
+         ((M.Kind = mkField) or
+          ((M.Kind = mkProperty) and M.NeedsSynthAccessors)) then
+        NeedSynth := NeedSynth + [M];
+    SrcLines := ReadSourceLines(AInfo.SourceFile);
+    if Length(NeedSynth) > 0 then
+    begin
+      SynthesiseAllPropertiesOnLines(SrcLines, AInfo.ClassDeclLine, AInfo.ClassEndLine, NeedSynth);
+      AppendImplementationsInLines(SrcLines, AInfo.ClassName, NeedSynth);
+    end;
+    for var Target in AInfo.Targets do
+    begin
+      AddAncestorToClassLines(SrcLines, AInfo.ClassDeclLine, Target.InterfaceName);
+      EnsureUsesContainsInLines(SrcLines,
+        ChangeFileExt(ExtractFileName(Target.FileName), ''));
+    end;
+    WriteSourceLines(AInfo.SourceFile, SrcLines);
+    Exit;
+  end;
+
+  // Single-target legacy path (Targets empty -> falls through to the
+  // original ExistingFile/DeclLine/EndLine fields).
   if (AInfo.ExistingFile = '') or (AInfo.ExistingEndLine < 1) then
   begin
     ShowMessage('No target interface selected.');
@@ -1121,12 +1300,33 @@ begin
   if AMode = eimAddToExisting then
   begin
     ProjFiles := TEditorHelper.GetProjectSourceFiles;
-    Existing := TProjectInterfaceScanner.ScanProject(ProjFiles);
-    if Length(Existing) = 0 then
+    var AllProjectInterfaces := TProjectInterfaceScanner.ScanProject(ProjFiles);
+    if Length(AllProjectInterfaces) = 0 then
     begin
       ShowMessage('No interface declarations found in the project.');
       Exit;
     end;
+
+    // Filter: prefer interfaces the class already implements (its
+    // ancestor list past the base class). Fallback: all project
+    // interfaces, in case the class implements none yet.
+    var BaseClass: string;
+    var Implemented := TExtractInterfaceEngine.ParseClassAncestors(
+      Lines[Info.ClassDeclLine - 1], BaseClass);
+    if Length(Implemented) > 0 then
+    begin
+      var Filtered: TArray<TInterfaceDeclLocation>;
+      for var Loc in AllProjectInterfaces do
+        for var IfName in Implemented do
+          if SameText(Loc.InterfaceName, IfName) then
+            Filtered := Filtered + [Loc];
+      if Length(Filtered) > 0 then
+        Existing := Filtered
+      else
+        Existing := AllProjectInterfaces;
+    end
+    else
+      Existing := AllProjectInterfaces;
   end;
 
   if not TExtractInterfaceDialog.Choose(Application.MainForm, AMode, Info,
@@ -1193,6 +1393,331 @@ end;
 procedure AddToExistingInterface;
 begin
   RunWizard(eimAddToExisting);
+end;
+
+{ ---------- IInterface support flow ----------
+
+  Adds IInterface compatibility directly to the class at the cursor:
+  declares IInterface in the ancestor list, adds FRefCount, overrides
+  NewInstance / AfterConstruction (to mirror TInterfacedObject's
+  initial-refcount-1 trick so an interface cast during the constructor
+  cannot cause premature self-Destroy), and implements QueryInterface /
+  _AddRef / _Release. Once applied, the class can be held purely as an
+  IInterface and the instance frees itself when the last reference is
+  released.
+
+  Two emission modes depending on the base class:
+    * TObject / TPersistent / unknown:  fresh implementations (no
+      `override` on the IInterface methods).
+    * TComponent or descendant:         `override` (TComponent declares
+      _AddRef / _Release / QueryInterface as virtual stdcall).
+}
+
+function InjectStmtBeforeMethodBodyEnd(var ALines: TArray<string>;
+  const AClassName, AMethodName, AStmtToInject: string): Boolean;
+// Locates the implementation of AClassName.AMethodName and splices
+// AStmtToInject into its body just before the matching 'end;'. Tracks
+// nested begin/try/case/record blocks. Returns False when the impl
+// cannot be located, so the caller can warn the user instead of
+// silently dropping the cleanup.
+var
+  I, J, K, BeginLine, EndLine, Depth: Integer;
+  Trimmed, Upper, Indent, HeaderUpper: string;
+  Buf: TStringList;
+begin
+  Result := False;
+  HeaderUpper := UpperCase(AClassName) + '.' + UpperCase(AMethodName);
+
+  for I := 0 to High(ALines) do
+  begin
+    Trimmed := Trim(StripLineCommentLocal(ALines[I]));
+    Upper := UpperCase(Trimmed);
+    if not (StartsText('PROCEDURE ', Upper) or
+            StartsText('FUNCTION ', Upper) or
+            StartsText('CLASS PROCEDURE ', Upper) or
+            StartsText('CLASS FUNCTION ', Upper)) then Continue;
+    if Pos(HeaderUpper, Upper) = 0 then Continue;
+
+    // Find 'begin' that opens this routine.
+    BeginLine := -1;
+    for J := I + 1 to High(ALines) do
+    begin
+      Upper := UpperCase(Trim(StripLineCommentLocal(ALines[J])));
+      if (Upper = 'BEGIN') or StartsText('BEGIN ', Upper) then
+      begin
+        BeginLine := J; Break;
+      end;
+    end;
+    if BeginLine < 0 then Exit;
+
+    // Track depth to the matching closing 'end;'.
+    Depth := 1;
+    EndLine := -1;
+    for J := BeginLine + 1 to High(ALines) do
+    begin
+      Trimmed := Trim(StripLineCommentLocal(ALines[J]));
+      Upper := UpperCase(Trimmed);
+      while (Upper <> '') and (Upper[Length(Upper)] = ';') do
+        Upper := Trim(Copy(Upper, 1, Length(Upper) - 1));
+
+      if (Upper = 'BEGIN') or StartsText('BEGIN ', Upper) or
+         (Upper = 'TRY') or StartsText('TRY ', Upper) or
+         (Upper = 'CASE') or StartsText('CASE ', Upper) or
+         (Upper = 'RECORD') or StartsText('RECORD ', Upper) then
+        Inc(Depth)
+      else if (Upper = 'END') or StartsText('END ', Upper) then
+      begin
+        Dec(Depth);
+        if Depth = 0 then begin EndLine := J; Break; end;
+      end;
+    end;
+    if EndLine < 0 then Exit;
+
+    // Pick indent from the closing 'end;' line.
+    Indent := '';
+    for K := 1 to Length(ALines[EndLine]) do
+      if ALines[EndLine][K] = ' ' then Indent := Indent + ' '
+      else Break;
+    if Indent = '' then Indent := '  ';
+    // Method bodies are typically '  ' indented; the body content is
+    // one level deeper.
+    Indent := Indent + '  ';
+
+    Buf := TStringList.Create;
+    try
+      for K := 0 to EndLine - 1 do Buf.Add(ALines[K]);
+      Buf.Add(Indent + AStmtToInject);
+      for K := EndLine to High(ALines) do Buf.Add(ALines[K]);
+      ALines := StringListToArray(Buf);
+    finally
+      Buf.Free;
+    end;
+    Result := True;
+    Exit;
+  end;
+end;
+
+procedure DelegateInterfaceImplementation;
+var
+  Src, BaseClass: string;
+  CurLine, InsertBefore, ClassEndAfter, I: Integer;
+  Lines: TArray<string>;
+  Info: TExtractInterfaceInfo;
+  DeclBlock, ImplBlock: string;
+  BaseIsTObjectLike, HasNewInst, HasAfterCtor: Boolean;
+  OverrideKW, BaseDesc, ExtraNote: string;
+  InjectNewInstOK, InjectAfterCtorOK: Boolean;
+begin
+  TEditorHelper.SaveAllFiles;
+  if not GetEditorCursorLine(Src, CurLine) then
+  begin
+    ShowMessage('No editor file at cursor.'); Exit;
+  end;
+  Lines := ReadSourceLines(Src);
+  if not TExtractInterfaceEngine.ParseClassAtLine(Lines, Src, CurLine, Info) then
+  begin
+    ShowMessage('No class declaration found around the cursor.'); Exit;
+  end;
+
+  // Skip if the class already lists IInterface / IUnknown.
+  var Ancestors := TExtractInterfaceEngine.ParseClassAncestors(
+    Lines[Info.ClassDeclLine - 1], BaseClass);
+  for var A in Ancestors do
+    if SameText(A, 'IInterface') or SameText(A, 'IUnknown') then
+    begin
+      ShowMessage(Format(
+        'Class %s already lists %s in its ancestor list - nothing to do.',
+        [Info.ClassName, A]));
+      Exit;
+    end;
+
+  // Heuristic on base class. TObject / TPersistent have no virtual
+  // IInterface methods to override; everything else we treat as a
+  // TComponent descendant. Users with an exotic base can adjust the
+  // generated `override` keywords by hand.
+  BaseIsTObjectLike := (BaseClass = '') or
+    SameText(BaseClass, 'TObject') or SameText(BaseClass, 'TPersistent');
+  if BaseIsTObjectLike then OverrideKW := ''
+  else OverrideKW := 'override; ';
+
+  // Detect whether the class already declares NewInstance and/or
+  // AfterConstruction. We must NOT re-declare them (would trip E2007),
+  // and we must NOT re-emit fresh implementations - instead the
+  // existing bodies get the relevant refcount statement spliced in.
+  HasNewInst := TExtractInterfaceEngine.ClassHasMethodDecl(
+    Lines, Info.ClassDeclLine, Info.ClassEndLine, 'NewInstance');
+  HasAfterCtor := TExtractInterfaceEngine.ClassHasMethodDecl(
+    Lines, Info.ClassDeclLine, Info.ClassEndLine, 'AfterConstruction');
+
+  DeclBlock :=
+    '    FRefCount: Integer;' + sLineBreak +
+    '  protected' + sLineBreak +
+    '    function QueryInterface(const IID: TGUID; out Obj): HResult; ' + OverrideKW + 'stdcall;' + sLineBreak +
+    '    function _AddRef: Integer; ' + OverrideKW + 'stdcall;' + sLineBreak +
+    '    function _Release: Integer; ' + OverrideKW + 'stdcall;';
+  if (not HasAfterCtor) or (not HasNewInst) then
+    DeclBlock := DeclBlock + sLineBreak + '  public';
+  if not HasAfterCtor then
+    DeclBlock := DeclBlock + sLineBreak +
+      '    procedure AfterConstruction; override;';
+  if not HasNewInst then
+    DeclBlock := DeclBlock + sLineBreak +
+      '    class function NewInstance: TObject; override;';
+
+  Lines := ReadSourceLines(Src);
+
+  if FindLastPrivateSectionInClass(Lines, Info.ClassDeclLine,
+    Info.ClassEndLine, InsertBefore) then
+  begin
+    var Buf: TStringList := TStringList.Create;
+    try
+      for I := 0 to InsertBefore - 2 do Buf.Add(Lines[I]);
+      for var BL in DeclBlock.Split([sLineBreak]) do Buf.Add(BL);
+      for I := InsertBefore - 1 to High(Lines) do Buf.Add(Lines[I]);
+      Lines := StringListToArray(Buf);
+    finally
+      Buf.Free;
+    end;
+  end
+  else
+  begin
+    var Buf: TStringList := TStringList.Create;
+    try
+      for I := 0 to Info.ClassEndLine - 2 do Buf.Add(Lines[I]);
+      Buf.Add('  private');
+      for var BL in DeclBlock.Split([sLineBreak]) do Buf.Add(BL);
+      for I := Info.ClassEndLine - 1 to High(Lines) do Buf.Add(Lines[I]);
+      Lines := StringListToArray(Buf);
+    finally
+      Buf.Free;
+    end;
+  end;
+
+  // Ancestor list: explicit IInterface. For TObject-like base this is
+  // required (TObject does not implement IInterface). For TComponent-
+  // like base it is redundant but harmless and makes intent explicit.
+  AddAncestorToClassLines(Lines, Info.ClassDeclLine, 'IInterface');
+
+  // 1. Splice into existing NewInstance / AfterConstruction bodies
+  //    (if the user has them). Do this BEFORE appending our fresh
+  //    impls so the find-by-name search in InjectStmtBeforeMethodBodyEnd
+  //    sees only the user's pre-existing impl, not our about-to-be-
+  //    appended one.
+  InjectNewInstOK := True;
+  InjectAfterCtorOK := True;
+  if HasNewInst then
+    InjectNewInstOK := InjectStmtBeforeMethodBodyEnd(Lines,
+      Info.ClassName, 'NewInstance',
+      Info.ClassName + '(Result).FRefCount := 1;');
+  if HasAfterCtor then
+    InjectAfterCtorOK := InjectStmtBeforeMethodBodyEnd(Lines,
+      Info.ClassName, 'AfterConstruction', 'AtomicDecrement(FRefCount);');
+
+  // 2. Build the impl block, omitting NewInstance / AfterConstruction
+  //    when the user already has them.
+  ImplBlock := '';
+  if not HasNewInst then
+    ImplBlock := ImplBlock + sLineBreak +
+      'class function ' + Info.ClassName + '.NewInstance: TObject;' + sLineBreak +
+      'begin' + sLineBreak +
+      '  // Start at refcount 1 so an interface cast during the' + sLineBreak +
+      '  // constructor cannot drop the count to 0 and self-Destroy.' + sLineBreak +
+      '  // AfterConstruction below decrements it back to 0.' + sLineBreak +
+      '  Result := inherited NewInstance;' + sLineBreak +
+      '  ' + Info.ClassName + '(Result).FRefCount := 1;' + sLineBreak +
+      'end;' + sLineBreak;
+  if not HasAfterCtor then
+    ImplBlock := ImplBlock + sLineBreak +
+      'procedure ' + Info.ClassName + '.AfterConstruction;' + sLineBreak +
+      'begin' + sLineBreak +
+      '  inherited;' + sLineBreak +
+      '  AtomicDecrement(FRefCount);' + sLineBreak +
+      'end;' + sLineBreak;
+  ImplBlock := ImplBlock + sLineBreak +
+    'function ' + Info.ClassName + '.QueryInterface(const IID: TGUID; out Obj): HResult;' + sLineBreak +
+    'begin' + sLineBreak +
+    '  if GetInterface(IID, Obj) then' + sLineBreak +
+    '    Result := S_OK' + sLineBreak +
+    '  else' + sLineBreak +
+    '    Result := E_NOINTERFACE;' + sLineBreak +
+    'end;' + sLineBreak + sLineBreak +
+    'function ' + Info.ClassName + '._AddRef: Integer;' + sLineBreak +
+    'begin' + sLineBreak +
+    '  Result := AtomicIncrement(FRefCount);' + sLineBreak +
+    'end;' + sLineBreak + sLineBreak +
+    'function ' + Info.ClassName + '._Release: Integer;' + sLineBreak +
+    'begin' + sLineBreak +
+    '  Result := AtomicDecrement(FRefCount);' + sLineBreak +
+    '  if Result = 0 then' + sLineBreak +
+    '    Destroy;' + sLineBreak +
+    'end;';
+
+  ClassEndAfter := -1;
+  for I := High(Lines) downto 0 do
+    if UpperCase(Trim(Lines[I])) = 'END.' then
+    begin
+      ClassEndAfter := I; Break;
+    end;
+  if ClassEndAfter >= 0 then
+  begin
+    var Buf: TStringList := TStringList.Create;
+    try
+      for I := 0 to ClassEndAfter - 1 do Buf.Add(Lines[I]);
+      // Normalise spacing: strip any blank lines that already trail
+      // the prior content so we never end up with three blank lines
+      // before our first method (user's two + our leading newline).
+      while (Buf.Count > 0) and (Trim(Buf[Buf.Count - 1]) = '') do
+        Buf.Delete(Buf.Count - 1);
+      // One blank line before our first inserted method.
+      Buf.Add('');
+      // Strip the leading newline ImplBlock starts with (it was there
+      // so the old splice produced *some* gap; the new splice manages
+      // the gap explicitly).
+      var BlockText: string := ImplBlock;
+      while StartsText(sLineBreak, BlockText) do
+        BlockText := Copy(BlockText, Length(sLineBreak) + 1, MaxInt);
+      for var BL in BlockText.Split([sLineBreak]) do Buf.Add(BL);
+      // One blank line after the last inserted method, before 'end.'.
+      Buf.Add('');
+      for I := ClassEndAfter to High(Lines) do Buf.Add(Lines[I]);
+      Lines := StringListToArray(Buf);
+    finally
+      Buf.Free;
+    end;
+  end;
+
+  WriteSourceLines(Src, Lines);
+
+  if BaseIsTObjectLike then
+    BaseDesc := 'TObject-like base (' +
+      IfThen(BaseClass = '', 'TObject', BaseClass) +
+      ') - fresh IInterface implementation'
+  else
+    BaseDesc := 'TComponent-style base (' + BaseClass +
+      ') - overrides the inherited virtual IInterface methods';
+
+  ExtraNote := '';
+  if HasNewInst then
+    if InjectNewInstOK then
+      ExtraNote := ExtraNote + sLineBreak +
+        '- Spliced ' + Info.ClassName + '(Result).FRefCount := 1; into the existing NewInstance.'
+    else
+      ExtraNote := ExtraNote + sLineBreak +
+        '- WARNING: could not locate the existing NewInstance body. ' +
+        'Add  ' + Info.ClassName + '(Result).FRefCount := 1;  manually.';
+  if HasAfterCtor then
+    if InjectAfterCtorOK then
+      ExtraNote := ExtraNote + sLineBreak +
+        '- Spliced AtomicDecrement(FRefCount); into the existing AfterConstruction.'
+    else
+      ExtraNote := ExtraNote + sLineBreak +
+        '- WARNING: could not locate the existing AfterConstruction body. ' +
+        'Add  AtomicDecrement(FRefCount);  manually.';
+
+  ShowMessage(Format(
+    'Class %s now implements IInterface (%s).' + sLineBreak +
+    'The instance frees itself when the last interface reference is dropped.%s',
+    [Info.ClassName, BaseDesc, ExtraNote]));
 end;
 
 end.

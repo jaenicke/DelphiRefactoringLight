@@ -66,6 +66,7 @@ type
     procedure OnMoveToUnit(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
+    procedure OnDelegateInterface(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -229,6 +230,10 @@ begin
   IfaceMi := TMenuItem.Create(FPopupMenu);
   IfaceMi.Caption := 'Add to existing interface...';
   IfaceMi.OnClick := OnAddToExistingInterface;
+  IfaceSub.Add(IfaceMi);
+  IfaceMi := TMenuItem.Create(FPopupMenu);
+  IfaceMi.Caption := 'Add IInterface support to class...';
+  IfaceMi.OnClick := OnDelegateInterface;
   IfaceSub.Add(IfaceMi);
 
   FSeparator := TMenuItem.Create(FPopupMenu);
@@ -545,6 +550,11 @@ end;
 procedure TContextMenuInstaller.OnAddToExistingInterface(Sender: TObject);
 begin
   Expert.ExtractInterfaceWizard.AddToExistingInterface;
+end;
+
+procedure TContextMenuInstaller.OnDelegateInterface(Sender: TObject);
+begin
+  Expert.ExtractInterfaceWizard.DelegateInterfaceImplementation;
 end;
 
 end.

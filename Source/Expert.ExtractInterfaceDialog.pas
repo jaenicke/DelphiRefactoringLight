@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
+ * Copyright (c) 2026 Sebastian Jï¿½nicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -23,7 +23,7 @@ unit Expert.ExtractInterfaceDialog;
 interface
 
 uses
-  System.SysUtils, System.Classes,
+  System.SysUtils, System.Classes, System.Generics.Collections,
   Vcl.Controls, Vcl.Forms, Vcl.StdCtrls, Vcl.CheckLst, Vcl.ExtCtrls,
   Vcl.Dialogs, Vcl.ComCtrls, Vcl.Buttons,
   Expert.ExtractInterface;
@@ -66,6 +66,13 @@ type
     ///  currently selected target interface (Add-to-existing mode).
     ///  Empty / nil for Extract-New mode.</summary>
     FExistingMemberNames: TArray<string>;
+    /// <summary>Per-interface (UPPERCASE name) member-checked state.
+    ///  Allows the user to pick different members for different
+    ///  interfaces and have all selections applied on OK.</summary>
+    FSelectionByInterface: TDictionary<string, TArray<Boolean>>;
+    /// <summary>UPPERCASE name of the interface whose selections are
+    ///  currently shown in the CheckListBox.</summary>
+    FCurrentInterfaceKey: string;
     FUpdating: Boolean;
 
     procedure BuildLayout;
@@ -128,6 +135,7 @@ type
     constructor CreateDialog(AOwner: TComponent; AMode: TInterfaceMode;
       const AInfo: TExtractInterfaceInfo;
       const AExistingInterfaces: TArray<TInterfaceDeclLocation>);
+    destructor Destroy; override;
     function GetResult: TExtractInterfaceInfo;
 
     class function Choose(AOwner: TComponent; AMode: TInterfaceMode;
@@ -152,6 +160,7 @@ begin
   FMode := AMode;
   FInfo := AInfo;
   FExistingList := AExistingInterfaces;
+  FSelectionByInterface := TDictionary<string, TArray<Boolean>>.Create;
   if FMode = eimExtractNew then
     Caption := 'Extract interface from ' + FInfo.ClassName
   else
@@ -167,8 +176,18 @@ begin
 
   BuildLayout;
   PopulateList;
+  // Seed FCurrentInterfaceKey so the FIRST combo-change persists the
+  // initial selection under the correct key.
+  if FMode = eimAddToExisting then
+    FCurrentInterfaceKey := UpperCase(FInfo.InterfaceName);
   RefreshExistingMemberMarks;
   RefreshPreview;
+end;
+
+destructor TExtractInterfaceDialog.Destroy;
+begin
+  FreeAndNil(FSelectionByInterface);
+  inherited;
 end;
 
 procedure TExtractInterfaceDialog.BuildLayout;
@@ -534,8 +553,45 @@ begin
 end;
 
 procedure TExtractInterfaceDialog.DoExistingChange(Sender: TObject);
+var
+  Saved: TArray<Boolean>;
+  Row, MIdx: Integer;
 begin
+  // Persist current visible selections to the OUTGOING interface's
+  // slot in the per-interface map, then load the INCOMING interface's
+  // previously-saved state (or, if none, initialise with defaults).
+  if (FCurrentInterfaceKey <> '') and (FClb <> nil) then
+  begin
+    SetLength(Saved, Length(FInfo.Members));
+    for Row := 0 to FClb.Items.Count - 1 do
+    begin
+      MIdx := MemberIndex(Row);
+      if (MIdx >= 0) and (MIdx <= High(Saved)) then
+        Saved[MIdx] := FClb.Checked[Row];
+    end;
+    FSelectionByInterface.AddOrSetValue(FCurrentInterfaceKey, Saved);
+  end;
+
   SyncExistingSelectionToInfo;
+
+  // Switch to the new interface.
+  FCurrentInterfaceKey := UpperCase(FInfo.InterfaceName);
+  if FSelectionByInterface.TryGetValue(FCurrentInterfaceKey, Saved) and
+     (Length(Saved) = Length(FInfo.Members)) then
+  begin
+    FUpdating := True;
+    try
+      for Row := 0 to FClb.Items.Count - 1 do
+      begin
+        MIdx := MemberIndex(Row);
+        if (MIdx >= 0) and (MIdx <= High(Saved)) then
+          FClb.Checked[Row] := Saved[MIdx];
+      end;
+    finally
+      FUpdating := False;
+    end;
+  end;
+
   RefreshExistingMemberMarks;
   RefreshPreview;
 end;
@@ -745,16 +801,54 @@ end;
 
 function TExtractInterfaceDialog.GetResult: TExtractInterfaceInfo;
 var
-  Row, MIdx: Integer;
+  Row, MIdx, I: Integer;
+  Saved: TArray<Boolean>;
+  Loc: TInterfaceDeclLocation;
+  Target: TInterfaceTarget;
 begin
-  // Final sync from list rows back into FInfo.Members.
+  // Final sync from list rows back into FInfo.Members AND into the
+  // per-interface selection map (so the currently visible interface
+  // gets persisted with the others).
   for Row := 0 to FClb.Items.Count - 1 do
   begin
     MIdx := MemberIndex(Row);
     if (MIdx >= 0) and (MIdx <= High(FInfo.Members)) then
       FInfo.Members[MIdx].Selected := FClb.Checked[Row];
   end;
+  if (FMode = eimAddToExisting) and (FCurrentInterfaceKey <> '') then
+  begin
+    SetLength(Saved, Length(FInfo.Members));
+    for I := 0 to High(FInfo.Members) do
+      Saved[I] := FInfo.Members[I].Selected;
+    FSelectionByInterface.AddOrSetValue(FCurrentInterfaceKey, Saved);
+  end;
+
   FInfo.Mode := FMode;
+
+  // For add-to-existing: build the Targets array from every interface
+  // for which the user picked at least one member. A target with no
+  // selection is dropped here so ApplyAddToExisting can iterate
+  // Targets directly without per-entry filtering.
+  if FMode = eimAddToExisting then
+  begin
+    FInfo.Targets := nil;
+    for Loc in FExistingList do
+    begin
+      if not FSelectionByInterface.TryGetValue(
+          UpperCase(Loc.InterfaceName), Saved) then Continue;
+      if Length(Saved) <> Length(FInfo.Members) then Continue;
+      var Any: Boolean := False;
+      for I := 0 to High(Saved) do
+        if Saved[I] then begin Any := True; Break; end;
+      if not Any then Continue;
+      Target.InterfaceName := Loc.InterfaceName;
+      Target.FileName := Loc.FileName;
+      Target.DeclLine := Loc.DeclLine;
+      Target.EndLine := Loc.EndLine;
+      Target.MemberSelected := Saved;
+      FInfo.Targets := FInfo.Targets + [Target];
+    end;
+  end;
   Result := FInfo;
 end;
 

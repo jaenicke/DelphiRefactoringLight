@@ -14,6 +14,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised |
+| *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/completion`, and `publishDiagnostics` push notifications (used to detect inactive `{$IFDEF}` regions when DelphiLSP delivers them &mdash; diagnostic code `H2655`/`H2656` with tag `Unnecessary`). DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
@@ -161,6 +162,46 @@ Two related actions, both reached through the editor's *Refactoring Light &rarr;
   - Class-body `{$IFDEF}` branches are not tracked &mdash; members from both branches end up in the list, even when only one is active.
   - Overloaded methods are emitted individually (no dedup).
   - Default member visibility for VCL classes (`$M+`, the common case) is assumed to be `published`. Pure `TObject` descendants would actually default to `public`; the dialog shows a `default visibility` header in that case so the difference is visible.
+
+### Add IInterface support to class (menu only)
+
+Reachable via *Refactoring Light &rarr; Extract / extend interface &rarr; Add IInterface support to class&hellip;*. Turns a class that does **not** descend from `TInterfacedObject` (any `TObject` / `TPersistent` / `TComponent` descendant) into a refcount-managed class. After the rewrite the instance can be held purely as an `IInterface` and frees itself when the last interface reference is released &mdash; no `.Free` call needed.
+
+No dialog, no choice: the cursor must be inside a class, the wizard does the rest.
+
+- Detects whether the class already declares `IInterface` / `IUnknown` in its ancestor list and bails out with a message if so.
+- Picks a code-emission mode from the base class:
+  - **TObject-like** (`TObject`, `TPersistent`, or unknown base &mdash; e.g. for a class declared as just `TFoo = class`): fresh `QueryInterface` / `_AddRef` / `_Release` declarations (no `override`).
+  - **TComponent-style** (anything else, e.g. `TComponent`, `TForm`, `TFrame`): the same three methods are declared with `override`, since `TComponent` declares them as `virtual stdcall`.
+- Splices the additions into the existing last `private` section (or opens a fresh one if the class has none), and appends the implementations just before the unit's `end.` with one blank line of padding on each side.
+- Generated declarations:
+  - `FRefCount: Integer;` (private field)
+  - `function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;` (with `override` for TComponent-style)
+  - `function _AddRef: Integer; stdcall;` (with `override` for TComponent-style)
+  - `function _Release: Integer; stdcall;` (with `override` for TComponent-style)
+  - `procedure AfterConstruction; override;`
+  - `class function NewInstance: TObject; override;`
+- Generated implementations mirror `System.TInterfacedObject`:
+  - `NewInstance` sets `FRefCount := 1` after `inherited NewInstance` (so an interface cast during the constructor cannot drop the count to 0 and trigger a premature `Destroy`).
+  - `AfterConstruction` decrements `FRefCount` back to 0.
+  - `_AddRef` / `_Release` use `AtomicIncrement` / `AtomicDecrement`; `_Release` calls `Destroy` when the count hits 0.
+  - `QueryInterface` forwards to `GetInterface`, returning `S_OK` or `E_NOINTERFACE`.
+- **Existing `NewInstance` / `AfterConstruction` are detected and merged.** The wizard scans the class body, omits the declaration when the user has it already, and splices the required statement (`<ClassName>(Result).FRefCount := 1;` or `AtomicDecrement(FRefCount);`) into the existing routine body just before its closing `end;`. The Pascal-aware walker tracks nested `begin` / `try` / `case` / `record` blocks so the insertion lands at the right depth. The success dialog reports which statements were spliced; if a body cannot be parsed (very rare), a warning lists the statement to add by hand.
+
+Usage after the rewrite (no `.Free` call):
+
+```pascal
+var
+  I: IInterface;
+begin
+  I := TMyClass.Create;          // NewInstance: FRefCount := 1, AfterConstruction: 0, cast: 1
+  // ... use I ...
+end;                             // I drops scope -> _Release -> FRefCount = 0 -> Destroy
+```
+
+- Limitations:
+  - The class loses its `.Free`-managed lifecycle. Pure `TObject`-style construction with `AOwner` (`TComponent.Create(AOwner)`) becomes unsound &mdash; the owner would `Notification(opRemove).Free` the instance while interface references are still held.
+  - When the class additionally implements a derived interface like `ITest = interface(IInterface)`, the compiler treats each interface as its own VMT slot and the IInterface methods generated here only fill the standalone `IInterface` slot. Adding `ITest` will require either a method-resolution clause or a separate manual implementation &mdash; this wizard does not handle that case.
 
 ## Requirements
 

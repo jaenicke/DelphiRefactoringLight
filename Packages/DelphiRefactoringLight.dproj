@@ -143,6 +143,9 @@
         <DCCReference Include="..\Source\Expert.ExtractInterface.pas"/>
         <DCCReference Include="..\Source\Expert.ExtractInterfaceDialog.pas"/>
         <DCCReference Include="..\Source\Expert.ExtractInterfaceWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.SemanticReplace.pas"/>
+        <DCCReference Include="..\Source\Expert.SemanticReplaceDialogs.pas"/>
+        <DCCReference Include="..\Source\Expert.SemanticReplaceWizard.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

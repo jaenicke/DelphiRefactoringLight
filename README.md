@@ -15,6 +15,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised |
 | *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
+| *(menu only)*          | **Semantic replace** &mdash; apply project-wide find / replace rules loaded from a per-project JSON file; identifier-bounded matching, comment- and string-aware, optional local-var hoisting when a rule fires multiple times in the same routine, automatic uses-clause augmentation |
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/completion`, and `publishDiagnostics` push notifications (used to detect inactive `{$IFDEF}` regions when DelphiLSP delivers them &mdash; diagnostic code `H2655`/`H2656` with tag `Unnecessary`). DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
@@ -203,6 +204,99 @@ end;                             // I drops scope -> _Release -> FRefCount = 0 -
   - The class loses its `.Free`-managed lifecycle. Pure `TObject`-style construction with `AOwner` (`TComponent.Create(AOwner)`) becomes unsound &mdash; the owner would `Notification(opRemove).Free` the instance while interface references are still held.
   - When the class additionally implements a derived interface like `ITest = interface(IInterface)`, the compiler treats each interface as its own VMT slot and the IInterface methods generated here only fill the standalone `IInterface` slot. Adding `ITest` will require either a method-resolution clause or a separate manual implementation &mdash; this wizard does not handle that case.
 
+### Semantic replace (menu only)
+
+Project-wide find / replace driven by a per-project JSON rules file. Replaces dotted identifier expressions (typically the migration shape `Manager.Config.WriteConfig` &rarr; `TAppCentral.Get<IConfig>.WriteConfig`), keeps each file's `uses` clause in sync with what the rewrites need, and optionally hoists a local variable when the same rule fires multiple times in the same routine.
+
+Reached via *Refactoring Light &rarr; Semantic replace*. The submenu mirrors the *Remove with* layout:
+
+- **In current unit** &mdash; act only on the editor's current file.
+- **In selected units&hellip;** &mdash; a checklist of every project `*.pas` with a live filter and *Select all* / *Clear* shortcuts.
+- **In whole project&hellip;** &mdash; every project source file.
+- **Edit rules&hellip;** &mdash; opens the rule editor (read-write the JSON file).
+
+#### Rules file
+
+Rules live at `<project_root>/semantic-replace.json`. The wizard creates a starter file with one fully-commented example the first time it is needed. Schema:
+
+```json
+{
+  "rules": [
+    {
+      "find":    "Manager.Config.WriteConfig",
+      "replace": "TAppCentral.Get<IConfig>.WriteConfig",
+      "uses":    ["AppCentral.Core", "AppCentral.Config"],
+      "localVar": {
+        "name":    "LConfig",
+        "type":    "IConfig",
+        "value":   "TAppCentral.Get<IConfig>",
+        "replace": "LConfig.WriteConfig"
+      }
+    }
+  ]
+}
+```
+
+- `find` &mdash; literal text to match. Whole-identifier matching: `FooManager.Config.WriteConfig` will NOT trigger a rule whose `find` is `Manager.Config.WriteConfig`.
+- `replace` &mdash; what to substitute when no local-var hoisting is in play.
+- `uses` &mdash; unit names to add to the interface-section `uses` of every file that ends up with at least one edit. Existing entries are deduped case-insensitively.
+- `localVar` &mdash; optional. When all four sub-fields are set AND the rule fires twice or more inside the same routine body, the wizard
+  1. inserts `var <name>: <type> := <value>;` right after the routine's `begin` (Delphi 10.3+ inline var, indented to match the body),
+  2. uses `localVar.replace` instead of `replace` for every occurrence inside that routine.
+  
+  Routines where the rule fires only once are not hoisted; they get the plain `replace`.
+
+The rule editor dialog provides Add / Edit / Delete buttons plus a single-rule edit dialog with separate fields for each property; on OK the rules are written back to the JSON file using `TJSONObject.Format(2)` so they stay human-readable.
+
+#### How matching works
+
+The engine runs a single-pass comment / string-aware state machine over the source text. Matches inside `// line comments`, `{ brace comments }`, `(* paren-star comments *)` and `'string literals'` are skipped. Each match is bounded to whole identifiers on both sides &mdash; the previous and next character must NOT be a letter, digit or underscore.
+
+Method bodies are detected by a separate pass that recognises `procedure` / `function` / `constructor` / `destructor` headers (with or without a leading `class`), finds the matching `begin`, and tracks `begin` / `try` / `case` / `record` nesting to find the body's terminating `end;`. Each match is attributed to the body that contains it, which drives the local-var hoisting decision.
+
+#### Preview dialog
+
+Before any file is written the wizard shows a preview dialog containing a per-file summary and a per-match before / after diff:
+
+```
+=== Unit1.pas ===
+    C:\Users\Foo\Projects\App\Unit1.pas
+
+    uses += AppCentral.Core, AppCentral.Config
+
+    L42:
+      - Manager.Config.WriteConfig('key1', 'value1');
+      + LConfig.WriteConfig('key1', 'value1');
+
+    L43:
+      - Manager.Config.WriteConfig('key2', 'value2');
+      + LConfig.WriteConfig('key2', 'value2');
+
+    -- 1 local var(s) will be hoisted right after BEGIN.
+
+=== Unit2.pas ===
+    ...
+```
+
+Click *Apply* to commit, *Cancel* to discard.
+
+#### Applying
+
+For every file with at least one match:
+
+1. The new content is produced by the engine in memory (single pass, all edits sorted by offset and applied in one go).
+2. The file's interface-section `uses` clause is augmented with the deduped union of `uses` entries from every rule that fired. The wizard preserves the existing layout: single-line `uses` stays single-line, one-unit-per-line `uses` gets an extra line with matching indent.
+3. The new content is pushed back through `TEditorHelper.ReplaceFileContent` (i.e. `IOTAEditWriter`), so the change is undoable from the IDE and shows up instantly without a manual reload.
+
+A confirmation message reports how many files were touched and how many occurrences were replaced.
+
+#### Limitations
+
+- Rule matching is purely textual &mdash; the engine does not verify via LSP that `Manager.Config.WriteConfig` really refers to the symbol you think it does. Two unrelated types that happen to share the same dotted name will both get rewritten. Constrain `find` enough that the prefix is project-unique.
+- Local-var hoisting is per-routine; the same expression appearing in two different routines is hoisted twice (once per routine), not factored out further.
+- The hoisted statement uses Delphi 10.3+ inline-var syntax (`var name: type := value;` inside the body). On older compilers it would need to be a classical var-block above `begin`; the wizard does not currently emit that form.
+- No diff syntax highlighting in the preview.
+
 ## Requirements
 
 - **Delphi 13** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
@@ -278,6 +372,9 @@ DelphiRefactoringLight/
 |   |-- Expert.ExtractInterface.pas          # Extract-interface engine: class parser, interface emitter, clash detection
 |   |-- Expert.ExtractInterfaceDialog.pas    # Member checklist + live preview dialog (extract / extend)
 |   |-- Expert.ExtractInterfaceWizard.pas    # Workflow: LSP type resolution, file emit, class rewrite
+|   |-- Expert.SemanticReplace.pas           # Semantic-replace engine: rule loader, scanner, applier
+|   |-- Expert.SemanticReplaceDialogs.pas    # Rule editor, unit picker, preview dialogs
+|   |-- Expert.SemanticReplaceWizard.pas     # Workflow: scope picking, dry-run + preview, push edits
 |   |-- Expert.LspPrewarmer.pas              # IOTAIDENotifier: pre-warms LSP on project open
 |   |-- Expert.PluginSettings.pas            # Plugin settings (registry-backed)
 |   |-- Expert.OptionsFrame.pas / .dfm       # Tools > Options > Refactoring Light page
@@ -323,6 +420,7 @@ DelphiRefactoringLight/
 - **Per-file diagnostic wait**: refactoring wizards that depend on diagnostics (currently the *Remove with* wizard, for inactive-region detection) explicitly block until `publishDiagnostics` for the file in question has arrived (up to 30 s timeout per file). Idempotent: files that already have diagnostics return instantly. When no diagnostics arrive within the window, affected occurrences are reported as *"LSP no diagnostics &mdash; skipped (dead-code unknown)"* rather than rewritten on guesswork.
 - **Inactive `{$IFDEF}`-region tracking**: `TLspClient` parses every `publishDiagnostics` notification, filters for `source = "DelphiLSP"` + `tag = Unnecessary` (or `code = H2655`/`H2656`), and stores the resulting line-range table per file. `IsLineInactive(file, line)` is a direct lookup. `HasReceivedDiagnostics(file)` tells callers whether a `False` from `IsLineInactive` means "verified active" or "no data".
 - **LSP-driven type-to-unit resolution** (Extract Interface): for each type identifier referenced by the chosen interface members, the engine collects the line of the member that introduced it, then runs `textDocument/definition` on that exact column (a localised search inside `[M.LineStart, M.LineStart+3]` avoids the off-by-line bugs that a whole-file scan would hit on mixed line endings or duplicated identifiers like `TForm` inside `TForm11`). The resulting target-file path is mapped back to a unit name. Partial-failure mode: when LSP cannot resolve every type (often because the source unit itself has compile errors), the result is unioned with the source unit's own interface-uses so the new / extended interface unit still compiles. A diagnostic dialog after the run reports `<resolved>/<attempted>` and the LSP error if any.
+- **Single-pass comment- and string-aware scanner** (Semantic Replace): one state machine walks the source text from start to end with five states (code / line-comment / brace-comment / paren-star-comment / string), so matches inside strings and comments are skipped without a separate tokenisation pass. The same routine emits matches for ALL rules at once (whole-identifier-bounded), which keeps the per-file cost linear in the file size regardless of rule count. A second comment-aware pass discovers routine bodies (`procedure` / `function` / `constructor` / `destructor` plus matching `end;` with proper nesting), so the local-var hoisting decision can be made per-routine.
 - **`IOTAEditWriter`** instead of `InsertText`: byte-precise edits without IDE auto-indent interference.
 - **`Module.Refresh(False)`** instead of `True`: reloads the form module without discarding in-editor changes.
 - **PID-based restart hint**: a marker file in `%TEMP%` stores the process ID; if it matches the current IDE, the package was re-installed during the running session and a restart hint is shown.

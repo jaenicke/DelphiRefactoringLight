@@ -83,6 +83,9 @@ contains
   Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas',
   Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',
   Expert.ExtractInterfaceDialog in '..\Source\Expert.ExtractInterfaceDialog.pas',
-  Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas';
+  Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas',
+  Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
+  Expert.SemanticReplaceDialogs in '..\Source\Expert.SemanticReplaceDialogs.pas',
+  Expert.SemanticReplaceWizard in '..\Source\Expert.SemanticReplaceWizard.pas';
 
 end.

@@ -477,7 +477,14 @@ end;
 
 /// <summary>From the current cursor position (just after 'do' + trivia),
 ///  determines the body shape and the body range.</summary>
-function ReadBody(var Cur: TCursor; var AOcc: TWithOccurrence): Boolean;
+function ReadBody(var Cur: TCursor; var AOcc: TWithOccurrence;
+  AResults: TList<TWithOccurrence>): Boolean;
+// Reads the body of a `with` statement. AResults receives every nested
+// `with` discovered inside this body (recursively, at every depth).
+// Nested withs are detected at statement boundaries inside begin..end
+// / try..end / case..end / asm..end bodies; inside a single-statement
+// body the detection is limited to the case where the entire body IS a
+// `with` statement (e.g. `with c do with d do ...`).
 var
   Ident: string;
   IdentStart: TWithSourcePos;
@@ -486,6 +493,48 @@ var
   StartPos, EndPos, InnerStart, InnerEnd: TWithSourcePos;
   SaveIdx: Integer;
   SaveLine, SaveCol: Integer;
+  Target: TWithTarget;
+
+  // Tries to consume a `with` statement starting at the current cursor
+  // (the `with` keyword has just been read into Ident / IdentStart by
+  // the outer scanner; we get only the position back). Returns True if
+  // a complete with was parsed and appended to AResults.
+  function TryParseNestedWith(const AKeywordPos: TWithSourcePos): Boolean;
+  var
+    NestedOcc: TWithOccurrence;
+    NestedTargets: TList<TWithTarget>;
+    DoIdent: string;
+    DoIdentStart: TWithSourcePos;
+  begin
+    Result := False;
+    NestedOcc := Default(TWithOccurrence);
+    NestedOcc.KeywordPos := AKeywordPos;
+    NestedTargets := TList<TWithTarget>.Create;
+    try
+      while True do
+      begin
+        if not ReadOneTarget(Cur, Target) then Break;
+        NestedTargets.Add(Target);
+        SkipTrivia(Cur);
+        if Cur.Peek = ',' then begin Cur.Advance; Continue; end;
+        Break;
+      end;
+      NestedOcc.Targets := NestedTargets.ToArray;
+    finally
+      NestedTargets.Free;
+    end;
+    if Length(NestedOcc.Targets) = 0 then Exit;
+    SkipTrivia(Cur);
+    if not IsIdentStart(Cur.Peek) then Exit;
+    DoIdent := ReadIdent(Cur, DoIdentStart);
+    if not SameKeyword(DoIdent, 'do') then Exit;
+    NestedOcc.DoPos := DoIdentStart;
+    if ReadBody(Cur, NestedOcc, AResults) then
+    begin
+      AResults.Add(NestedOcc);
+      Result := True;
+    end;
+  end;
 begin
   Result := False;
   SkipTrivia(Cur);
@@ -519,13 +568,18 @@ begin
         InnerStart := OpenerStartPos;   // include the 'try'/'case'/'asm'
       end;
       BlockDepth := 1;
+      // We are right after the block opener (begin/try/case/asm); the
+      // next statement starts at a statement boundary, so detect any
+      // nested `with` immediately.
+      var BoundaryNext: Boolean := True;
       while (not Cur.Eof) and (BlockDepth > 0) do
       begin
         SkipTrivia(Cur);
         if Cur.Eof then Break;
         case Cur.Peek of
-          '''': SkipString(Cur);
-          '#':  SkipCharConst(Cur);
+          '''': begin SkipString(Cur); BoundaryNext := False; end;
+          '#':  begin SkipCharConst(Cur); BoundaryNext := False; end;
+          ';':  begin Cur.Advance; BoundaryNext := True; end;
         else
           if IsIdentStart(Cur.Peek) then
           begin
@@ -533,7 +587,10 @@ begin
             Ident := ReadIdent(Cur, IdentStart);
             if SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'try')
               or SameKeyword(Ident, 'case') or SameKeyword(Ident, 'asm') then
-              Inc(BlockDepth)
+            begin
+              Inc(BlockDepth);
+              BoundaryNext := True;
+            end
             else if SameKeyword(Ident, 'end') then
             begin
               Dec(BlockDepth);
@@ -561,16 +618,71 @@ begin
                 end;
                 Exit(True);
               end;
-            end;
-            // otherwise: just an identifier, keep going
+              BoundaryNext := False;
+            end
+            else if BoundaryNext and SameKeyword(Ident, 'with') then
+            begin
+              // Nested with at a statement boundary inside this body.
+              // The recursive call consumes its own body (and any
+              // further nesting); the returned occurrence lands in
+              // AResults via TryParseNestedWith.
+              TryParseNestedWith(IdentStart);
+              BoundaryNext := False;
+            end
+            else if SameKeyword(Ident, 'then') or SameKeyword(Ident, 'else')
+              or SameKeyword(Ident, 'do') or SameKeyword(Ident, 'of')
+              or SameKeyword(Ident, 'repeat') or SameKeyword(Ident, 'finally')
+              or SameKeyword(Ident, 'except') then
+              BoundaryNext := True
+            else
+              BoundaryNext := False;
             if WordStart < 0 then ;
           end
           else
+          begin
             Cur.Advance;
+            BoundaryNext := False;
+          end;
         end;
       end;
       // unbalanced — bail
       Exit(False);
+    end
+    else if SameKeyword(Ident, 'with') then
+    begin
+      // The single-statement body IS another `with` (e.g.
+      // `with c do with d do blub;`). Parse it as a nested with and
+      // record this body as a single statement covering the whole
+      // inner with. The inner with's own body parsing produces the
+      // wider extent.
+      AOcc.BodyKind := wbkSingle;
+      var InnerStartPos := IdentStart;
+      var InnerEndForOuter: TWithSourcePos;
+      // Remember where we are in case the parse fails.
+      var SaveInnerIdx: Integer := Cur.Idx;
+      var SaveInnerLine: Integer := Cur.Line;
+      var SaveInnerCol: Integer := Cur.Col;
+      if TryParseNestedWith(IdentStart) then
+      begin
+        // The nested with's end position is the outer body's end.
+        var NestedTail := AResults[AResults.Count - 1].BodyRange.EndPos;
+        InnerEndForOuter := NestedTail;
+        AOcc.BodyRange.StartPos := InnerStartPos;
+        AOcc.BodyRange.EndPos := InnerEndForOuter;
+        AOcc.BodyInnerRange := AOcc.BodyRange;
+        // Skip the trailing ';' if present so the outer loop continues
+        // cleanly.
+        SkipTrivia(Cur);
+        if Cur.Peek = ';' then Cur.Advance;
+        Exit(True);
+      end
+      else
+      begin
+        // Rollback and fall through to the normal single-statement path.
+        Cur.Idx := SaveInnerIdx;
+        Cur.Line := SaveInnerLine;
+        Cur.Col := SaveInnerCol;
+      end;
     end
     else
     begin
@@ -741,7 +853,7 @@ begin
               if SameKeyword(Ident, 'do') then
               begin
                 Occ.DoPos := IdentStart;
-                if ReadBody(Cur, Occ) then
+                if ReadBody(Cur, Occ, Results) then
                   Results.Add(Occ);
               end
               else

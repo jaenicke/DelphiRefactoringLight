@@ -467,7 +467,6 @@ begin
         Builder.Append(ABody[I]);
         Inc(I);
       end;
-      LineStart := I;
       // Walk forward while either consuming up to `Shift` spaces, or
       // until we hit a non-space char or end-of-line.
       Stripped := 0;
@@ -925,7 +924,7 @@ begin
   // Inner now looks like 'Vcl.Controls.TWinControl' or 'TBase'.
   // Walk from the end to find the last identifier and its position
   // relative to the original line.
-  var LastIdentStart := 0;
+  var LastIdentStart: Integer;
   var P := Length(Inner);
   while (P >= 1) and not IsIdentCont(Inner[P]) do Dec(P);
   if P < 1 then Exit;
@@ -2466,7 +2465,6 @@ begin
       // Up to 6 hops.
       var SearchFile := CurFile;
       var SearchStart := CurStart;
-      var SearchEnd := CurEnd;
       var Found := False;
       for var AH := 1 to 6 do
       begin
@@ -2496,7 +2494,6 @@ begin
         end;
         SearchFile := ParentFile;
         SearchStart := ParentStart;
-        SearchEnd := ParentEnd;
       end;
       if not Found then Exit;
       // Replace CurFile with where we found the member so the
@@ -3415,7 +3412,6 @@ begin
               if HintHit then
               begin
                 Prefixes.AddOrSetValue(Ref.StartIdx, Targets[I].QualifyPrefix);
-                Matched := True;
                 DbgRef.MatchSource := dmLsp;
                 DbgRef.MatchedTargetIdx := I;
                 DbgRef.AppliedPrefix := Targets[I].QualifyPrefix;

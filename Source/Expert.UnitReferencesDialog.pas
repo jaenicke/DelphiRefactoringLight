@@ -13,7 +13,7 @@ unit Expert.UnitReferencesDialog;
   from the target that appears in that file is shown as a row in
   a TListView (Identifier, File, Line, Column, Preview).
 
-  Double-click / Enter -> jump to the location (uses TEditorHelper.GotoLocation).
+  Double-click / Enter -> jump to the location (uses Editor.GotoLocation).
 }
 
 interface

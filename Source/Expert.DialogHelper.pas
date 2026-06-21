@@ -48,18 +48,23 @@ procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 implementation
 
 uses
-  System.SysUtils, ToolsAPI;
+  System.SysUtils {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 
+{$IFNDEF STANDALONE_BUILD}
 function ThemingServices: IOTAIDEThemingServices;
 begin
   if not Supports(BorlandIDEServices, IOTAIDEThemingServices, Result) then
     Result := nil;
 end;
+{$ENDIF}
 
 procedure RegisterDialogClass(AClass: TCustomFormClass);
+{$IFNDEF STANDALONE_BUILD}
 var
   TS: IOTAIDEThemingServices;
+{$ENDIF}
 begin
+{$IFNDEF STANDALONE_BUILD}
   TS := ThemingServices;
   if (TS <> nil) and TS.IDEThemingEnabled then
   try
@@ -67,12 +72,15 @@ begin
   except
     // Defensive: don't let a theming bug break dialog creation.
   end;
+{$ENDIF}
 end;
 
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 var
-  TS: IOTAIDEThemingServices;
   Anchor: TCustomForm;
+  {$IFNDEF STANDALONE_BUILD}
+  TS: IOTAIDEThemingServices;
+  {$ENDIF}
 begin
   // Anchor the dialog to the IDE main window. This both fixes the
   // multi-monitor jump and makes Windows treat the dialog as a child
@@ -88,6 +96,7 @@ begin
     AForm.PopupParent := Anchor;
   end;
 
+{$IFNDEF STANDALONE_BUILD}
   // Apply the IDE theme to the form and all its child controls.
   TS := ThemingServices;
   if (TS <> nil) and TS.IDEThemingEnabled then
@@ -96,6 +105,7 @@ begin
   except
     // See RegisterDialogClass.
   end;
+{$ENDIF}
 end;
 
 end.

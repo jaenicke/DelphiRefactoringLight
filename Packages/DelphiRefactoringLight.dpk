@@ -40,6 +40,7 @@ contains
   Expert.RenameWizard in '..\Source\Expert.RenameWizard.pas',
   Expert.KeyBinding in '..\Source\Expert.KeyBinding.pas',
   Expert.RenameDialog in '..\Source\Expert.RenameDialog.pas',
+  Expert.EditorHelperIntf in '..\Source\Expert.EditorHelperIntf.pas',
   Expert.EditorHelper in '..\Source\Expert.EditorHelper.pas',
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
   Lsp.JsonRpc in '..\Source\Lsp.JsonRpc.pas',

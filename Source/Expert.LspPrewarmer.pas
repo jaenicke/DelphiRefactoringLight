@@ -68,7 +68,7 @@ implementation
 
 uses
   System.SysUtils, System.IOUtils, Winapi.Windows,
-  Expert.PluginSettings, Expert.EditorHelper, Expert.LspManager;
+  Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager;
 
 { TPrewarmIdeNotifier }
 
@@ -174,12 +174,12 @@ begin
   if FInFlight then Exit;
 
   // Resolve config bits on the main thread (ToolsAPI is single-threaded).
-  RootPath := TEditorHelper.GetProjectRoot;
+  RootPath := Editor.GetProjectRoot;
   if RootPath = '' then
     RootPath := ExtractFilePath(AProjectFile);
-  DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+  DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then Exit;
-  ScanFiles := TEditorHelper.GetProjectSourceFiles;
+  ScanFiles := Editor.GetProjectSourceFiles;
   if Length(ScanFiles) = 0 then Exit;
 
   FInFlight := True;

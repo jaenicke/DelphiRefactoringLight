@@ -96,6 +96,7 @@
         <DCCReference Include="..\Source\Expert.RenameWizard.pas"/>
         <DCCReference Include="..\Source\Expert.KeyBinding.pas"/>
         <DCCReference Include="..\Source\Expert.RenameDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.EditorHelperIntf.pas"/>
         <DCCReference Include="..\Source\Expert.EditorHelper.pas"/>
         <DCCReference Include="..\Source\Lsp.Uri.pas"/>
         <DCCReference Include="..\Source\Lsp.JsonRpc.pas"/>

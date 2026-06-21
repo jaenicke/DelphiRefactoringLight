@@ -297,6 +297,10 @@ A confirmation message reports how many files were touched and how many occurren
 - The hoisted statement uses Delphi 10.3+ inline-var syntax (`var name: type := value;` inside the body). On older compilers it would need to be a classical var-block above `begin`; the wizard does not currently emit that form.
 - No diff syntax highlighting in the preview.
 
+## Standalone executable
+
+The same wizards also ship as a self-contained Windows `.exe` that runs without the Delphi IDE. The standalone hosts the wizards behind an `IEditorHelper` abstraction: the standalone host manages the project file, the file tree, and an embedded `TMemo`, then exposes them to the wizards exactly the way the IDE plugin does. Useful for bulk refactorings, scripted runs, or working on a machine where the IDE itself is locked. See [`Standalone/README.md`](Standalone/README.md) for build instructions, the parity matrix (which wizards work, which need `TSynEdit` first), and architecture notes.
+
 ## Requirements
 
 - **Delphi 13** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
@@ -382,7 +386,8 @@ DelphiRefactoringLight/
 |   |-- Expert.ContextMenu.pas               # "Refactoring Light" submenu in the editor popup
 |   |-- Expert.Shortcuts.pas                 # User-configurable shortcut storage
 |   |-- Expert.KeyBinding.pas                # Shortcut registration
-|   |-- Expert.EditorHelper.pas              # ToolsAPI wrappers
+|   |-- Expert.EditorHelperIntf.pas          # IEditorHelper interface (host abstraction; no ToolsAPI deps)
+|   |-- Expert.EditorHelper.pas              # ToolsAPI-backed IEditorHelper impl + backwards-compat facade
 |   |-- Expert.LspManager.pas                # LSP client singleton + project indexer
 |   |-- Expert.IdeCodeInsight.pas            # IDE-internal code insight wrapper
 |   |-- Expert.RestartHint.pas               # PID-based restart hint
@@ -397,6 +402,14 @@ DelphiRefactoringLight/
 |   |-- DelphiRefactoringLight.dpk           # Package source
 |   |-- DelphiRefactoringLight.dproj         # Project file
 |   `-- DelphiRefactoringLight.res           # Resources
+|
+|-- Standalone/                              # Standalone Windows .exe host
+|   |-- RefactoringLightStandalone.dpr       # Application entry point
+|   |-- RefactoringLightStandalone.dproj     # msbuild project (defines STANDALONE_BUILD)
+|   |-- Standalone.MainForm.pas / .dfm       # Main form: file tree + TMemo + menu
+|   |-- Standalone.EditorHelper.pas          # IEditorHelper impl backed by .dproj XML + in-memory buffers
+|   |-- build.bat                            # msbuild driver (Debug | Release)
+|   `-- README.md                            # Build, parity matrix, architecture
 |
 |-- dih/                                     # Delphi Install Helper tool
 |   |-- delinst.dpr / .dproj / .res

@@ -11,7 +11,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.JSON, System.SyncObjs, System.IOUtils, System.Generics.Collections, Winapi.Windows,
-  Delphi.FileEncoding, Lsp.JsonRpc, Lsp.Protocol, Lsp.Uri;
+  Delphi.FileEncoding, Expert.EditorHelperIntf, Lsp.JsonRpc, Lsp.Protocol, Lsp.Uri;
 
 type
   ELspError = class(Exception)
@@ -127,6 +127,14 @@ type
 
     /// <summary>Gets hover info (type, description) for the identifier.</summary>
     function GetHover(const AFilePath: string; ALine, ACol: Integer): string;
+    /// <summary>Calls textDocument/signatureHelp. Returns the response's
+    ///  "result" object verbatim (caller owns and must Free). Returns
+    ///  nil when the server returns null / no result / errors. The
+    ///  result, when non-nil, has shape:
+    ///    { signatures: [ { label, documentation, parameters[...] } ],
+    ///      activeSignature: N, activeParameter: N }
+    ///  Use SignatureHelpLabels for a convenience extractor.</summary>
+    function GetSignatureHelp(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
 
     /// <summary>Requests code completion. Returns a JSON array of items.</summary>
     function GetCompletion(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
@@ -326,6 +334,12 @@ begin
     Log('<--', Method, AMsg.ToJSON);
     if SameText(Method, 'textDocument/publishDiagnostics') then
     begin
+      // Count every publishDiagnostics notification we get, regardless
+      // of whether the inner extraction succeeds. The count is the
+      // "is the server talking to us" signal that the status line uses;
+      // it must reflect actual traffic, not the strictness of our
+      // inactive-range parser.
+      TInterlocked.Increment(FDiagnosticsCount);
       var ParamsObj: TJSONObject;
       if AMsg.TryGetValue<TJSONObject>('params', ParamsObj) then
       try
@@ -663,6 +677,23 @@ begin
   end;
 end;
 
+function ReadLiveContent(const AFilePath: string): string;
+// Prefer the live editor buffer (via IEditorHelper) over disk so the
+// LSP sees the user's unsaved edits. The IDE plugin's TIDEEditorHelper
+// reads from IOTAEditBuffer; the standalone's TStandaloneEditorHelper
+// reads from its in-memory Memo buffer. Without this hop the LSP gets
+// stale content - the dot the user just typed isn't on disk yet, so
+// completion at the new column returns scope-level suggestions
+// instead of the dotted-member list.
+var
+  EditorContent: string;
+begin
+  if (Editor <> nil) and Editor.ReadEditorContent(AFilePath, EditorContent) then
+    Result := EditorContent
+  else
+    Result := Delphi.FileEncoding.ReadDelphiFile(ExpandFileName(AFilePath));
+end;
+
 procedure TLspClient.OpenDocument(const AFilePath: string);
 var
   Params, TextDocObj: TJSONObject;
@@ -670,7 +701,7 @@ var
   AbsPath: string;
 begin
   AbsPath := ExpandFileName(AFilePath);
-  Content := Delphi.FileEncoding.ReadDelphiFile(AbsPath);
+  Content := ReadLiveContent(AFilePath);
 
   TextDocObj := TJSONObject.Create;
   TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
@@ -716,7 +747,7 @@ begin
   // funktioniert. Identischer Text + Version 2 ist ein No-Op
   // semantisch, aber bringt den Server in den erwarteten Zustand.
   AbsPath := ExpandFileName(AFilePath);
-  Content := Delphi.FileEncoding.ReadDelphiFile(AbsPath);
+  Content := ReadLiveContent(AFilePath);
   TextDocObj := TJSONObject.Create;
   TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
   TextDocObj.AddPair('version', TJSONNumber.Create(2));
@@ -980,6 +1011,46 @@ begin
   end;
 end;
 
+function TLspClient.GetSignatureHelp(const AFilePath: string;
+  ALine, ACol: Integer): TJSONObject;
+var
+  Params, TextDoc, Pos, Context: TJSONObject;
+  Response: TJSONObject;
+  ResultVal: TJSONValue;
+  ResultObj: TJSONObject;
+begin
+  Result := nil;
+  TextDoc := TJSONObject.Create;
+  TextDoc.AddPair('uri', TLspUri.PathToFileUri(ExpandFileName(AFilePath)));
+
+  Pos := TJSONObject.Create;
+  Pos.AddPair('line', TJSONNumber.Create(ALine));
+  Pos.AddPair('character', TJSONNumber.Create(ACol));
+
+  // SignatureHelpContext (LSP 3.15+). triggerKind 2 = TriggerCharacter.
+  Context := TJSONObject.Create;
+  Context.AddPair('triggerKind', TJSONNumber.Create(2));
+  Context.AddPair('triggerCharacter', '(');
+  Context.AddPair('isRetrigger', TJSONBool.Create(False));
+
+  Params := TJSONObject.Create;
+  Params.AddPair('textDocument', TextDoc);
+  Params.AddPair('position', Pos);
+  Params.AddPair('context', Context);
+
+  Response := SendRequest('textDocument/signatureHelp', Params);
+  try
+    ResultVal := Response.GetValue('result');
+    if ResultVal is TJSONObject then
+    begin
+      ResultObj := TJSONObject(ResultVal);
+      Result := ResultObj.Clone as TJSONObject;
+    end;
+  finally
+    Response.Free;
+  end;
+end;
+
 function TLspClient.GetCompletion(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
 var
   Params, TextDoc, Pos: TJSONObject;
@@ -1087,11 +1158,12 @@ var
   List: TList<TLspRange>;
   UpKey: string;
 begin
+  // The notification count is bumped by the dispatcher in
+  // HandleNotification; here we only do the deeper inactive-range
+  // extraction, which has stricter input requirements.
   if AParams = nil then Exit;
   if not AParams.TryGetValue<string>('uri', Uri) then Exit;
   if not AParams.TryGetValue<TJSONArray>('diagnostics', DiagArr) then Exit;
-
-  TInterlocked.Increment(FDiagnosticsCount);
 
   Path := TLspUri.FileUriToPath(Uri);
   if Path = '' then Exit;

@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -23,17 +23,20 @@ unit Expert.FindImplementationsWizard;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Forms, Vcl.Dialogs, ToolsAPI, Expert.EditorHelper, Expert.FindReferencesDialog,
-  Expert.LspManager, Expert.ImplementationFinder, Lsp.Uri, Lsp.Client;
+  System.SysUtils, System.Classes, Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog,
+  Expert.LspManager, Expert.ImplementationFinder, Lsp.Uri, Lsp.Client, System.UITypes;
 
 type
-  TLspFindImplementationsWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspFindImplementationsWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private
     FDialog: TFindReferencesDialog;
     FContext: TEditorContext;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
     procedure SearchAndShow;
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -41,8 +44,10 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    procedure Execute;
     function GetMenuText: string;
+
+    {$ENDIF}
+    procedure Execute;
   end;
 
 var
@@ -50,7 +55,10 @@ var
 
 implementation
 
-{ TLspFindImplementationsWizard - IOTANotifier }
+{$IFNDEF STANDALONE_BUILD}
+{ TLspFindImplementationsWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
 
 procedure TLspFindImplementationsWizard.AfterSave; begin end;
 procedure TLspFindImplementationsWizard.BeforeSave; begin end;
@@ -58,32 +66,24 @@ procedure TLspFindImplementationsWizard.Destroyed; begin end;
 procedure TLspFindImplementationsWizard.Modified; begin end;
 
 function TLspFindImplementationsWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.FindImplementationsWizard';
-end;
+begin Result := 'DelphiRefactoringLight.FindImplementationsWizard'; end;
 
 function TLspFindImplementationsWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Find Implementations';
-end;
+begin Result := 'Delphi Refactoring Light - Find Implementations'; end;
 
 function TLspFindImplementationsWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspFindImplementationsWizard.GetMenuText: string;
-begin
-  Result := 'Find implementations...';
-end;
-
+begin Result := 'Find implementations...'; end;
+{$ENDIF}
 procedure TLspFindImplementationsWizard.Execute;
 var
   PrevDialog: TFindReferencesDialog;
   PrevContext: TEditorContext;
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
 
   if not Ctx.IsValid then
   begin
@@ -127,7 +127,7 @@ end;
 
 procedure TLspFindImplementationsWizard.DoGotoLocation(AItem: TFindReferenceItem);
 begin
-  TEditorHelper.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+  Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
 end;
 
 procedure TLspFindImplementationsWizard.SearchAndShow;
@@ -139,9 +139,9 @@ begin
   // Flush editor changes to the file system, otherwise the text scan would
   // see stale content.
   FDialog.SetStatus('Saving all files...');
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
-  ProjFiles := TEditorHelper.GetProjectSourceFiles;
+  ProjFiles := Editor.GetProjectSourceFiles;
   if System.Length(ProjFiles) = 0 then
   begin
     FDialog.SetStatus('No project context found.');
@@ -160,7 +160,7 @@ begin
   FDialog.SetStatus('Resolving method declaration via LSP...');
 
   try
-    var DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+    var DelphiLspJson := Editor.FindDelphiLspJson;
     if DelphiLspJson <> '' then
     begin
       var RootPath := FContext.ProjectRoot;

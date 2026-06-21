@@ -97,10 +97,6 @@ type
     ///  already there.</summary>
     procedure RefreshExistingMemberMarks;
     /// <summary>True if Row index represents a member that is already
-    ///  present in the selected target interface. Used by the toggle
-    ///  helpers to leave such rows alone.</summary>
-    function IsAlreadyInInterface(ARow: Integer): Boolean;
-
     procedure DoPresetAll(Sender: TObject);
     procedure DoPresetPublic(Sender: TObject);
     procedure DoPresetPublished(Sender: TObject);
@@ -639,19 +635,6 @@ begin
   finally
     FUpdating := False;
   end;
-end;
-
-function TExtractInterfaceDialog.IsAlreadyInInterface(ARow: Integer): Boolean;
-var
-  MIdx: Integer;
-begin
-  Result := False;
-  if FMode <> eimAddToExisting then Exit;
-  if Length(FExistingMemberNames) = 0 then Exit;
-  MIdx := MemberIndex(ARow);
-  if MIdx < 0 then Exit;
-  Result := TExtractInterfaceEngine.ClashesWithExisting(
-    FInfo.Members[MIdx], FExistingMemberNames);
 end;
 
 procedure TExtractInterfaceDialog.ToggleSection(AHeaderRow: Integer);

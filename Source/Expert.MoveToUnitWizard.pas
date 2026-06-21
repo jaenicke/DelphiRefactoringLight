@@ -17,12 +17,15 @@ interface
 
 uses
   System.SysUtils, System.UITypes,
-  Vcl.Forms, Vcl.Dialogs, ToolsAPI,
-  Expert.EditorHelper, Expert.MoveToUnit, Expert.MoveToUnitDialog;
+  Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
+  Expert.EditorHelperIntf, Expert.MoveToUnit, Expert.MoveToUnitDialog;
 
 type
-  TLspMoveToUnitWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspMoveToUnitWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -30,8 +33,10 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    procedure Execute;
     function GetMenuText: string;
+
+    {$ENDIF}
+    procedure Execute;
   end;
 
 var
@@ -39,37 +44,34 @@ var
 
 implementation
 
+{$IFNDEF STANDALONE_BUILD}
+{ TLspMoveToUnitWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
+
 procedure TLspMoveToUnitWizard.AfterSave; begin end;
 procedure TLspMoveToUnitWizard.BeforeSave; begin end;
 procedure TLspMoveToUnitWizard.Destroyed; begin end;
 procedure TLspMoveToUnitWizard.Modified; begin end;
 
 function TLspMoveToUnitWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.MoveToUnitWizard';
-end;
+begin Result := 'DelphiRefactoringLight.MoveToUnitWizard'; end;
 
 function TLspMoveToUnitWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Move To Unit';
-end;
+begin Result := 'Delphi Refactoring Light - Move To Unit'; end;
 
 function TLspMoveToUnitWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspMoveToUnitWizard.GetMenuText: string;
-begin
-  Result := 'Move to unit...';
-end;
-
+begin Result := 'Move to unit...'; end;
+{$ENDIF}
 procedure TLspMoveToUnitWizard.Execute;
 var
   Ctx: TEditorContext;
   Target: string;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or
      not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
   begin
@@ -86,7 +88,7 @@ begin
 
   if not TMoveToUnitDialog.Choose(Application.MainForm,
        Ctx.WordAtCursor, Ctx.FileName,
-       TEditorHelper.GetProjectSourceFiles, Target) then
+       Editor.GetProjectSourceFiles, Target) then
     Exit;
 
   if Target = '' then Exit;

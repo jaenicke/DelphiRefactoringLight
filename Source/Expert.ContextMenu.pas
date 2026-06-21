@@ -57,7 +57,6 @@ type
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
-    procedure OnRemoveWith(Sender: TObject);
     procedure OnRemoveWithProjectWide(Sender: TObject);
     procedure OnRemoveWithCurrentUnit(Sender: TObject);
     procedure OnRemoveWithSelectedUnits(Sender: TObject);
@@ -526,13 +525,6 @@ procedure TContextMenuInstaller.OnSignatureCheck(Sender: TObject);
 begin
   if SignatureCheckInstance <> nil then
     SignatureCheckInstance.Execute;
-end;
-
-procedure TContextMenuInstaller.OnRemoveWith(Sender: TObject);
-begin
-  // Legacy entry - kept for any callers; same as the global shortcut.
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.Execute;
 end;
 
 procedure TContextMenuInstaller.OnRemoveWithAtCursor(Sender: TObject);

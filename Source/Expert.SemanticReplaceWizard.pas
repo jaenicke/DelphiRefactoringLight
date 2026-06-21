@@ -22,7 +22,7 @@ unit Expert.SemanticReplaceWizard;
 //      project files)
 //   3. Per file: dry-run apply, collect stats and matches
 //   4. Build a human-readable preview and show it in the preview dialog
-//   5. On confirm: rewrite each modified file through TEditorHelper.
+//   5. On confirm: rewrite each modified file through Editor.
 //      ReplaceFileContent (IOTAEditWriter, undoable, instant) and
 //      augment its interface-uses clause with the units declared on
 //      the rules that fired.
@@ -37,11 +37,11 @@ procedure ApplySemanticReplacements_Project;
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils, System.StrUtils,
+  System.SysUtils, System.Classes, System.IOUtils, System.StrUtils, System.UITypes,
   System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls,
-  ToolsAPI,
-  Expert.EditorHelper, Expert.SemanticReplace, Expert.SemanticReplaceDialogs,
+  Expert.EditorHelperIntf,
+  Expert.SemanticReplace, Expert.SemanticReplaceDialogs,
   Delphi.FileEncoding;
 
 const
@@ -52,7 +52,7 @@ var
   Root: string;
 begin
   Result := False;
-  Root := TEditorHelper.GetProjectRoot;
+  Root := Editor.GetProjectRoot;
   if Root = '' then Exit;
   APath := IncludeTrailingPathDelimiter(Root) + CRulesFileName;
   Result := True;
@@ -130,7 +130,7 @@ function ReadSourceText(const AFile: string): string;
 var
   Tmp: string;
 begin
-  if TEditorHelper.ReadEditorContent(AFile, Tmp) then
+  if Editor.ReadEditorContent(AFile, Tmp) then
     Result := Tmp
   else
     Result := TDelphiFileEncoding.ReadAll(AFile);
@@ -140,7 +140,7 @@ procedure WriteSourceText(const AFile, AContent: string);
 var
   Enc: TEncoding;
 begin
-  if not TEditorHelper.ReplaceFileContent(AFile, AContent) then
+  if not Editor.ReplaceFileContent(AFile, AContent) then
   begin
     if TFile.Exists(AFile) then Enc := TDelphiFileEncoding.Detect(AFile)
     else Enc := TEncoding.UTF8;
@@ -327,7 +327,7 @@ begin
     ShowMessage('No source files to scan.'); Exit;
   end;
   if not EnsureRulesLoaded(Rules, Path) then Exit;
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   Plans := TList<TFilePlan>.Create;
   TotalEdits := 0;
@@ -409,7 +409,7 @@ procedure ApplySemanticReplacements_CurrentUnit;
 var
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
   if not Ctx.IsValid then
   begin
     ShowMessage('No file at cursor.'); Exit;
@@ -421,7 +421,7 @@ procedure ApplySemanticReplacements_SelectedUnits;
 var
   AllFiles, Chosen: TArray<string>;
 begin
-  AllFiles := TEditorHelper.GetProjectSourceFiles;
+  AllFiles := Editor.GetProjectSourceFiles;
   if Length(AllFiles) = 0 then
   begin
     ShowMessage('Project source file list is empty.'); Exit;
@@ -437,7 +437,7 @@ end;
 
 procedure ApplySemanticReplacements_Project;
 begin
-  RunReplaceOver(TEditorHelper.GetProjectSourceFiles);
+  RunReplaceOver(Editor.GetProjectSourceFiles);
 end;
 
 end.

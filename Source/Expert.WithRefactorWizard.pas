@@ -10,7 +10,7 @@ unit Expert.WithRefactorWizard;
 {
   Orchestrates the project-wide "remove with" refactoring:
 
-    1) Resolve project files via TEditorHelper.GetProjectSourceFiles.
+    1) Resolve project files via Editor.GetProjectSourceFiles.
     2) Save unsaved editor buffers to disk so the LSP and the file
        reads agree on content.
     3) Start LSP via TLspManager and ensure it has indexed the project.
@@ -19,7 +19,7 @@ unit Expert.WithRefactorWizard;
        before/after texts.
     6) Show TWithRefactorDialog modal. The user reviews the entries
        and clicks "Apply selected", "Apply all" or "Close".
-    7) Apply the chosen edits via TEditorHelper.ApplyEditViaEditor.
+    7) Apply the chosen edits via Editor.ApplyEditViaEditor.
        For multiple edits in the same file, apply bottom-up so earlier
        offsets stay stable.
 
@@ -32,7 +32,7 @@ interface
 
 uses
   System.Classes, System.SysUtils, System.Generics.Collections,
-  Vcl.Forms, ToolsAPI;
+  Vcl.Forms{$IFNDEF STANDALONE_BUILD}, ToolsAPI{$ENDIF};
 
 type
   /// <summary>Scope of a remove-with run. Determines which source
@@ -52,8 +52,11 @@ type
     wrsCursor
   );
 
-  TLspWithRefactorWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspWithRefactorWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -61,10 +64,12 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
+    function GetMenuText: string;
+
+    {$ENDIF}
     /// <summary>Legacy entry point - delegates to ExecuteAtCursor (the
     ///  fastest single-action default).</summary>
     procedure Execute;
-    function GetMenuText: string;
 
     /// <summary>Scans the entire project. Slow on big code bases.</summary>
     procedure ExecuteProjectWide;
@@ -90,8 +95,13 @@ implementation
 uses
   System.UITypes, System.IOUtils, System.Math, System.JSON,
   Vcl.Dialogs, Vcl.Controls,
-  Expert.EditorHelper, Expert.LspManager, Lsp.Client,
+  Expert.EditorHelperIntf, Expert.LspManager, Lsp.Client,
   Expert.WithScanner, Expert.WithRewriter, Expert.WithRefactorDialog;
+
+{$IFNDEF STANDALONE_BUILD}
+{ TLspWithRefactorWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
 
 procedure TLspWithRefactorWizard.AfterSave; begin end;
 procedure TLspWithRefactorWizard.BeforeSave; begin end;
@@ -99,30 +109,22 @@ procedure TLspWithRefactorWizard.Destroyed; begin end;
 procedure TLspWithRefactorWizard.Modified; begin end;
 
 function TLspWithRefactorWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.WithRefactorWizard';
-end;
+begin Result := 'DelphiRefactoringLight.WithRefactorWizard'; end;
 
 function TLspWithRefactorWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Remove with';
-end;
+begin Result := 'Delphi Refactoring Light - Remove with'; end;
 
 function TLspWithRefactorWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspWithRefactorWizard.GetMenuText: string;
-begin
-  Result := 'Remove with (project-wide)...';
-end;
-
+begin Result := 'Remove with (project-wide)...'; end;
+{$ENDIF}
 { ---------- Apply phase ---------- }
 
 type
   /// <summary>One concrete text edit to apply via
-  ///  TEditorHelper.ApplyEditViaEditor. Position is 1-based here; the
+  ///  Editor.ApplyEditViaEditor. Position is 1-based here; the
   ///  apply step converts to 0-based.</summary>
   TPlainEdit = record
     FileName: string;
@@ -431,7 +433,7 @@ begin
   Sorted := Copy(AEdits);
   SortPlainEdits(Sorted);
   for I := 0 to High(Sorted) do
-    if TEditorHelper.ApplyEditViaEditor(
+    if Editor.ApplyEditViaEditor(
         Sorted[I].FileName,
         Sorted[I].Line - 1,
         Sorted[I].Col - 1,
@@ -518,7 +520,7 @@ procedure TLspWithRefactorWizard.ExecuteSelectedUnits;
 var
   AllFiles, Selected: TArray<string>;
 begin
-  AllFiles := TEditorHelper.GetProjectSourceFiles;
+  AllFiles := Editor.GetProjectSourceFiles;
   if Length(AllFiles) = 0 then
   begin
     MessageDlg('No project source files found.', mtInformation, [mbOK], 0);
@@ -546,7 +548,7 @@ procedure TLspWithRefactorWizard.ExecuteAtCursor;
 var
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or not IsScannableSource(Ctx.FileName) then
   begin
     MessageDlg('No Pascal file is currently active.', mtInformation, [mbOK], 0);
@@ -608,14 +610,14 @@ begin
       case AScope of
         wrsProject:
           begin
-            ProjFiles := TEditorHelper.GetProjectSourceFiles;
+            ProjFiles := Editor.GetProjectSourceFiles;
             for I := 0 to High(ProjFiles) do
               if IsScannableSource(ProjFiles[I]) and TFile.Exists(ProjFiles[I]) then
                 ScanFiles.Add(ProjFiles[I]);
           end;
         wrsCurrentUnit, wrsCursor:
           begin
-            var Ctx := TEditorHelper.GetCurrentContext;
+            var Ctx := Editor.GetCurrentContext;
             if (Ctx.FileName <> '') and IsScannableSource(Ctx.FileName)
               and TFile.Exists(Ctx.FileName) then
               ScanFiles.Add(Ctx.FileName);
@@ -639,10 +641,10 @@ begin
       // Save editors so on-disk content matches what the LSP sees.
       Dialog.SetStatus('Saving open editor buffers...');
       Application.ProcessMessages;
-      TEditorHelper.SaveAllFiles;
+      Editor.SaveAllFiles;
 
       // Resolve LSP config.
-      DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+      DelphiLspJson := Editor.FindDelphiLspJson;
       if DelphiLspJson = '' then
       begin
         Dialog.SetStatus('No .delphilsp.json found - cannot resolve target types. ' +
@@ -652,8 +654,8 @@ begin
         Exit;
       end;
 
-      RootPath := TEditorHelper.GetProjectRoot;
-      ProjFile := TEditorHelper.GetCurrentProjectDproj;
+      RootPath := Editor.GetProjectRoot;
+      ProjFile := Editor.GetCurrentProjectDproj;
       if RootPath = '' then
         RootPath := ExtractFilePath(ProjFile);
 
@@ -725,7 +727,7 @@ begin
           // gets the whole current unit (graceful fallback).
           if AScope = wrsCursor then
           begin
-            var Ctx := TEditorHelper.GetCurrentContext;
+            var Ctx := Editor.GetCurrentContext;
             // Only filter when we're scanning the file the caret is in
             // (otherwise leave Occs alone - same unit fallback).
             if SameText(Ctx.FileName, ScanFiles[FileIdx]) then
@@ -847,7 +849,7 @@ begin
           procedure(const AItem: TWithRewriteResult)
           begin
             // Jump to the with-keyword position in the source file.
-            TEditorHelper.GotoLocation(
+            Editor.GotoLocation(
               AItem.FileName,
               AItem.Occurrence.KeywordPos.Line - 1,
               AItem.Occurrence.KeywordPos.Col - 1,

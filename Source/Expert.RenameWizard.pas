@@ -11,7 +11,9 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.StrUtils,
-  System.Generics.Collections, System.Generics.Defaults, Vcl.Forms, Vcl.Dialogs, ToolsAPI, Expert.EditorHelper,
+  System.Generics.Collections, System.Generics.Defaults, Vcl.Forms, Vcl.Dialogs,
+  {$IFNDEF STANDALONE_BUILD} ToolsAPI, {$ENDIF}
+  Expert.EditorHelperIntf,
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding;
 
@@ -23,7 +25,7 @@ type
     OldText: string;
   end;
 
-  TLspRenameWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspRenameWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private
     FDialog: TRenameDialog;
     FContext: TEditorContext;
@@ -61,6 +63,8 @@ type
     function BuildPreviewItems(const AEdit: TLspWorkspaceEdit; const ADefFilePath: string; ADefLine: Integer;
       const AImplFiles: TArray<string>): TRenamePreviewItems;
   public
+    {$IFNDEF STANDALONE_BUILD}
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -68,6 +72,9 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
+    function GetMenuText: string;
+    {$ENDIF}
+
     procedure Execute;
 
     /// <summary>Triggered by the unit-rename watcher when the IDE renames
@@ -76,8 +83,6 @@ type
     ///  preview list and confirms just like with a normal identifier
     ///  rename.</summary>
     procedure ExecuteForUnit(const AOldUnitName, ANewUnitName: string);
-
-    function GetMenuText: string;
   end;
 
 var
@@ -85,7 +90,10 @@ var
 
 implementation
 
-{ TLspRenameWizard - IOTANotifier }
+{$IFNDEF STANDALONE_BUILD}
+{ TLspRenameWizard - IOTANotifier / IOTAWizard / IOTAMenuWizard stubs.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
 
 procedure TLspRenameWizard.AfterSave; begin end;
 procedure TLspRenameWizard.BeforeSave; begin end;
@@ -111,11 +119,11 @@ function TLspRenameWizard.GetMenuText: string;
 begin
   Result := 'Rename identifier...';
 end;
-
+{$ENDIF}
 procedure TLspRenameWizard.Execute;
 begin
   FUnitRenameMode := False;
-  FContext := TEditorHelper.GetCurrentContext;
+  FContext := Editor.GetCurrentContext;
 
   if not FContext.IsValid then
   begin
@@ -128,7 +136,7 @@ begin
   FDialog := TRenameDialog.CreateDialog(Application.MainForm, FContext.WordAtCursor);
   try
     FDialog.OnPreviewRequested := DoPreview;
-    FDialog.SetCheckContext(FContext.FileName, TEditorHelper.GetProjectSourceFiles);
+    FDialog.SetCheckContext(FContext.FileName, Editor.GetProjectSourceFiles);
     TLspManager.Instance.ApplyStatusToCaption(FDialog);
     if FDialog.ShowModal = mrOk then
       ApplyFEdit;
@@ -191,7 +199,7 @@ begin
 
       for var Edit in SortedEdits do
       begin
-        if TEditorHelper.ApplyEditViaEditor(FE.FilePath, Edit.Range.Start.Line, Edit.Range.Start.Character,
+        if Editor.ApplyEditViaEditor(FE.FilePath, Edit.Range.Start.Line, Edit.Range.Start.Character,
           FContext.WordAtCursor, Edit.NewText) then
           Inc(AppliedCount)
         else
@@ -207,7 +215,7 @@ begin
     if TLspManager.Instance.IsAlive then
     begin
       try
-        var Client := TLspManager.Instance.GetClient(FContext.ProjectRoot, FContext.ProjectFile, TEditorHelper.FindDelphiLspJson);
+        var Client := TLspManager.Instance.GetClient(FContext.ProjectRoot, FContext.ProjectFile, Editor.FindDelphiLspJson);
         for var F in AffectedFiles do
           Client.RefreshDocument(F);
       except
@@ -255,12 +263,12 @@ begin
   end;
 
   // Save all dirty files so the text scan sees their current state
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   FDialog.SetBusy(True);
   FDiagLog := '';
   try
-    ProjFiles := TEditorHelper.GetProjectSourceFiles;
+    ProjFiles := Editor.GetProjectSourceFiles;
     FDiagLog :=
       '=== Diagnostics (Unit Rename) ===' + sLineBreak +
       'Old unit name: ' + FContext.WordAtCursor + sLineBreak +
@@ -370,7 +378,7 @@ begin
     Exit;
   end;
 
-  DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+  DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
     MessageDlg('No .delphilsp.json found.' + sLineBreak +
@@ -381,7 +389,7 @@ begin
   end;
 
   // Save all modified files so the LSP sees current data
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   RootPath := FContext.ProjectRoot;
   if RootPath = '' then
@@ -392,7 +400,7 @@ begin
   try
     // Save all unsaved files (so LSP sees the current state)
     FDialog.SetStatus('Saving all files...');
-    TEditorHelper.SaveAllFiles;
+    Editor.SaveAllFiles;
 
     FDiagLog := '=== Diagnostics ===' + sLineBreak +
       'File: ' + FContext.FileName + sLineBreak +
@@ -401,7 +409,7 @@ begin
       'delphilsp.json: ' + DelphiLspJson + sLineBreak + sLineBreak;
 
     // Get project files from the IDE
-    ProjFiles := TEditorHelper.GetProjectSourceFiles;
+    ProjFiles := Editor.GetProjectSourceFiles;
     FDiagLog := FDiagLog + 'Project files: ' + IntToStr(Length(ProjFiles)) + sLineBreak + sLineBreak;
 
     // Phase 1: text search over project files

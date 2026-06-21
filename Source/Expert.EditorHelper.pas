@@ -17,19 +17,60 @@ unit Expert.EditorHelper;
 interface
 
 uses
-  System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI;
+  System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI,
+  Expert.EditorHelperIntf;
 
 type
-  TEditorContext = record
-    FileName: string;
-    Line: Integer;       // 1-basiert
-    Column: Integer;     // 1-basiert
-    WordAtCursor: string;
-    ProjectFile: string;
-    ProjectRoot: string;
-    IsValid: Boolean;
+  // Re-export TEditorContext from the interface unit so existing
+  // `uses Expert.EditorHelper` consumers keep compiling unchanged.
+  TEditorContext = Expert.EditorHelperIntf.TEditorContext;
+
+  /// <summary>ToolsAPI-backed implementation of IEditorHelper. Installed
+  ///  as the default in this unit's initialization section. The
+  ///  standalone executable installs a different implementation via
+  ///  SetEditorImpl before any wizard runs.</summary>
+  TIDEEditorHelper = class(TInterfacedObject, IEditorHelper)
+  public
+    function GetCurrentContext: TEditorContext;
+    function GetCurrentProjectDproj: string;
+    function GetProjectRoot: string;
+    function GetProjectSearchPaths: string;
+    function GetProjectSourceFiles: TArray<string>;
+    function BuildSearchPathFromProject(
+      const ADprojPath, ARootPath: string): string;
+    function FindDelphiLspJson: string;
+
+    function ReadEditorContent(const AFilePath: string; out AContent: string): Boolean;
+    function ReplaceFileContent(const AFilePath: string;
+      const ANewContent: string): Boolean;
+    function ReplaceSelection(const AFilePath: string;
+      AStartLine, AStartCol, AEndLine, AEndCol: Integer;
+      const ANewText: string): Boolean;
+    function ReplaceLineAt(const AFilePath: string; ALine: Integer;
+      const ANewContent: string): Boolean;
+    function DeleteLineAt(const AFilePath: string; ALine: Integer): Boolean;
+    function InsertTextAtLineStart(const AFilePath: string;
+      ALine: Integer; const AText: string): Boolean;
+    function ApplyEditViaEditor(const AFilePath: string;
+      ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;
+
+    procedure SaveAllFiles;
+    procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
+    procedure NotifyClassStructureChanged(const AFilePath: string);
+    function GotoLocation(const AFilePath: string;
+      ALine, ACol: Integer; AHighlightLen: Integer = 0): Boolean;
+    function AddFileToActiveProject(const AFilePath: string): Boolean;
+    function GetSelection(out AFilePath: string;
+      out AStartLine, AStartCol, AEndLine, AEndCol: Integer;
+      out AText: string): Boolean;
   end;
 
+  /// <summary>Backwards-compatible static facade. Every method delegates
+  ///  to the active IEditorHelper implementation (see Editor in
+  ///  Expert.EditorHelperIntf). Existing callers that say
+  ///  `TEditorHelper.Foo(...)` keep working; new code should call
+  ///  `Editor.Foo(...)` directly to make the IEditorHelper indirection
+  ///  visible.</summary>
   TEditorHelper = class
     class function GetCurrentContext: TEditorContext;
     class procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
@@ -94,7 +135,7 @@ type
 
 implementation
 
-class function TEditorHelper.GetCurrentContext: TEditorContext;
+function TIDEEditorHelper.GetCurrentContext: TEditorContext;
 var
   EditorServices: IOTAEditorServices;
   EditBuffer: IOTAEditBuffer;
@@ -188,7 +229,7 @@ begin
   Result.IsValid := (Result.FileName <> '') and (Result.WordAtCursor <> '');
 end;
 
-class function TEditorHelper.GetCurrentProjectDproj: string;
+function TIDEEditorHelper.GetCurrentProjectDproj: string;
 var
   ProjectGroup: IOTAProjectGroup;
   ModuleServices: IOTAModuleServices;
@@ -227,7 +268,7 @@ begin
   end;
 end;
 
-class function TEditorHelper.GetProjectRoot: string;
+function TIDEEditorHelper.GetProjectRoot: string;
 var
   DprojPath: string;
 begin
@@ -238,7 +279,7 @@ begin
     Result := '';
 end;
 
-class procedure TEditorHelper.ReloadModifiedFiles(const FilePaths: TArray<string>);
+procedure TIDEEditorHelper.ReloadModifiedFiles(const FilePaths: TArray<string>);
 var
   ModuleServices: IOTAModuleServices;
   ActionServices: IOTAActionServices;
@@ -260,7 +301,7 @@ begin
     ActionServices.ReloadFile(''{ leer = aktuelle Datei });
 end;
 
-class procedure TEditorHelper.SaveAllFiles;
+procedure TIDEEditorHelper.SaveAllFiles;
 var
   ModuleServices: IOTAModuleServices;
 begin
@@ -268,7 +309,7 @@ begin
     ModuleServices.SaveAll;
 end;
 
-class function TEditorHelper.GotoLocation(const AFilePath: string;
+function TIDEEditorHelper.GotoLocation(const AFilePath: string;
   ALine, ACol: Integer; AHighlightLen: Integer): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -339,7 +380,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.ApplyEditViaEditor(const AFilePath: string;
+function TIDEEditorHelper.ApplyEditViaEditor(const AFilePath: string;
   ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -419,7 +460,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.InsertTextAtLineStart(const AFilePath: string;
+function TIDEEditorHelper.InsertTextAtLineStart(const AFilePath: string;
   ALine: Integer; const AText: string): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -474,7 +515,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.ReplaceFileContent(const AFilePath: string;
+function TIDEEditorHelper.ReplaceFileContent(const AFilePath: string;
   const ANewContent: string): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -519,7 +560,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.ReplaceSelection(const AFilePath: string;
+function TIDEEditorHelper.ReplaceSelection(const AFilePath: string;
   AStartLine, AStartCol, AEndLine, AEndCol: Integer;
   const ANewText: string): Boolean;
 var
@@ -587,7 +628,7 @@ begin
   Result := True;
 end;
 
-class procedure TEditorHelper.NotifyClassStructureChanged(const AFilePath: string);
+procedure TIDEEditorHelper.NotifyClassStructureChanged(const AFilePath: string);
 var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
@@ -619,7 +660,7 @@ begin
   end;
 end;
 
-class function TEditorHelper.ReplaceLineAt(const AFilePath: string;
+function TIDEEditorHelper.ReplaceLineAt(const AFilePath: string;
   ALine: Integer; const ANewContent: string): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -650,7 +691,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.DeleteLineAt(const AFilePath: string;
+function TIDEEditorHelper.DeleteLineAt(const AFilePath: string;
   ALine: Integer): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -681,7 +722,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.ReadEditorContent(const AFilePath: string;
+function TIDEEditorHelper.ReadEditorContent(const AFilePath: string;
   out AContent: string): Boolean;
 var
   ModuleServices: IOTAModuleServices;
@@ -716,7 +757,7 @@ begin
   Result := True;
 end;
 
-class function TEditorHelper.FindDelphiLspJson: string;
+function TIDEEditorHelper.FindDelphiLspJson: string;
 var
   DprojPath, ProjDir: string;
   JsonFiles: TStringDynArray;
@@ -747,7 +788,7 @@ begin
   Result := '';
 end;
 
-class function TEditorHelper.GetProjectSourceFiles: TArray<string>;
+function TIDEEditorHelper.GetProjectSourceFiles: TArray<string>;
 var
   ModuleServices: IOTAModuleServices;
   ProjectGroup: IOTAProjectGroup;
@@ -823,7 +864,7 @@ begin
   end;
 end;
 
-class function TEditorHelper.GetProjectSearchPaths: string;
+function TIDEEditorHelper.GetProjectSearchPaths: string;
 var
   DprojPath, RootPath: string;
 begin
@@ -832,7 +873,7 @@ begin
   Result := TEditorHelper.BuildSearchPathFromProject(DprojPath, RootPath);
 end;
 
-class function TEditorHelper.BuildSearchPathFromProject(
+function TIDEEditorHelper.BuildSearchPathFromProject(
   const ADprojPath, ARootPath: string): string;
 var
   Dirs: TList<string>;
@@ -921,5 +962,140 @@ begin
     Dirs.Free;
   end;
 end;
+
+function TIDEEditorHelper.GetSelection(out AFilePath: string;
+  out AStartLine, AStartCol, AEndLine, AEndCol: Integer;
+  out AText: string): Boolean;
+var
+  ES: IOTAEditorServices;
+  EB: IOTAEditBuffer;
+  BL: IOTAEditBlock;
+  Mod_: IOTAModule;
+begin
+  Result := False;
+  AFilePath := ''; AText := '';
+  AStartLine := 0; AStartCol := 0; AEndLine := 0; AEndCol := 0;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, ES) then Exit;
+  EB := ES.TopBuffer;
+  if EB = nil then Exit;
+  BL := EB.EditBlock;
+  if (BL = nil) or not BL.IsValid then Exit;
+  AStartLine := BL.StartingRow;
+  AStartCol := BL.StartingColumn;
+  AEndLine := BL.EndingRow;
+  AEndCol := BL.EndingColumn;
+  AText := BL.Text;
+  Mod_ := EB.Module;
+  if Mod_ <> nil then AFilePath := Mod_.FileName;
+  Result := (AText <> '');
+end;
+
+function TIDEEditorHelper.AddFileToActiveProject(const AFilePath: string): Boolean;
+var
+  MS: IOTAModuleServices;
+  ProjectGroup: IOTAProjectGroup;
+  Project: IOTAProject;
+  I: Integer;
+begin
+  Result := False;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
+  // Prefer the active project from the project group.
+  for I := 0 to MS.ModuleCount - 1 do
+    if Supports(MS.Modules[I], IOTAProjectGroup, ProjectGroup) then
+    begin
+      Project := ProjectGroup.ActiveProject;
+      if Project <> nil then
+      begin
+        Project.AddFile(AFilePath, True);
+        Exit(True);
+      end;
+    end;
+  // Fallback: first non-group project.
+  for I := 0 to MS.ModuleCount - 1 do
+    if Supports(MS.Modules[I], IOTAProject, Project) then
+      if not Supports(Project, IOTAProjectGroup) then
+      begin
+        Project.AddFile(AFilePath, True);
+        Exit(True);
+      end;
+end;
+
+{ ---------------------------------------------------------------
+  TEditorHelper - backwards-compat static facade.
+  Every method delegates to the active IEditorHelper implementation.
+  --------------------------------------------------------------- }
+
+class function TEditorHelper.GetCurrentContext: TEditorContext;
+begin Result := Editor.GetCurrentContext; end;
+
+class procedure TEditorHelper.ReloadModifiedFiles(const FilePaths: TArray<string>);
+begin Editor.ReloadModifiedFiles(FilePaths); end;
+
+class function TEditorHelper.GetCurrentProjectDproj: string;
+begin Result := Editor.GetCurrentProjectDproj; end;
+
+class function TEditorHelper.GetProjectRoot: string;
+begin Result := Editor.GetProjectRoot; end;
+
+class function TEditorHelper.GetProjectSearchPaths: string;
+begin Result := Editor.GetProjectSearchPaths; end;
+
+class procedure TEditorHelper.SaveAllFiles;
+begin Editor.SaveAllFiles; end;
+
+class function TEditorHelper.ApplyEditViaEditor(const AFilePath: string;
+  ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;
+begin Result := Editor.ApplyEditViaEditor(AFilePath, ALine, ACol, AOldText, ANewText); end;
+
+class function TEditorHelper.InsertTextAtLineStart(const AFilePath: string;
+  ALine: Integer; const AText: string): Boolean;
+begin Result := Editor.InsertTextAtLineStart(AFilePath, ALine, AText); end;
+
+class function TEditorHelper.ReplaceFileContent(const AFilePath: string;
+  const ANewContent: string): Boolean;
+begin Result := Editor.ReplaceFileContent(AFilePath, ANewContent); end;
+
+class function TEditorHelper.ReadEditorContent(const AFilePath: string;
+  out AContent: string): Boolean;
+begin Result := Editor.ReadEditorContent(AFilePath, AContent); end;
+
+class function TEditorHelper.ReplaceLineAt(const AFilePath: string;
+  ALine: Integer; const ANewContent: string): Boolean;
+begin Result := Editor.ReplaceLineAt(AFilePath, ALine, ANewContent); end;
+
+class function TEditorHelper.DeleteLineAt(const AFilePath: string; ALine: Integer): Boolean;
+begin Result := Editor.DeleteLineAt(AFilePath, ALine); end;
+
+class procedure TEditorHelper.NotifyClassStructureChanged(const AFilePath: string);
+begin Editor.NotifyClassStructureChanged(AFilePath); end;
+
+class function TEditorHelper.ReplaceSelection(const AFilePath: string;
+  AStartLine, AStartCol, AEndLine, AEndCol: Integer;
+  const ANewText: string): Boolean;
+begin Result := Editor.ReplaceSelection(AFilePath, AStartLine, AStartCol,
+  AEndLine, AEndCol, ANewText); end;
+
+class function TEditorHelper.GotoLocation(const AFilePath: string;
+  ALine, ACol: Integer; AHighlightLen: Integer): Boolean;
+begin Result := Editor.GotoLocation(AFilePath, ALine, ACol, AHighlightLen); end;
+
+class function TEditorHelper.FindDelphiLspJson: string;
+begin Result := Editor.FindDelphiLspJson; end;
+
+class function TEditorHelper.GetProjectSourceFiles: TArray<string>;
+begin Result := Editor.GetProjectSourceFiles; end;
+
+class function TEditorHelper.BuildSearchPathFromProject(
+  const ADprojPath, ARootPath: string): string;
+begin Result := Editor.BuildSearchPathFromProject(ADprojPath, ARootPath); end;
+
+initialization
+  // Install the IDE-backed implementation as the default. Standalone
+  // executables call SetEditorImpl(TStandaloneEditorHelper.Create) at
+  // startup BEFORE any wizard runs, overwriting this.
+  SetEditorImpl(TIDEEditorHelper.Create);
+
+finalization
+  SetEditorImpl(nil);
 
 end.

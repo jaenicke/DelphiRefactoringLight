@@ -78,6 +78,7 @@ type
     procedure OnUnitRefs(Sender: TObject);
     procedure OnFindUnit(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
+    procedure OnFindOriginalSymbol(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
     procedure OnDelegateInterface(Sender: TObject);
@@ -132,10 +133,15 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
+<<<<<<< HEAD
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
   Expert.FindUnitDialog;
+=======
+  Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard,
+  Expert.ExtractInterfaceWizard, Expert.SemanticReplaceWizard;
+>>>>>>> c72e495 (Add Find Original Symbol because Ctrl + Click not always works in Delphi 13.1)
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -264,6 +270,7 @@ begin
   Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
   Leaf(Root, 'Find References',           OnFindReferences,       skFindRef,    REQ_EDITOR);
   Leaf(Root, 'Find Implementations',      OnFindImplementations,  skFindImp,    REQ_EDITOR);
+  Leaf(Root, 'Find Original Symbol',      OnFindOriginalSymbol,   skFindOriginalSymbol, REQ_EDITOR);
   Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
@@ -907,6 +914,12 @@ procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);
 begin
   if MoveToUnitInstance <> nil then
     MoveToUnitInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnFindOriginalSymbol(Sender: TObject);
+begin
+  if FindOriginalSymbolInstance <> nil then
+    FindOriginalSymbolInstance.Execute;
 end;
 
 procedure TContextMenuInstaller.OnExtractInterface(Sender: TObject);

@@ -24,7 +24,7 @@ uses
   Vcl.Menus;
 
 type
-  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit);
+  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit, skFindOriginalSymbol);
 
   TShortcutChangedProc = procedure of object;
 
@@ -71,6 +71,7 @@ type
     class function scRemoveWith: TShortCut; static;
     class function scUnitRefs: TShortCut; static;
     class function scMoveToUnit: TShortCut; static;
+    class function scFindOriginalSymbol: TShortCut; static;
   end;
 
 implementation
@@ -88,13 +89,15 @@ const
     TShortCut(vkA     or scAlt or scCtrl or scShift),
     TShortCut(vkW     or scAlt or scCtrl or scShift),
     TShortCut(vkF     or scAlt or scCtrl or scShift),
-    TShortCut(vkM     or scCtrl or scShift)
+    TShortCut(vkM     or scCtrl or scShift),
+    TShortCut(vkG     or scCtrl)
   );
 
   ValueNames: array[TShortcutKind] of string = (
     'Rename', 'Completion', 'ExtractMethod',
     'FindReferences', 'FindImplementations', 'AlignSignature',
-    'RemoveWith', 'UnitReferences', 'MoveToUnit'
+    'RemoveWith', 'UnitReferences', 'MoveToUnit',
+    'FindOriginalSymbol'
   );
 
   DisplayNames: array[TShortcutKind] of string = (
@@ -106,7 +109,8 @@ const
     'Align method signature',
     'Remove with (project-wide)',
     'Find unit references (project-wide)',
-    'Move to unit (project-wide)'
+    'Move to unit (project-wide)',
+    'Find original symbol'
   );
 
 { TExpertsShortCut }
@@ -292,6 +296,11 @@ end;
 class function TExpertsShortCut.scMoveToUnit: TShortCut;
 begin
   Result := FShortcuts[skMoveToUnit];
+end;
+
+class function TExpertsShortCut.scFindOriginalSymbol: TShortCut;
+begin
+  Result := FShortcuts[skFindOriginalSymbol];
 end;
 
 end.

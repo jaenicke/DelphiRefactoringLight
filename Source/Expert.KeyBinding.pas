@@ -24,6 +24,7 @@ type
     procedure RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure MoveToUnitKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure FindOriginalSymbolKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
   public
     function GetBindingType: TBindingType;
     function GetDisplayName: string;
@@ -46,7 +47,7 @@ uses
   Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
-  Expert.MoveToUnitWizard;
+  Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard;
 
 { TLspKeyBinding }
 
@@ -113,6 +114,13 @@ begin
     MoveToUnitInstance.Execute;
 end;
 
+procedure TLspKeyBinding.FindOriginalSymbolKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if Assigned(FindOriginalSymbolInstance) then
+    FindOriginalSymbolInstance.Execute;
+end;
+
 function TLspKeyBinding.GetBindingType: TBindingType;
 begin
   Result := btPartial;
@@ -157,6 +165,9 @@ begin
 
   // Ctrl+Shift+M -> Move to unit (project-wide)
   BindingServices.AddKeyBinding([TExpertsShortCut.scMoveToUnit], MoveToUnitKeyProc, nil);
+
+  // Ctrl+G -> Find Original Symbol (Go to Definition)
+  BindingServices.AddKeyBinding([TExpertsShortCut.scFindOriginalSymbol], FindOriginalSymbolKeyProc, nil);
 end;
 
 var

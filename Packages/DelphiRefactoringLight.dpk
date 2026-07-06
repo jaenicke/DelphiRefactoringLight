@@ -62,6 +62,7 @@ contains
   Expert.FindReferencesWizard in '..\Source\Expert.FindReferencesWizard.pas',
   Expert.ImplementationFinder in '..\Source\Expert.ImplementationFinder.pas',
   Expert.FindImplementationsWizard in '..\Source\Expert.FindImplementationsWizard.pas',
+  Expert.FindOriginalSymbolWizard in '..\Source\Expert.FindOriginalSymbolWizard.pas',
   Expert.ContextMenu in '..\Source\Expert.ContextMenu.pas',
   Expert.UnitRenameWatcher in '..\Source\Expert.UnitRenameWatcher.pas',
   Expert.PluginSettings in '..\Source\Expert.PluginSettings.pas',

@@ -21,6 +21,7 @@ uses
   Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.LspPrewarmer,
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
+  Expert.FindOriginalSymbolWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex;
 
 type
@@ -72,6 +73,9 @@ begin
   // Create the move-to-unit wizard
   MoveToUnitInstance := TLspMoveToUnitWizard.Create;
 
+  // Create the find-original-symbol wizard
+  FindOriginalSymbolInstance := TLspFindOriginalSymbolWizard.Create;
+
   // Register keyboard shortcuts (defaults are Ctrl+Alt+Shift + R/Space/M/U/I/A,
   // user-configurable via Tools > Options > Refactoring Light).
   InstallKeyBinding;
@@ -111,6 +115,7 @@ finalization
   FreeAndNil(LspPrewarmerInstance);
   FreeAndNil(UnitRenameWatcherInstance);
   FreeAndNil(ContextMenuInstance);
+  FreeAndNil(FindOriginalSymbolInstance);
   FreeAndNil(MoveToUnitInstance);
   FreeAndNil(UnitReferencesInstance);
   FreeAndNil(WithRefactorInstance);

@@ -95,8 +95,6 @@ begin
   if RootPath = '' then
     RootPath := ExtractFilePath(FContext.FileName);
 
-  Editor.SaveAllFiles;
-
   Screen.Cursor := crHourGlass;
   try
     WasRunning := TLspManager.Instance.IsAlive;

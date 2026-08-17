@@ -50,8 +50,8 @@ uses
   System.Character, System.Generics.Collections,
   System.UITypes,
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
-  ToolsAPI,
-  Expert.EditorHelper, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
+  {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
+  Expert.EditorHelperIntf, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
   Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
   Delphi.FileEncoding;
 
@@ -94,14 +94,14 @@ function ReadSourceLines(const AFile: string): TArray<string>;
 var
   Content: string;
 begin
-  if TEditorHelper.ReadEditorContent(AFile, Content) then
+  if Editor.ReadEditorContent(AFile, Content) then
     Result := Content.Split([sLineBreak], TStringSplitOptions.None)
   else
     Result := TDelphiFileEncoding.ReadLines(AFile);
 end;
 
 /// <summary>Writes lines back to a unit. Pushes through IOTAEditWriter
-///  via TEditorHelper.ReplaceFileContent so the IDE sees the change
+///  via Editor.ReplaceFileContent so the IDE sees the change
 ///  instantly and it is part of the undo stack. Falls back to a direct
 ///  disk write only if the file is not open in the IDE.</summary>
 procedure WriteSourceLines(const AFile: string; const ALines: TArray<string>);
@@ -109,40 +109,16 @@ var
   NewContent: string;
 begin
   NewContent := string.Join(sLineBreak, ALines);
-  if not TEditorHelper.ReplaceFileContent(AFile, NewContent) then
+  if not Editor.ReplaceFileContent(AFile, NewContent) then
     WriteLinesEnc(AFile, ALines);
 end;
 
-/// <summary>Adds AFile to the IDE's active project (.dproj). Idempotent:
-///  if the file is already part of the project, AddFile is a no-op on
-///  the OTA side.</summary>
+/// <summary>Adds AFile to the active project. Goes through the
+///  IEditorHelper, which uses IOTAProject.AddFile in the IDE and a
+///  direct .dproj XML edit in standalone. Idempotent.</summary>
 procedure AddFileToActiveProject(const AFile: string);
-var
-  MS: IOTAModuleServices;
-  ProjectGroup: IOTAProjectGroup;
-  Project: IOTAProject;
-  I: Integer;
 begin
-  if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
-  // Prefer the active project from the project group.
-  for I := 0 to MS.ModuleCount - 1 do
-    if Supports(MS.Modules[I], IOTAProjectGroup, ProjectGroup) then
-    begin
-      Project := ProjectGroup.ActiveProject;
-      if Project <> nil then
-      begin
-        Project.AddFile(AFile, True);
-        Exit;
-      end;
-    end;
-  // Fallback: first non-group project.
-  for I := 0 to MS.ModuleCount - 1 do
-    if Supports(MS.Modules[I], IOTAProject, Project) then
-      if not Supports(Project, IOTAProjectGroup) then
-      begin
-        Project.AddFile(AFile, True);
-        Exit;
-      end;
+  Editor.AddFileToActiveProject(AFile);
 end;
 
 function IsIdentCh(C: Char): Boolean; inline;
@@ -294,10 +270,10 @@ begin
     if TypeRefs.Count = 0 then Exit;
 
     try
-      Dproj := TEditorHelper.GetCurrentProjectDproj;
-      Pr := TEditorHelper.GetProjectRoot;
+      Dproj := Editor.GetCurrentProjectDproj;
+      Pr := Editor.GetProjectRoot;
       if Pr = '' then Pr := ExtractFilePath(ASourceFile);
-      Dj := TEditorHelper.FindDelphiLspJson;
+      Dj := Editor.FindDelphiLspJson;
       Client := TLspManager.Instance.GetClient(Pr, Dproj, Dj);
       AStats.LspAvailable := True;
       Status('LSP: warming up source file for type resolution...');
@@ -316,7 +292,7 @@ begin
     // earlier: positions ended up pointing to the wrong line).
     SL := TStringList.Create;
     try
-      if not TEditorHelper.ReadEditorContent(ASourceFile, Content) then
+      if not Editor.ReadEditorContent(ASourceFile, Content) then
         Content := TDelphiFileEncoding.ReadAll(ASourceFile);
       SL.Text := Content;
       SetLength(Lines, SL.Count);
@@ -486,18 +462,25 @@ end;
 /// <summary>Opens AFile in the IDE so the user sees the freshly written
 ///  unit immediately.</summary>
 procedure OpenModuleInIDE(const AFile: string);
+{$IFNDEF STANDALONE_BUILD}
 var
   MS: IOTAModuleServices;
+{$ENDIF}
 begin
+{$IFNDEF STANDALONE_BUILD}
   if Supports(BorlandIDEServices, IOTAModuleServices, MS) then
     MS.OpenModule(AFile);
+{$ELSE}
+  // Standalone has no IDE module manager. The new file lives on disk;
+  // the user can open it manually. No-op.
+{$ENDIF}
 end;
 
 function GetEditorCursorLine(out AFile: string; out ALine: Integer): Boolean;
 var
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
   AFile := Ctx.FileName;
   ALine := Ctx.Line;
   Result := (AFile <> '') and (ALine > 0);
@@ -1273,7 +1256,7 @@ var
   M: TClassMember;
   ProjFiles: TArray<string>;
 begin
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
   if not GetEditorCursorLine(Src, CurLine) then
   begin
     ShowMessage('No editor file at cursor.');
@@ -1299,7 +1282,7 @@ begin
   Existing := nil;
   if AMode = eimAddToExisting then
   begin
-    ProjFiles := TEditorHelper.GetProjectSourceFiles;
+    ProjFiles := Editor.GetProjectSourceFiles;
     var AllProjectInterfaces := TProjectInterfaceScanner.ScanProject(ProjFiles);
     if Length(AllProjectInterfaces) = 0 then
     begin
@@ -1508,7 +1491,7 @@ var
   OverrideKW, BaseDesc, ExtraNote: string;
   InjectNewInstOK, InjectAfterCtorOK: Boolean;
 begin
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
   if not GetEditorCursorLine(Src, CurLine) then
   begin
     ShowMessage('No editor file at cursor.'); Exit;

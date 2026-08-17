@@ -864,7 +864,7 @@ class function TExtractInterfaceEngine.ParseExistingInterfaceNames(
 var
   Lines: TArray<string>;
   L: TList<string>;
-  I, P, Q: Integer;
+  I: Integer;
   Line, Trimmed, Upper: string;
   procedure AddIdentAfter(const AKeyword: string; const ATrimmedLine: string);
   var
@@ -923,8 +923,6 @@ begin
         CollectAfterKeyword('WRITE', Upper, Trimmed);
       end;
 
-      if P = 0 then ;
-      if Q = 0 then ;
     end;
     Result := L.ToArray;
   finally
@@ -1157,7 +1155,7 @@ class function TProjectInterfaceScanner.ScanFile(
 var
   Lines: TArray<string>;
   I, J: Integer;
-  L, Trimmed, Upper, Name: string;
+  L, Trimmed, Upper: string;
   EqPos, IfacePos, Depth: Integer;
   List: TList<TInterfaceDeclLocation>;
 begin

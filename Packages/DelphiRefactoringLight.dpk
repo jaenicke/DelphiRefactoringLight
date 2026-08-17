@@ -40,6 +40,7 @@ contains
   Expert.RenameWizard in '..\Source\Expert.RenameWizard.pas',
   Expert.KeyBinding in '..\Source\Expert.KeyBinding.pas',
   Expert.RenameDialog in '..\Source\Expert.RenameDialog.pas',
+  Expert.EditorHelperIntf in '..\Source\Expert.EditorHelperIntf.pas',
   Expert.EditorHelper in '..\Source\Expert.EditorHelper.pas',
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
   Lsp.JsonRpc in '..\Source\Lsp.JsonRpc.pas',
@@ -83,6 +84,9 @@ contains
   Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas',
   Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',
   Expert.ExtractInterfaceDialog in '..\Source\Expert.ExtractInterfaceDialog.pas',
-  Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas';
+  Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas',
+  Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
+  Expert.SemanticReplaceDialogs in '..\Source\Expert.SemanticReplaceDialogs.pas',
+  Expert.SemanticReplaceWizard in '..\Source\Expert.SemanticReplaceWizard.pas';
 
 end.

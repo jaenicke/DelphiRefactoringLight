@@ -11,11 +11,11 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
-  Vcl.Forms, Vcl.Dialogs, ToolsAPI, Expert.EditorHelper, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
+  Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Delphi.FileEncoding;
 
 type
-  TLspFindReferencesWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private
     // Bezeichnet nur den GERADE laufenden Search. Verschachtelte
     // Execute-Calls speichern den Vorgaengerwert auf dem Stack und
@@ -32,6 +32,9 @@ type
 
     procedure SearchAndShow;
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -39,8 +42,10 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    procedure Execute;
     function GetMenuText: string;
+
+    {$ENDIF}
+    procedure Execute;
   end;
 
 var
@@ -48,7 +53,10 @@ var
 
 implementation
 
-{ TLspFindReferencesWizard - IOTANotifier }
+{$IFNDEF STANDALONE_BUILD}
+{ TLspFindReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
 
 procedure TLspFindReferencesWizard.AfterSave; begin end;
 procedure TLspFindReferencesWizard.BeforeSave; begin end;
@@ -56,32 +64,24 @@ procedure TLspFindReferencesWizard.Destroyed; begin end;
 procedure TLspFindReferencesWizard.Modified; begin end;
 
 function TLspFindReferencesWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.FindReferencesWizard';
-end;
+begin Result := 'DelphiRefactoringLight.FindReferencesWizard'; end;
 
 function TLspFindReferencesWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Find References';
-end;
+begin Result := 'Delphi Refactoring Light - Find References'; end;
 
 function TLspFindReferencesWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspFindReferencesWizard.GetMenuText: string;
-begin
-  Result := 'Find references...';
-end;
-
+begin Result := 'Find references...'; end;
+{$ENDIF}
 procedure TLspFindReferencesWizard.Execute;
 var
   PrevDialog: TFindReferencesDialog;
   PrevContext: TEditorContext;
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
 
   if not Ctx.IsValid then
   begin
@@ -132,7 +132,7 @@ begin
   // Static-style: uses only the item's own location data. Safe to be
   // assigned as a callback to dialog instances that may outlive the
   // particular Execute call that opened them.
-  TEditorHelper.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+  Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
 end;
 
 procedure TLspFindReferencesWizard.SearchAndShow;
@@ -144,7 +144,7 @@ var
   LspLocations: TArray<TLspLocation>;
   LspLine, LspCol: Integer;
 begin
-  DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+  DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
     FDialog.SetStatus('No .delphilsp.json found - enable Tools > Options > '
@@ -158,7 +158,7 @@ begin
 
   // Save all editor changes
   FDialog.SetStatus('Saving all files...');
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   // Start LSP
   var WasRunning := TLspManager.Instance.IsAlive;
@@ -222,7 +222,7 @@ begin
   // Strategy 2: fallback - text search + GotoDefinition verification
   FDialog.SetStatus('Fallback: text search in project...');
 
-  ProjFiles := TEditorHelper.GetProjectSourceFiles;
+  ProjFiles := Editor.GetProjectSourceFiles;
 
   var TextCandidates := FindCandidatesByText(FContext.WordAtCursor, ProjFiles);
 

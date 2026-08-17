@@ -15,8 +15,17 @@ procedure EnableThemes(AForm: TCustomForm);
 implementation
 
 uses
-  ToolsApi,
+  {$IFNDEF STANDALONE_BUILD} ToolsApi, {$ENDIF}
   System.SysUtils;
+
+{$IFDEF STANDALONE_BUILD}
+// In standalone, theming is a no-op: the IDE theme service is not
+// available and our VCL forms use their own colors.
+function GetThemedColor(AColor: TColor): TColor;
+begin Result := AColor; end;
+procedure EnableThemes(AForm: TCustomForm);
+begin end;
+{$ELSE}
 
 function IdeThemesEnabled: Boolean;
 var
@@ -72,5 +81,6 @@ begin
   else
     Result := AColor;
 end;
+{$ENDIF}
 
 end.

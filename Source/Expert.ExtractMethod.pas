@@ -11,7 +11,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.JSON, System.Types, System.Generics.Collections, System.RegularExpressions,
-  Winapi.Windows, Vcl.Forms, Vcl.Dialogs, ToolsAPI, Expert.EditorHelper, Expert.LspManager, Expert.ExtractMethodDialog,
+  Winapi.Windows, Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.LspManager, Expert.ExtractMethodDialog,
   Expert.SelectionValidator, Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
 
 type
@@ -611,7 +611,6 @@ begin
   // Concatenate header lines until we have a complete '(...)' block, or
   // we hit a ';' before any '(' (procedure with no params).
   Header := '';
-  Depth := 0;
   for I := AInsertLine - 1 to Length(AFileLines) - 1 do
   begin
     Header := Header + ' ' + AFileLines[I];
@@ -754,33 +753,20 @@ begin
 end;
 
 function TLspExtractMethodWizard.GetSelectedBlock(out AInfo: TExtractMethodInfo): Boolean;
-var
-  ES: IOTAEditorServices;
-  EB: IOTAEditBuffer;
-  BL: IOTAEditBlock;
 begin
   Result := False;
   AInfo := Default(TExtractMethodInfo);
-  if not Supports(BorlandIDEServices, IOTAEditorServices, ES) then Exit;
-  EB := ES.TopBuffer;
-  if EB = nil then Exit;
-  BL := EB.EditBlock;
-  if (BL = nil) or not BL.IsValid then
+  if not Editor.GetSelection(AInfo.FileName,
+       AInfo.StartLine, AInfo.StartCol, AInfo.EndLine, AInfo.EndCol,
+       AInfo.SelectedText) then
   begin
     MessageDlg('Please select the code block to extract first.', mtInformation, [mbOK], 0);
     Exit;
   end;
-  AInfo.SelectedText := BL.Text;
-  AInfo.StartLine := BL.StartingRow;
-  AInfo.StartCol := BL.StartingColumn;
-  AInfo.EndLine := BL.EndingRow;
-  AInfo.EndCol := BL.EndingColumn;
   // If the selection ends at the start of the next line (EndCol=1),
   // that line does NOT belong to the selection
   if AInfo.EndCol = 1 then Dec(AInfo.EndLine);
   if Trim(AInfo.SelectedText) = '' then begin MessageDlg('Selection is empty.', mtWarning, [mbOK], 0); Exit; end;
-  var Mod_ := EB.Module;
-  if Mod_ <> nil then AInfo.FileName := Mod_.FileName;
   var Lines := AInfo.SelectedText.Split([#10]);
   var MinI := MaxInt;
   for var L in Lines do begin var S := L.TrimRight([#13,#10]); if Trim(S)='' then Continue;
@@ -1348,7 +1334,7 @@ var
 begin
   // IMPORTANT: read the editor buffer (not the file on disk) so that the
   // newly inserted method and call are not lost.
-  if not TEditorHelper.ReadEditorContent(AInfo.FileName, Content) then Exit;
+  if not Editor.ReadEditorContent(AInfo.FileName, Content) then Exit;
 
   SL := TStringList.Create;
   try
@@ -1441,9 +1427,9 @@ begin
       var LineNum := LineChanges[J].Key;
       var NewText := LineChanges[J].Value;
       if NewText = #0 then
-        TEditorHelper.DeleteLineAt(AInfo.FileName, LineNum)
+        Editor.DeleteLineAt(AInfo.FileName, LineNum)
       else
-        TEditorHelper.ReplaceLineAt(AInfo.FileName, LineNum, NewText);
+        Editor.ReplaceLineAt(AInfo.FileName, LineNum, NewText);
     end;
   finally
     LineChanges.Free;
@@ -1498,17 +1484,17 @@ var
   Client: TLspClient;
   DJ, RP: string;
 begin
-  DJ := TEditorHelper.FindDelphiLspJson;
+  DJ := Editor.FindDelphiLspJson;
   if DJ='' then begin FDialog.SetPreviewText('No .delphilsp.json found.'); FDialog.SetStatus('Error'); Exit; end;
-  RP := TEditorHelper.GetProjectRoot;
+  RP := Editor.GetProjectRoot;
   if RP='' then RP := ExtractFilePath(AInfo.FileName);
   AInfo.MethodName := FDialog.GetMethodName;
   if AInfo.MethodName='' then begin FDialog.SetPreviewText('Please enter a method name.'); Exit; end;
   FDialog.SetBusy(True);
   try
-    FDialog.SetStatus('Saving files...'); TEditorHelper.SaveAllFiles;
+    FDialog.SetStatus('Saving files...'); Editor.SaveAllFiles;
     FDialog.SetStatus('Connecting to LSP...');
-    Client := TLspManager.Instance.GetClient(RP, TEditorHelper.GetCurrentProjectDproj, DJ);
+    Client := TLspManager.Instance.GetClient(RP, Editor.GetCurrentProjectDproj, DJ);
 
     // Einheitlicher Warmup ueber alle Wizards. Die Status-Callbacks
     // landen 1:1 im Dialog, damit der User dieselben Texte sieht wie im
@@ -1565,16 +1551,13 @@ var
   Info: TExtractMethodInfo;
   Client: TLspClient;
   NMC, CC, CDC: string;
-  ES: IOTAEditorServices;
-  EB: IOTAEditBuffer;
-  EP: IOTAEditPosition;
 begin
   if not GetSelectedBlock(Info) then Exit;
   FInfoReady := False;
   FDialog := TExtractMethodDialog.CreateDialog(Application.MainForm, 'ExtractedMethod');
   try
     FDialog.OnNameChanged := OnMethodNameChange;
-    FDialog.SetCheckContext(Info.FileName, TEditorHelper.GetProjectSourceFiles);
+    FDialog.SetCheckContext(Info.FileName, Editor.GetProjectSourceFiles);
     TLspManager.Instance.ApplyStatusToCaption(FDialog);
     FDialog.Show;
     Application.ProcessMessages;
@@ -1587,31 +1570,28 @@ begin
     NMC := GenerateMethod(Info); CC := GenerateCall(Info);
     if Info.EnclosingClass<>'' then CDC := GenerateClassDeclaration(Info) else CDC := '';
 
-    if not Supports(BorlandIDEServices, IOTAEditorServices, ES) then Exit;
-    EB := ES.TopBuffer; if EB=nil then Exit;
-    EP := EB.EditPosition; if EP=nil then Exit;
     // Replace the block with the call, byte-exact via Writer (no auto-indent).
     // Delete from (StartLine, 1) to the start of the line after EndLine so that
     // indentation and the trailing newline of the block are removed too.
-    TEditorHelper.ReplaceSelection(Info.FileName,
+    Editor.ReplaceSelection(Info.FileName,
       Info.StartLine, 1, Info.EndLine + 1, 1,
       CC + #13#10);
 
     // Insert the new method and class declaration via a direct Writer
     // (avoids the IDE's auto-indent)
-    TEditorHelper.InsertTextAtLineStart(Info.FileName, Info.InsertLine, NMC);
+    Editor.InsertTextAtLineStart(Info.FileName, Info.InsertLine, NMC);
     if (Info.ClassDeclLine>0) and (CDC<>'') then
-      TEditorHelper.InsertTextAtLineStart(Info.FileName, Info.ClassDeclLine, CDC);
+      Editor.InsertTextAtLineStart(Info.FileName, Info.ClassDeclLine, CDC);
 
     // Remove the moved variables from the var declaration of the old method
     if Length(Info.LocalVars)>0 then
       RemoveLocalVarsFromDeclaration(Info);
 
     // Notify the form designer about class changes
-    TEditorHelper.NotifyClassStructureChanged(Info.FileName);
+    Editor.NotifyClassStructureChanged(Info.FileName);
 
-    try Client := TLspManager.Instance.GetClient(TEditorHelper.GetProjectRoot,
-      TEditorHelper.GetCurrentProjectDproj, TEditorHelper.FindDelphiLspJson);
+    try Client := TLspManager.Instance.GetClient(Editor.GetProjectRoot,
+      Editor.GetCurrentProjectDproj, Editor.FindDelphiLspJson);
       Client.RefreshDocument(Info.FileName); except end;
     MessageDlg('Method "'+Info.MethodName+'" extracted. Ctrl+Z to undo.', mtInformation, [mbOK], 0);
   finally FDialog.Free; FDialog := nil; end;

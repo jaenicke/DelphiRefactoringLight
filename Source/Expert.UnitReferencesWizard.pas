@@ -38,12 +38,12 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.UITypes, System.JSON,
   System.StrUtils, System.DateUtils, System.SyncObjs,
   System.Generics.Collections, System.Generics.Defaults,
-  Vcl.Forms, Vcl.Dialogs, ToolsAPI,
-  Expert.EditorHelper, Expert.UnitReferencesDialog, Expert.LspManager,
+  Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
+  Expert.EditorHelperIntf, Expert.UnitReferencesDialog, Expert.LspManager,
   Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
 
 type
-  TLspFindUnitReferencesWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspFindUnitReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private type
     TSymbolPos = record
       Name: string;
@@ -68,12 +68,10 @@ type
       ASeen: TDictionary<string, Boolean>);
     function ReadCachedLines(AFile: string;
       ACache: TDictionary<string, TArray<string>>): TArray<string>;
-    /// <summary>Refines a symbol position to the start of the actual
-    ///  identifier on that line (LSP findReferences only triggers when
-    ///  the cursor is on the identifier itself).</summary>
-    procedure RefinePositionToIdentifier(var ASym: TSymbolPos;
-      const ALines: TArray<string>);
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -81,8 +79,10 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    procedure Execute;
     function GetMenuText: string;
+
+    {$ENDIF}
+    procedure Execute;
   end;
 
 var
@@ -90,7 +90,10 @@ var
 
 implementation
 
-{ TLspFindUnitReferencesWizard - IOTANotifier stubs }
+{$IFNDEF STANDALONE_BUILD}
+{ TLspFindUnitReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
 
 procedure TLspFindUnitReferencesWizard.AfterSave; begin end;
 procedure TLspFindUnitReferencesWizard.BeforeSave; begin end;
@@ -98,25 +101,17 @@ procedure TLspFindUnitReferencesWizard.Destroyed; begin end;
 procedure TLspFindUnitReferencesWizard.Modified; begin end;
 
 function TLspFindUnitReferencesWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.UnitReferencesWizard';
-end;
+begin Result := 'DelphiRefactoringLight.UnitReferencesWizard'; end;
 
 function TLspFindUnitReferencesWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Find Unit References';
-end;
+begin Result := 'Delphi Refactoring Light - Find Unit References'; end;
 
 function TLspFindUnitReferencesWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspFindUnitReferencesWizard.GetMenuText: string;
-begin
-  Result := 'Find unit references...';
-end;
-
+begin Result := 'Find unit references...'; end;
+{$ENDIF}
 procedure TLspFindUnitReferencesWizard.OpenTrace(const ARootPath: string);
 var
   Path: string;
@@ -178,7 +173,7 @@ procedure TLspFindUnitReferencesWizard.Execute;
 var
   UnitName: string;
 begin
-  FContext := TEditorHelper.GetCurrentContext;
+  FContext := Editor.GetCurrentContext;
 
   if (FContext.FileName = '') or
      not SameText(ExtractFileExt(FContext.FileName), '.pas') then
@@ -217,7 +212,7 @@ begin
   try
     var C := TLspManager.Instance.GetClient(
       FContext.ProjectRoot, FContext.ProjectFile,
-      TEditorHelper.FindDelphiLspJson);
+      Editor.FindDelphiLspJson);
     C.Verbose := False;
     C.OnLog := nil;
   except end;
@@ -227,7 +222,7 @@ end;
 
 procedure TLspFindUnitReferencesWizard.DoGotoLocation(AItem: TUnitRefItem);
 begin
-  TEditorHelper.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+  Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
 end;
 
 procedure TLspFindUnitReferencesWizard.CollectSymbols(AArr: TJSONArray;
@@ -626,52 +621,6 @@ begin
       Exit(True);
 end;
 
-procedure TLspFindUnitReferencesWizard.RefinePositionToIdentifier(
-  var ASym: TSymbolPos; const ALines: TArray<string>);
-var
-  Line: string;
-  P, NameLen: Integer;
-  Before, After: Char;
-  IsId: Boolean;
-begin
-  if (ASym.Line < 0) or (ASym.Line >= System.Length(ALines)) then Exit;
-  Line := ALines[ASym.Line];
-  if Line = '' then Exit;
-  NameLen := System.Length(ASym.Name);
-  if NameLen = 0 then Exit;
-
-  // Word-boundary search for ASym.Name in the line, starting at the
-  // earliest plausible column. We prefer a hit at or after the
-  // selectionRange column the LSP gave us, but also accept earlier
-  // hits when the LSP's column was wider than the name.
-  P := 1;
-  while P <= System.Length(Line) - NameLen + 1 do
-  begin
-    if SameText(Copy(Line, P, NameLen), ASym.Name) then
-    begin
-      IsId := True;
-      if P > 1 then
-      begin
-        Before := Line[P - 1];
-        if CharInSet(Before, ['A'..'Z','a'..'z','0'..'9','_']) then
-          IsId := False;
-      end;
-      if IsId and (P + NameLen <= System.Length(Line)) then
-      begin
-        After := Line[P + NameLen];
-        if CharInSet(After, ['A'..'Z','a'..'z','0'..'9','_']) then
-          IsId := False;
-      end;
-      if IsId then
-      begin
-        // Found a word-boundary hit; use this column (0-based).
-        ASym.Col := P - 1;
-        Exit;
-      end;
-    end;
-    Inc(P);
-  end;
-end;
 
 procedure TLspFindUnitReferencesWizard.SearchAndShow;
 var
@@ -698,7 +647,7 @@ var
   FinalItems: TList<TUnitRefItem>;
   FileList: TList<TUnitRefItem>;
 begin
-  DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+  DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
     FDialog.SetStatus('No .delphilsp.json found - enable Tools > Options > '
@@ -714,7 +663,7 @@ begin
 
   // Save editor changes so the LSP sees the same content.
   FDialog.SetStatus('Saving all files...');
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   WasRunning := TLspManager.Instance.IsAlive;
   if WasRunning then
@@ -774,7 +723,7 @@ begin
   FDialog.SetStatus('Scanning project files for uses of ' + TargetUnitName + '...');
   Application.ProcessMessages;
 
-  ProjFiles := TEditorHelper.GetProjectSourceFiles;
+  ProjFiles := Editor.GetProjectSourceFiles;
   UsingFiles := TList<string>.Create;
   UsingFileSet := TDictionary<string, Boolean>.Create;
   Symbols := TList<TSymbolPos>.Create;

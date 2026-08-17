@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -48,10 +48,10 @@ unit Expert.MoveToUnit;
 interface
 
 uses
-  System.SysUtils, System.Classes, System.Types, System.IOUtils,
+  System.SysUtils, System.Classes, System.Types, System.IOUtils, System.UITypes,
   System.StrUtils, System.Character, System.Generics.Collections, System.JSON,
   Vcl.Dialogs, Vcl.Forms,
-  Expert.EditorHelper, Expert.WithRewriter,
+  Expert.EditorHelperIntf, Expert.WithRewriter,
   Expert.LspManager,
   Lsp.Client, Lsp.Uri, Lsp.Protocol, Delphi.FileEncoding;
 
@@ -449,7 +449,7 @@ end;
 
 class function TLspMoveToUnit.ReadFile(const APath: string): string;
 begin
-  if not TEditorHelper.ReadEditorContent(APath, Result) then
+  if not Editor.ReadEditorContent(APath, Result) then
     Result := TDelphiFileEncoding.ReadAll(APath);
 end;
 
@@ -990,7 +990,7 @@ begin
   // word-boundary token and isn't the source or target.
   var Consumers := TList<string>.Create;
   try
-    for var F in TEditorHelper.GetProjectSourceFiles do
+    for var F in Editor.GetProjectSourceFiles do
     begin
       if SameText(F, ASourceFile) or SameText(F, ATargetFile) then Continue;
       var Ext := AnsiLowerCase(ExtractFileExt(F));
@@ -1128,7 +1128,7 @@ begin
     // the surrounding pre-/post-padding meets, plus possibly an
     // orphaned section header ('type' with no body). Two clean-up
     // passes: collapse runs of blank lines, then drop empty sections.
-    TEditorHelper.ReplaceFileContent(ASourceFile,
+    Editor.ReplaceFileContent(ASourceFile,
       CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString)));
   finally
     Out_.Free;
@@ -1206,7 +1206,7 @@ begin
       if Out_.Length > 0 then Out_.Append(#13#10);
       Out_.Append(Lines[I]);
     end;
-    TEditorHelper.ReplaceFileContent(ATargetFile,
+    Editor.ReplaceFileContent(ATargetFile,
       CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString)));
   finally
     Out_.Free;
@@ -1278,14 +1278,14 @@ begin
           Out_.Append(';');
         end;
       end;
-      TEditorHelper.ReplaceFileContent(AConsumerFile, Out_.ToString);
+      Editor.ReplaceFileContent(AConsumerFile, Out_.ToString);
       Exit;
     finally
       Out_.Free;
     end;
   end;
 
-  TEditorHelper.ReplaceFileContent(AConsumerFile, JoinLines(Lines));
+  Editor.ReplaceFileContent(AConsumerFile, JoinLines(Lines));
 end;
 
 class procedure TLspMoveToUnit.EnsureImplementationUses(
@@ -1340,7 +1340,7 @@ begin
         Lines[InsertLine] :=
           Copy(Line, 1, InjectAfterCol) + InsertText +
           Copy(Line, InjectAfterCol + 1, MaxInt);
-        TEditorHelper.ReplaceFileContent(ATargetFile, JoinLines(Lines));
+        Editor.ReplaceFileContent(ATargetFile, JoinLines(Lines));
       end;
       Exit;
     end;
@@ -1377,7 +1377,7 @@ begin
           Out_.Append(';');
         end;
       end;
-      TEditorHelper.ReplaceFileContent(ATargetFile, Out_.ToString);
+      Editor.ReplaceFileContent(ATargetFile, Out_.ToString);
     finally
       Out_.Free;
     end;
@@ -1618,7 +1618,7 @@ begin
       end;
   end;
 
-  TEditorHelper.ReplaceFileContent(AConsumerFile, JoinLines(Lines));
+  Editor.ReplaceFileContent(AConsumerFile, JoinLines(Lines));
 end;
 
 class function TLspMoveToUnit.ApplyPlan(const APlan: TMovePlan): Boolean;
@@ -1644,10 +1644,10 @@ begin
     var DeclUnits: TArray<string>;
     var ImplUnits: TArray<string>;
     try
-      var DelphiLspJson := TEditorHelper.FindDelphiLspJson;
-      var RootPath := TEditorHelper.GetProjectRoot;
+      var DelphiLspJson := Editor.FindDelphiLspJson;
+      var RootPath := Editor.GetProjectRoot;
       if RootPath = '' then RootPath := ExtractFilePath(APlan.SourceFile);
-      var ProjFile := TEditorHelper.GetCurrentProjectDproj;
+      var ProjFile := Editor.GetCurrentProjectDproj;
       if (DelphiLspJson <> '') and (ProjFile <> '') then
         Client := TLspManager.Instance.GetClient(RootPath, ProjFile, DelphiLspJson);
     except
@@ -1749,7 +1749,7 @@ var
   Plan: TMovePlan;
 begin
   Result := False;
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
   if not BuildPlan(ASymbol, ASourceFile, ATargetFile, Plan) then
   begin
     if Plan.ProblemDetail <> '' then

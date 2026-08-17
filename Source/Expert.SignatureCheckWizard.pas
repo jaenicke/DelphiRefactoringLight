@@ -11,18 +11,21 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.UITypes,
-  Vcl.Forms, Vcl.Dialogs, ToolsAPI,
-  Expert.EditorHelper, Expert.LspManager, Expert.SignatureCheck,
+  Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
+  Expert.EditorHelperIntf, Expert.LspManager, Expert.SignatureCheck,
   Expert.SignatureCheckDialog, Lsp.Client;
 
 type
-  TLspSignatureCheckWizard = class(TNotifierObject, IOTAWizard, IOTAMenuWizard)
+  TLspSignatureCheckWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private
     FDialog: TSignatureCheckDialog;
     FContext: TEditorContext;
     procedure DoGotoLocation(AEntry: TSignatureEntry);
     procedure CollectAndShow;
   public
+    {$IFNDEF STANDALONE_BUILD}
+
+    // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
     procedure AfterSave;
     procedure BeforeSave;
     procedure Destroyed;
@@ -30,8 +33,10 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    procedure Execute;
     function GetMenuText: string;
+
+    {$ENDIF}
+    procedure Execute;
   end;
 
 var
@@ -39,34 +44,31 @@ var
 
 implementation
 
+{$IFNDEF STANDALONE_BUILD}
+{ TLspSignatureCheckWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
+  Only compiled into the IDE plugin; the standalone build does not
+  inherit from TNotifierObject and never needs these. }
+
 procedure TLspSignatureCheckWizard.AfterSave; begin end;
 procedure TLspSignatureCheckWizard.BeforeSave; begin end;
 procedure TLspSignatureCheckWizard.Destroyed; begin end;
 procedure TLspSignatureCheckWizard.Modified; begin end;
 
 function TLspSignatureCheckWizard.GetIDString: string;
-begin
-  Result := 'DelphiRefactoringLight.SignatureCheckWizard';
-end;
+begin Result := 'DelphiRefactoringLight.SignatureCheckWizard'; end;
 
 function TLspSignatureCheckWizard.GetName: string;
-begin
-  Result := 'Delphi Refactoring Light - Align Method Signature';
-end;
+begin Result := 'Delphi Refactoring Light - Align Method Signature'; end;
 
 function TLspSignatureCheckWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
+begin Result := [wsEnabled]; end;
 
 function TLspSignatureCheckWizard.GetMenuText: string;
-begin
-  Result := 'Align method signature...';
-end;
-
+begin Result := 'Align method signature...'; end;
+{$ENDIF}
 procedure TLspSignatureCheckWizard.DoGotoLocation(AEntry: TSignatureEntry);
 begin
-  TEditorHelper.GotoLocation(AEntry.FilePath, AEntry.Line, AEntry.Col,
+  Editor.GotoLocation(AEntry.FilePath, AEntry.Line, AEntry.Col,
     Length(AEntry.Name));
 end;
 
@@ -76,7 +78,7 @@ var
   PrevContext: TEditorContext;
   Ctx: TEditorContext;
 begin
-  Ctx := TEditorHelper.GetCurrentContext;
+  Ctx := Editor.GetCurrentContext;
   if not Ctx.IsValid then
   begin
     MessageDlg('No identifier found at the cursor.' + sLineBreak +
@@ -118,7 +120,7 @@ var
   Client: TLspClient;
   Entries: TSignatureEntries;
 begin
-  DelphiLspJson := TEditorHelper.FindDelphiLspJson;
+  DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
     FDialog.SetStatus('No .delphilsp.json found - enable Tools > Options > '
@@ -131,7 +133,7 @@ begin
     RootPath := ExtractFilePath(FContext.FileName);
 
   FDialog.SetStatus('Saving all files...');
-  TEditorHelper.SaveAllFiles;
+  Editor.SaveAllFiles;
 
   var WasRunning := TLspManager.Instance.IsAlive;
   if WasRunning then

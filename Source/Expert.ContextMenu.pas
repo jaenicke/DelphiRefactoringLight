@@ -57,7 +57,6 @@ type
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
-    procedure OnRemoveWith(Sender: TObject);
     procedure OnRemoveWithProjectWide(Sender: TObject);
     procedure OnRemoveWithCurrentUnit(Sender: TObject);
     procedure OnRemoveWithSelectedUnits(Sender: TObject);
@@ -67,6 +66,10 @@ type
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
     procedure OnDelegateInterface(Sender: TObject);
+    procedure OnSemanticReplaceCurrent(Sender: TObject);
+    procedure OnSemanticReplaceSelected(Sender: TObject);
+    procedure OnSemanticReplaceProject(Sender: TObject);
+    procedure OnSemanticReplaceEditRules(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -100,7 +103,8 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
-  Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard;
+  Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
+  Expert.SemanticReplaceWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -235,6 +239,30 @@ begin
   IfaceMi.Caption := 'Add IInterface support to class...';
   IfaceMi.OnClick := OnDelegateInterface;
   IfaceSub.Add(IfaceMi);
+
+  // Semantic Replace: project-wide find/replace driven by a JSON
+  // rules file. Scope is picked from a submenu (same pattern as
+  // Remove with).
+  var SemSub: TMenuItem := TMenuItem.Create(FPopupMenu);
+  SemSub.Caption := 'Semantic replace';
+  Submenu.Add(SemSub);
+  var SemMi: TMenuItem;
+  SemMi := TMenuItem.Create(FPopupMenu);
+  SemMi.Caption := 'In current unit';
+  SemMi.OnClick := OnSemanticReplaceCurrent;
+  SemSub.Add(SemMi);
+  SemMi := TMenuItem.Create(FPopupMenu);
+  SemMi.Caption := 'In selected units...';
+  SemMi.OnClick := OnSemanticReplaceSelected;
+  SemSub.Add(SemMi);
+  SemMi := TMenuItem.Create(FPopupMenu);
+  SemMi.Caption := 'In whole project...';
+  SemMi.OnClick := OnSemanticReplaceProject;
+  SemSub.Add(SemMi);
+  SemMi := TMenuItem.Create(FPopupMenu);
+  SemMi.Caption := 'Edit rules...';
+  SemMi.OnClick := OnSemanticReplaceEditRules;
+  SemSub.Add(SemMi);
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -499,13 +527,6 @@ begin
     SignatureCheckInstance.Execute;
 end;
 
-procedure TContextMenuInstaller.OnRemoveWith(Sender: TObject);
-begin
-  // Legacy entry - kept for any callers; same as the global shortcut.
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.Execute;
-end;
-
 procedure TContextMenuInstaller.OnRemoveWithAtCursor(Sender: TObject);
 begin
   if WithRefactorInstance <> nil then
@@ -555,6 +576,26 @@ end;
 procedure TContextMenuInstaller.OnDelegateInterface(Sender: TObject);
 begin
   Expert.ExtractInterfaceWizard.DelegateInterfaceImplementation;
+end;
+
+procedure TContextMenuInstaller.OnSemanticReplaceCurrent(Sender: TObject);
+begin
+  Expert.SemanticReplaceWizard.ApplySemanticReplacements_CurrentUnit;
+end;
+
+procedure TContextMenuInstaller.OnSemanticReplaceSelected(Sender: TObject);
+begin
+  Expert.SemanticReplaceWizard.ApplySemanticReplacements_SelectedUnits;
+end;
+
+procedure TContextMenuInstaller.OnSemanticReplaceProject(Sender: TObject);
+begin
+  Expert.SemanticReplaceWizard.ApplySemanticReplacements_Project;
+end;
+
+procedure TContextMenuInstaller.OnSemanticReplaceEditRules(Sender: TObject);
+begin
+  Expert.SemanticReplaceWizard.EditSemanticReplaceRules;
 end;
 
 end.

@@ -10,7 +10,7 @@ unit Expert.LspManager;
 interface
 
 uses
-  System.SysUtils, System.Classes, Lsp.Client;
+  System.SysUtils, System.Classes, Lsp.Client, System.Generics.Collections;
 
 type
   /// <summary>
@@ -90,8 +90,8 @@ implementation
 
 uses
   Winapi.Windows, System.IOUtils, System.DateUtils, System.JSON,
-  System.Win.Registry, System.TypInfo,
-  ToolsAPI, Expert.EditorHelper;
+  System.Win.Registry, System.TypInfo
+  {$IFNDEF STANDALONE_BUILD}, ToolsAPI, Expert.EditorHelper {$ENDIF};
 
 const
   /// <summary>Absolute Notfall-Fallback, falls weder Registry noch ToolsAPI
@@ -148,20 +148,24 @@ end;
 
 class function TLspPathResolver.ResolveLspExePath: string;
 var
+  {$IFNDEF STANDALONE_BUILD}
   Services: IOTAServices;
+  {$ENDIF}
   BaseKey, RootDir, Candidate: string;
 begin
   // 1. Get the registry base-key via ToolsAPI (e.g. "Software\Embarcadero\BDS\37.0")
   BaseKey := '';
+  {$IFNDEF STANDALONE_BUILD}
   if Supports(BorlandIDEServices, IOTAServices, Services) then
   try
     BaseKey := Services.GetBaseRegistryKey;
   except
     BaseKey := '';
   end;
+  {$ENDIF}
 
-  // 1a. If ToolsAPI gives no key, try a sensible sequence
-  //     (descending so newer BDS versions win).
+  // 1a. If ToolsAPI gives no key (or this is the standalone build), try a
+  //     sensible registry probe (descending so newer BDS versions win).
   if BaseKey = '' then
   begin
     for var Ver in TArray<string>.Create('37.0', '23.0', '22.0', '21.0', '20.0') do
@@ -180,6 +184,7 @@ begin
       Exit(Candidate);
   end;
 
+  {$IFNDEF STANDALONE_BUILD}
   // 2. Ask ToolsAPI directly.
   if Supports(BorlandIDEServices, IOTAServices, Services) then
   try
@@ -193,6 +198,7 @@ begin
   except
     // ignorieren
   end;
+  {$ENDIF}
 
   // 3. Notfall
   Result := FallbackLspPath;
@@ -301,16 +307,22 @@ begin
     Exit;
   end;
 
-  // Jede Datei via didOpen dem LSP bekannt machen, damit
-  // projektweite Queries (implementation, references) alle Dateien
-  // beruecksichtigen koennen. RefreshDocument = didClose + didOpen
-  // mit kurzer Pause dazwischen (in Lsp.Client definiert).
+  // Jede Datei via didOpen dem LSP bekannt machen, damit projektweite
+  // Queries (implementation, references) alle Dateien beruecksichtigen
+  // koennen. Wichtig: hier NICHT RefreshDocument benutzen - das macht
+  // didClose + 50ms Sleep + didOpen + didChange pro Datei. Auf einem
+  // 1200-Datei-Projekt waeren das ueber 60 Sekunden allein an Sleep,
+  // plus doppelter JSON-Traffic. Beim Cold-Start kennt der LSP die
+  // Dateien noch gar nicht, also reicht ein blankes didOpen. Spaetere
+  // Edits laufen weiter ueber RefreshDocument (das wurde gegen einen
+  // controller-mode Hover-Bug eingefuehrt - der ist bei der initialen
+  // Indexierung irrelevant).
   for I := 0 to N - 1 do
   begin
     if Assigned(AProgress) then
       AProgress(I + 1, N, AProjectFiles[I]);
     try
-      FClient.RefreshDocument(AProjectFiles[I]);
+      FClient.OpenDocument(AProjectFiles[I]);
     except
       // Einzelne Datei-Fehler ignorieren (z.B. fehlende Datei)
     end;
@@ -327,8 +339,16 @@ begin
   //            Timeout. Position = Anfang des ersten Symbols.
   // Max. 30 s gesamt, in 500 ms-Schritten.
   begin
+    // Probe phase: didOpen was fast (~1s for 1200 files now that the
+    // Sleep is gone), but DelphiLSP still needs time to actually build
+    // its index. We report time-based progress here - elapsed seconds
+    // of a 30s deadline - so the bar visibly keeps climbing instead of
+    // sitting at 100% pretending to be done. Both stages share the
+    // deadline; the elapsed counter just keeps counting through.
     var ProbeFile := AProjectFiles[0];
-    var Deadline := Now + 30 / SecsPerDay;
+    var ProbeStart := Now;
+    const ProbeMaxSec = 30;
+    var Deadline := ProbeStart + ProbeMaxSec / SecsPerDay;
     var SymbolsReady := False;
     var ProbeLine: Integer := 0;
     var ProbeCol: Integer := 0;
@@ -367,7 +387,11 @@ begin
       if not SymbolsReady then
       begin
         if Assigned(AProgress) then
-          AProgress(N, N, 'Waiting for LSP symbols...');
+        begin
+          var Elapsed := Round((Now - ProbeStart) * SecsPerDay);
+          AProgress(Elapsed, ProbeMaxSec,
+            Format('Waiting for LSP symbols... (%d / %d s)', [Elapsed, ProbeMaxSec]));
+        end;
         Sleep(500);
       end;
     end;
@@ -389,7 +413,11 @@ begin
       if not DefReady then
       begin
         if Assigned(AProgress) then
-          AProgress(N, N, 'Waiting for LSP index...');
+        begin
+          var Elapsed := Round((Now - ProbeStart) * SecsPerDay);
+          AProgress(Elapsed, ProbeMaxSec,
+            Format('Waiting for LSP index... (%d / %d s)', [Elapsed, ProbeMaxSec]));
+        end;
         Sleep(500);
       end;
     end;
@@ -447,6 +475,13 @@ begin
 end;
 
 function TLspManager.GetWarmupStatusLine: string;
+// Primary readiness signal is FProjectIndexed (set by EnsureProject-
+// Indexed once every project file has been pushed through didOpen).
+// Diagnostics are a *bonus* signal - DelphiLSP in single-process mode
+// often never sends publishDiagnostics, so we must not gate "ready"
+// on Diag > 0. Otherwise wizards that work just fine (rename, find-
+// references, completion) look broken because the status reads
+// "cold-starting" forever.
 var
   Diag, Inactive: Integer;
 begin
@@ -454,17 +489,24 @@ begin
     Exit('LSP not started yet - first action will trigger a cold start (~10-30 s).');
   Diag := FClient.GetDiagnosticsCount;
   Inactive := FClient.GetInactiveRangesTotal;
-  if Diag = 0 then
-    Result := 'LSP cold-starting (no diagnostics received yet). First action may be slow.'
-  else if not FProjectIndexed then
-    Result := Format(
-      'LSP warming up - %d diagnostics, %d inactive regions analysed so far. ' +
-      'First action may have to wait for the rest of the project.',
-      [Diag, Inactive])
+  if not FProjectIndexed then
+  begin
+    if Diag = 0 then
+      Result := 'LSP starting - indexing project files...'
+    else
+      Result := Format(
+        'LSP starting - %d diagnostics, %d inactive regions so far.',
+        [Diag, Inactive]);
+  end
   else
-    Result := Format(
-      'LSP ready - %d diagnostics, %d inactive regions analysed.',
-      [Diag, Inactive]);
+  begin
+    if Diag = 0 then
+      Result := 'LSP ready (server did not publish diagnostics).'
+    else
+      Result := Format(
+        'LSP ready - %d diagnostics, %d inactive regions analysed.',
+        [Diag, Inactive]);
+  end;
 end;
 
 initialization

@@ -505,7 +505,11 @@ begin
     L := Lines[ALine];
     P := ACol + 1; // 1-based for Copy/Pos
     if (P < 1) or (P > Length(L) + 1) then Exit;
-    if (AOldText <> '') and (Copy(L, P, Length(AOldText)) <> AOldText) then Exit;
+    // Case-insensitive sanity check: Pascal identifiers are
+    // case-insensitive, so an occurrence may be spelled with a
+    // different case than the name under the cursor (and a case-only
+    // rename would otherwise be rejected outright).
+    if (AOldText <> '') and not SameText(Copy(L, P, Length(AOldText)), AOldText) then Exit;
     L := Copy(L, 1, P - 1) + ANewText + Copy(L, P + Length(AOldText), MaxInt);
     Lines[ALine] := L;
     Result := ReplaceFileContent(AFilePath, Lines.Text);

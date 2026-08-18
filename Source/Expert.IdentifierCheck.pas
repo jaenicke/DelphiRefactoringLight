@@ -193,11 +193,24 @@ begin
     Exit;
   end;
 
-  if (AOldName <> '') and SameText(Trimmed, AOldName) then
+  if AOldName <> '' then
   begin
-    Result.Status := icsUnchanged;
-    Result.Message := 'Name unchanged.';
-    Exit;
+    // Exact match: nothing to rename.
+    if Trimmed = AOldName then
+    begin
+      Result.Status := icsUnchanged;
+      Result.Message := 'Name unchanged.';
+      Exit;
+    end;
+    // Case-only change: valid rename in Pascal (identifiers are
+    // case-insensitive, but the declared spelling matters for style).
+    // No collision checks needed - it is the same identifier.
+    if SameText(Trimmed, AOldName) then
+    begin
+      Result.Status := icsOk;
+      Result.Message := 'Case-only change of the same identifier.';
+      Exit;
+    end;
   end;
 
   InUnitTotal := CountInText(ACurrentFileText, Trimmed);

@@ -256,7 +256,9 @@ begin
     MessageDlg('Please enter a new name.', mtWarning, [mbOK], 0);
     Exit;
   end;
-  if SameText(NewName, FContext.WordAtCursor) then
+  // Case-sensitive compare: a case-only change (foo -> Foo) is a
+  // legitimate rename in Pascal and must go through the full pipeline.
+  if NewName = FContext.WordAtCursor then
   begin
     MessageDlg('The new name is identical to the old one.', mtWarning, [mbOK], 0);
     Exit;
@@ -372,7 +374,9 @@ begin
     MessageDlg('Please enter a new name.', mtWarning, [mbOK], 0);
     Exit;
   end;
-  if SameText(NewName, FContext.WordAtCursor) then
+  // Case-sensitive compare: a case-only change (foo -> Foo) is a
+  // legitimate rename in Pascal and must go through the full pipeline.
+  if NewName = FContext.WordAtCursor then
   begin
     MessageDlg('The new name is identical to the old one.', mtWarning, [mbOK], 0);
     Exit;

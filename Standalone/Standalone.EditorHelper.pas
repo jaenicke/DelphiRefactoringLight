@@ -275,6 +275,16 @@ begin
 end;
 
 function TStandaloneEditorHelper.GetCurrentContext: TEditorContext;
+
+  function IsWordCh(C: Char): Boolean;
+  begin
+    Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
+  end;
+
+var
+  Content, Line: string;
+  Lines: TArray<string>;
+  P, StartP, EndP: Integer;
 begin
   Result := Default(TEditorContext);
   Result.FileName := FState.ActiveFile;
@@ -283,6 +293,35 @@ begin
   Result.ProjectFile := FState.ProjectFile;
   Result.ProjectRoot := FState.ProjectRoot;
   Result.IsValid := (Result.FileName <> '') and TFile.Exists(Result.FileName);
+
+  // WordAtCursor: extract the identifier at (Line, Column) from the
+  // live buffer. The IDE implementation gets this from IOTAEditPosition;
+  // here we walk the buffer line ourselves. Three cursor states must
+  // work (mirroring the IDE behaviour): caret inside the word, at its
+  // first character, or directly after its last character.
+  if not Result.IsValid then Exit;
+  if not ReadEditorContent(Result.FileName, Content) then Exit;
+  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  if (Result.Line < 1) or (Result.Line > Length(Lines)) then Exit;
+  Line := Lines[Result.Line - 1];
+  if Line = '' then Exit;
+
+  // P = 1-based index of the character the caret "touches". Prefer the
+  // char AT the caret; if that is not a word char (caret at word end,
+  // or past end of line), fall back to the char before the caret.
+  P := Result.Column;
+  if (P > Length(Line)) or ((P >= 1) and not IsWordCh(Line[P])) then
+    P := Result.Column - 1;
+  if (P < 1) or (P > Length(Line)) or not IsWordCh(Line[P]) then Exit;
+
+  StartP := P;
+  while (StartP > 1) and IsWordCh(Line[StartP - 1]) do Dec(StartP);
+  EndP := P;
+  while (EndP < Length(Line)) and IsWordCh(Line[EndP + 1]) do Inc(EndP);
+  // Identifiers cannot start with a digit - if this "word" does, the
+  // caret sits in a number literal, not an identifier.
+  if CharInSet(Line[StartP], ['0'..'9']) then Exit;
+  Result.WordAtCursor := Copy(Line, StartP, EndP - StartP + 1);
 end;
 
 function TStandaloneEditorHelper.GetCurrentProjectDproj: string;

@@ -119,6 +119,10 @@
         <DCCReference Include="..\Source\Expert.CompletionWizard.pas"/>
         <DCCReference Include="..\Source\Expert.CompletionPopup.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureHelpWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.DfmEventCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.DfmEventCheckDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.InterfaceGuidCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.InterfaceGuidDialog.pas"/>
         <DCCReference Include="..\Source\Expert.RenameDialog.pas"/>
         <DCCReference Include="..\Source\Lsp.Protocol.pas"/>
         <DCCReference Include="..\Source\Expert.ExtractInterface.pas"/>

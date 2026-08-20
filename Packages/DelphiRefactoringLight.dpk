@@ -87,6 +87,10 @@ contains
   Expert.ExtractInterfaceWizard in '..\Source\Expert.ExtractInterfaceWizard.pas',
   Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
   Expert.SemanticReplaceDialogs in '..\Source\Expert.SemanticReplaceDialogs.pas',
-  Expert.SemanticReplaceWizard in '..\Source\Expert.SemanticReplaceWizard.pas';
+  Expert.SemanticReplaceWizard in '..\Source\Expert.SemanticReplaceWizard.pas',
+  Expert.DfmEventCheck in '..\Source\Expert.DfmEventCheck.pas',
+  Expert.DfmEventCheckDialog in '..\Source\Expert.DfmEventCheckDialog.pas',
+  Expert.InterfaceGuidCheck in '..\Source\Expert.InterfaceGuidCheck.pas',
+  Expert.InterfaceGuidDialog in '..\Source\Expert.InterfaceGuidDialog.pas';
 
 end.

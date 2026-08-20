@@ -70,6 +70,8 @@ type
     procedure OnSemanticReplaceSelected(Sender: TObject);
     procedure OnSemanticReplaceProject(Sender: TObject);
     procedure OnSemanticReplaceEditRules(Sender: TObject);
+    procedure OnCheckDfmEvents(Sender: TObject);
+    procedure OnCheckInterfaceGuids(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -104,7 +106,8 @@ uses
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
-  Expert.SemanticReplaceWizard;
+  Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
+  Expert.InterfaceGuidDialog;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -263,6 +266,20 @@ begin
   SemMi.Caption := 'Edit rules...';
   SemMi.OnClick := OnSemanticReplaceEditRules;
   SemSub.Add(SemMi);
+
+  // Project checks - things the compiler does not verify.
+  var ChecksSub: TMenuItem := TMenuItem.Create(FPopupMenu);
+  ChecksSub.Caption := 'Project checks';
+  Submenu.Add(ChecksSub);
+  var ChkMi: TMenuItem;
+  ChkMi := TMenuItem.Create(FPopupMenu);
+  ChkMi.Caption := 'DFM event handlers...';
+  ChkMi.OnClick := OnCheckDfmEvents;
+  ChecksSub.Add(ChkMi);
+  ChkMi := TMenuItem.Create(FPopupMenu);
+  ChkMi.Caption := 'Interface GUIDs...';
+  ChkMi.OnClick := OnCheckInterfaceGuids;
+  ChecksSub.Add(ChkMi);
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -596,6 +613,16 @@ end;
 procedure TContextMenuInstaller.OnSemanticReplaceEditRules(Sender: TObject);
 begin
   Expert.SemanticReplaceWizard.EditSemanticReplaceRules;
+end;
+
+procedure TContextMenuInstaller.OnCheckDfmEvents(Sender: TObject);
+begin
+  Expert.DfmEventCheckDialog.CheckDfmEventHandlers;
+end;
+
+procedure TContextMenuInstaller.OnCheckInterfaceGuids(Sender: TObject);
+begin
+  Expert.InterfaceGuidDialog.CheckInterfaceGuids;
 end;
 
 end.

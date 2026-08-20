@@ -147,6 +147,10 @@
         <DCCReference Include="..\Source\Expert.SemanticReplace.pas"/>
         <DCCReference Include="..\Source\Expert.SemanticReplaceDialogs.pas"/>
         <DCCReference Include="..\Source\Expert.SemanticReplaceWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.DfmEventCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.DfmEventCheckDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.InterfaceGuidCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.InterfaceGuidDialog.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

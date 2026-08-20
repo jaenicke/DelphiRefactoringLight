@@ -289,6 +289,17 @@ object MainForm: TMainForm
       object MenuSep3: TMenuItem
         Caption = '-'
       end
+      object MenuChecks: TMenuItem
+        Caption = 'Project chec&ks'
+        object MenuCheckDfm: TMenuItem
+          Caption = 'DFM event handlers...'
+          OnClick = DoCheckDfmEvents
+        end
+        object MenuCheckGuids: TMenuItem
+          Caption = 'Interface GUIDs...'
+          OnClick = DoCheckInterfaceGuids
+        end
+      end
       object MenuSemRep: TMenuItem
         Caption = '&Semantic replace'
         object MenuSemRepCurrent: TMenuItem

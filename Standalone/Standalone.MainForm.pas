@@ -80,6 +80,9 @@ type
     MenuIfaceAdd: TMenuItem;
     MenuIfaceImpl: TMenuItem;
     MenuSep3: TMenuItem;
+    MenuChecks: TMenuItem;
+    MenuCheckDfm: TMenuItem;
+    MenuCheckGuids: TMenuItem;
     MenuSemRep: TMenuItem;
     MenuSemRepCurrent: TMenuItem;
     MenuSemRepSelected: TMenuItem;
@@ -126,6 +129,8 @@ type
     procedure DoRefactorAddToInterface(Sender: TObject);
     procedure DoRefactorAddIInterface(Sender: TObject);
     procedure DoRefactorSemanticEditRules(Sender: TObject);
+    procedure DoCheckDfmEvents(Sender: TObject);
+    procedure DoCheckInterfaceGuids(Sender: TObject);
     procedure DoRefactorSemanticProject(Sender: TObject);
     procedure DoRefactorSemanticCurrent(Sender: TObject);
     procedure DoRefactorSemanticSelected(Sender: TObject);
@@ -273,6 +278,8 @@ uses
   Expert.ExtractMethod,
   Expert.CompletionWizard,
   Expert.SignatureHelpWizard,
+  Expert.DfmEventCheckDialog,
+  Expert.InterfaceGuidDialog,
   Expert.LspManager;
 
 {$R *.dfm}
@@ -1110,6 +1117,12 @@ begin RunWizard(procedure begin DelegateInterfaceImplementation; end); end;
 
 procedure TMainForm.DoRefactorSemanticEditRules(Sender: TObject);
 begin RunWizard(procedure begin EditSemanticReplaceRules; end); end;
+
+procedure TMainForm.DoCheckDfmEvents(Sender: TObject);
+begin RunWizard(procedure begin CheckDfmEventHandlers; end); end;
+
+procedure TMainForm.DoCheckInterfaceGuids(Sender: TObject);
+begin RunWizard(procedure begin CheckInterfaceGuids; end); end;
 
 procedure TMainForm.DoRefactorSemanticProject(Sender: TObject);
 begin RunWizard(procedure begin ApplySemanticReplacements_Project; end); end;

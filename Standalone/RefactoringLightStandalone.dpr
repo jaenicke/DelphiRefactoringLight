@@ -1,4 +1,4 @@
-program RefactoringLightStandalone;
+﻿program RefactoringLightStandalone;
 
 uses
   Vcl.Forms,
@@ -26,6 +26,11 @@ uses
   Expert.DfmEventCheckDialog in '..\Source\Expert.DfmEventCheckDialog.pas',
   Expert.InterfaceGuidCheck in '..\Source\Expert.InterfaceGuidCheck.pas',
   Expert.InterfaceGuidDialog in '..\Source\Expert.InterfaceGuidDialog.pas',
+  Expert.UsesGraph in '..\Source\Expert.UsesGraph.pas',
+  Expert.CircularRefsDialog in '..\Source\Expert.CircularRefsDialog.pas',
+  Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
+  Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
+  Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',
   Expert.RenameDialog in '..\Source\Expert.RenameDialog.pas',
   Lsp.Protocol in '..\Source\Lsp.Protocol.pas',
   Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',

@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -68,7 +68,8 @@ implementation
 
 uses
   System.SysUtils, System.IOUtils, Winapi.Windows,
-  Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager;
+  Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
+  Expert.UnitIndex;
 
 { TPrewarmIdeNotifier }
 
@@ -145,24 +146,28 @@ begin
 end;
 
 procedure TLspPrewarmer.HandleProjectOpened(const AProjectFile: string);
+var
+  LProj: string;
+  DoLsp: Boolean;
 begin
-  if not TPluginSettings.PrewarmLspOnProjectOpen then Exit;
   if AProjectFile = '' then Exit;
   // Debounce: ignore re-opens of the same project (the IDE fires
   // ofnFileOpened for the .dproj AND the .dpr when a project loads).
   if SameText(FLastProject, AProjectFile) then Exit;
-  if FInFlight then Exit;
   FLastProject := AProjectFile;
+  LProj := AProjectFile;
+  DoLsp := TPluginSettings.PrewarmLspOnProjectOpen and not FInFlight;
   // Defer to the next message-loop tick so the IDE has finished its
   // own project-load work first - some ToolsAPI calls (GetProjectRoot,
   // search-path access) can be flaky during construction.
   TThread.ForceQueue(nil,
     procedure
-    var
-      ProjectFile: string;
     begin
-      ProjectFile := AProjectFile;
-      StartPrewarmFor(ProjectFile);
+      // Add this project's scope to the identifier index (the global scope
+      // is already warming from plugin startup). Independent of the LSP
+      // prewarm setting.
+      try TUnitIndex.Instance.RefreshSourcesFromEditor; except end;
+      if DoLsp then StartPrewarmFor(LProj);
     end);
 end;
 

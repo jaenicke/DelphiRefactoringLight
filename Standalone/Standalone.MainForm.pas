@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -74,6 +74,7 @@ type
     MenuRwProject: TMenuItem;
     MenuMoveToUnit: TMenuItem;
     MenuUnitRefs: TMenuItem;
+    MenuFindUnit: TMenuItem;
     MenuSep2: TMenuItem;
     MenuIface: TMenuItem;
     MenuIfaceExtract: TMenuItem;
@@ -83,6 +84,7 @@ type
     MenuChecks: TMenuItem;
     MenuCheckDfm: TMenuItem;
     MenuCheckGuids: TMenuItem;
+    MenuCheckCircular: TMenuItem;
     MenuSemRep: TMenuItem;
     MenuSemRepCurrent: TMenuItem;
     MenuSemRepSelected: TMenuItem;
@@ -125,12 +127,14 @@ type
     procedure DoRefactorRemoveWithProject(Sender: TObject);
     procedure DoRefactorMoveToUnit(Sender: TObject);
     procedure DoRefactorUnitRefs(Sender: TObject);
+    procedure DoFindUnit(Sender: TObject);
     procedure DoRefactorExtractInterface(Sender: TObject);
     procedure DoRefactorAddToInterface(Sender: TObject);
     procedure DoRefactorAddIInterface(Sender: TObject);
     procedure DoRefactorSemanticEditRules(Sender: TObject);
     procedure DoCheckDfmEvents(Sender: TObject);
     procedure DoCheckInterfaceGuids(Sender: TObject);
+    procedure DoCheckCircularRefs(Sender: TObject);
     procedure DoRefactorSemanticProject(Sender: TObject);
     procedure DoRefactorSemanticCurrent(Sender: TObject);
     procedure DoRefactorSemanticSelected(Sender: TObject);
@@ -280,6 +284,8 @@ uses
   Expert.SignatureHelpWizard,
   Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog,
+  Expert.CircularRefsDialog,
+  Expert.FindUnitDialog,
   Expert.LspManager;
 
 {$R *.dfm}
@@ -1123,6 +1129,12 @@ begin RunWizard(procedure begin CheckDfmEventHandlers; end); end;
 
 procedure TMainForm.DoCheckInterfaceGuids(Sender: TObject);
 begin RunWizard(procedure begin CheckInterfaceGuids; end); end;
+
+procedure TMainForm.DoCheckCircularRefs(Sender: TObject);
+begin RunWizard(procedure begin CheckCircularReferences; end); end;
+
+procedure TMainForm.DoFindUnit(Sender: TObject);
+begin RunWizard(procedure begin FindUnitForIdentifier; end); end;
 
 procedure TMainForm.DoRefactorSemanticProject(Sender: TObject);
 begin RunWizard(procedure begin ApplySemanticReplacements_Project; end); end;

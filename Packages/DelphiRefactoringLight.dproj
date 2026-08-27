@@ -151,6 +151,11 @@
         <DCCReference Include="..\Source\Expert.DfmEventCheckDialog.pas"/>
         <DCCReference Include="..\Source\Expert.InterfaceGuidCheck.pas"/>
         <DCCReference Include="..\Source\Expert.InterfaceGuidDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.UsesGraph.pas"/>
+        <DCCReference Include="..\Source\Expert.CircularRefsDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.UsesEditor.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
+        <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

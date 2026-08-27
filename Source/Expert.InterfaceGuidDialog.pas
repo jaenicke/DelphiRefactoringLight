@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -19,10 +19,11 @@ implementation
 
 uses
   System.SysUtils, System.Classes, System.Generics.Collections,
-  System.Generics.Defaults, System.UITypes,
+  System.Generics.Defaults, System.UITypes, System.IOUtils,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
-  Expert.EditorHelperIntf, Expert.InterfaceGuidCheck, Expert.DialogHelper;
+  Expert.EditorHelperIntf, Expert.InterfaceGuidCheck, Expert.DialogHelper,
+  Delphi.FileEncoding;
 
 // Small helper: bottom-aligned button panel. Kept local to avoid
 // pulling a whole layout framework into this dialog.
@@ -46,11 +47,24 @@ type
     FBtnClose: TButton;
     FBtnGoto: TButton;
     FEntries: TArray<TInterfaceGuidEntry>;
+    /// <summary>Live-refresh state. The dialog is non-modal; while it
+    ///  is open a timer watches the ACTIVE editor unit. When its
+    ///  content changes, only that file is rescanned, its entries are
+    ///  swapped in, and duplicates are recomputed - so a fixed (or
+    ///  newly introduced) GUID shows up without rerunning the check.</summary>
+    FWatchTimer: TTimer;
+    FWatchFile: string;
+    FWatchContent: string;
+    procedure DoWatchTick(Sender: TObject);
+    procedure RefreshFileEntries(const AFile: string);
+    procedure UpdateSummary;
     procedure DoCustomDrawItem(Sender: TCustomListView; Item: TListItem;
       State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure DoData(Sender: TObject; Item: TListItem);
     procedure DoDblClick(Sender: TObject);
     procedure DoGotoClick(Sender: TObject);
     procedure DoCloseClick(Sender: TObject);
+    procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure GotoSelected;
     procedure FillList;
   public
@@ -62,8 +76,6 @@ constructor TInterfaceGuidDialog.CreateDialog(AOwner: TComponent;
   const AEntries: TArray<TInterfaceGuidEntry>);
 var
   Col: TListColumn;
-  DupCount, NoGuidCount: Integer;
-  E: TInterfaceGuidEntry;
 begin
   inherited CreateNew(AOwner);
   Caption := 'Interface GUIDs';
@@ -71,6 +83,9 @@ begin
   Height := 600;
   Position := poScreenCenter;
   BorderStyle := bsSizeable;
+  // Non-modal: the user jumps to entries via "Go to" and needs to
+  // navigate / edit in the editor while the list stays open.
+  OnClose := DoFormClose;
 
   FEntries := AEntries;
 
@@ -88,6 +103,11 @@ begin
   FListView.ViewStyle := vsReport;
   FListView.ReadOnly := True;
   FListView.RowSelect := True;
+  // Virtual mode: with thousands of interfaces (type-library imports!)
+  // populating the list item-by-item froze the UI for many seconds.
+  // OwnerData renders rows on demand from FEntries instead.
+  FListView.OwnerData := True;
+  FListView.OnData := DoData;
   FListView.OnCustomDrawItem := DoCustomDrawItem;
   FListView.OnDblClick := DoDblClick;
 
@@ -112,7 +132,23 @@ begin
   FBtnClose.OnClick := DoCloseClick;
 
   FillList;
+  UpdateSummary;
 
+  // Watch the active editor unit for changes and refresh its entries
+  // live. 1 s cadence: reading + comparing one file's buffer is cheap.
+  FWatchTimer := TTimer.Create(Self);
+  FWatchTimer.Interval := 1000;
+  FWatchTimer.OnTimer := DoWatchTick;
+  FWatchTimer.Enabled := True;
+
+  PrepareDialog(Self, AOwner);
+end;
+
+procedure TInterfaceGuidDialog.UpdateSummary;
+var
+  DupCount, NoGuidCount: Integer;
+  E: TInterfaceGuidEntry;
+begin
   DupCount := 0; NoGuidCount := 0;
   for E in FEntries do
   begin
@@ -122,15 +158,98 @@ begin
   FLblSummary.Caption := Format(
     '%d interface(s), %d with duplicate GUIDs (shown red, on top), %d without GUID.',
     [Length(FEntries), DupCount, NoGuidCount]);
+end;
 
-  PrepareDialog(Self, AOwner);
+// Effective content of AFile as the compiler / a fresh scan would see
+// it: the live editor buffer when the file is open, the disk state
+// otherwise (e.g. right after the user closed the unit WITHOUT saving
+// - the buffer is gone and the disk state is authoritative again).
+function ReadEffectiveContent(const AFile: string; out AContent: string): Boolean;
+begin
+  Result := True;
+  if Editor.ReadEditorContent(AFile, AContent) then Exit;
+  AContent := '';
+  if not TFile.Exists(AFile) then Exit(False);
+  try
+    AContent := TDelphiFileEncoding.ReadAll(AFile);
+  except
+    Result := False;
+  end;
+end;
+
+procedure TInterfaceGuidDialog.DoWatchTick(Sender: TObject);
+var
+  Ctx: TEditorContext;
+  Content, OldEffective: string;
+begin
+  Ctx := Editor.GetCurrentContext;
+  if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
+    Exit;
+  if not ReadEffectiveContent(Ctx.FileName, Content) then
+    Exit;
+  if not SameText(Ctx.FileName, FWatchFile) then
+  begin
+    // Active unit switched. Before re-baselining, give the PREVIOUS
+    // watch file one final check: if the user closed it without
+    // saving, its effective content reverted to the disk state and
+    // the list would keep showing the discarded edits.
+    if (FWatchFile <> '') and ReadEffectiveContent(FWatchFile, OldEffective)
+       and (OldEffective <> FWatchContent) then
+      RefreshFileEntries(FWatchFile);
+    // Baseline for the new file; refresh on the NEXT change so merely
+    // viewing a file does not churn the list.
+    FWatchFile := Ctx.FileName;
+    FWatchContent := Content;
+    Exit;
+  end;
+  if Content = FWatchContent then Exit;
+  FWatchContent := Content;
+  RefreshFileEntries(Ctx.FileName);
+end;
+
+procedure TInterfaceGuidDialog.RefreshFileEntries(const AFile: string);
+var
+  Kept: TList<TInterfaceGuidEntry>;
+  E: TInterfaceGuidEntry;
+  SelName, SelFile: string;
+  I: Integer;
+begin
+  // Remember the selection so the refill can restore it.
+  SelName := ''; SelFile := '';
+  if (FListView.Selected <> nil) and (FListView.Selected.Index < Length(FEntries)) then
+  begin
+    SelName := FEntries[FListView.Selected.Index].InterfaceName;
+    SelFile := FEntries[FListView.Selected.Index].FileName;
+  end;
+
+  Kept := TList<TInterfaceGuidEntry>.Create;
+  try
+    for E in FEntries do
+      if not SameText(E.FileName, AFile) then
+        Kept.Add(E);
+    Kept.AddRange(TInterfaceGuidChecker.ScanSingleFile(AFile));
+    FEntries := Kept.ToArray;
+  finally
+    Kept.Free;
+  end;
+  TInterfaceGuidChecker.MarkDuplicates(FEntries);
+  FillList;
+  UpdateSummary;
+
+  if SelName <> '' then
+    for I := 0 to High(FEntries) do
+      if SameText(FEntries[I].InterfaceName, SelName)
+         and SameText(FEntries[I].FileName, SelFile) then
+      begin
+        FListView.ItemIndex := I;
+        FListView.Selected.MakeVisible(False);
+        Break;
+      end;
 end;
 
 procedure TInterfaceGuidDialog.FillList;
 var
   Sorted: TArray<TInterfaceGuidEntry>;
-  E: TInterfaceGuidEntry;
-  Item: TListItem;
 begin
   // Duplicates first (grouped by GUID so pairs sit together), then the
   // rest alphabetically by interface name.
@@ -152,21 +271,26 @@ begin
       end));
   FEntries := Sorted;
 
-  FListView.Items.BeginUpdate;
-  try
-    FListView.Items.Clear;
-    for E in FEntries do
-    begin
-      Item := FListView.Items.Add;
-      if E.HasGuid then Item.Caption := E.Guid
-      else Item.Caption := '(no GUID)';
-      Item.SubItems.Add(E.InterfaceName);
-      Item.SubItems.Add(ExtractFileName(E.FileName));
-      Item.SubItems.Add(IntToStr(E.Line));
-    end;
-  finally
-    FListView.Items.EndUpdate;
-  end;
+  // Virtual list: no item creation - just announce the row count and
+  // let DoData serve rows as they scroll into view.
+  FListView.Items.Count := Length(FEntries);
+  FListView.Invalidate;
+end;
+
+procedure TInterfaceGuidDialog.DoData(Sender: TObject; Item: TListItem);
+var
+  E: TInterfaceGuidEntry;
+begin
+  if (Item.Index < 0) or (Item.Index >= Length(FEntries)) then Exit;
+  E := FEntries[Item.Index];
+  if E.HasGuid then Item.Caption := E.Guid
+  else Item.Caption := '(no GUID)';
+  if E.IsDispInterface then
+    Item.SubItems.Add(E.InterfaceName + '  (dispinterface)')
+  else
+    Item.SubItems.Add(E.InterfaceName);
+  Item.SubItems.Add(ExtractFileName(E.FileName));
+  Item.SubItems.Add(IntToStr(E.Line));
 end;
 
 procedure TInterfaceGuidDialog.DoCustomDrawItem(Sender: TCustomListView;
@@ -211,11 +335,19 @@ begin
   Close;
 end;
 
+procedure TInterfaceGuidDialog.DoFormClose(Sender: TObject; var Action: TCloseAction);
+begin
+  // Non-modal dialog owns its own lifetime.
+  Action := caFree;
+end;
+
 procedure CheckInterfaceGuids;
 var
   Files: TArray<string>;
   Entries: TArray<TInterfaceGuidEntry>;
   Dlg: TInterfaceGuidDialog;
+  ProgressForm: TForm;
+  ProgressLbl: TLabel;
 begin
   Files := Editor.GetProjectSourceFiles;
   if Length(Files) = 0 then
@@ -223,18 +355,54 @@ begin
     ShowMessage('No project loaded / no source files found.');
     Exit;
   end;
-  Entries := TInterfaceGuidChecker.Scan(Files);
+
+  // Small always-on-top progress window; the scan runs synchronously
+  // on the UI thread, so we pump messages every few files to keep the
+  // label painting. Without this, big projects (many hundred files,
+  // possibly on a network share) look like a silent hang.
+  ProgressForm := TForm.CreateNew(nil);
+  try
+    ProgressForm.Caption := 'Interface GUIDs';
+    ProgressForm.BorderStyle := bsToolWindow;
+    ProgressForm.FormStyle := fsStayOnTop;
+    ProgressForm.Position := poScreenCenter;
+    ProgressForm.ClientWidth := 420;
+    ProgressForm.ClientHeight := 48;
+    ProgressLbl := TLabel.Create(ProgressForm);
+    ProgressLbl.Parent := ProgressForm;
+    ProgressLbl.Align := alClient;
+    ProgressLbl.Alignment := taCenter;
+    ProgressLbl.Layout := tlCenter;
+    ProgressLbl.Caption := 'Scanning...';
+    ProgressForm.Show;
+    Screen.Cursor := crHourGlass;
+    try
+      Entries := TInterfaceGuidChecker.Scan(Files,
+        procedure(ACurrent, ATotal: Integer; AFile: string)
+        begin
+          if (ACurrent mod 10 = 0) or (ACurrent = ATotal) then
+          begin
+            ProgressLbl.Caption := Format('Scanning %d / %d  -  %s',
+              [ACurrent, ATotal, ExtractFileName(AFile)]);
+            Application.ProcessMessages;
+          end;
+        end);
+    finally
+      Screen.Cursor := crDefault;
+    end;
+  finally
+    ProgressForm.Free;
+  end;
+
   if Length(Entries) = 0 then
   begin
     ShowMessage('No interface declarations found in the project.');
     Exit;
   end;
+  // Non-modal (frees itself on close) so the user can keep navigating
+  // and editing while the list stays open.
   Dlg := TInterfaceGuidDialog.CreateDialog(Application.MainForm, Entries);
-  try
-    Dlg.ShowModal;
-  finally
-    Dlg.Free;
-  end;
+  Dlg.Show;
 end;
 
 end.

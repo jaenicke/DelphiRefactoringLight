@@ -1,6 +1,6 @@
-# Delphi Refactoring Light
+﻿# Delphi Refactoring Light
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide nine refactoring features directly in the editor:
+A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
 | Shortcut               | Feature                                                                                                                                              |
 |------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -16,6 +16,10 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised |
 | *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
 | *(menu only)*          | **Semantic replace** &mdash; apply project-wide find / replace rules loaded from a per-project JSON file; identifier-bounded matching, comment- and string-aware, optional local-var hoisting when a rule fires multiple times in the same routine, automatic uses-clause augmentation |
+| *(menu only)*          | **Find unit for identifier** &mdash; type an identifier, see which unit(s) declare it (from a background-maintained index over the whole search path) and add the chosen unit to the current file's `uses` clause |
+| *(menu only)*          | **Project checks** &mdash; three compiler-uncatchable checks: DFM event-handler signatures (with auto-fix), interface GUID duplicates, and circular unit references |
+
+All actions are reachable from the editor's right-click **Refactoring Light** submenu **and** from the IDE's top-level **Refactor** menu (the plugin replaces that menu's contents with its own, context-sensitively enabled entries).
 
 Unlike purely text-based tools, this package uses the actual LSP requests that DelphiLSP advertises in its `initialize` response: `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/completion`, and `publishDiagnostics` push notifications (used to detect inactive `{$IFDEF}` regions when DelphiLSP delivers them &mdash; diagnostic code `H2655`/`H2656` with tag `Unnecessary`). DelphiLSP does **not** implement `textDocument/rename`, `textDocument/references`, `textDocument/foldingRange`, `textDocument/selectionRange` or `textDocument/documentHighlight` &mdash; for rename and find-references the package therefore runs a project-wide text search and verifies every candidate semantically via `textDocument/definition`. Identifiers that happen to share a name but belong to different symbols are cleanly distinguished.
 
@@ -297,6 +301,28 @@ A confirmation message reports how many files were touched and how many occurren
 - The hoisted statement uses Delphi 10.3+ inline-var syntax (`var name: type := value;` inside the body). On older compilers it would need to be a classical var-block above `begin`; the wizard does not currently emit that form.
 - No diff syntax highlighting in the preview.
 
+### Find unit for identifier (menu only)
+
+Type an identifier and find out which unit(s) declare it, then add that unit to the current file's `uses` clause &mdash; the classic "Find Unit" / "Add Unit" workflow, backed by a plugin-maintained identifier index rather than the LSP (DelphiLSP has no cross-search-path symbol query).
+
+- **Background identifier index** (`TUnitIndex`): a single worker thread parses the `interface` section of every reachable `.pas` into an `identifier -> unit(s)` map. Two **separate scopes**, each with its own on-disk cache under `%APPDATA%\DelphiRefactoringLight\unitindex\<hash>.idx`:
+  - **global** &mdash; the IDE's Library / Browsing paths (RTL / VCL / third-party). Keyed by the global-dir set, so every project that sees the same library paths shares one cached index. It barely changes, so after the first pass it is only re-scanned every ~10 minutes. **Starts building at plugin load** &mdash; no project needed.
+  - **project** &mdash; the project's own sources plus the `.dproj` `DCC_UnitSearchPath`. Keyed by the `.dproj` path, re-scanned every 30 s since it changes while you edit. Added when a project opens.
+- Parsing is **incremental** (path + mtime + size), so only changed files are re-read. The published snapshot is an **immutable, reference-counted** view: the search runs on a background thread and scans it lock-free, so typing in the filter never blocks the UI or the worker.
+- The dialog pre-fills with the identifier under the cursor, filters live as you type (substring, capped at 200 rows &mdash; keep typing to narrow), and offers **Add to interface uses**, **Add to implementation uses** and **Go to** (open the declaring unit). The `uses` insertion creates a clause if the section has none and is comment-aware.
+- **Limitation:** DCU-only units (no `.pas` on the search path) are not indexed. The parser is heuristic (class / record bodies are skipped via `end`-counting); occasional false positives just add an extra candidate unit.
+
+### Project checks (menu only)
+
+Three checks for problems the compiler does **not** catch, reachable via *Refactoring Light &rarr; Project checks*. Each opens a results dialog; double-click / **Go to** jumps to the offending location.
+
+- **DFM event handlers** &mdash; scans every form's `.dfm` for `OnXxx = Handler` references and flags two failure modes the compiler ignores (the `.dfm` binds handlers *by name*):
+  - **Missing handler** &mdash; the referenced method does not exist &rarr; the form crashes with *"Method not found"* on load.
+  - **Signature mismatch** &mdash; the handler's parameter list deviates from the event type &rarr; stack corruption when the event fires. The expected signature is resolved from the component's **actual source** on the search / browsing path (version-correct, no hard-coded tables), and compiler **directives inside parameter lists** (`var NodeHeight: {$if CompilerVersion >= 36.0}TDimension{$else}Integer{$ifend}`) are resolved to their active branch before comparing, so IFDEF'd signatures are not falsely flagged. `//` comments inside multi-line signatures are stripped as well.
+  - The Details column **bold-highlights** the differing parameter types; interchangeable integer aliases (`Integer` / `LongInt` / ...) can optionally be ignored. An **"Auto-fix"** column marks rows the plugin can correct itself: checking them and pressing *Fix checked signatures* rewrites **both** the class declaration and the implementation header (anchored by name, not line number, so fixing several handlers in one file stays correct), **keeps the handler's own parameter names** (only types / modifiers are corrected), and adds any newly-required unit to the `uses` clause &mdash; the declaring unit of each parameter type is resolved via LSP `GotoDefinition` and cached across the batch. Files are written straight to disk when not open in the IDE (so a large batch does not flood the editor with tabs); an optional *Apply via IDE (open form + save)* mode re-streams the DFM instead.
+- **Interface GUIDs** &mdash; lists every `interface` / `dispinterface` and its GUID; duplicates are shown in red on top. A GUID shared by a matching `interface` **and** `dispinterface` pair is not counted as a duplicate.
+- **Circular unit references** &mdash; a Tarjan strongly-connected-components analysis over the project's `uses` graph. Tabs for the cycle groups, the shortest / longest cycle lengths (how many units a cycle spans), the individual **edge levers** (ranked by how many units would leave the cyclic set if that one `uses` entry were removed), the complete list of simple cycles, and the **hotspots** (which unit appears in the most cycles, and via which `uses` entry). Double-click jumps to the exact `uses` entry.
+
 ## Standalone executable
 
 The same wizards also ship as a self-contained Windows `.exe` that runs without the Delphi IDE. The standalone hosts the wizards behind an `IEditorHelper` abstraction: the standalone host manages the project file, the file tree, and an embedded `TMemo`, then exposes them to the wizards exactly the way the IDE plugin does. Useful for bulk refactorings, scripted runs, or working on a machine where the IDE itself is locked. See [`Standalone/README.md`](Standalone/README.md) for build instructions, the parity matrix (which wizards work, which need `TSynEdit` first), and architecture notes.
@@ -379,11 +405,20 @@ DelphiRefactoringLight/
 |   |-- Expert.SemanticReplace.pas           # Semantic-replace engine: rule loader, scanner, applier
 |   |-- Expert.SemanticReplaceDialogs.pas    # Rule editor, unit picker, preview dialogs
 |   |-- Expert.SemanticReplaceWizard.pas     # Workflow: scope picking, dry-run + preview, push edits
-|   |-- Expert.LspPrewarmer.pas              # IOTAIDENotifier: pre-warms LSP on project open
+|   |-- Expert.DfmEventCheck.pas             # DFM event-handler check engine + signature auto-fix
+|   |-- Expert.DfmEventCheckDialog.pas       # DFM event-handler results dialog (bold diff, auto-fix)
+|   |-- Expert.InterfaceGuidCheck.pas        # Interface/GUID collection + duplicate detection
+|   |-- Expert.InterfaceGuidDialog.pas       # Interface GUID results dialog (live refresh)
+|   |-- Expert.UsesGraph.pas                 # Uses-graph + Tarjan SCC / cycle / lever / hotspot analysis
+|   |-- Expert.CircularRefsDialog.pas        # Circular-reference results dialog (tabs)
+|   |-- Expert.UnitIndex.pas                 # Background identifier index (global + project scopes)
+|   |-- Expert.UsesEditor.pas                # Reusable "add unit to interface/implementation uses"
+|   |-- Expert.FindUnitDialog.pas            # Find-unit-for-identifier dialog (threaded search)
+|   |-- Expert.LspPrewarmer.pas              # IOTAIDENotifier: pre-warms LSP + unit index on project open
 |   |-- Expert.PluginSettings.pas            # Plugin settings (registry-backed)
 |   |-- Expert.OptionsFrame.pas / .dfm       # Tools > Options > Refactoring Light page
 |   |-- Expert.OptionsPage.pas               # ToolsAPI options-page registration
-|   |-- Expert.ContextMenu.pas               # "Refactoring Light" submenu in the editor popup
+|   |-- Expert.ContextMenu.pas               # "Refactoring Light" submenu in the editor popup + IDE Refactor menu
 |   |-- Expert.Shortcuts.pas                 # User-configurable shortcut storage
 |   |-- Expert.KeyBinding.pas                # Shortcut registration
 |   |-- Expert.EditorHelperIntf.pas          # IEditorHelper interface (host abstraction; no ToolsAPI deps)
@@ -437,6 +472,8 @@ DelphiRefactoringLight/
 - **`IOTAEditWriter`** instead of `InsertText`: byte-precise edits without IDE auto-indent interference.
 - **`Module.Refresh(False)`** instead of `True`: reloads the form module without discarding in-editor changes.
 - **PID-based restart hint**: a marker file in `%TEMP%` stores the process ID; if it matches the current IDE, the package was re-installed during the running session and a restart hint is shown.
+- **Background identifier index** (`TUnitIndex`, for *Find unit for identifier*): a single low-priority worker thread parses the `interface` sections of the whole search path into an `identifier -> unit(s)` map, split into a project-independent **global** scope (IDE library / browsing paths, shared across projects, rarely re-scanned) and a **project** scope (project sources + `DCC_UnitSearchPath`, re-scanned every 30 s). Both are cached to disk (path + mtime + size, incremental). The main thread only gathers the source roots via ToolsAPI; the worker does the file I/O and publishes an **immutable, reference-counted snapshot** whose reference is swapped under a lock, so lookups scan lock-free on any thread. The dialog's substring search therefore runs on a background thread and never blocks the UI.
+- **IDE main-menu integration** (`TContextMenuInstaller`): the same "Refactoring Light" action tree that hangs in the editor popup is also injected **directly into the IDE's top-level Refactor menu** (`mnuRefactoring`). The menu is located language-independently (component name, then a normalized-caption match against the shipped IDE translations, then an empty-placeholder heuristic). Because that menu is driven by an action (`actnMMRefactoring`) that the IDE disables when there is no refactoring context, the plugin hooks the action's `OnUpdate` to keep it openable and to enable/disable each of its own entries by context (no project &rarr; all disabled; project but no active editor &rarr; only the project-wide entries). The IDE's own (contextually disabled) Refactor entries are hidden while the plugin is loaded and restored on uninstall.
 
 ## AI Disclosure
 

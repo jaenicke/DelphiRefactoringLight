@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -132,6 +132,7 @@ type
       ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;
 
     procedure SaveAllFiles;
+    function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
     function GotoLocation(const AFilePath: string;
@@ -561,6 +562,10 @@ procedure TStandaloneEditorHelper.SaveAllFiles;
 // Standalone keeps buffers and disk in sync on every write, so there
 // is nothing to save explicitly. No-op.
 begin end;
+
+function TStandaloneEditorHelper.SaveFile(const AFilePath: string): Boolean;
+// Standalone already wrote the file to disk; nothing to do.
+begin Result := True; end;
 
 procedure TStandaloneEditorHelper.ReloadModifiedFiles(const FilePaths: TArray<string>);
 // The main form refreshes editor tabs from disk after every successful

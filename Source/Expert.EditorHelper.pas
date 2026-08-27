@@ -5,20 +5,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  *)
-(*
- * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
- *
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at https://mozilla.org/MPL/2.0/.
- *)
 unit Expert.EditorHelper;
 
 interface
 
 uses
   System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI,
-  Expert.EditorHelperIntf;
+  Expert.EditorHelperIntf, Delphi.FileEncoding;
 
 type
   // Re-export TEditorContext from the interface unit so existing
@@ -55,6 +48,7 @@ type
       ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;
 
     procedure SaveAllFiles;
+    function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
     function GotoLocation(const AFilePath: string;
@@ -79,6 +73,7 @@ type
     class function GetProjectSearchPaths: string;
     /// <summary>Speichert alle geaenderten Dateien in der IDE (File > Save All).</summary>
     class procedure SaveAllFiles;
+    class function SaveFile(const AFilePath: string): Boolean;
 
     /// <summary>Wendet ein TextEdit ueber die IDE-Editor-API an (Undo-faehig).
     ///  ALine und ACol sind 0-basiert. Gibt True zurueck wenn erfolgreich.</summary>
@@ -309,6 +304,23 @@ begin
     ModuleServices.SaveAll;
 end;
 
+function TIDEEditorHelper.SaveFile(const AFilePath: string): Boolean;
+var
+  ModuleServices: IOTAModuleServices;
+  Module: IOTAModule;
+begin
+  Result := False;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
+  Module := ModuleServices.FindModule(AFilePath);
+  if Module = nil then Exit;   // not open -> already written to disk
+  try
+    Module.Save(False, False); // SaveAs=False, SavePrompt=False
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
 function TIDEEditorHelper.GotoLocation(const AFilePath: string;
   ALine, ACol: Integer; AHighlightLen: Integer): Boolean;
 var
@@ -478,10 +490,17 @@ begin
   if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
   if Module = nil then Exit;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   // Lineare Position von Zeilenanfang berechnen
@@ -529,13 +548,34 @@ begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
-  if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
-  if Module = nil then Exit;
+  // NOT open in the IDE: write straight to disk (encoding-preserving)
+  // instead of OpenModule. A batch fix touches hundreds of files - opening
+  // a tab for each would flood the editor and stall the IDE.
+  if Module = nil then
+  begin
+    try
+      var Enc: TEncoding;
+      if TFile.Exists(AFilePath) then Enc := TDelphiFileEncoding.Detect(AFilePath)
+      else Enc := TEncoding.UTF8;
+      TDelphiFileEncoding.WriteAll(AFilePath, ANewContent, Enc);
+      Result := True;
+    except
+      Result := False;
+    end;
+    Exit;
+  end;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   // Aktuelle Laenge ermitteln
@@ -595,10 +635,17 @@ begin
   if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
   if Module = nil then Exit;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   // Reader: Buffer lesen und Positionen berechnen
@@ -675,10 +722,17 @@ begin
   if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
   if Module = nil then Exit;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   Writer := SourceEditor.CreateUndoableWriter;
@@ -706,10 +760,17 @@ begin
   if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
   if Module = nil then Exit;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   Writer := SourceEditor.CreateUndoableWriter;
@@ -738,10 +799,17 @@ begin
   Module := ModuleServices.FindModule(AFilePath);
   if Module = nil then Exit;
 
+  // Pick the editor whose FileName matches the REQUESTED file. The
+  // module covers all its files (.pas AND .dfm), so "first source
+  // editor" silently returned the .pas buffer for a .dfm request.
   SourceEditor := nil;
   for I := 0 to Module.GetModuleFileCount - 1 do
     if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
+    begin
+      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
+        Break;
+      SourceEditor := nil;
+    end;
   if SourceEditor = nil then Exit;
 
   Reader := SourceEditor.CreateReader;
@@ -1042,6 +1110,9 @@ begin Result := Editor.GetProjectSearchPaths; end;
 
 class procedure TEditorHelper.SaveAllFiles;
 begin Editor.SaveAllFiles; end;
+
+class function TEditorHelper.SaveFile(const AFilePath: string): Boolean;
+begin Result := Editor.SaveFile(AFilePath); end;
 
 class function TEditorHelper.ApplyEditViaEditor(const AFilePath: string;
   ALine, ACol: Integer; const AOldText, ANewText: string): Boolean;

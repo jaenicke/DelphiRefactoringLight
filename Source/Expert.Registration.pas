@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -21,7 +21,7 @@ uses
   Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.LspPrewarmer,
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
-  Expert.Shortcuts, Expert.OptionsPage;
+  Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex;
 
 type
   TShortcutChangeHook = class
@@ -92,6 +92,12 @@ begin
   // refactoring action doesn't have to pay the cold-start cost.
   LspPrewarmerInstance := TLspPrewarmer.Create;
   LspPrewarmerInstance.Install;
+
+  // Start building the GLOBAL identifier index (RTL/VCL/library paths) in
+  // the background right away - it is project-independent, so it can warm
+  // up before the user ever opens "Find Unit". The project scope is added
+  // later when a project opens (see TLspPrewarmer) or when the dialog runs.
+  TUnitIndex.Instance.StartGlobalIndex;
 
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;

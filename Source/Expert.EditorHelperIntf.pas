@@ -1,5 +1,5 @@
-(*
- * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -92,6 +92,11 @@ type
 
     // ---------- IDE-specific niceties (no-ops in standalone) ----------
     procedure SaveAllFiles;
+    /// <summary>Saves the single module for AFilePath if it is open in the
+    ///  IDE (so a caller can save one form at a time and show which unit is
+    ///  being processed). No-op / True in standalone, where edits are
+    ///  already written straight to disk.</summary>
+    function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
 

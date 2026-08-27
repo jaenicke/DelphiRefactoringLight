@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -37,7 +37,8 @@ unit Expert.ContextMenu;
 interface
 
 uses
-  System.Classes, Vcl.Menus, Vcl.ExtCtrls, Expert.Shortcuts;
+  System.Classes, System.Generics.Collections, Vcl.Menus, Vcl.ExtCtrls,
+  Expert.Shortcuts;
 
 type
   TContextMenuInstaller = class
@@ -47,10 +48,22 @@ type
     FPopupMenu: TPopupMenu;
     FOldOnPopup: TNotifyEvent;
     FHooked: Boolean;
+    // Main-menu integration: a copy of our actions hung directly into the
+    // IDE's top-level Refactor menu.
+    FMainMenuOwner: TComponent;        // owns the main-menu item tree
+    FMainMenuAdded: TArray<TMenuItem>; // items added to the Refactor menu (incl. separator)
+    FMainDumped: Boolean;              // wrote the debug dump already
+    // The Refactor menu is disabled by its action's OnUpdate; we hook that
+    // update to keep the menu openable (our items stay reachable).
+    FRefactorAction: TBasicAction;
+    FRefOldUpdate: TNotifyEvent;
+    FHidden: TArray<TMenuItem>;   // IDE's own Refactor items we hid (to restore)
+    FItemReq: TDictionary<TMenuItem, Integer>;   // main-menu item -> context requirement
     FRetryTimer: TTimer;
     FRetryCount: Integer;
     FSyncTimer: TTimer;
     FInPopup: Boolean;
+    procedure UpdateMainItemStates;
     procedure OnRename(Sender: TObject);
     procedure OnFindReferences(Sender: TObject);
     procedure OnFindImplementations(Sender: TObject);
@@ -62,6 +75,7 @@ type
     procedure OnRemoveWithSelectedUnits(Sender: TObject);
     procedure OnRemoveWithAtCursor(Sender: TObject);
     procedure OnUnitRefs(Sender: TObject);
+    procedure OnFindUnit(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
@@ -72,13 +86,23 @@ type
     procedure OnSemanticReplaceEditRules(Sender: TObject);
     procedure OnCheckDfmEvents(Sender: TObject);
     procedure OnCheckInterfaceGuids(Sender: TObject);
+    procedure OnCheckCircularRefs(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
     function IsOurHandler(const AHandler: TNotifyEvent): Boolean;
     function FindEditorPopupMenu: TPopupMenu;
-    function CreateItem(const ACaption: string; AKind: TShortcutKind;
-      AOnClick: TNotifyEvent): TMenuItem;
+    function MakeItem(AOwner: TComponent; const ACaption: string;
+      AOnClick: TNotifyEvent; AKind: TShortcutKind; ATrackShortcut: Boolean): TMenuItem;
+    function BuildMenuTree(AOwner: TComponent; ATrackShortcut: Boolean): TMenuItem;
+    function FindRefactorMenu: TMenuItem;
+    procedure DumpMainMenu(const AReason: string);
+    procedure HookRefactorAction(AParent: TMenuItem);
+    procedure DoRefactorActionUpdate(Sender: TObject);
+    function IsOurMainItem(AItem: TMenuItem): Boolean;
+    procedure HideExistingEntries(AParent: TMenuItem);
+    procedure InstallIntoMainMenu;
+    procedure RemoveFromMainMenu;
     procedure BuildItems;
     procedure AddOurItems;
     procedure RemoveOurItems;
@@ -100,14 +124,17 @@ var
 implementation
 
 uses
-  System.SysUtils, System.UITypes, Winapi.Windows,
-  Vcl.Forms, Vcl.Controls,
+  System.SysUtils, System.UITypes, System.IOUtils, System.StrUtils,
+  System.Actions, Winapi.Windows, ToolsAPI,
+  Vcl.Forms, Vcl.Controls, Vcl.ActnList,
+  Expert.EditorHelperIntf,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
-  Expert.InterfaceGuidDialog;
+  Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
+  Expert.FindUnitDialog;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -119,11 +146,16 @@ const
   ///  unintentionally displace ours.</summary>
   SyncIntervalMs = 2000;
 
+  // Context requirement for a main-menu entry.
+  REQ_PROJECT = 1;   // needs an open project
+  REQ_EDITOR  = 2;   // needs an active source editor (cursor context)
+
 { TContextMenuInstaller }
 
 destructor TContextMenuInstaller.Destroy;
 begin
   Uninstall;
+  FreeAndNil(FItemReq);
   inherited;
 end;
 
@@ -147,21 +179,19 @@ begin
   end;
 end;
 
-function TContextMenuInstaller.CreateItem(const ACaption: string;
-  AKind: TShortcutKind; AOnClick: TNotifyEvent): TMenuItem;
+function TContextMenuInstaller.MakeItem(AOwner: TComponent; const ACaption: string;
+  AOnClick: TNotifyEvent; AKind: TShortcutKind; ATrackShortcut: Boolean): TMenuItem;
 begin
-  // Owner = FPopupMenu so the items live in FPopupMenu.Components from
-  // creation onward. Items.Remove / Items.Add only changes the menu
-  // hierarchy, never Components, so the IDE's bookkeeping (which may
-  // walk Components for popup integration) sees a stable picture.
-  // FPopupMenu frees the items at IDE shutdown.
-  Result := TMenuItem.Create(FPopupMenu);
+  Result := TMenuItem.Create(AOwner);
   Result.Caption := ACaption;
-  // Tag stores the shortcut kind so RefreshShortcuts can find this item.
-  // Encoded as Ord+1 so 0 means "no shortcut tracked".
-  Result.Tag := Ord(AKind) + 1;
-  Result.ShortCut := TExpertsShortCut.Shortcuts[AKind];
   Result.OnClick := AOnClick;
+  if ATrackShortcut then
+  begin
+    // Tag stores the shortcut kind so RefreshShortcuts can find this item.
+    // Encoded as Ord+1 so 0 means "no shortcut tracked".
+    Result.Tag := Ord(AKind) + 1;
+    Result.ShortCut := TExpertsShortCut.Shortcuts[AKind];
+  end;
 end;
 
 procedure TContextMenuInstaller.RefreshShortcuts;
@@ -180,106 +210,99 @@ begin
   end;
 end;
 
+// Builds the whole "Refactoring Light" submenu tree owned by AOwner and
+// returns its root item. ATrackShortcut controls whether the leaf items
+// carry the configurable shortcuts (True for the editor popup, False for
+// the copy hung into the IDE's main Refactor menu).
+function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
+  ATrackShortcut: Boolean): TMenuItem;
+
+  // Records the item's context requirement (only for the main-menu copy;
+  // the popup already only appears in an editor context).
+  procedure Req(AItem: TMenuItem; AReq: Integer);
+  begin
+    if (not ATrackShortcut) and (FItemReq <> nil) then
+      FItemReq.AddOrSetValue(AItem, AReq);
+  end;
+
+  function Leaf(AParent: TMenuItem; const ACaption: string; AOnClick: TNotifyEvent;
+    AKind: TShortcutKind; AReq: Integer): TMenuItem;
+  begin
+    Result := MakeItem(AOwner, ACaption, AOnClick, AKind, ATrackShortcut);
+    AParent.Add(Result);
+    Req(Result, AReq);
+  end;
+
+  function Plain(AParent: TMenuItem; const ACaption: string; AOnClick: TNotifyEvent;
+    AReq: Integer): TMenuItem;
+  begin
+    Result := TMenuItem.Create(AOwner);
+    Result.Caption := ACaption;
+    Result.OnClick := AOnClick;
+    AParent.Add(Result);
+    Req(Result, AReq);
+  end;
+
+  function Sub(AParent: TMenuItem; const ACaption: string): TMenuItem;
+  begin
+    Result := TMenuItem.Create(AOwner);
+    Result.Caption := ACaption;
+    AParent.Add(Result);
+    Req(Result, REQ_PROJECT);   // a group is usable whenever a project is open
+  end;
+
+var
+  Root, RemoveWithSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
+begin
+  if (not ATrackShortcut) and (FItemReq = nil) then
+    FItemReq := TDictionary<TMenuItem, Integer>.Create;
+
+  Root := TMenuItem.Create(AOwner);
+  Root.Caption := 'Refactoring Light';
+
+  Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
+  Leaf(Root, 'Find References',           OnFindReferences,       skFindRef,    REQ_EDITOR);
+  Leaf(Root, 'Find Implementations',      OnFindImplementations,  skFindImp,    REQ_EDITOR);
+  Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
+  Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
+  Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
+
+  RemoveWithSub := Sub(Root, 'Remove with');
+  Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);
+  Plain(RemoveWithSub, 'In current unit',    OnRemoveWithCurrentUnit,   REQ_EDITOR);
+  Plain(RemoveWithSub, 'In selected units...', OnRemoveWithSelectedUnits, REQ_PROJECT);
+  Plain(RemoveWithSub, 'In whole project...', OnRemoveWithProjectWide,   REQ_PROJECT);
+
+  Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
+  Leaf(Root, 'Find unit references...',   OnUnitRefs,             skUnitRefs,   REQ_EDITOR);
+  Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
+
+  IfaceSub := Sub(Root, 'Extract / extend interface');
+  Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
+  Plain(IfaceSub, 'Add to existing interface...',        OnAddToExistingInterface, REQ_EDITOR);
+  Plain(IfaceSub, 'Add IInterface support to class...',  OnDelegateInterface,      REQ_EDITOR);
+
+  SemSub := Sub(Root, 'Semantic replace');
+  Plain(SemSub, 'In current unit',    OnSemanticReplaceCurrent,   REQ_EDITOR);
+  Plain(SemSub, 'In selected units...', OnSemanticReplaceSelected, REQ_PROJECT);
+  Plain(SemSub, 'In whole project...', OnSemanticReplaceProject,   REQ_PROJECT);
+  Plain(SemSub, 'Edit rules...',       OnSemanticReplaceEditRules, REQ_PROJECT);
+
+  ChecksSub := Sub(Root, 'Project checks');
+  Plain(ChecksSub, 'DFM event handlers...',        OnCheckDfmEvents,       REQ_PROJECT);
+  Plain(ChecksSub, 'Interface GUIDs...',           OnCheckInterfaceGuids,  REQ_PROJECT);
+  Plain(ChecksSub, 'Circular unit references...',  OnCheckCircularRefs,    REQ_PROJECT);
+
+  Result := Root;
+end;
+
 procedure TContextMenuInstaller.BuildItems;
 var
   Submenu: TMenuItem;
 begin
   if Length(FItems) > 0 then Exit;
 
-  // The visible top-level entry: a submenu carrying all our actions.
-  // Owner = FPopupMenu (see CreateItem comment).
-  Submenu := TMenuItem.Create(FPopupMenu);
-  Submenu.Caption := 'Refactoring Light';
-  Submenu.Tag := 0; // no shortcut tracked for the parent
-
-  Submenu.Add(CreateItem('Rename...',                       skRename,     OnRename));
-  Submenu.Add(CreateItem('Find References',                 skFindRef,    OnFindReferences));
-  Submenu.Add(CreateItem('Find Implementations',            skFindImp,    OnFindImplementations));
-  Submenu.Add(CreateItem('Extract Method',                  skExtract,    OnExtractMethod));
-  Submenu.Add(CreateItem('Align method signature...',       skAlign,      OnSignatureCheck));
-  Submenu.Add(CreateItem('Code Completion',                 skCompletion, OnCompletion));
-  // 'Remove with' is a nested submenu - the project-wide scan can
-  // take many minutes on big code bases, so we expose narrower
-  // scopes as separate menu entries. Only the first sub-item carries
-  // the registered Ctrl+Alt+Shift+W shortcut (the global keybinding
-  // also triggers ExecuteAtCursor); the other three are
-  // mouse/keyboard-navigated only.
-  var RemoveWithSub := TMenuItem.Create(FPopupMenu);
-  RemoveWithSub.Caption := 'Remove with';
-  Submenu.Add(RemoveWithSub);
-  RemoveWithSub.Add(CreateItem('At cursor only',           skRemoveWith, OnRemoveWithAtCursor));
-  // Sub-items without their own shortcut: create directly.
-  var Mi: TMenuItem;
-  Mi := TMenuItem.Create(FPopupMenu);
-  Mi.Caption := 'In current unit';
-  Mi.OnClick := OnRemoveWithCurrentUnit;
-  RemoveWithSub.Add(Mi);
-  Mi := TMenuItem.Create(FPopupMenu);
-  Mi.Caption := 'In selected units...';
-  Mi.OnClick := OnRemoveWithSelectedUnits;
-  RemoveWithSub.Add(Mi);
-  Mi := TMenuItem.Create(FPopupMenu);
-  Mi.Caption := 'In whole project...';
-  Mi.OnClick := OnRemoveWithProjectWide;
-  RemoveWithSub.Add(Mi);
-  Submenu.Add(CreateItem('Move to unit...',                 skMoveToUnit, OnMoveToUnit));
-  Submenu.Add(CreateItem('Find unit references...',         skUnitRefs,   OnUnitRefs));
-
-  // Extract/extend interface: no shortcut, submenu with two actions.
-  var IfaceSub := TMenuItem.Create(FPopupMenu);
-  IfaceSub.Caption := 'Extract / extend interface';
-  Submenu.Add(IfaceSub);
-  var IfaceMi: TMenuItem;
-  IfaceMi := TMenuItem.Create(FPopupMenu);
-  IfaceMi.Caption := 'Extract new interface from class...';
-  IfaceMi.OnClick := OnExtractInterface;
-  IfaceSub.Add(IfaceMi);
-  IfaceMi := TMenuItem.Create(FPopupMenu);
-  IfaceMi.Caption := 'Add to existing interface...';
-  IfaceMi.OnClick := OnAddToExistingInterface;
-  IfaceSub.Add(IfaceMi);
-  IfaceMi := TMenuItem.Create(FPopupMenu);
-  IfaceMi.Caption := 'Add IInterface support to class...';
-  IfaceMi.OnClick := OnDelegateInterface;
-  IfaceSub.Add(IfaceMi);
-
-  // Semantic Replace: project-wide find/replace driven by a JSON
-  // rules file. Scope is picked from a submenu (same pattern as
-  // Remove with).
-  var SemSub: TMenuItem := TMenuItem.Create(FPopupMenu);
-  SemSub.Caption := 'Semantic replace';
-  Submenu.Add(SemSub);
-  var SemMi: TMenuItem;
-  SemMi := TMenuItem.Create(FPopupMenu);
-  SemMi.Caption := 'In current unit';
-  SemMi.OnClick := OnSemanticReplaceCurrent;
-  SemSub.Add(SemMi);
-  SemMi := TMenuItem.Create(FPopupMenu);
-  SemMi.Caption := 'In selected units...';
-  SemMi.OnClick := OnSemanticReplaceSelected;
-  SemSub.Add(SemMi);
-  SemMi := TMenuItem.Create(FPopupMenu);
-  SemMi.Caption := 'In whole project...';
-  SemMi.OnClick := OnSemanticReplaceProject;
-  SemSub.Add(SemMi);
-  SemMi := TMenuItem.Create(FPopupMenu);
-  SemMi.Caption := 'Edit rules...';
-  SemMi.OnClick := OnSemanticReplaceEditRules;
-  SemSub.Add(SemMi);
-
-  // Project checks - things the compiler does not verify.
-  var ChecksSub: TMenuItem := TMenuItem.Create(FPopupMenu);
-  ChecksSub.Caption := 'Project checks';
-  Submenu.Add(ChecksSub);
-  var ChkMi: TMenuItem;
-  ChkMi := TMenuItem.Create(FPopupMenu);
-  ChkMi.Caption := 'DFM event handlers...';
-  ChkMi.OnClick := OnCheckDfmEvents;
-  ChecksSub.Add(ChkMi);
-  ChkMi := TMenuItem.Create(FPopupMenu);
-  ChkMi.Caption := 'Interface GUIDs...';
-  ChkMi.OnClick := OnCheckInterfaceGuids;
-  ChecksSub.Add(ChkMi);
+  Submenu := BuildMenuTree(FPopupMenu, True);
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -287,6 +310,276 @@ begin
   // FItems holds exactly the top-level items we add to FPopupMenu.Items
   // each time the popup opens (and remove again before the next open).
   FItems := [FSeparator, Submenu];
+end;
+
+// Strips the '&' accelerator markers and a trailing ellipsis from a menu
+// caption and upper-cases it, for language-tolerant caption matching.
+function NormCaption(const S: string): string;
+begin
+  Result := UpperCase(Trim(StringReplace(S, '&', '', [rfReplaceAll])));
+  Result := Result.TrimRight(['.', #$2026, ' ']);
+end;
+
+function TContextMenuInstaller.FindRefactorMenu: TMenuItem;
+const
+  // Captions of the IDE's Refactor menu across the shipped IDE languages
+  // (accelerators/ellipsis already stripped by NormCaption).
+  RefactorCaptions: array[0..6] of string =
+    ('REFACTOR', 'REFACTORING', 'REFAKTORIEREN', 'REFACTORISER',
+     'RIFATTORIZZA', 'REFATORAR', 'REFACTORIZAR');
+var
+  NTA: INTAServices;
+  Menu: TMainMenu;
+  I, K: Integer;
+  It, Cand: TMenuItem;
+  Cap: string;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, INTAServices, NTA) then Exit;
+  Menu := NTA.MainMenu;
+  if Menu = nil then Exit;
+
+  // 1) By component Name - language-independent.
+  for I := 0 to Menu.Items.Count - 1 do
+  begin
+    It := Menu.Items[I];
+    if SameText(It.Name, 'RefactorMenu') or SameText(It.Name, 'RefactoringMenu') then
+      Exit(It);
+  end;
+
+  // 2) By (normalized) caption against the known translations.
+  for I := 0 to Menu.Items.Count - 1 do
+  begin
+    It := Menu.Items[I];
+    Cap := NormCaption(It.Caption);
+    for K := Low(RefactorCaptions) to High(RefactorCaptions) do
+      if Cap = RefactorCaptions[K] then Exit(It);
+  end;
+
+  // 3) Fallback heuristic: the sole top-level item that is an empty
+  //    placeholder - a real caption but no sub-items and no click handler.
+  Cand := nil;
+  for I := 0 to Menu.Items.Count - 1 do
+  begin
+    It := Menu.Items[I];
+    if (It.Count = 0) and (It.Caption <> '') and (It.Caption <> '-')
+       and not Assigned(It.OnClick) then
+    begin
+      if Cand = nil then Cand := It else begin Cand := nil; Break; end;
+    end;
+  end;
+  Result := Cand;
+end;
+
+procedure TContextMenuInstaller.DumpMainMenu(const AReason: string);
+
+  function ActInfo(It: TMenuItem): string;
+  begin
+    if It.Action <> nil then
+      Result := Format('Action="%s"(En=%s)',
+        [It.Action.Name, BoolToStr((It.Action as TContainedAction).Enabled, True)])
+    else
+      Result := 'Action=-';
+  end;
+
+var
+  NTA: INTAServices;
+  Menu: TMainMenu;
+  SB: TStringBuilder;
+  I: Integer;
+  It, Found: TMenuItem;
+  Path: string;
+begin
+  try
+    SB := TStringBuilder.Create;
+    try
+      SB.AppendLine('--- Refactoring Light main-menu dump (' + AReason + ') ---');
+      if not Supports(BorlandIDEServices, INTAServices, NTA) then
+        SB.AppendLine('INTAServices NOT available')
+      else
+      begin
+        Menu := NTA.MainMenu;
+        if Menu = nil then
+          SB.AppendLine('INTAServices.MainMenu is nil')
+        else
+        begin
+          Found := FindRefactorMenu;
+          SB.AppendLine(Format('MainMenu has %d top-level items:', [Menu.Items.Count]));
+          for I := 0 to Menu.Items.Count - 1 do
+          begin
+            It := Menu.Items[I];
+            SB.AppendLine(Format('  [%2d] Name="%s"  Caption="%s"  Sub=%d  Enabled=%s  %s%s',
+              [I, It.Name, It.Caption, It.Count, BoolToStr(It.Enabled, True),
+               ActInfo(It), IfThen(It = Found, '   <== matched', '')]));
+          end;
+          if Found = nil then SB.AppendLine('=> No Refactor menu matched.');
+        end;
+      end;
+      Path := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-mainmenu.log');
+      TFile.AppendAllText(Path, SB.ToString + sLineBreak);
+    finally
+      SB.Free;
+    end;
+  except
+    // diagnostics are best-effort
+  end;
+end;
+
+procedure TContextMenuInstaller.UpdateMainItemStates;
+var
+  HasProject, HasEditor: Boolean;
+  Pair: TPair<TMenuItem, Integer>;
+  En: Boolean;
+begin
+  if (FItemReq = nil) or (Editor = nil) then Exit;
+  HasProject := Editor.GetCurrentProjectDproj <> '';
+  HasEditor := Editor.GetCurrentContext.IsValid;
+  for Pair in FItemReq do
+  begin
+    case Pair.Value of
+      REQ_EDITOR:  En := HasProject and HasEditor;
+    else           // REQ_PROJECT (and groups)
+      En := HasProject;
+    end;
+    try Pair.Key.Enabled := En; except end;
+  end;
+end;
+
+procedure TContextMenuInstaller.DoRefactorActionUpdate(Sender: TObject);
+begin
+  // Let the IDE run its own update first (it disables the menu when there
+  // is no refactoring context), then force it back on so the menu - and
+  // thus OUR entries - can always be opened.
+  if Assigned(FRefOldUpdate) then
+    try FRefOldUpdate(Sender); except end;
+  if Sender is TContainedAction then
+    TContainedAction(Sender).Enabled := True;
+  // Gate OUR entries by context (no project -> disabled, etc.).
+  UpdateMainItemStates;
+end;
+
+procedure TContextMenuInstaller.HookRefactorAction(AParent: TMenuItem);
+var
+  Act: TBasicAction;
+begin
+  if AParent = nil then Exit;
+  Act := AParent.Action;
+  if Act = nil then
+  begin
+    AParent.Enabled := True;   // no action drives it: a plain enable sticks
+    Exit;
+  end;
+  if Act = FRefactorAction then Exit;   // already hooked this action
+  // A different action (first time, or the IDE recreated it): hook OnUpdate.
+  FRefactorAction := Act;
+  FRefOldUpdate := (Act as TContainedAction).OnUpdate;
+  (Act as TContainedAction).OnUpdate := DoRefactorActionUpdate;
+  (Act as TContainedAction).Enabled := True;
+end;
+
+procedure TContextMenuInstaller.InstallIntoMainMenu;
+var
+  Parent, Root, Child: TMenuItem;
+  FirstTime: Boolean;
+begin
+  FirstTime := not FMainDumped;
+  if FirstTime then
+  begin
+    FMainDumped := True;
+    try TFile.Delete(TPath.Combine(TPath.GetTempPath, 'RefactoringLight-mainmenu.log')); except end;
+    DumpMainMenu('before add');
+  end;
+
+  Parent := FindRefactorMenu;   // always re-query - the IDE may recreate it
+  if Parent = nil then Exit;
+
+  if FMainMenuOwner = nil then
+    FMainMenuOwner := TComponent.Create(nil);
+
+  // Build our tree once, then hang its children DIRECTLY into the Refactor
+  // menu. No leading separator - we replace the menu's contents entirely.
+  if Length(FMainMenuAdded) = 0 then
+  begin
+    Root := BuildMenuTree(FMainMenuOwner, False);   // no shortcuts here
+    while Root.Count > 0 do
+    begin
+      Child := Root.Items[0];
+      Root.Remove(Child);
+      FMainMenuAdded := FMainMenuAdded + [Child];
+    end;
+    Root.Free;   // empty throwaway container
+  end;
+
+  // Hide the IDE's own (contextually disabled) Refactor entries, add ours.
+  HideExistingEntries(Parent);
+  for Child in FMainMenuAdded do
+    if Parent.IndexOf(Child) < 0 then Parent.Add(Child);
+
+  // Keep the menu openable against the IDE's action-driven disabling.
+  HookRefactorAction(Parent);
+
+  if FirstTime then DumpMainMenu('after add');
+end;
+
+function TContextMenuInstaller.IsOurMainItem(AItem: TMenuItem): Boolean;
+var
+  It: TMenuItem;
+begin
+  for It in FMainMenuAdded do
+    if It = AItem then Exit(True);
+  Result := False;
+end;
+
+procedure TContextMenuInstaller.HideExistingEntries(AParent: TMenuItem);
+var
+  I: Integer;
+  It: TMenuItem;
+  Known: Boolean;
+  H: TMenuItem;
+begin
+  for I := 0 to AParent.Count - 1 do
+  begin
+    It := AParent.Items[I];
+    if IsOurMainItem(It) then Continue;   // never hide our own entries
+    if not It.Visible then Continue;
+    It.Visible := False;
+    Known := False;
+    for H in FHidden do if H = It then begin Known := True; Break; end;
+    if not Known then FHidden := FHidden + [It];
+  end;
+end;
+
+procedure TContextMenuInstaller.RemoveFromMainMenu;
+var
+  Parent, Child: TMenuItem;
+  Idx: Integer;
+begin
+  try
+    // Restore the IDE's own entries we hid.
+    for Child in FHidden do
+      if Child <> nil then
+        try Child.Visible := True; except end;
+
+    // Un-hook the Refactor action's OnUpdate.
+    if (FRefactorAction <> nil) then
+      try (FRefactorAction as TContainedAction).OnUpdate := FRefOldUpdate; except end;
+
+    Parent := FindRefactorMenu;
+    if Parent <> nil then
+      for Child in FMainMenuAdded do
+        if Child <> nil then
+        begin
+          Idx := Parent.IndexOf(Child);
+          if Idx >= 0 then Parent.Remove(Child);
+        end;
+  except
+    // menu already torn down - the owner free below still cleans up
+  end;
+  FHidden := nil;
+  FRefactorAction := nil;
+  FRefOldUpdate := nil;
+  FMainMenuAdded := nil;
+  FreeAndNil(FMainMenuOwner);   // frees the whole main-menu item tree
 end;
 
 procedure TContextMenuInstaller.AddOurItems;
@@ -427,6 +720,10 @@ begin
   // The guard in DoOnPopup (re-entry returns immediately, and we
   // never forward to a self-reference) is what actually breaks the
   // cycle at runtime; but we still try to keep FOldOnPopup honest.
+  // Re-assert our main-menu entry too - the IDE may rebuild the Refactor
+  // menu contextually and drop our submenu.
+  try InstallIntoMainMenu; except end;
+
   if (FPopupMenu = nil) or not FHooked then Exit;
   Current := FPopupMenu.OnPopup;
   if not Assigned(Current) then
@@ -454,6 +751,9 @@ begin
   BuildItems;
   HookPopup;
 
+  // Also hang a copy of our menu into the IDE's top-level Refactor menu.
+  try InstallIntoMainMenu; except end;
+
   // Periodic re-sync so other plugins don't accidentally evict us.
   if FSyncTimer = nil then
   begin
@@ -478,6 +778,9 @@ begin
     FSyncTimer.Enabled := False;
     FreeAndNil(FSyncTimer);
   end;
+
+  // Remove our copy from the IDE main Refactor menu (frees that tree).
+  RemoveFromMainMenu;
 
   // Unhook BEFORE removing items so an in-flight popup that is mid
   // OnPopup callback doesn't see a partially-disassembled state.
@@ -574,6 +877,11 @@ begin
     UnitReferencesInstance.Execute;
 end;
 
+procedure TContextMenuInstaller.OnFindUnit(Sender: TObject);
+begin
+  Expert.FindUnitDialog.FindUnitForIdentifier;
+end;
+
 procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);
 begin
   if MoveToUnitInstance <> nil then
@@ -623,6 +931,11 @@ end;
 procedure TContextMenuInstaller.OnCheckInterfaceGuids(Sender: TObject);
 begin
   Expert.InterfaceGuidDialog.CheckInterfaceGuids;
+end;
+
+procedure TContextMenuInstaller.OnCheckCircularRefs(Sender: TObject);
+begin
+  Expert.CircularRefsDialog.CheckCircularReferences;
 end;
 
 end.

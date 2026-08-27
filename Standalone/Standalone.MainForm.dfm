@@ -268,6 +268,10 @@ object MainForm: TMainForm
         Caption = 'Find &unit references...'
         OnClick = DoRefactorUnitRefs
       end
+      object MenuFindUnit: TMenuItem
+        Caption = 'Find unit for &identifier...'
+        OnClick = DoFindUnit
+      end
       object MenuSep2: TMenuItem
         Caption = '-'
       end
@@ -298,6 +302,10 @@ object MainForm: TMainForm
         object MenuCheckGuids: TMenuItem
           Caption = 'Interface GUIDs...'
           OnClick = DoCheckInterfaceGuids
+        end
+        object MenuCheckCircular: TMenuItem
+          Caption = 'Circular unit references...'
+          OnClick = DoCheckCircularRefs
         end
       end
       object MenuSemRep: TMenuItem

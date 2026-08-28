@@ -571,22 +571,33 @@ begin
             if LiveCount > 0 then
               Cap := Format('%s (%d found)', [BaseCap, LiveCount]);
           end;
-          try Pair.Key.Caption := Cap; except end;
+          // Only write on an actual change - TMenuItem setters trigger
+          // MenuChanged up to the menu bar, which repaints it.
+          try
+            if Pair.Key.Caption <> Cap then Pair.Key.Caption := Cap;
+          except
+          end;
         end;
     else           // REQ_PROJECT (and groups)
       En := HasProject;
     end;
-    try Pair.Key.Enabled := En; except end;
+    try
+      if Pair.Key.Enabled <> En then Pair.Key.Enabled := En;
+    except
+    end;
   end;
 end;
 
 procedure TContextMenuInstaller.DoRefactorActionUpdate(Sender: TObject);
 begin
-  // Let the IDE run its own update first (it disables the menu when there
-  // is no refactoring context), then force it back on so the menu - and
-  // thus OUR entries - can always be opened.
-  if Assigned(FRefOldUpdate) then
-    try FRefOldUpdate(Sender); except end;
+  // Deliberately do NOT chain the IDE's own update handler. Its only
+  // visible effect is disabling the action when there is no IDE
+  // refactoring context - and since we re-enable right afterwards, the
+  // False->True toggle repainted the top-level Refactor item on EVERY
+  // action-update cycle (which fires on mouse moves): the menu entry
+  // visibly flickered. The IDE's own entries under this menu are hidden
+  // while we are installed, so nothing depends on that handler running.
+  // Setting Enabled to an unchanged value is a no-op (no repaint).
   if Sender is TContainedAction then
     TContainedAction(Sender).Enabled := True;
   // Gate OUR entries by context (no project -> disabled, etc.).

@@ -611,6 +611,7 @@ begin
   // Concatenate header lines until we have a complete '(...)' block, or
   // we hit a ';' before any '(' (procedure with no params).
   Header := '';
+  P1 := 0; P2 := 0;
   for I := AInsertLine - 1 to Length(AFileLines) - 1 do
   begin
     Header := Header + ' ' + AFileLines[I];

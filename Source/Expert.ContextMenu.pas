@@ -59,6 +59,7 @@ type
     FRefOldUpdate: TNotifyEvent;
     FHidden: TArray<TMenuItem>;   // IDE's own Refactor items we hid (to restore)
     FItemReq: TDictionary<TMenuItem, Integer>;   // main-menu item -> context requirement
+    FLastStateTick: Cardinal;   // throttle for UpdateMainItemStates
     FRetryTimer: TTimer;
     FRetryCount: Integer;
     FSyncTimer: TTimer;
@@ -425,15 +426,35 @@ begin
   end;
 end;
 
+// True if a source editor is on top. Deliberately does NOT use
+// Editor.GetCurrentContext: that one walks the caret via IOTAEditPosition
+// to read the word under the cursor, which COLLAPSES an active selection.
+// Since this runs on every action update (IDE idle), it must be cheap and
+// must never touch the caret / selection. TopBuffer is a read-only query.
+function HasActiveSourceEditor: Boolean;
+var
+  ES: IOTAEditorServices;
+begin
+  Result := Supports(BorlandIDEServices, IOTAEditorServices, ES)
+    and (ES.TopBuffer <> nil);
+end;
+
 procedure TContextMenuInstaller.UpdateMainItemStates;
 var
   HasProject, HasEditor: Boolean;
   Pair: TPair<TMenuItem, Integer>;
   En: Boolean;
+  Tick: Cardinal;
 begin
   if (FItemReq = nil) or (Editor = nil) then Exit;
+  // Throttle: this fires on every action-list update (IDE idle). Recompute
+  // the states at most a few times per second.
+  Tick := GetTickCount;
+  if (FLastStateTick <> 0) and (Tick - FLastStateTick < 300) then Exit;
+  FLastStateTick := Tick;
+
   HasProject := Editor.GetCurrentProjectDproj <> '';
-  HasEditor := Editor.GetCurrentContext.IsValid;
+  HasEditor := HasActiveSourceEditor;
   for Pair in FItemReq do
   begin
     case Pair.Value of

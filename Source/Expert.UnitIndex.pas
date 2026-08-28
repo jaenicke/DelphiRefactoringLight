@@ -1094,8 +1094,8 @@ begin
         var Key := UpperCase(F);
         Target.AddOrSetValue(Key, True);
         var Info: TIndexedUnit;
-        var Size: Int64 := 0;
-        var MT: TDateTime := 0;
+        var Size: Int64;
+        var MT: TDateTime;
         try
           Size := TFile.GetSize(F);
           MT := TFile.GetLastWriteTime(F);

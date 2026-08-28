@@ -261,7 +261,6 @@ var
   Line, Col: Integer;
   Orig, NewLine: string;
   RuleMap: TDictionary<Integer, Integer>;   // ruleIdx -> count
-  WithVarMap: TDictionary<Int64, Boolean>;
 begin
   SB := TStringBuilder.Create;
   RuleMap := TDictionary<Integer, Integer>.Create;
@@ -310,7 +309,6 @@ begin
     RuleMap.Free;
     SB.Free;
   end;
-  if WithVarMap = nil then ;
 end;
 
 procedure RunReplaceOver(const AFiles: TArray<string>);

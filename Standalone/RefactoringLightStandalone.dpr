@@ -31,6 +31,7 @@ uses
   Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
   Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',
+  Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.RenameDialog in '..\Source\Expert.RenameDialog.pas',
   Lsp.Protocol in '..\Source\Lsp.Protocol.pas',
   Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',

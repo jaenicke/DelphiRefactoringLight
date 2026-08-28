@@ -67,6 +67,8 @@ Refactor
 ├── Move to unit...
 ├── Find unit references...
 ├── Find unit for identifier...
+├── Add unit for identifier at cursor
+├── Resolve missing units...
 ├── -----
 ├── Extract / extend interface
 │   ├── Extract new interface from class...
@@ -126,6 +128,7 @@ not the wizard.
 | Add IInterface support       |    yes     | In-place edit of the class declaration.                                                                  |
 | Semantic replace (all modes) |    yes     | Reads `semantic-replace.json` from the project root.                                                     |
 | Find unit for identifier     |    yes     | Background identifier index over the project + search paths; the lookup itself needs no LSP.             |
+| Auto-import missing units    |    yes     | Live lightbulb + on-demand entries. Diagnostics come from the standalone's own LSP session (E2003 push after an idle-time background analysis); the IDE-only Structure-view source does not apply here. |
 | Project checks: DFM events   |    yes     | Parses `.dfm` + component source; auto-fix writes to disk (type-unit resolution for the fix uses LSP when available). |
 | Project checks: Iface GUIDs  |    yes     | Pure source scan.                                                                                        |
 | Project checks: Circular refs|    yes     | Pure `uses`-graph analysis.                                                                              |

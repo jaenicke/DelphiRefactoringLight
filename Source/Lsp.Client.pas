@@ -62,6 +62,10 @@ type
     ///  ranges. Populated by HandlePublishDiagnostics from DelphiLSP
     ///  diagnostics with code 'H2655'/'H2656' and tag=1.</summary>
     FInactiveRanges: TObjectDictionary<string, TList<TLspRange>>;
+    /// <summary>Map: uppercase absolute file path -> array of error/warning
+    ///  diagnostics (severity + code + range), for the auto-import feature
+    ///  (undeclared identifiers = code 'E2003'). Guarded by FInactiveRangesLock.</summary>
+    FErrorDiags: TObjectDictionary<string, TList<TLspErrorDiag>>;
     FInactiveRangesLock: TCriticalSection;
     FDiagnosticsCount: Integer;
     /// <summary>Set of uppercase file paths that have received at least
@@ -151,6 +155,11 @@ type
     ///  has reported for AFilePath, as 0-based LSP positions. Empty when
     ///  the server has not yet pushed diagnostics for this file.</summary>
     function GetInactiveRanges(const AFilePath: string): TArray<TLspRange>;
+
+    /// <summary>Returns the error/warning diagnostics DelphiLSP has reported
+    ///  for AFilePath (0-based ranges). Empty when none / not yet analysed.
+    ///  Use the 'E2003' code to find undeclared identifiers.</summary>
+    function GetErrorDiagnostics(const AFilePath: string): TArray<TLspErrorDiag>;
 
     /// <summary>True iff the 0-based line ALine lies inside one of the
     ///  inactive ranges DelphiLSP reported for AFilePath.</summary>
@@ -266,6 +275,7 @@ begin
   FPending := TObjectDictionary<Integer, TPendingRequest>.Create([doOwnsValues]);
   FPendingLock := TCriticalSection.Create;
   FInactiveRanges := TObjectDictionary<string, TList<TLspRange>>.Create([doOwnsValues]);
+  FErrorDiags := TObjectDictionary<string, TList<TLspErrorDiag>>.Create([doOwnsValues]);
   FInactiveRangesLock := TCriticalSection.Create;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
   FProcessHandle := INVALID_HANDLE_VALUE;
@@ -303,6 +313,7 @@ begin
   FPending.Free;
   FPendingLock.Free;
   FInactiveRanges.Free;
+  FErrorDiags.Free;
   FInactiveRangesLock.Free;
   FFilesWithDiagnostics.Free;
   inherited;
@@ -1154,13 +1165,15 @@ var
   Source, Code: string;
   TagArr: TJSONArray;
   HasUnnecessaryTag: Boolean;
+  Severity: Integer;
   R: TLspRange;
   List: TList<TLspRange>;
+  ErrList: TList<TLspErrorDiag>;
   UpKey: string;
 begin
   // The notification count is bumped by the dispatcher in
-  // HandleNotification; here we only do the deeper inactive-range
-  // extraction, which has stricter input requirements.
+  // HandleNotification; here we do the deeper extraction (inactive
+  // regions AND error/warning diagnostics for auto-import).
   if AParams = nil then Exit;
   if not AParams.TryGetValue<string>('uri', Uri) then Exit;
   if not AParams.TryGetValue<TJSONArray>('diagnostics', DiagArr) then Exit;
@@ -1172,47 +1185,67 @@ begin
   FInactiveRangesLock.Enter;
   try
     FFilesWithDiagnostics.AddOrSetValue(UpKey, True);
-    if FInactiveRanges.TryGetValue(UpKey, List) then
-      List.Clear
-    else
-    begin
-      List := TList<TLspRange>.Create;
-      FInactiveRanges.Add(UpKey, List);
-    end;
+    if FInactiveRanges.TryGetValue(UpKey, List) then List.Clear
+    else begin List := TList<TLspRange>.Create; FInactiveRanges.Add(UpKey, List); end;
+    if FErrorDiags.TryGetValue(UpKey, ErrList) then ErrList.Clear
+    else begin ErrList := TList<TLspErrorDiag>.Create; FErrorDiags.Add(UpKey, ErrList); end;
 
     for DiagVal in DiagArr do
     begin
       if not (DiagVal is TJSONObject) then Continue;
       DiagObj := TJSONObject(DiagVal);
-
-      // Match: Source='DelphiLSP' AND (Code in {H2655,H2656} OR tag=1)
       Source := DiagObj.GetValue<string>('source', '');
       Code := DiagObj.GetValue<string>('code', '');
+      Severity := DiagObj.GetValue<Integer>('severity', 0);
+
+      // Range (shared by both classifications).
+      if not DiagObj.TryGetValue<TJSONObject>('range', RangeObj) then Continue;
+      if not RangeObj.TryGetValue<TJSONObject>('start', StartObj) then Continue;
+      if not RangeObj.TryGetValue<TJSONObject>('end', EndObj) then Continue;
+      R.Start.Line      := StartObj.GetValue<Integer>('line', -1);
+      R.Start.Character := StartObj.GetValue<Integer>('character', 0);
+      R.End_.Line       := EndObj.GetValue<Integer>('line', -1);
+      R.End_.Character  := EndObj.GetValue<Integer>('character', 0);
+      if (R.Start.Line < 0) or (R.End_.Line < 0) then Continue;
+
+      // Inactive $IFDEF regions: Source='DelphiLSP' AND (H2655/H2656 OR tag=1).
       HasUnnecessaryTag := False;
       if DiagObj.TryGetValue<TJSONArray>('tags', TagArr) then
         for var T: TJSONValue in TagArr do
           if (T is TJSONNumber) and (TJSONNumber(T).AsInt = 1) then
-          begin
-            HasUnnecessaryTag := True;
-            Break;
-          end;
+          begin HasUnnecessaryTag := True; Break; end;
+      if SameText(Source, 'DelphiLSP')
+         and (HasUnnecessaryTag or SameText(Code, 'H2655') or SameText(Code, 'H2656')) then
+        List.Add(R);
 
-      if not (SameText(Source, 'DelphiLSP')
-              and (HasUnnecessaryTag
-                   or SameText(Code, 'H2655')
-                   or SameText(Code, 'H2656'))) then
-        Continue;
-
-      if not DiagObj.TryGetValue<TJSONObject>('range', RangeObj) then Continue;
-      if not RangeObj.TryGetValue<TJSONObject>('start', StartObj) then Continue;
-      if not RangeObj.TryGetValue<TJSONObject>('end', EndObj) then Continue;
-      R.Start.Line       := StartObj.GetValue<Integer>('line', -1);
-      R.Start.Character  := StartObj.GetValue<Integer>('character', 0);
-      R.End_.Line        := EndObj.GetValue<Integer>('line', -1);
-      R.End_.Character   := EndObj.GetValue<Integer>('character', 0);
-      if (R.Start.Line < 0) or (R.End_.Line < 0) then Continue;
-      List.Add(R);
+      // Error / warning diagnostics (severity 1 or 2) for auto-import.
+      if (Severity = 1) or (Severity = 2) then
+      begin
+        var ED: TLspErrorDiag;
+        ED.Range := R;
+        ED.Severity := Severity;
+        ED.Code := Code;
+        ED.Message := DiagObj.GetValue<string>('message', '');
+        ErrList.Add(ED);
+      end;
     end;
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.GetErrorDiagnostics(const AFilePath: string): TArray<TLspErrorDiag>;
+var
+  UpKey: string;
+  List: TList<TLspErrorDiag>;
+begin
+  SetLength(Result, 0);
+  if AFilePath = '' then Exit;
+  UpKey := AnsiUpperCase(ExpandFileName(AFilePath));
+  FInactiveRangesLock.Enter;
+  try
+    if FErrorDiags.TryGetValue(UpKey, List) then
+      Result := List.ToArray;
   finally
     FInactiveRangesLock.Leave;
   end;

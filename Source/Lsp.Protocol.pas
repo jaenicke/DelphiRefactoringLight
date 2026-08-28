@@ -33,6 +33,17 @@ type
     class function FromJSON(AObj: TJSONObject): TLspTextEdit; static;
   end;
 
+  /// <summary>A compiler diagnostic (error / warning / hint) as reported by
+  ///  DelphiLSP via publishDiagnostics. Range is 0-based (LSP convention).
+  ///  Code is the language-independent compiler code (e.g. 'E2003' for an
+  ///  undeclared identifier).</summary>
+  TLspErrorDiag = record
+    Range: TLspRange;
+    Severity: Integer;   // 1=Error, 2=Warning, 3=Information, 4=Hint
+    Code: string;
+    Message: string;
+  end;
+
   TLspTextDocumentIdentifier = record
     Uri: string;
     function ToJSON: TJSONObject;

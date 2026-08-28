@@ -21,7 +21,8 @@ uses
   Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.LspPrewarmer,
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
-  Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex;
+  Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
+  Expert.StructureErrors;
 
 type
   TShortcutChangeHook = class
@@ -99,6 +100,15 @@ begin
   // later when a project opens (see TLspPrewarmer) or when the dialog runs.
   TUnitIndex.Instance.StartGlobalIndex;
 
+  // Live auto-import indicator: watches the active buffer in the background
+  // and shows a small quick-fix button at the caret when an undeclared
+  // identifier has a known unit (see Expert.AutoImport).
+  StartAutoImportLive;
+  // Primary diagnostics source in the IDE: the Structure view mirrors the
+  // IDE's own Error Insight; its notifier feeds the live checker without
+  // any LSP round-trip of our own (see Expert.StructureErrors).
+  InstallStructureErrorSource;
+
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;
 end;
@@ -106,6 +116,8 @@ end;
 initialization
 
 finalization
+  UninstallStructureErrorSource;
+  StopAutoImportLive;
   TExpertsShortCut.RemoveListener(TShortcutChangeHook.HandleChanged);
   UnregisterOptionsPage;
   FreeAndNil(LspPrewarmerInstance);

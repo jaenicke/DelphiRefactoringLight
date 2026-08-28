@@ -138,6 +138,16 @@ type
     ///  route the ancestor chain through IFDEF-guarded aliases
     ///  (TVTAncestor = TVTAncestorVcl). The resolver follows these.</summary>
     FClassAlias: TDictionary<string, string>;
+    /// <summary>FILE-SCOPED copies of the proc-type / alias tables, keyed by
+    ///  "UPPER(file)|UPPER(name)". The global tables above are name-only and
+    ///  therefore ambiguous when two units declare the same type name (e.g.
+    ///  Vcl.Controls.TCanResizeEvent has 4 params, Vcl.ExtCtrls.TCanResizeEvent
+    ///  has 3). Resolution prefers the declaration in the SAME file as the
+    ///  class that declares the event property, so the right one wins.</summary>
+    FProcSigFile: TDictionary<string, string>;
+    FProcRawFile: TDictionary<string, string>;
+    FProcLocFile: TDictionary<string, string>;
+    FAliasFile: TDictionary<string, string>;
     /// <summary>UPPER(classname) -> declaring file. Built in one pass
     ///  over all project sources; makes ancestor lookup O(1) instead
     ///  of a scan over every file. Classes NOT in the index (TForm,
@@ -160,7 +170,7 @@ type
     ///  that declares the event property, then its procedural type.
     ///  False when not resolvable from indexed source.</summary>
     function TryResolveEventSignature(const ACompType, AEventName: string;
-      out ASignature, ATypeName, ARawParams: string): Boolean;
+      out ASignature, ATypeName, ARawParams, ALocation: string): Boolean;
     class function NormalizeParams(const AParamList: string): string;
     class function ExpectedSignature(const AEventName: string;
       out ASignature: string): Boolean;
@@ -426,10 +436,13 @@ const
   //   OnCellClick       - TDBGrid(Column), TIB_Grid(custom), ...
   //   OnChanged / OnSelectionChange / OnPaint - vary by component
   //   OnStartDock / OnStartDrag - have a var DragObject parameter
-  NotifyEvents: array[0..14] of string = (
+  //   OnPopup           - TPopupMenu.OnPopup is TNotifyEvent, but
+  //                       TcxGridPopupMenu.OnPopup is TcxGridBeforePopupProc
+  //                       (ASenderMenu, AHitTest, X, Y, var AllowPopup)
+  NotifyEvents: array[0..13] of string = (
     'OnClick', 'OnDblClick', 'OnEnter', 'OnExit',
     'OnCreate', 'OnDestroy', 'OnShow', 'OnHide', 'OnActivate',
-    'OnDeactivate', 'OnResize', 'OnPopup', 'OnExecute', 'OnUpdate',
+    'OnDeactivate', 'OnResize', 'OnExecute', 'OnUpdate',
     'OnTimer');
 
   // Component classes whose events from the tables below verifiably
@@ -450,7 +463,13 @@ const
     'TListView', 'TTreeView', 'TRadioGroup', 'TTrackBar',
     'TProgressBar', 'TStatusBar');
 
-  KnownEvents: array[0..11] of TKnownEvent = (
+  // NOTE: only events whose signature is the SAME across every component
+  // that publishes them belong here. OnCanResize deliberately does NOT:
+  // TControl.TCanResizeEvent has 4 params (var NewWidth, NewHeight: Integer)
+  // while TSplitter's TCanResizeEvent (= TSplitterCanResizeEvent) has 3
+  // (var NewSize: Integer; var Accept: Boolean). A single table entry would
+  // be wrong for one of them, so OnCanResize is resolved from source instead.
+  KnownEvents: array[0..10] of TKnownEvent = (
     (Name: 'OnKeyDown';    Signature: 'TObject|var Word|TShiftState'),
     (Name: 'OnKeyUp';      Signature: 'TObject|var Word|TShiftState'),
     (Name: 'OnKeyPress';   Signature: 'TObject|var Char'),
@@ -461,8 +480,7 @@ const
     (Name: 'OnCloseQuery'; Signature: 'TObject|var Boolean'),
     (Name: 'OnMouseWheel'; Signature: 'TObject|TShiftState|Integer|TPoint|var Boolean'),
     (Name: 'OnDragOver';   Signature: 'TObject|TObject|Integer|Integer|TDragState|var Boolean'),
-    (Name: 'OnDragDrop';   Signature: 'TObject|TObject|Integer|Integer'),
-    (Name: 'OnCanResize';  Signature: 'TObject|var Integer|var Integer|var Boolean'));
+    (Name: 'OnDragDrop';   Signature: 'TObject|TObject|Integer|Integer'));
 
 class function TDfmEventChecker.ExpectedSignature(const AEventName: string;
   out ASignature: string): Boolean;
@@ -922,10 +940,18 @@ begin
   FProcRawParams := TDictionary<string, string>.Create;
   FProcLoc := TDictionary<string, string>.Create;
   FClassAlias := TDictionary<string, string>.Create;
+  FProcSigFile := TDictionary<string, string>.Create;
+  FProcRawFile := TDictionary<string, string>.Create;
+  FProcLocFile := TDictionary<string, string>.Create;
+  FAliasFile := TDictionary<string, string>.Create;
 end;
 
 destructor TDfmEventChecker.Destroy;
 begin
+  FAliasFile.Free;
+  FProcLocFile.Free;
+  FProcRawFile.Free;
+  FProcSigFile.Free;
   FClassAlias.Free;
   FProcLoc.Free;
   FProcRawParams.Free;
@@ -1128,17 +1154,20 @@ begin
                   Issue.ActualNorm := MethodInfo.Value;
                   Issues.Add(Issue);
                 end
-                else if not HasTableSig and (CompStack.Count > 0)
+                else if (not (SigCheckable and HasTableSig)) and (CompStack.Count > 0)
                         and (CompStack.Peek.Value <> '') then
                 begin
-                  // No built-in table signature (third-party event).
-                  // First try to resolve it EXACTLY from the component's
-                  // own source (indexed from the search path). If that
-                  // works, check against the real signature; otherwise
-                  // pool it for the cross-project consistency check.
-                  var ResolvedSig, TypeName, RawParams: string;
+                  // Not using the built-in table (either the event isn't in
+                  // it, or the component is not whitelisted - a third-party
+                  // class may redeclare a standard event name with a
+                  // different type, e.g. TcxGridPopupMenu.OnPopup). Resolve
+                  // the event type EXACTLY from the component's own source
+                  // (indexed from the search path); if that works, check the
+                  // real signature, otherwise pool it for the cross-project
+                  // consistency check.
+                  var ResolvedSig, TypeName, RawParams, TypeLoc: string;
                   if TryResolveEventSignature(CompStack.Peek.Value, PropName,
-                       ResolvedSig, TypeName, RawParams) then
+                       ResolvedSig, TypeName, RawParams, TypeLoc) then
                   begin
                     if not SameText(MethodInfo.Value, ResolvedSig) then
                     begin
@@ -1160,14 +1189,13 @@ begin
                       Issue.ExpectedRawParams := RawParams;   // enables auto-fix
                       Issue.FormClass := FormClass;
                       Issue.EventTypeName := TypeName;
-                      var Loc: string;
-                      if FProcLoc.TryGetValue(UpperCase(TypeName), Loc) then
+                      if TypeLoc <> '' then
                       begin
-                        var Bar := Pos('|', Loc);
+                        var Bar := Pos('|', TypeLoc);
                         if Bar > 0 then
                         begin
-                          Issue.EventTypeFile := Copy(Loc, 1, Bar - 1);
-                          Issue.EventTypeLine := StrToIntDef(Copy(Loc, Bar + 1, MaxInt), 0);
+                          Issue.EventTypeFile := Copy(TypeLoc, 1, Bar - 1);
+                          Issue.EventTypeLine := StrToIntDef(Copy(TypeLoc, Bar + 1, MaxInt), 0);
                         end;
                       end;
                       Issues.Add(Issue);
@@ -1360,13 +1388,20 @@ begin
             if EqP > 0 then
             begin
               T := Trim(Copy(L, 1, EqP - 1));
-              if (T <> '') and CharInSet(T[1], ['A'..'Z', 'a'..'z', '_'])
-                 and not FProcSig.ContainsKey(UpperCase(T)) then
+              if (T <> '') and CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']) then
               begin
                 var RawP := ExtractProcParams(Lines, I);
-                FProcSig.Add(UpperCase(T), NormalizeParams(RawP));
-                FProcRawParams.Add(UpperCase(T), Trim(RawP));
-                FProcLoc.Add(UpperCase(T), F + '|' + IntToStr(I + 1));
+                var NP := NormalizeParams(RawP);
+                var FKey := UpperCase(F) + '|' + UpperCase(T);
+                FProcSigFile.AddOrSetValue(FKey, NP);
+                FProcRawFile.AddOrSetValue(FKey, Trim(RawP));
+                FProcLocFile.AddOrSetValue(FKey, F + '|' + IntToStr(I + 1));
+                if not FProcSig.ContainsKey(UpperCase(T)) then
+                begin
+                  FProcSig.Add(UpperCase(T), NP);
+                  FProcRawParams.Add(UpperCase(T), Trim(RawP));
+                  FProcLoc.Add(UpperCase(T), F + '|' + IntToStr(I + 1));
+                end;
               end;
             end;
           end;
@@ -1384,6 +1419,7 @@ begin
             begin
               var DotP := LastDelimiter('.', Rhs);
               if DotP > 0 then Rhs := Copy(Rhs, DotP + 1, MaxInt);
+              FAliasFile.AddOrSetValue(UpperCase(F) + '|' + UpperCase(Lhs), Rhs);
               if not FClassAlias.ContainsKey(UpperCase(Lhs)) then
                 FClassAlias.Add(UpperCase(Lhs), Rhs);
             end;
@@ -1443,13 +1479,53 @@ end;
 
 function TDfmEventChecker.TryResolveEventSignature(
   const ACompType, AEventName: string;
-  out ASignature, ATypeName, ARawParams: string): Boolean;
+  out ASignature, ATypeName, ARawParams, ALocation: string): Boolean;
+
+  // Resolve a proc-TYPE name to its signature, PREFERRING the declaration in
+  // APreferFile (the file that declares the class whose event property we are
+  // resolving), so a name shared by two units picks the in-scope one. Follows
+  // type aliases (TCanResizeEvent = TSplitterCanResizeEvent), keeping the file
+  // preference while it can, then falls back to the global (name-only) tables.
+  function ResolveProc(const AName, APreferFile: string;
+    out OSig, ORaw, OLoc, OFinal: string): Boolean;
+  var
+    Nm, PF, FKey, Nxt: string;
+    H: Integer;
+  begin
+    Result := False;
+    Nm := AName; PF := APreferFile; H := 0;
+    while (Nm <> '') and (H < 40) do
+    begin
+      Inc(H);
+      if PF <> '' then
+      begin
+        FKey := UpperCase(PF) + '|' + UpperCase(Nm);
+        if FProcSigFile.TryGetValue(FKey, OSig) then
+        begin
+          FProcRawFile.TryGetValue(FKey, ORaw);
+          FProcLocFile.TryGetValue(FKey, OLoc);
+          OFinal := Nm; Exit(True);
+        end;
+        if FAliasFile.TryGetValue(FKey, Nxt) then begin Nm := Nxt; Continue; end;
+      end;
+      if FProcSig.TryGetValue(UpperCase(Nm), OSig) then
+      begin
+        FProcRawParams.TryGetValue(UpperCase(Nm), ORaw);
+        FProcLoc.TryGetValue(UpperCase(Nm), OLoc);
+        OFinal := Nm; Exit(True);
+      end;
+      if FClassAlias.TryGetValue(UpperCase(Nm), Nxt) then
+      begin Nm := Nxt; PF := ''; Continue; end;   // global alias - file context lost
+      Break;
+    end;
+  end;
+
 var
-  Cls, TypeName, Sig: string;
+  Cls, TypeName, PropFile: string;
   Hops: Integer;
 begin
   Result := False;
-  ASignature := ''; ATypeName := ''; ARawParams := '';
+  ASignature := ''; ATypeName := ''; ARawParams := ''; ALocation := '';
   Cls := ACompType;
   Hops := 0;
   while (Cls <> '') and (Hops < 40) do
@@ -1457,15 +1533,18 @@ begin
     Inc(Hops);
     if FEventPropType.TryGetValue(UpperCase(Cls) + '.' + UpperCase(AEventName), TypeName) then
     begin
-      ATypeName := TypeName;
-      if FProcSig.TryGetValue(UpperCase(TypeName), Sig) then
+      // The type name resolves in the scope of the unit that declares Cls.
+      PropFile := '';
+      FClassIndex.TryGetValue(UpperCase(Cls), PropFile);
+      var Sig, Raw, Loc, Final: string;
+      if ResolveProc(TypeName, PropFile, Sig, Raw, Loc, Final) then
       begin
-        ASignature := Sig;
-        FProcRawParams.TryGetValue(UpperCase(TypeName), ARawParams);
+        ASignature := Sig; ARawParams := Raw; ALocation := Loc; ATypeName := Final;
         Exit(True);
       end;
       // Property found but its type isn't a resolvable proc type
       // (declared elsewhere / not indexed). Give up - cannot verify.
+      ATypeName := TypeName;
       Exit(False);
     end;
     // Next hop: real ancestor first; if none, follow a type alias

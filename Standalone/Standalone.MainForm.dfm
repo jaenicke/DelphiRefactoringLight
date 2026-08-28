@@ -272,6 +272,14 @@ object MainForm: TMainForm
         Caption = 'Find unit for &identifier...'
         OnClick = DoFindUnit
       end
+      object MenuAddUnitCursor: TMenuItem
+        Caption = 'Add unit for identifier at cursor'
+        OnClick = DoAddUnitAtCursor
+      end
+      object MenuResolveMissing: TMenuItem
+        Caption = 'Resolve missing units...'
+        OnClick = DoResolveMissingUnits
+      end
       object MenuSep2: TMenuItem
         Caption = '-'
       end

@@ -46,6 +46,13 @@ type
     ///  Startet den LSP neu wenn sich das Projekt geaendert hat.</summary>
     function GetClient(const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;
 
+    /// <summary>Gibt den BEREITS laufenden Client zurueck, ohne einen
+    ///  neuen zu starten. Fuer Hintergrund-Checks (Auto-Import live), die
+    ///  keinen Kaltstart ausloesen und nicht mit einer parallelen
+    ///  GetClient-Erzeugung kollidieren duerfen. Nil solange kein Client
+    ///  initialisiert ist.</summary>
+    function PeekClient: TLspClient;
+
     /// <summary>Sorgt dafuer, dass alle uebergebenen Projektdateien via
     ///  textDocument/didOpen im LSP bekannt sind. Das ist zwingend noetig
     ///  fuer projektweite Queries wie textDocument/implementation, die
@@ -247,6 +254,14 @@ begin
       Reset;
     end;
   end;
+end;
+
+function TLspManager.PeekClient: TLspClient;
+begin
+  if (FClient <> nil) and FIsReady then
+    Result := FClient
+  else
+    Result := nil;
 end;
 
 function TLspManager.GetClient(const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;

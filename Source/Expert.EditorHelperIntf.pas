@@ -46,6 +46,16 @@ type
     ['{1F6F4D86-5C8D-4A6E-9B0E-7BCE2C5F0A12}']
     // ---------- Cursor / project context ----------
     function GetCurrentContext: TEditorContext;
+    /// <summary>File name of the topmost editor buffer - CHEAP and without
+    ///  touching the caret/selection (unlike GetCurrentContext, which moves
+    ///  the edit position). Safe to call from idle/timer handlers.
+    ///  '' when no editor is active.</summary>
+    function GetActiveFileName: string;
+
+    /// <summary>Caret position (1-based line/column) of the active editor -
+    ///  CHEAP and read-only like GetActiveFileName (never moves the edit
+    ///  position). False when no editor is active.</summary>
+    function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;

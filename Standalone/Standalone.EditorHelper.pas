@@ -109,6 +109,8 @@ type
     constructor Create(AState: TStandaloneProjectState);
 
     function GetCurrentContext: TEditorContext;
+    function GetActiveFileName: string;
+    function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -323,6 +325,18 @@ begin
   // caret sits in a number literal, not an identifier.
   if CharInSet(Line[StartP], ['0'..'9']) then Exit;
   Result.WordAtCursor := Copy(Line, StartP, EndP - StartP + 1);
+end;
+
+function TStandaloneEditorHelper.GetActiveFileName: string;
+begin
+  Result := FState.ActiveFile;
+end;
+
+function TStandaloneEditorHelper.GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+begin
+  ALine := FState.ActiveLine;
+  ACol := FState.ActiveCol;
+  Result := (FState.ActiveFile <> '') and (ALine > 0);
 end;
 
 function TStandaloneEditorHelper.GetCurrentProjectDproj: string;

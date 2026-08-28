@@ -77,6 +77,8 @@ type
     procedure OnRemoveWithAtCursor(Sender: TObject);
     procedure OnUnitRefs(Sender: TObject);
     procedure OnFindUnit(Sender: TObject);
+    procedure OnAddUnitAtCursor(Sender: TObject);
+    procedure OnResolveMissingUnits(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
@@ -135,7 +137,7 @@ uses
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
-  Expert.FindUnitDialog;
+  Expert.FindUnitDialog, Expert.AutoImport;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -150,6 +152,10 @@ const
   // Context requirement for a main-menu entry.
   REQ_PROJECT = 1;   // needs an open project
   REQ_EDITOR  = 2;   // needs an active source editor (cursor context)
+  REQ_LIVEFIX = 3;   // like REQ_EDITOR, but additionally reflects the live
+                     // auto-import check: disabled when the checker KNOWS
+                     // there is nothing to fix; annotated with the count
+                     // when it knows there is.
 
 { TContextMenuInstaller }
 
@@ -277,6 +283,8 @@ begin
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
   Leaf(Root, 'Find unit references...',   OnUnitRefs,             skUnitRefs,   REQ_EDITOR);
   Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
+  Plain(Root, 'Add unit for identifier at cursor', OnAddUnitAtCursor, REQ_LIVEFIX);
+  Plain(Root, 'Resolve missing units...', OnResolveMissingUnits,  REQ_EDITOR);
 
   IfaceSub := Sub(Root, 'Extract / extend interface');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
@@ -459,6 +467,24 @@ begin
   begin
     case Pair.Value of
       REQ_EDITOR:  En := HasProject and HasEditor;
+      REQ_LIVEFIX:
+        begin
+          En := HasProject and HasEditor;
+          // When the live auto-import check holds FRESH results for the
+          // active buffer, reflect them: no missing units -> disabled;
+          // otherwise annotate the caption with the count. Without fresh
+          // data the entry stays enabled (on-demand path decides).
+          var LiveCount: Integer;
+          var BaseCap := 'Add unit for identifier at cursor';
+          var Cap := BaseCap;
+          if En and LiveFreshInfo(Editor.GetActiveFileName, LiveCount) then
+          begin
+            En := LiveCount > 0;
+            if LiveCount > 0 then
+              Cap := Format('%s (%d found)', [BaseCap, LiveCount]);
+          end;
+          try Pair.Key.Caption := Cap; except end;
+        end;
     else           // REQ_PROJECT (and groups)
       En := HasProject;
     end;
@@ -901,6 +927,16 @@ end;
 procedure TContextMenuInstaller.OnFindUnit(Sender: TObject);
 begin
   Expert.FindUnitDialog.FindUnitForIdentifier;
+end;
+
+procedure TContextMenuInstaller.OnAddUnitAtCursor(Sender: TObject);
+begin
+  Expert.AutoImport.AddUnitForIdentifierAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnResolveMissingUnits(Sender: TObject);
+begin
+  Expert.AutoImport.ResolveMissingUnits;
 end;
 
 procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);

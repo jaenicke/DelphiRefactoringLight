@@ -25,6 +25,8 @@ type
   TIDEEditorHelper = class(TInterfacedObject, IEditorHelper)
   public
     function GetCurrentContext: TEditorContext;
+    function GetActiveFileName: string;
+    function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -129,6 +131,50 @@ type
   end;
 
 implementation
+
+function TIDEEditorHelper.GetActiveFileName: string;
+var
+  EditorServices: IOTAEditorServices;
+  EditBuffer: IOTAEditBuffer;
+  Module: IOTAModule;
+begin
+  // Deliberately touches ONLY the buffer/module, never the EditPosition -
+  // GetCurrentContext moves the edit position and collapses the selection,
+  // which must never happen from an idle/timer poll.
+  Result := '';
+  if not Supports(BorlandIDEServices, IOTAEditorServices, EditorServices) then
+    Exit;
+  EditBuffer := EditorServices.TopBuffer;
+  if EditBuffer = nil then
+    Exit;
+  Module := EditBuffer.Module;
+  if Module <> nil then
+    Result := Module.FileName;
+end;
+
+function TIDEEditorHelper.GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+var
+  EditorServices: IOTAEditorServices;
+  EditBuffer: IOTAEditBuffer;
+  EditView: IOTAEditView;
+  Pos: TOTAEditPos;
+begin
+  // Read-only view state - safe from timers (no EditPosition involved).
+  Result := False;
+  ALine := 0; ACol := 0;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, EditorServices) then
+    Exit;
+  EditBuffer := EditorServices.TopBuffer;
+  if EditBuffer = nil then
+    Exit;
+  EditView := EditBuffer.TopView;
+  if EditView = nil then
+    Exit;
+  Pos := EditView.CursorPos;
+  ALine := Pos.Line;
+  ACol := Pos.Col;
+  Result := ALine > 0;
+end;
 
 function TIDEEditorHelper.GetCurrentContext: TEditorContext;
 var

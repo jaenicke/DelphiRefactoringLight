@@ -8,7 +8,7 @@
         <TargetedPlatforms>1</TargetedPlatforms>
         <AppType>Package</AppType>
         <FrameworkType>VCL</FrameworkType>
-        <ProjectVersion>20.3</ProjectVersion>
+        <ProjectVersion>20.4</ProjectVersion>
         <Platform Condition="'$(Platform)'==''">Win32</Platform>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
@@ -156,6 +156,8 @@
         <DCCReference Include="..\Source\Expert.UsesEditor.pas"/>
         <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
         <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>
+        <DCCReference Include="..\Source\Expert.AutoImport.pas"/>
+        <DCCReference Include="..\Source\Expert.StructureErrors.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

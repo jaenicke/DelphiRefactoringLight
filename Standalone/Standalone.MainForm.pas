@@ -75,6 +75,8 @@ type
     MenuMoveToUnit: TMenuItem;
     MenuUnitRefs: TMenuItem;
     MenuFindUnit: TMenuItem;
+    MenuAddUnitCursor: TMenuItem;
+    MenuResolveMissing: TMenuItem;
     MenuSep2: TMenuItem;
     MenuIface: TMenuItem;
     MenuIfaceExtract: TMenuItem;
@@ -128,6 +130,8 @@ type
     procedure DoRefactorMoveToUnit(Sender: TObject);
     procedure DoRefactorUnitRefs(Sender: TObject);
     procedure DoFindUnit(Sender: TObject);
+    procedure DoAddUnitAtCursor(Sender: TObject);
+    procedure DoResolveMissingUnits(Sender: TObject);
     procedure DoRefactorExtractInterface(Sender: TObject);
     procedure DoRefactorAddToInterface(Sender: TObject);
     procedure DoRefactorAddIInterface(Sender: TObject);
@@ -286,6 +290,7 @@ uses
   Expert.InterfaceGuidDialog,
   Expert.CircularRefsDialog,
   Expert.FindUnitDialog,
+  Expert.AutoImport,
   Expert.LspManager;
 
 {$R *.dfm}
@@ -338,11 +343,16 @@ begin
       P := Memo.Perform(EM_LINEINDEX, Result.EndLine - 1, 0);
       Result.EndCol := (SelStart + SelLen) - P + 1;
     end;
+
+  // Live auto-import indicator (idles until an LSP client is up).
+  StartAutoImportLive;
+
   UpdateStatusBar;
 end;
 
 procedure TMainForm.FormDestroy(Sender: TObject);
 begin
+  StopAutoImportLive;
   LspPoll.Enabled := False;
   LspLogFlush.Enabled := False;
   try
@@ -1135,6 +1145,12 @@ begin RunWizard(procedure begin CheckCircularReferences; end); end;
 
 procedure TMainForm.DoFindUnit(Sender: TObject);
 begin RunWizard(procedure begin FindUnitForIdentifier; end); end;
+
+procedure TMainForm.DoAddUnitAtCursor(Sender: TObject);
+begin RunWizard(procedure begin AddUnitForIdentifierAtCursor; end); end;
+
+procedure TMainForm.DoResolveMissingUnits(Sender: TObject);
+begin RunWizard(procedure begin ResolveMissingUnits; end); end;
 
 procedure TMainForm.DoRefactorSemanticProject(Sender: TObject);
 begin RunWizard(procedure begin ApplySemanticReplacements_Project; end); end;

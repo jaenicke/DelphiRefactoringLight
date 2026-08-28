@@ -23,7 +23,15 @@ function UnitInUsesText(const AContent, AUnit: string): Boolean;
 
 /// <summary>Adds AUnit to the requested section's uses clause of AFilePath
 ///  (creating the clause if the section has none). Returns True if the file
-///  was changed; False if AUnit was already reachable or on error.</summary>
+///  was changed; False if AUnit was already reachable or on error.
+///
+///  Section aware: a unit listed only under implementation does NOT satisfy
+///  an interface-level need - in that case it is MOVED (removed from the
+///  implementation clause, added to the interface clause; listing it in
+///  both would not compile). The reverse direction is a no-op: a unit in
+///  the interface uses is reachable from the implementation too.
+///  Clauses containing { } or (* *) (e.g. IFDEFs) are never rewritten -
+///  the move is refused (False) rather than risking a mangled clause.</summary>
 function AddUnitToUses(const AFilePath, AUnit: string;
   ASection: TUsesSection): Boolean;
 
@@ -107,13 +115,173 @@ begin
   end;
 end;
 
+// Line index of the 'uses' keyword inside [AFrom..ATo), and the index of
+// the line carrying the closing ';'. False when the range has no clause.
+function FindUsesClause(SL: TStringList; AFrom, ATo: Integer;
+  out AUsesIdx, ASemiIdx: Integer): Boolean;
+var
+  I: Integer;
+  Low: string;
+begin
+  Result := False;
+  AUsesIdx := -1; ASemiIdx := -1;
+  for I := AFrom to ATo - 1 do
+  begin
+    Low := LowerCase(Trim(StripLineComment(SL[I])));
+    if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
+    begin
+      AUsesIdx := I;
+      Break;
+    end;
+  end;
+  if AUsesIdx < 0 then Exit;
+  for I := AUsesIdx to ATo - 1 do
+    if Pos(';', StripLineComment(SL[I])) > 0 then
+    begin
+      ASemiIdx := I;
+      Exit(True);
+    end;
+end;
+
+function ClauseContains(SL: TStringList; AUsesIdx, ASemiIdx: Integer;
+  const AUnit: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := AUsesIdx to ASemiIdx do
+    if TokenEquals(StripLineComment(SL[I]), AUnit) then Exit(True);
+end;
+
+// Removes AUnit from the clause [AUsesIdx..ASemiIdx]. Handles the common
+// layouts (single line; one-unit-per-line with trailing commas); refuses
+// clauses containing block comments / IFDEFs and exotic layouts (returns
+// False, file untouched). Deletes the whole clause when AUnit was its only
+// unit.
+function RemoveFromClause(SL: TStringList; AUsesIdx, ASemiIdx: Integer;
+  const AUnit: string): Boolean;
+var
+  I, LineIdx, A, B, P, UnitCount: Integer;
+  Stripped, U, Needle, Rest: string;
+begin
+  Result := False;
+
+  // Safety gate + unit count: work on the stripped clause text.
+  UnitCount := 0;
+  for I := AUsesIdx to ASemiIdx do
+  begin
+    Stripped := StripLineComment(SL[I]);
+    if (Pos('{', Stripped) > 0) or (Pos('(*', Stripped) > 0) then Exit;
+    // Count commas later; here just refuse braces.
+  end;
+  var ClauseText := '';
+  for I := AUsesIdx to ASemiIdx do
+    ClauseText := ClauseText + ' ' + StripLineComment(SL[I]);
+  P := Pos(';', ClauseText);
+  if P > 0 then ClauseText := Copy(ClauseText, 1, P - 1);
+  P := Pos('uses', LowerCase(ClauseText));
+  if P > 0 then ClauseText := Copy(ClauseText, P + 4, MaxInt);
+  for var Part in ClauseText.Split([',']) do
+    if Trim(Part) <> '' then Inc(UnitCount);
+
+  // The only unit -> drop the entire clause.
+  if UnitCount <= 1 then
+  begin
+    for I := ASemiIdx downto AUsesIdx do SL.Delete(I);
+    Exit(True);
+  end;
+
+  // Locate the token line and its position (positions in the stripped
+  // prefix are identical to the original line - StripLineComment only
+  // cuts a // tail).
+  LineIdx := -1;
+  for I := AUsesIdx to ASemiIdx do
+    if TokenEquals(StripLineComment(SL[I]), AUnit) then
+    begin LineIdx := I; Break; end;
+  if LineIdx < 0 then Exit;
+
+  Stripped := StripLineComment(SL[LineIdx]);
+  U := UpperCase(Stripped);
+  Needle := UpperCase(AUnit);
+  A := 0;
+  P := Pos(Needle, U);
+  while P > 0 do
+  begin
+    var OkBefore := (P = 1) or
+      not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_', '.']);
+    var AfterIdx := P + Length(Needle);
+    var OkAfter := (AfterIdx > Length(U)) or
+      not CharInSet(U[AfterIdx], ['A'..'Z', '0'..'9', '_', '.']);
+    if OkBefore and OkAfter then begin A := P; Break; end;
+    P := Pos(Needle, U, P + 1);
+  end;
+  if A = 0 then Exit;
+  B := A + Length(AUnit);   // first char AFTER the token (1-based)
+
+  // (a) ", " after the token -> remove token + comma + spaces.
+  P := B;
+  while (P <= Length(Stripped)) and (Stripped[P] = ' ') do Inc(P);
+  if (P <= Length(Stripped)) and (Stripped[P] = ',') then
+  begin
+    Inc(P);
+    while (P <= Length(Stripped)) and (Stripped[P] = ' ') do Inc(P);
+    SL[LineIdx] := Copy(SL[LineIdx], 1, A - 1) + Copy(SL[LineIdx], P, MaxInt);
+    if Trim(SL[LineIdx]) = '' then SL.Delete(LineIdx);
+    Exit(True);
+  end;
+
+  // (b) "," before the token -> remove comma + spaces + token.
+  P := A - 1;
+  while (P >= 1) and (Stripped[P] = ' ') do Dec(P);
+  if (P >= 1) and (Stripped[P] = ',') then
+  begin
+    SL[LineIdx] := Copy(SL[LineIdx], 1, P - 1) + Copy(SL[LineIdx], B, MaxInt);
+    if Trim(SL[LineIdx]) = '' then SL.Delete(LineIdx);
+    Exit(True);
+  end;
+
+  // (c) Token alone on its line ("  B," was case (a); here "  B;" or "  B").
+  Rest := Trim(Copy(Stripped, B, MaxInt));
+  if Trim(Copy(Stripped, 1, A - 1)) = '' then
+  begin
+    if Rest = ';' then
+    begin
+      // Line "  B;" - the previous clause line must end with ',': turn
+      // that into the closing ';' and drop this line.
+      for I := LineIdx - 1 downto AUsesIdx do
+      begin
+        var PrevStripped := StripLineComment(SL[I]);
+        var Q := Length(PrevStripped);
+        while (Q >= 1) and (PrevStripped[Q] = ' ') do Dec(Q);
+        if (Q >= 1) and (PrevStripped[Q] = ',') then
+        begin
+          SL[I] := Copy(SL[I], 1, Q - 1) + ';' + Copy(SL[I], Q + 1, MaxInt);
+          SL.Delete(LineIdx);
+          Exit(True);
+        end;
+        if Trim(PrevStripped) <> '' then Break;   // unexpected layout
+      end;
+    end
+    else if Rest = '' then
+    begin
+      // Line "  B" with the ';' further down (unusual) - just drop the
+      // line if the NEXT clause line starts the terminator.
+      SL.Delete(LineIdx);
+      Exit(True);
+    end;
+  end;
+
+  // Exotic layout (comma-first style etc.) - leave the file untouched.
+end;
+
 function AddUnitToUses(const AFilePath, AUnit: string;
   ASection: TUsesSection): Boolean;
 var
   Content: string;
   SL: TStringList;
-  I, StartIdx, EndIdx, UsesIdx, P: Integer;
+  I, IntfIdx, ImplIdx, StartIdx, EndIdx, UsesIdx, SemiIdx, P: Integer;
   Low: string;
+  InIntf, InImpl: Boolean;
 begin
   Result := False;
   if (AUnit = '') or (AFilePath = '') then Exit;
@@ -123,50 +291,66 @@ begin
     if not TFile.Exists(AFilePath) then Exit;
     try Content := TFile.ReadAllText(AFilePath); except Exit; end;
   end;
-  if UnitInUsesText(Content, AUnit) then Exit;   // already reachable
 
   SL := TStringList.Create;
   try
     SL.Text := Content;
 
-    // Delimit the section we are inserting into.
-    StartIdx := -1; EndIdx := SL.Count;
+    // Section boundaries.
+    IntfIdx := -1; ImplIdx := SL.Count;
     for I := 0 to SL.Count - 1 do
     begin
       Low := LowerCase(Trim(StripLineComment(SL[I])));
-      if (ASection = usInterface) and (Low = 'interface') and (StartIdx < 0) then
-        StartIdx := I
+      if (Low = 'interface') and (IntfIdx < 0) then
+        IntfIdx := I
       else if Low = 'implementation' then
       begin
-        if ASection = usImplementation then StartIdx := I
-        else if (ASection = usInterface) and (StartIdx >= 0) then
-        begin EndIdx := I; Break; end;
+        ImplIdx := I;
+        Break;
       end;
+    end;
+
+    // Where is the unit already listed?
+    InIntf := False; InImpl := False;
+    if (IntfIdx >= 0)
+      and FindUsesClause(SL, IntfIdx + 1, ImplIdx, UsesIdx, SemiIdx) then
+      InIntf := ClauseContains(SL, UsesIdx, SemiIdx, AUnit);
+    if (ImplIdx < SL.Count)
+      and FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then
+      InImpl := ClauseContains(SL, UsesIdx, SemiIdx, AUnit);
+
+    if ASection = usInterface then
+    begin
+      if InIntf then Exit;   // already reachable at interface level
+      if InImpl then
+      begin
+        // MOVE: a unit under implementation does not satisfy an interface
+        // need, and listing it in both clauses would not compile. Removing
+        // implementation lines never shifts the interface indices (the
+        // implementation section comes after).
+        if not FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then Exit;
+        if not RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit) then Exit;
+      end;
+      StartIdx := IntfIdx;
+      EndIdx := ImplIdx;
+    end
+    else
+    begin
+      if InIntf or InImpl then Exit;   // reachable either way
+      if ImplIdx >= SL.Count then Exit;
+      StartIdx := ImplIdx;
+      EndIdx := SL.Count;
     end;
     if StartIdx < 0 then Exit;   // section not found
 
-    // Find a uses clause inside the section.
-    UsesIdx := -1;
-    for I := StartIdx + 1 to EndIdx - 1 do
+    // Insert into the section's uses clause (create one if missing).
+    if FindUsesClause(SL, StartIdx + 1, EndIdx, UsesIdx, SemiIdx) then
     begin
-      Low := LowerCase(Trim(StripLineComment(SL[I])));
-      if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
-      begin UsesIdx := I; Break; end;
-    end;
-
-    if UsesIdx >= 0 then
-    begin
-      // Insert ", AUnit" before the ';' that closes the clause.
-      for I := UsesIdx to EndIdx - 1 do
-      begin
-        P := Pos(';', StripLineComment(SL[I]));
-        if P > 0 then
-        begin
-          P := Pos(';', SL[I]);
-          SL[I] := Copy(SL[I], 1, P - 1) + ', ' + AUnit + Copy(SL[I], P, MaxInt);
-          Break;
-        end;
-      end;
+      P := Pos(';', StripLineComment(SL[SemiIdx]));
+      if P <= 0 then Exit;
+      P := Pos(';', SL[SemiIdx]);
+      SL[SemiIdx] := Copy(SL[SemiIdx], 1, P - 1) + ', ' + AUnit
+        + Copy(SL[SemiIdx], P, MaxInt);
     end
     else
       SL.Insert(StartIdx + 1, 'uses ' + AUnit + ';');

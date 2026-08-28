@@ -64,6 +64,12 @@ type
     FRetryCount: Integer;
     FSyncTimer: TTimer;
     FInPopup: Boolean;
+    // Editor-popup takeover: the IDE's own "Refactoring" popup entry we
+    // hid for the current popup round (re-found and re-hidden per popup,
+    // restored in RemoveOurItems / on uninstall).
+    FPopupTakenOver: TMenuItem;
+    FPopupDumped: Boolean;
+    FPopupNoMatchDumped: Boolean;
     procedure UpdateMainItemStates;
     procedure OnRename(Sender: TObject);
     procedure OnFindReferences(Sender: TObject);
@@ -99,7 +105,9 @@ type
       AOnClick: TNotifyEvent; AKind: TShortcutKind; ATrackShortcut: Boolean): TMenuItem;
     function BuildMenuTree(AOwner: TComponent; ATrackShortcut: Boolean): TMenuItem;
     function FindRefactorMenu: TMenuItem;
+    function FindPopupRefactorItem: TMenuItem;
     procedure DumpMainMenu(const AReason: string);
+    procedure DumpEditorPopup(const AReason: string);
     procedure HookRefactorAction(AParent: TMenuItem);
     procedure DoRefactorActionUpdate(Sender: TObject);
     function IsOurMainItem(AItem: TMenuItem): Boolean;
@@ -329,13 +337,25 @@ begin
   Result := Result.TrimRight(['.', #$2026, ' ']);
 end;
 
-function TContextMenuInstaller.FindRefactorMenu: TMenuItem;
 const
-  // Captions of the IDE's Refactor menu across the shipped IDE languages
-  // (accelerators/ellipsis already stripped by NormCaption).
+  // Captions of the IDE's Refactor menu / popup entry across the shipped
+  // IDE languages (accelerators/ellipsis already stripped by NormCaption).
   RefactorCaptions: array[0..6] of string =
     ('REFACTOR', 'REFACTORING', 'REFAKTORIEREN', 'REFACTORISER',
      'RIFATTORIZZA', 'REFATORAR', 'REFACTORIZAR');
+
+function IsRefactorCaption(const ACaption: string): Boolean;
+var
+  Cap: string;
+  K: Integer;
+begin
+  Cap := NormCaption(ACaption);
+  for K := Low(RefactorCaptions) to High(RefactorCaptions) do
+    if Cap = RefactorCaptions[K] then Exit(True);
+  Result := False;
+end;
+
+function TContextMenuInstaller.FindRefactorMenu: TMenuItem;
 var
   NTA: INTAServices;
   Menu: TMainMenu;
@@ -425,6 +445,74 @@ begin
         end;
       end;
       Path := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-mainmenu.log');
+      TFile.AppendAllText(Path, SB.ToString + sLineBreak);
+    finally
+      SB.Free;
+    end;
+  except
+    // diagnostics are best-effort
+  end;
+end;
+
+// The IDE's own "Refactoring" entry inside the editor popup - found per
+// popup round (the IDE rebuilds/updates the popup in its own OnPopup).
+// Matched language-independently: component name containing 'refactor',
+// else normalized caption against the shipped translations. Our own
+// submenu (which may carry the same caption after the takeover) is
+// excluded via the FItems check.
+function TContextMenuInstaller.FindPopupRefactorItem: TMenuItem;
+
+  function IsOurs(AItem: TMenuItem): Boolean;
+  var
+    Own: TMenuItem;
+  begin
+    for Own in FItems do
+      if Own = AItem then Exit(True);
+    Result := False;
+  end;
+
+var
+  I: Integer;
+  It: TMenuItem;
+begin
+  Result := nil;
+  if FPopupMenu = nil then Exit;
+  for I := 0 to FPopupMenu.Items.Count - 1 do
+  begin
+    It := FPopupMenu.Items[I];
+    if IsOurs(It) then Continue;
+    if (Pos('REFACTOR', UpperCase(It.Name)) > 0) or IsRefactorCaption(It.Caption) then
+      Exit(It);
+  end;
+end;
+
+procedure TContextMenuInstaller.DumpEditorPopup(const AReason: string);
+var
+  SB: TStringBuilder;
+  I: Integer;
+  It: TMenuItem;
+  Path, ActName: string;
+begin
+  try
+    SB := TStringBuilder.Create;
+    try
+      SB.AppendLine('--- Refactoring Light editor-popup dump (' + AReason + ') ---');
+      if FPopupMenu = nil then
+        SB.AppendLine('FPopupMenu is nil')
+      else
+      begin
+        SB.AppendLine(Format('Popup "%s" has %d top-level items:',
+          [FPopupMenu.Name, FPopupMenu.Items.Count]));
+        for I := 0 to FPopupMenu.Items.Count - 1 do
+        begin
+          It := FPopupMenu.Items[I];
+          if It.Action <> nil then ActName := It.Action.Name else ActName := '-';
+          SB.AppendLine(Format('  [%2d] Name="%s"  Caption="%s"  Sub=%d  Enabled=%s  Visible=%s  Action=%s',
+            [I, It.Name, It.Caption, It.Count, BoolToStr(It.Enabled, True),
+             BoolToStr(It.Visible, True), ActName]));
+        end;
+      end;
+      Path := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-editorpopup.log');
       TFile.AppendAllText(Path, SB.ToString + sLineBreak);
     finally
       SB.Free;
@@ -631,9 +719,50 @@ end;
 
 procedure TContextMenuInstaller.AddOurItems;
 var
-  Item: TMenuItem;
+  Item, IdeRef, Submenu: TMenuItem;
+  Idx: Integer;
 begin
   if FPopupMenu = nil then Exit;
+  if not FPopupDumped then
+  begin
+    FPopupDumped := True;
+    DumpEditorPopup('first popup');
+  end;
+
+  // FItems = [Separator, Submenu] - see BuildItems.
+  Submenu := nil;
+  if Length(FItems) > 1 then Submenu := FItems[1];
+
+  // Take over the IDE's own "Refactoring" popup entry (analogous to the
+  // main-menu Refactor takeover): hide the IDE's entry and show our tree
+  // at the SAME position under the SAME (localized) caption. The entry is
+  // re-found on every popup because the IDE rebuilds its popup content.
+  IdeRef := FindPopupRefactorItem;
+  if (IdeRef <> nil) and (Submenu <> nil) then
+  begin
+    FPopupTakenOver := IdeRef;
+    try
+      IdeRef.Visible := False;
+      Submenu.Caption := IdeRef.Caption;
+      Idx := FPopupMenu.Items.IndexOf(IdeRef);
+      if Idx < 0 then Idx := 0;
+      if FPopupMenu.Items.IndexOf(Submenu) < 0 then
+        FPopupMenu.Items.Insert(Idx, Submenu);
+      Exit;   // takeover mode: no trailing separator + submenu
+    except
+      // popup rebuilt beneath us - fall through to the append fallback
+      FPopupTakenOver := nil;
+    end;
+  end
+  else if (IdeRef = nil) and not FPopupNoMatchDumped then
+  begin
+    FPopupNoMatchDumped := True;
+    DumpEditorPopup('no Refactoring item matched - using append fallback');
+  end;
+
+  // Fallback (no IDE Refactoring entry found): the classic appended
+  // separator + "Refactoring Light" submenu at the end of the popup.
+  if Submenu <> nil then Submenu.Caption := 'Refactoring Light';
   for Item in FItems do
     if (Item <> nil) and (FPopupMenu.Items.IndexOf(Item) < 0) then
       FPopupMenu.Items.Add(Item);
@@ -645,6 +774,19 @@ var
   Idx: Integer;
 begin
   if FPopupMenu = nil then Exit;
+
+  // Restore the IDE's popup entry we hid in the previous round, so the
+  // IDE's own popup bookkeeping sees its menu unmodified.
+  if FPopupTakenOver <> nil then
+  begin
+    try
+      FPopupTakenOver.Visible := True;
+    except
+      // item freed by the IDE between popups - nothing to restore
+    end;
+    FPopupTakenOver := nil;
+  end;
+
   for Item in FItems do
   begin
     if Item = nil then Continue;

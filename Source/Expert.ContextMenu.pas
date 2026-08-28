@@ -133,15 +133,10 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
-<<<<<<< HEAD
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
-  Expert.FindUnitDialog;
-=======
-  Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard,
-  Expert.ExtractInterfaceWizard, Expert.SemanticReplaceWizard;
->>>>>>> c72e495 (Add Find Original Symbol because Ctrl + Click not always works in Delphi 13.1)
+  Expert.FindUnitDialog, Expert.FindOriginalSymbolWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet

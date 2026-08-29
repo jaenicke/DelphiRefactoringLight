@@ -20,13 +20,15 @@ unit Expert.AutoImport;
 //     identifier in the file with its suggested unit + target section.
 //
 // Live indicator ("lightbulb"): StartAutoImportLive watches the active
-// buffer. Diagnostics come from either of two sources:
+// buffer. Diagnostics come from TWO COMPLEMENTARY sources that merge:
 //   * IDE: Expert.StructureErrors pushes the IDE's own Error Insight
-//     results (Structure view notifier) via LiveReportErrorDiags - primary,
-//     no LSP round-trip of our own.
-//   * Fallback / standalone: a low-frequency poller re-runs our LSP
-//     diagnostics in the background after the buffer has been idle (all
-//     ToolsAPI access on the main thread; the worker only waits on LSP).
+//     results (Structure view notifier) via LiveReportErrorDiags - fast,
+//     but ERRORS only.
+//   * Both hosts: a low-frequency poller runs our own LSP diagnostics in
+//     the background once per idle buffer state (all ToolsAPI access on
+//     the main thread; the worker only waits on LSP). This is the only
+//     source of HINT fixes (H2443/H2164); its result is the superset and
+//     replaces the structure result for the same buffer state.
 // When the caret sits on a line with a missing identifier whose unit is
 // known, a small non-focus-stealing button appears just below the caret;
 // clicking it opens the chooser popup. The hint is bound to the error line:
@@ -36,7 +38,49 @@ unit Expert.AutoImport;
 interface
 
 uses
-  Lsp.Protocol;
+  System.SysUtils, Lsp.Protocol, Expert.UsesEditor;
+
+type
+  TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
+    qfAlignHeader, qfRemoveVar);
+
+  /// <summary>One concrete, applicable fix action derived from a compiler
+  ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
+  TQuickFix = record
+    Kind: TQuickFixKind;
+    Line: Integer;              // 0-based line the fix anchors to
+    Caption: string;            // short hint-label text
+    // token replacement (qfRenameIdent / qfFixUsesName):
+    Col: Integer;               // 0-based start column of the token
+    TokenLen: Integer;
+    NewText: string;
+    // uses handling:
+    Identifier: string;         // qfAddUnit: the unresolved identifier
+    UnitNames: TArray<string>;  // qfAddUnit: candidate units (deduped)
+    Section: TUsesSection;      // target section for uses additions
+    FollowUpUnit: string;       // qfRenameIdent: unit to add after renaming
+    OldUnit: string;            // qfRemoveUses: unit to remove
+  end;
+
+/// <summary>Turns compiler diagnostics into concrete quick fixes. Pure
+///  function of (content, diagnostics) plus the immutable unit-index
+///  snapshot - safe on any thread. Providers: E2003 (add unit / "did you
+///  mean" rename), F2613/F2063 (fix or remove a uses entry), E2037 (align
+///  the implementation header with the declaration), H2443 (add the unit
+///  the hint names to uses), H2164 (remove an unused variable).</summary>
+function ResolveQuickFixes(const AContent: string;
+  const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
+
+/// <summary>Executes one quick fix. AUnitChoice picks the candidate unit
+///  for qfAddUnit (index into UnitNames).</summary>
+function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
+  AUnitChoice: Integer): Boolean;
+
+/// <summary>E2037 fix: rewrites the implementation header at/around ALine0
+///  (0-based) so parameters and return type match the declaration, keeping
+///  the implementation's parameter names. False when the declaration is
+///  not found or ambiguous (overloads).</summary>
+function AlignImplHeaderToDecl(const AFile: string; ALine0: Integer): Boolean;
 
 procedure AddUnitForIdentifierAtCursor;
 procedure ResolveMissingUnits;
@@ -54,29 +98,58 @@ function LiveFreshInfo(const AFile: string; out ACount: Integer): Boolean;
 /// <summary>Feeds the live checker with error diagnostics obtained from an
 ///  EXTERNAL source - in the IDE that is the Structure view, which mirrors
 ///  Delphi's own Error Insight (see Expert.StructureErrors). AContent must
-///  be the buffer content the diagnostics refer to. Marks the buffer state
-///  as answered, so the LSP polling fallback skips its own analysis for
-///  this state. Main thread only.</summary>
+///  be the buffer content the diagnostics refer to. These fast, errors-only
+///  results are published immediately; the complementary LSP pass (which
+///  adds the hint fixes) still runs for the same buffer state and replaces
+///  them as the superset. Main thread only.</summary>
 procedure LiveReportErrorDiags(const AFile, AContent: string;
   const ADiags: TArray<TLspErrorDiag>);
 
-/// <summary>Opens the quick-fix chooser popup at the caret for AIdent
-///  (or for the first missing identifier when AIdent is ''), taken from
-///  the FRESH live results of AFile. False when there is no matching
-///  fresh entry. Used by the Structure-view double-click integration.</summary>
-function LiveShowFixAtCaret(const AFile, AIdent: string): Boolean;
+/// <summary>Opens the quick-fix chooser popup for the fixes on the CARET
+///  line, taken from the FRESH live results of AFile. False when there is
+///  no fresh fix there. Used by the Structure-view double-click
+///  integration (the IDE navigates to the error first).</summary>
+function LiveShowFixAtCaret(const AFile: string): Boolean;
+
+/// <summary>True while the live checker is still resolving (or has a
+///  resolve queued) - a False from LiveShowFixAtCaret then means "not
+///  ready yet", not "nothing to fix"; the caller may retry shortly.</summary>
+function LiveResolveBusy: Boolean;
+
+/// <summary>The FRESH quick fixes anchored to the 0-based line ALine0 of
+///  AFile - read-only access for the editor line markers
+///  (Expert.QuickFixMarkers). Empty when the live results are stale or
+///  belong to another file. Main thread only.</summary>
+function LiveFixesForLine(const AFile: string; ALine0: Integer): TArray<TQuickFix>;
+
+var
+  /// <summary>Set by Expert.QuickFixMarkers: invoked from the poll TICK
+  ///  (safe WM_TIMER context) whenever the published live results change,
+  ///  so the markers can invalidate the editor. Never called from
+  ///  notifier/queue contexts.</summary>
+  GLiveRepaintHook: TProc = nil;
+
+/// <summary>Called after a REAL compile (IOTAIDENotifier50.AfterCompile,
+///  not code-insight): re-arms ONE LSP analysis of the active buffer even
+///  though the Structure view already answered it. The compiler's full
+///  message set - including hints like H2443, which never reach the
+///  Structure view and whose window has no read API - is only obtainable
+///  through the plugin's own LSP session. State-only (notifier context);
+///  the poll tick performs the analysis.</summary>
+procedure LiveRefreshAfterCompile;
 
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.Types, System.UITypes,
+  System.Classes, System.Types, System.UITypes,
   System.Generics.Collections, System.IOUtils, System.Math, System.StrUtils,
-  System.Hash, System.JSON,
+  System.Hash, System.JSON, System.SyncObjs,
   Winapi.Windows,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Graphics, Vcl.Dialogs,
   Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.UsesEditor,
+  Expert.EditorHelperIntf, Expert.UnitIndex,
+  Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
   Expert.DialogHelper;
 
 type
@@ -191,6 +264,369 @@ begin
   end;
 end;
 
+// ---------------------------------------------------------------------------
+//  Quick-fix model + resolver
+// ---------------------------------------------------------------------------
+//
+// One diagnostic can yield several concrete FIX ACTIONS. Providers:
+//   E2003 undeclared identifier  -> add declaring unit to uses (index hit),
+//                                   or "did you mean" rename (fuzzy index)
+//   F2613 unit not found         -> fix the unit name in uses (fuzzy) or
+//                                   remove the entry
+//   E2037 declaration differs    -> align the implementation header with
+//                                   the declaration (DFM-fix style merge)
+//   H2443 inline not expanded    -> add the unit named in the hint to uses
+// ResolveQuickFixes is a pure function of (content, diagnostics) plus the
+// immutable index snapshot - safe on any thread. (TQuickFix and the public
+// entry points are declared in the interface section.)
+
+// Token at the 1-based column ACol1 of ALine; identifier chars, optionally
+// including '.' (for dotted unit names). 0-based start col out.
+function TokenAt(const ALine: string; ACol1: Integer; AAllowDots: Boolean;
+  out AStartCol0, ALen: Integer): Boolean;
+
+  function IsTokCh(C: Char): Boolean;
+  begin
+    Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_'])
+      or (AAllowDots and (C = '.'));
+  end;
+
+var
+  P, StartP, EndP: Integer;
+begin
+  Result := False;
+  P := ACol1;
+  if (P > Length(ALine)) or ((P >= 1) and not IsTokCh(ALine[P])) then
+    P := ACol1 - 1;
+  if (P < 1) or (P > Length(ALine)) or not IsTokCh(ALine[P]) then Exit;
+  StartP := P;
+  while (StartP > 1) and IsTokCh(ALine[StartP - 1]) do Dec(StartP);
+  EndP := P;
+  while (EndP < Length(ALine)) and IsTokCh(ALine[EndP + 1]) do Inc(EndP);
+  // Trim stray dots at the edges and reject number literals.
+  while (StartP <= EndP) and (ALine[StartP] = '.') do Inc(StartP);
+  while (EndP >= StartP) and (ALine[EndP] = '.') do Dec(EndP);
+  if (EndP < StartP) or CharInSet(ALine[StartP], ['0'..'9']) then Exit;
+  AStartCol0 := StartP - 1;
+  ALen := EndP - StartP + 1;
+  Result := True;
+end;
+
+// First '...'-quoted token of a (localized) diagnostic message - for H2443
+// that is the inline function's name (the marker anchor).
+function FirstQuoted(const S: string): string;
+var
+  I, StartQ: Integer;
+begin
+  Result := '';
+  StartQ := 0;
+  for I := 1 to Length(S) do
+    if S[I] = '''' then
+    begin
+      if StartQ = 0 then
+        StartQ := I
+      else
+      begin
+        Result := Copy(S, StartQ + 1, I - StartQ - 1);
+        Exit;
+      end;
+    end;
+end;
+
+// Last '...'-quoted token of a (localized) diagnostic message - for H2443
+// that is the unit name ("... because unit 'System.Math' is not ...").
+function LastQuoted(const S: string): string;
+var
+  I, EndQ: Integer;
+begin
+  Result := '';
+  EndQ := 0;
+  for I := Length(S) downto 1 do
+    if S[I] = '''' then
+    begin
+      if EndQ = 0 then
+        EndQ := I
+      else
+      begin
+        Result := Copy(S, I + 1, EndQ - I - 1);
+        Exit;
+      end;
+    end;
+end;
+
+function LooksLikeUnitName(const S: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if (S = '') or CharInSet(S[1], ['0'..'9', '.']) then Exit;
+  for I := 1 to Length(S) do
+    if not CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) then Exit;
+  Result := S[Length(S)] <> '.';
+end;
+
+function ResolveQuickFixes(const AContent: string;
+  const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
+var
+  Lines: TArray<string>;
+  ImplLine: Integer;
+  Res: TList<TQuickFix>;
+  Seen: TDictionary<string, Boolean>;
+  FuzzyCache: TDictionary<string, TArray<TFindUnitHit>>;
+  Snap: IUnitSnapshot;
+
+  function SectionFor(ALine0: Integer): TUsesSection;
+  begin
+    if ALine0 < ImplLine then Result := usInterface else Result := usImplementation;
+  end;
+
+  function DiagToken(const D: TLspErrorDiag; AAllowDots: Boolean;
+    out ACol0, ALen: Integer; out AText: string): Boolean;
+  var
+    LnTxt: string;
+  begin
+    Result := False;
+    if (D.Range.Start.Line < 0) or (D.Range.Start.Line > High(Lines)) then Exit;
+    LnTxt := Lines[D.Range.Start.Line];
+    Result := TokenAt(LnTxt, D.Range.Start.Character + 1, AAllowDots, ACol0, ALen);
+    if Result then
+      AText := Copy(LnTxt, ACol0 + 1, ALen);
+  end;
+
+  procedure AddE2003(const D: TLspErrorDiag);
+  var
+    Col0, Len, MaxDist: Integer;
+    Ident: string;
+    Hits, Cands: TArray<TFindUnitHit>;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    // Semantic dedup: both diagnostic sources report one E2003 per
+    // OCCURRENCE, so the same identifier twice on a line would otherwise
+    // produce identical fixes. One fix per (identifier, line).
+    if Seen.ContainsKey('I|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident)) then Exit;
+    Seen.Add('I|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident), True);
+
+    if Snap = nil then Exit;
+    Hits := DedupeByUnitName(Snap.Lookup(Ident));
+    if Length(Hits) > 0 then
+    begin
+      F := Default(TQuickFix);
+      F.Kind := qfAddUnit;
+      F.Line := D.Range.Start.Line;
+      F.Col := Col0;           // for the editor line markers
+      F.TokenLen := Len;
+      F.Identifier := Ident;
+      F.Caption := Format('Add unit for "%s"', [Ident]);
+      F.Section := SectionFor(F.Line);
+      for var H in Hits do
+        F.UnitNames := F.UnitNames + [H.UnitName];
+      Res.Add(F);
+      Exit;
+    end;
+
+    // Unknown everywhere -> "did you mean" via fuzzy index scan.
+    if Length(Ident) < 4 then Exit;
+    if not FuzzyCache.TryGetValue(UpperCase(Ident), Cands) then
+    begin
+      if Length(Ident) <= 5 then MaxDist := 1 else MaxDist := 2;
+      Cands := Snap.FuzzyIdentifiers(Ident, MaxDist, 3);
+      FuzzyCache.Add(UpperCase(Ident), Cands);
+    end;
+    for var C in Cands do
+    begin
+      F := Default(TQuickFix);
+      F.Kind := qfRenameIdent;
+      F.Line := D.Range.Start.Line;
+      F.Col := Col0;
+      F.TokenLen := Len;
+      F.NewText := C.Identifier;
+      F.Caption := Format('Did you mean "%s"?', [C.Identifier]);
+      F.Section := SectionFor(F.Line);
+      // If no declaring unit of the corrected identifier is reachable yet,
+      // plan to add the best one right after the rename.
+      var CandHits := DedupeByUnitName(Snap.Lookup(C.Identifier));
+      var Reachable := False;
+      for var H in CandHits do
+        if UnitInUsesText(AContent, H.UnitName) then
+        begin
+          Reachable := True;
+          Break;
+        end;
+      if (not Reachable) and (Length(CandHits) > 0) then
+        F.FollowUpUnit := CandHits[0].UnitName;
+      Res.Add(F);
+    end;
+  end;
+
+  procedure AddF2613(const D: TLspErrorDiag);
+  var
+    Col0, Len: Integer;
+    UnitName: string;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, True, Col0, Len, UnitName) then Exit;
+    if Seen.ContainsKey('U|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(UnitName)) then Exit;
+    Seen.Add('U|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(UnitName), True);
+    if Snap <> nil then
+      for var Cand in Snap.FuzzyUnitNames(UnitName, 2, 3) do
+      begin
+        // A candidate that is ALREADY listed in a uses clause would end up
+        // twice after the rename (a compile error) - the right action for
+        // that case is the remove fix below.
+        if UnitInUsesText(AContent, Cand) then Continue;
+        F := Default(TQuickFix);
+        F.Kind := qfFixUsesName;
+        F.Line := D.Range.Start.Line;
+        F.Col := Col0;
+        F.TokenLen := Len;
+        F.NewText := Cand;
+        F.Caption := Format('Unit "%s"?', [Cand]);
+        Res.Add(F);
+      end;
+    F := Default(TQuickFix);
+    F.Kind := qfRemoveUses;
+    F.Line := D.Range.Start.Line;
+    F.OldUnit := UnitName;
+    F.Caption := Format('Remove "%s" from uses', [UnitName]);
+    Res.Add(F);
+  end;
+
+  procedure AddE2037(const D: TLspErrorDiag);
+  var
+    Col0, Len: Integer;
+    Tok: string;
+    F: TQuickFix;
+  begin
+    F := Default(TQuickFix);
+    F.Kind := qfAlignHeader;
+    F.Line := D.Range.Start.Line;
+    F.Caption := 'Align with declaration';
+    // Marker anchor: the method name at the diagnostic position (falls
+    // back to the painter's first-word marker when unavailable).
+    if DiagToken(D, False, Col0, Len, Tok) then
+    begin
+      F.Col := Col0;
+      F.TokenLen := Len;
+    end;
+    Res.Add(F);
+  end;
+
+  procedure AddH2443(const D: TLspErrorDiag);
+  var
+    UnitName, FuncName, Tok: string;
+    Col0, Len, P: Integer;
+    F: TQuickFix;
+  begin
+    UnitName := LastQuoted(D.Message);
+    if not LooksLikeUnitName(UnitName) then Exit;
+    if UnitInUsesText(AContent, UnitName) then Exit;   // stale diagnostic
+    // One add-unit fix per unit, no matter how many call sites hint it.
+    if Seen.ContainsKey('H|' + UpperCase(UnitName)) then Exit;
+    Seen.Add('H|' + UpperCase(UnitName), True);
+
+    // Marker anchor: the inline function's call site. Prefer the token at
+    // the diagnostic position; else locate the first-quoted name (the
+    // function) in the line - without this the editor marker would sit
+    // under the line's indentation instead of under the call.
+    Col0 := 0;
+    Len := 0;
+    if not DiagToken(D, False, Col0, Len, Tok) then
+    begin
+      Col0 := 0;
+      Len := 0;
+      FuncName := FirstQuoted(D.Message);
+      if (FuncName <> '') and (D.Range.Start.Line >= 0)
+        and (D.Range.Start.Line <= High(Lines)) then
+      begin
+        P := Pos(UpperCase(FuncName), UpperCase(Lines[D.Range.Start.Line]));
+        if P > 0 then
+        begin
+          Col0 := P - 1;
+          Len := Length(FuncName);
+        end;
+      end;
+    end;
+    F := Default(TQuickFix);
+    F.Kind := qfAddUnit;
+    F.Line := D.Range.Start.Line;
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := UnitName;
+    F.UnitNames := [UnitName];
+    F.Section := SectionFor(D.Range.Start.Line);
+    F.Caption := Format('Add %s to uses', [UnitName]);
+    Res.Add(F);
+  end;
+
+  procedure AddH2164(const D: TLspErrorDiag);
+  var
+    Col0, Len, ColonP, I: Integer;
+    Ident, LnTxt: string;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    if Seen.ContainsKey('V|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident)) then Exit;
+    Seen.Add('V|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident), True);
+    // Only offer the removal when the line plausibly IS a var declaration
+    // we know how to rewrite: a ':' at top level before any ';', and no
+    // ':=' (an initialized inline var may carry a side effect - skipped).
+    LnTxt := Lines[D.Range.Start.Line];
+    if Pos(':=', LnTxt) > 0 then Exit;
+    ColonP := 0;
+    for I := 1 to Length(LnTxt) do
+      case LnTxt[I] of
+        ':': begin ColonP := I; Break; end;
+        ';': Break;
+      end;
+    if (ColonP = 0) or (Col0 + Len >= ColonP) then Exit;   // ident must precede ':'
+    F := Default(TQuickFix);
+    F.Kind := qfRemoveVar;
+    F.Line := D.Range.Start.Line;
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := Ident;
+    F.Caption := Format('Remove unused variable "%s"', [Ident]);
+    Res.Add(F);
+  end;
+
+var
+  Key: string;
+begin
+  Result := nil;
+  Lines := SplitContentLines(AContent);
+  ImplLine := ImplementationLineOf(Lines);
+  Snap := TUnitIndex.Instance.Snapshot;
+
+  Res := TList<TQuickFix>.Create;
+  Seen := TDictionary<string, Boolean>.Create;
+  FuzzyCache := TDictionary<string, TArray<TFindUnitHit>>.Create;
+  try
+    for var D in ADiags do
+    begin
+      Key := Format('%s|%d|%d', [UpperCase(D.Code), D.Range.Start.Line,
+        D.Range.Start.Character]);
+      if Seen.ContainsKey(Key) then Continue;
+      Seen.Add(Key, True);
+
+      // F2613 "Unit not found" and F2063 "Could not compile used unit":
+      // the IDE's Error Insight reports a broken/misspelled uses entry as
+      // F2063 (observed empirically), the batch compiler as F2613 - both
+      // anchor at the uses entry and get the same repair actions.
+      if SameText(D.Code, 'E2003') then AddE2003(D)
+      else if SameText(D.Code, 'F2613') or SameText(D.Code, 'F2063') then AddF2613(D)
+      else if SameText(D.Code, 'E2037') then AddE2037(D)
+      else if SameText(D.Code, 'H2443') then AddH2443(D)
+      else if SameText(D.Code, 'H2164') then AddH2164(D);
+    end;
+    Result := Res.ToArray;
+  finally
+    FuzzyCache.Free;
+    Seen.Free;
+    Res.Free;
+  end;
+end;
+
 var
   // True while an on-demand gather is running; the live poller skips its
   // tick then, so two didClose/didOpen sequences never interleave.
@@ -262,44 +698,456 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-//  Caret-anchored chooser popup (VS-like) for the single-identifier quick fix
+//  E2037 fix: align an implementation header with its declaration
 // ---------------------------------------------------------------------------
 
+// Rewrites the implementation header at/around ALine0 so that parameter
+// modifiers/types and the return type match the method's declaration, while
+// KEEPING the implementation's parameter names (MergeParamNames - the same
+// merge the DFM auto-fix uses). Multi-line headers are collapsed into one
+// rewritten line. Overloads with ambiguous declarations are refused.
+function AlignImplHeaderToDecl(const AFile: string; ALine0: Integer): Boolean;
+var
+  Content: string;
+  Lines: TArray<string>;
+
+  function IsHeaderLine(const S: string; out AKind: string;
+    out AIsClassMethod: Boolean): Boolean;
+  var
+    T: string;
+  begin
+    Result := False;
+    AKind := '';
+    T := Trim(S);
+    AIsClassMethod := StartsText('class ', T);
+    if AIsClassMethod then T := Trim(Copy(T, 7, MaxInt));
+    for var KW in ['procedure', 'function', 'constructor', 'destructor'] do
+      if StartsText(KW + ' ', T) then
+      begin
+        AKind := KW;
+        Exit(True);
+      end;
+  end;
+
+  // Joins lines from AStart until the first ';' outside parentheses;
+  // AEndLine returns the last joined line. '' when no terminator found.
+  function CollectHeader(AStart: Integer; out AEndLine: Integer): string;
+  var
+    I, J, Depth: Integer;
+    L: string;
+  begin
+    Result := '';
+    Depth := 0;
+    for I := AStart to Min(AStart + 11, High(Lines)) do
+    begin
+      L := StripLineComment(Lines[I]);
+      for J := 1 to Length(L) do
+      begin
+        case L[J] of
+          '(', '[': Inc(Depth);
+          ')', ']': if Depth > 0 then Dec(Depth);
+          ';': if Depth = 0 then
+            begin
+              AEndLine := I;
+              Exit(Trim(Result + ' ' + Copy(L, 1, J)));
+            end;
+        end;
+      end;
+      Result := Result + ' ' + L;
+    end;
+    Result := '';
+  end;
+
+  // Splits a collected header into name / params / return type.
+  function ParseHeader(const AHeader, AKind: string;
+    out AQualified, AParams, ARetType: string): Boolean;
+  var
+    T: string;
+    P, Depth, I, OpenP, CloseP, ColonP: Integer;
+  begin
+    Result := False;
+    T := Trim(AHeader);
+    if StartsText('class ', T) then T := Trim(Copy(T, 7, MaxInt));
+    if not StartsText(AKind + ' ', T) then Exit;
+    T := Trim(Copy(T, Length(AKind) + 2, MaxInt));
+    // Name runs until '(' / ':' / ';'.
+    P := 1;
+    while (P <= Length(T)) and not CharInSet(T[P], ['(', ':', ';']) do Inc(P);
+    AQualified := Trim(Copy(T, 1, P - 1));
+    if AQualified = '' then Exit;
+    AParams := '';
+    ARetType := '';
+    OpenP := 0; CloseP := 0; Depth := 0;
+    for I := 1 to Length(T) do
+      case T[I] of
+        '(': begin if Depth = 0 then OpenP := I; Inc(Depth); end;
+        ')': begin Dec(Depth); if Depth = 0 then begin CloseP := I; Break; end; end;
+      end;
+    if (OpenP > 0) and (CloseP > OpenP) then
+      AParams := Trim(Copy(T, OpenP + 1, CloseP - OpenP - 1));
+    // Return type: ':' after the params (or after the name) up to ';'.
+    ColonP := 0; Depth := 0;
+    for I := Max(1, CloseP + 1) to Length(T) do
+      case T[I] of
+        '(', '[': Inc(Depth);
+        ')', ']': if Depth > 0 then Dec(Depth);
+        ':': if Depth = 0 then begin ColonP := I; Break; end;
+        ';': if Depth = 0 then Break;
+      end;
+    if ColonP > 0 then
+    begin
+      I := ColonP + 1;
+      while (I <= Length(T)) and (T[I] <> ';') do Inc(I);
+      ARetType := Trim(Copy(T, ColonP + 1, I - ColonP - 1));
+    end;
+    Result := True;
+  end;
+
+var
+  HdrStart, HdrEnd, I, P, DeclLine, DeclEnd, ClassLine, SearchFrom, SearchTo: Integer;
+  Kind, DeclKind, Header, Qualified, ImplParams, ImplRet: string;
+  ClassName, MethodName, DeclHeader, DeclQual, DeclParams, DeclRet: string;
+  IsClassMeth, DeclIsClassMeth, B: Boolean;
+  Matches: Integer;
+  NewHeader, Indent: string;
+begin
+  Result := False;
+  if not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+
+  // 1. Header start at/above the diagnostic line.
+  HdrStart := -1;
+  for I := ALine0 downto Max(0, ALine0 - 4) do
+    if IsHeaderLine(Lines[I], Kind, IsClassMeth) then
+    begin
+      HdrStart := I;
+      Break;
+    end;
+  if HdrStart < 0 then Exit;
+
+  Header := CollectHeader(HdrStart, HdrEnd);
+  if Header = '' then Exit;
+  if not ParseHeader(Header, Kind, Qualified, ImplParams, ImplRet) then Exit;
+
+  P := Qualified.LastDelimiter('.');   // 0-based, -1 if none
+  if P >= 0 then
+  begin
+    ClassName := Copy(Qualified, 1, P);
+    MethodName := Copy(Qualified, P + 2, MaxInt);
+  end
+  else
+  begin
+    ClassName := '';
+    MethodName := Qualified;
+  end;
+  if MethodName = '' then Exit;
+
+  // 2. Find the declaration: inside the class body, or (plain routines)
+  //    in the interface section.
+  SearchFrom := 0;
+  SearchTo := High(Lines);
+  if ClassName <> '' then
+  begin
+    ClassLine := -1;
+    for I := 0 to High(Lines) do
+    begin
+      var T := Trim(StripLineComment(Lines[I]));
+      if StartsText(ClassName, T) then
+      begin
+        var Rest := Trim(Copy(T, Length(ClassName) + 1, MaxInt));
+        if StartsText('=', Rest) and (Pos('CLASS', UpperCase(Rest)) > 0) then
+        begin
+          // Skip non-body declarations that also match the pattern:
+          // forward ('TNode = class;') and metaclass ('TFoo = class of X;').
+          var After := Trim(Copy(Rest, 2, MaxInt));   // text after '='
+          if SameText(After, 'class;') or StartsText('class of ', After) then
+            Continue;
+          ClassLine := I;
+          Break;
+        end;
+      end;
+    end;
+    if ClassLine < 0 then Exit;
+    SearchFrom := ClassLine + 1;
+    SearchTo := High(Lines);
+    // The class body ends at ITS 'end;' - track nested type declarations
+    // ('TOpts = record ... end;', nested classes) so their terminators do
+    // not cut the search region short.
+    var Depth := 1;
+    for I := ClassLine + 1 to High(Lines) do
+    begin
+      var T := Trim(StripLineComment(Lines[I]));
+      var U := UpperCase(T);
+      if ((Pos('= RECORD', U) > 0) or (Pos('=RECORD', U) > 0)
+          or (Pos('= CLASS', U) > 0) or (Pos('=CLASS', U) > 0))
+        and not U.EndsWith(';') then
+        Inc(Depth)
+      else if SameText(T, 'end;') then
+      begin
+        Dec(Depth);
+        if Depth = 0 then
+        begin
+          SearchTo := I;
+          Break;
+        end;
+      end;
+    end;
+  end
+  else
+    SearchTo := ImplementationLineOf(Lines) - 1;
+
+  DeclLine := -1;
+  Matches := 0;
+  for I := SearchFrom to Min(SearchTo, High(Lines)) do
+  begin
+    if I = HdrStart then Continue;
+    if not IsHeaderLine(Lines[I], DeclKind, B) then Continue;
+    var T := Trim(StripLineComment(Lines[I]));
+    if StartsText('class ', T) then T := Trim(Copy(T, 7, MaxInt));
+    T := Trim(Copy(T, Length(DeclKind) + 2, MaxInt));
+    if not StartsText(MethodName, T) then Continue;
+    var After := Copy(T, Length(MethodName) + 1, MaxInt);
+    if (After <> '') and not CharInSet(After[1], ['(', ':', ';', ' ']) then Continue;
+    Inc(Matches);
+    if DeclLine < 0 then DeclLine := I;
+  end;
+  if (DeclLine < 0) or (Matches > 1) then Exit;   // none, or ambiguous overloads
+
+  DeclHeader := CollectHeader(DeclLine, DeclEnd);
+  if DeclHeader = '' then Exit;
+  if not IsHeaderLine(Lines[DeclLine], DeclKind, DeclIsClassMeth) then Exit;
+  if not ParseHeader(DeclHeader, DeclKind, DeclQual, DeclParams, DeclRet) then Exit;
+
+  // 3. Compose the new implementation header: declaration's modifiers /
+  //    types / return type, implementation's parameter names.
+  Indent := Copy(Lines[HdrStart], 1,
+    Length(Lines[HdrStart]) - Length(TrimLeft(Lines[HdrStart])));
+  NewHeader := Indent;
+  if DeclIsClassMeth then NewHeader := NewHeader + 'class ';
+  NewHeader := NewHeader + DeclKind + ' ' + Qualified;
+  if DeclParams <> '' then
+    NewHeader := NewHeader + '(' + MergeParamNames(ImplParams, DeclParams) + ')';
+  if DeclRet <> '' then
+    NewHeader := NewHeader + ': ' + DeclRet;
+  NewHeader := NewHeader + ';';
+
+  // 4. Apply: first line replaced, continuation lines removed.
+  if not Editor.ReplaceLineAt(AFile, HdrStart + 1, NewHeader) then Exit;
+  for I := HdrEnd downto HdrStart + 1 do
+    Editor.DeleteLineAt(AFile, I + 1);
+  Result := True;
+end;
+
+// Replaces the CHARACTERS [ACol0, ACol0+ATokenLen) of the 0-based line
+// ALine0 with ANewText, via a whole-line rewrite. Deliberately NOT
+// Editor.ReplaceSelection: the IDE implementation of that computes BYTE
+// offsets in the UTF-8 buffer, so a non-ASCII character earlier on the
+// line (a German comment, say) would shift the replacement. ReplaceLineAt
+// is line-based and encoding-safe in both hosts.
+function ReplaceTokenInLine(const AFile: string; ALine0, ACol0,
+  ATokenLen: Integer; const ANewText: string): Boolean;
+var
+  Content, L: string;
+  Lines: TArray<string>;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  L := Lines[ALine0];
+  // Stale-buffer guard: the token must still fit where the fix expects it.
+  if ACol0 + ATokenLen > Length(L) then Exit;
+  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
+    Copy(L, 1, ACol0) + ANewText + Copy(L, ACol0 + ATokenLen + 1, MaxInt));
+end;
+
+// H2164 fix: removes the variable AIdent from the declaration line ALine0
+// ("A, X, B: Integer;" -> "A, B: Integer;"; a lone "X: Integer;" removes
+// the line, and a var block left empty loses its 'var' keyword line too).
+function RemoveVarFromDecl(const AFile, AIdent: string; ALine0: Integer): Boolean;
+
+  function LooksLikeDeclLine(const S: string): Boolean;
+  var
+    T: string;
+    P: Integer;
+  begin
+    // "name[, name]*: type;" - enough to recognise a sibling declaration.
+    T := Trim(StripLineComment(S));
+    Result := False;
+    if (T = '') or (Pos(':=', T) > 0) then Exit;
+    P := Pos(':', T);
+    if P <= 1 then Exit;
+    Result := CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']);
+  end;
+
+var
+  Content, L, Stripped, NamesPart, Rest, Rebuilt: string;
+  Lines: TArray<string>;
+  ColonP, PrevIdx, NextIdx: Integer;
+  Kept: TArray<string>;
+  HadVarPrefix, Found: Boolean;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  L := Lines[ALine0];
+  Stripped := StripLineComment(L);
+  if Pos(':=', Stripped) > 0 then Exit;   // initialized inline var - refuse
+
+  ColonP := Pos(':', Stripped);
+  if ColonP <= 1 then Exit;
+  NamesPart := Trim(Copy(Stripped, 1, ColonP - 1));
+  Rest := Copy(L, ColonP, MaxInt);        // ': type;' + any trailing comment
+
+  HadVarPrefix := StartsText('var ', NamesPart);
+  if HadVarPrefix then
+    NamesPart := Trim(Copy(NamesPart, 5, MaxInt));
+
+  Found := False;
+  Kept := nil;
+  for var N in NamesPart.Split([',']) do
+  begin
+    var Nm := Trim(N);
+    if Nm = '' then Continue;
+    if SameText(Nm, AIdent) then
+      Found := True
+    else
+      Kept := Kept + [Nm];
+  end;
+  if not Found then Exit;
+
+  if Length(Kept) > 0 then
+  begin
+    // Rebuild the line without the removed name.
+    Rebuilt := Copy(L, 1, Length(L) - Length(TrimLeft(L)));   // indentation
+    if HadVarPrefix then Rebuilt := Rebuilt + 'var ';
+    Rebuilt := Rebuilt + string.Join(', ', Kept) + Rest;
+    Exit(Editor.ReplaceLineAt(AFile, ALine0 + 1, Rebuilt));
+  end;
+
+  // The only name on the line -> remove the whole line ...
+  if not Editor.DeleteLineAt(AFile, ALine0 + 1) then Exit;
+  Result := True;
+  if HadVarPrefix then Exit;   // inline 'var X: T;' - nothing more to do
+
+  // ... and drop a now-empty 'var' keyword line above it: previous
+  // non-empty line must be exactly 'var', and the line that moved into
+  // the deleted slot must not be a sibling declaration.
+  PrevIdx := ALine0 - 1;
+  while (PrevIdx >= 0) and (Trim(Lines[PrevIdx]) = '') do Dec(PrevIdx);
+  if (PrevIdx < 0) or not SameText(Trim(StripLineComment(Lines[PrevIdx])), 'var') then Exit;
+  NextIdx := ALine0 + 1;   // in the ORIGINAL lines: the line after the deleted one
+  while (NextIdx <= High(Lines)) and (Trim(Lines[NextIdx]) = '') do Inc(NextIdx);
+  if (NextIdx <= High(Lines)) and LooksLikeDeclLine(Lines[NextIdx]) then Exit;
+  Editor.DeleteLineAt(AFile, PrevIdx + 1);
+end;
+
+// Executes one quick fix. AUnitChoice picks the candidate unit for
+// qfAddUnit (index into UnitNames).
+function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
+  AUnitChoice: Integer): Boolean;
+begin
+  Result := False;
+  case AFix.Kind of
+    qfAddUnit:
+      begin
+        if (AUnitChoice < 0) or (AUnitChoice > High(AFix.UnitNames)) then
+          AUnitChoice := 0;
+        if AUnitChoice > High(AFix.UnitNames) then Exit;
+        Result := AddUnitToUses(AFile, AFix.UnitNames[AUnitChoice], AFix.Section);
+      end;
+    qfRenameIdent:
+      begin
+        Result := ReplaceTokenInLine(AFile, AFix.Line, AFix.Col,
+          AFix.TokenLen, AFix.NewText);
+        if Result and (AFix.FollowUpUnit <> '') then
+          AddUnitToUses(AFile, AFix.FollowUpUnit, AFix.Section);
+      end;
+    qfFixUsesName:
+      Result := ReplaceTokenInLine(AFile, AFix.Line, AFix.Col,
+        AFix.TokenLen, AFix.NewText);
+    qfRemoveUses:
+      Result := RemoveUnitFromUses(AFile, AFix.OldUnit);
+    qfAlignHeader:
+      Result := AlignImplHeaderToDecl(AFile, AFix.Line);
+    qfRemoveVar:
+      Result := RemoveVarFromDecl(AFile, AFix.Identifier, AFix.Line);
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+//  Caret-anchored quick-fix chooser popup (VS-like)
+// ---------------------------------------------------------------------------
+//
+// Lists the concrete fix ACTIONS for one source line: a qfAddUnit fix
+// expands into one row per candidate unit; every other fix is one row.
+// Double-click / Enter applies the selected action, Escape / clicking
+// elsewhere cancels. The Section button switches the target uses section
+// of the add-unit rows.
+
 type
-  TAutoImportPopup = class(TForm)
+  TQuickFixAction = record
+    Caption: string;
+    FixIdx: Integer;      // index into FFixes
+    UnitChoice: Integer;  // candidate-unit index for qfAddUnit, else -1
+  end;
+
+  TQuickFixPopup = class(TForm)
   private
     FFile: string;
-    FMissing: TMissingIdent;
-    FSection: TUsesSection;
+    FFixes: TArray<TQuickFix>;
+    FActions: TArray<TQuickFixAction>;
+    FSection: TUsesSection;   // current target of the add-unit rows
+    FHasUsesRows: Boolean;
     FLbl: TLabel;
     FList: TListBox;
     FSecBtn: TButton;
-    FAddBtn: TButton;
-    procedure DoAdd(Sender: TObject);
+    FApplyBtn: TButton;
+    procedure RebuildActions;
+    procedure DoApply(Sender: TObject);
     procedure DoToggleSection(Sender: TObject);
     procedure DoDeactivate(Sender: TObject);
     procedure DoKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure DoPopupClose(Sender: TObject; var Action: TCloseAction);
-    procedure UpdateSectionCaption;
   public
-    constructor CreatePopup(const AFile: string; const AMissing: TMissingIdent);
+    constructor CreatePopup(const AFile: string; const AFixes: TArray<TQuickFix>);
     procedure ShowAt(const APt: TPoint);
   end;
 
-constructor TAutoImportPopup.CreatePopup(const AFile: string; const AMissing: TMissingIdent);
+constructor TQuickFixPopup.CreatePopup(const AFile: string;
+  const AFixes: TArray<TQuickFix>);
+var
+  OnlyIdent: string;
+  OnlyAdds: Boolean;
 begin
   inherited CreateNew(nil);
   FFile := AFile;
-  FMissing := AMissing;
-  FSection := AMissing.Section;
+  FFixes := AFixes;
   BorderStyle := bsNone;
   FormStyle := fsStayOnTop;
   Color := clWindow;
-  Width := 340;
+  Width := 380;
   KeyPreview := True;
   OnDeactivate := DoDeactivate;
   OnKeyDown := DoKeyDown;
   OnClose := DoPopupClose;
+
+  // Section default + row kinds.
+  FSection := usImplementation;
+  FHasUsesRows := False;
+  OnlyAdds := True;
+  OnlyIdent := '';
+  for var F in FFixes do
+    if F.Kind = qfAddUnit then
+    begin
+      if not FHasUsesRows then FSection := F.Section;
+      FHasUsesRows := True;
+      if OnlyIdent = '' then OnlyIdent := F.Identifier;
+    end
+    else
+      OnlyAdds := False;
 
   // Explicit Top values BEFORE Align: with several alTop controls the VCL
   // stacks them by their current position, so without this the last-created
@@ -309,7 +1157,10 @@ begin
   FLbl.Top := 0;
   FLbl.Align := alTop;
   FLbl.AlignWithMargins := True;
-  FLbl.Caption := Format('Add unit for "%s":', [FMissing.Identifier]);
+  if OnlyAdds and (OnlyIdent <> '') then
+    FLbl.Caption := Format('Add unit for "%s":', [OnlyIdent])
+  else
+    FLbl.Caption := 'Quick fixes:';
 
   FList := TListBox.Create(Self);
   FList.Parent := Self;
@@ -317,10 +1168,7 @@ begin
   FList.Align := alTop;
   FList.Height := 90;
   FList.AlignWithMargins := True;
-  for var H in FMissing.Units do
-    FList.Items.Add(H.UnitName);
-  if FList.Items.Count > 0 then FList.ItemIndex := 0;
-  FList.OnDblClick := DoAdd;   // double-click = insert straight away
+  FList.OnDblClick := DoApply;   // double-click = apply straight away
 
   var Panel := TPanel.Create(Self);
   Panel.Parent := Self;
@@ -335,61 +1183,143 @@ begin
   FSecBtn.Width := 150;
   FSecBtn.AlignWithMargins := True;
   FSecBtn.OnClick := DoToggleSection;
+  FSecBtn.Visible := FHasUsesRows;
 
-  FAddBtn := TButton.Create(Self);
-  FAddBtn.Parent := Panel;
-  FAddBtn.Align := alRight;
-  FAddBtn.Width := 80;
-  FAddBtn.AlignWithMargins := True;
-  FAddBtn.Caption := 'Add';
-  FAddBtn.Default := True;
-  FAddBtn.OnClick := DoAdd;
+  FApplyBtn := TButton.Create(Self);
+  FApplyBtn.Parent := Panel;
+  FApplyBtn.Align := alRight;
+  FApplyBtn.Width := 80;
+  FApplyBtn.AlignWithMargins := True;
+  FApplyBtn.Caption := 'Apply';
+  FApplyBtn.Default := True;
+  FApplyBtn.OnClick := DoApply;
 
-  UpdateSectionCaption;
+  RebuildActions;
   ClientHeight := FLbl.Height + FList.Height + Panel.Height + 20;
 end;
 
-procedure TAutoImportPopup.UpdateSectionCaption;
+procedure TQuickFixPopup.RebuildActions;
+var
+  Sel, I, U: Integer;
+  A: TQuickFixAction;
 begin
+  Sel := FList.ItemIndex;
+  FActions := nil;
+  FList.Items.BeginUpdate;
+  try
+    FList.Items.Clear;
+    for I := 0 to High(FFixes) do
+      case FFixes[I].Kind of
+        qfAddUnit:
+          for U := 0 to High(FFixes[I].UnitNames) do
+          begin
+            A.Caption := Format('Add %s to %s uses',
+              [FFixes[I].UnitNames[U], SectionName(FSection)]);
+            A.FixIdx := I;
+            A.UnitChoice := U;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfRenameIdent:
+          begin
+            A.Caption := Format('Change to "%s"', [FFixes[I].NewText]);
+            if FFixes[I].FollowUpUnit <> '' then
+              A.Caption := A.Caption + Format('  (+ uses %s)', [FFixes[I].FollowUpUnit]);
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfFixUsesName:
+          begin
+            A.Caption := Format('Change unit name to "%s"', [FFixes[I].NewText]);
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfRemoveUses:
+          begin
+            A.Caption := Format('Remove "%s" from uses', [FFixes[I].OldUnit]);
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfAlignHeader:
+          begin
+            A.Caption := 'Align implementation header with declaration';
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfRemoveVar:
+          begin
+            A.Caption := Format('Remove unused variable "%s"', [FFixes[I].Identifier]);
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+      end;
+  finally
+    FList.Items.EndUpdate;
+  end;
+  if FList.Items.Count > 0 then
+  begin
+    if (Sel >= 0) and (Sel < FList.Items.Count) then
+      FList.ItemIndex := Sel
+    else
+      FList.ItemIndex := 0;
+  end;
   FSecBtn.Caption := 'Section: ' + SectionName(FSection);
 end;
 
-procedure TAutoImportPopup.DoToggleSection(Sender: TObject);
+procedure TQuickFixPopup.DoToggleSection(Sender: TObject);
 begin
-  if FSection = usInterface then FSection := usImplementation else FSection := usInterface;
-  UpdateSectionCaption;
+  if FSection = usInterface then FSection := usImplementation
+  else FSection := usInterface;
+  for var I := 0 to High(FFixes) do
+    if FFixes[I].Kind = qfAddUnit then
+      FFixes[I].Section := FSection;
+  RebuildActions;
 end;
 
-procedure TAutoImportPopup.DoAdd(Sender: TObject);
+procedure TQuickFixPopup.DoApply(Sender: TObject);
+var
+  A: TQuickFixAction;
+  Ok: Boolean;
 begin
-  if (FList.ItemIndex < 0) or (FList.ItemIndex > High(FMissing.Units)) then Exit;
-  var UnitName := FMissing.Units[FList.ItemIndex].UnitName;
-  var Ok := ApplyOne(FFile, UnitName, FSection);
+  if (FList.ItemIndex < 0) or (FList.ItemIndex > High(FActions)) then Exit;
+  A := FActions[FList.ItemIndex];
+  Ok := ApplyQuickFix(FFile, FFixes[A.FixIdx], A.UnitChoice);
   Close;
   if not Ok then
-    ShowMessage(Format('"%s" is already reachable in uses, or the clause ' +
-      'could not be rewritten (e.g. IFDEFs inside it).', [UnitName]));
+    ShowMessage('The fix could not be applied (the target may already be ' +
+      'in place, or the affected code could not be rewritten safely - ' +
+      'e.g. IFDEFs inside a uses clause, or an ambiguous overload).');
 end;
 
-procedure TAutoImportPopup.DoDeactivate(Sender: TObject);
+procedure TQuickFixPopup.DoDeactivate(Sender: TObject);
 begin
   Close;
 end;
 
-procedure TAutoImportPopup.DoKeyDown(Sender: TObject; var Key: Word;
+procedure TQuickFixPopup.DoKeyDown(Sender: TObject; var Key: Word;
   Shift: TShiftState);
 begin
   if Key = VK_ESCAPE then Close;
 end;
 
-procedure TAutoImportPopup.DoPopupClose(Sender: TObject; var Action: TCloseAction);
+procedure TQuickFixPopup.DoPopupClose(Sender: TObject; var Action: TCloseAction);
 begin
   // Non-modal, owner-less popup: Close alone would only hide it and leak
   // one instance per use. caFree releases it safely (deferred CM_RELEASE).
   Action := caFree;
 end;
 
-procedure TAutoImportPopup.ShowAt(const APt: TPoint);
+procedure TQuickFixPopup.ShowAt(const APt: TPoint);
 begin
   // Keep the popup on the visible work area.
   var R := Screen.WorkAreaRect;
@@ -657,7 +1587,7 @@ type
     procedure CreateParams(var Params: TCreateParams); override;
   public
     constructor CreateHint;
-    procedure SetInfo(const AIdent: string);
+    procedure SetInfo(const AText: string);
     procedure ShowNoActivateAt(const APt: TPoint);
     /// <summary>Counterpart to ShowNoActivateAt. The window is shown via
     ///  plain ShowWindow (bypassing VCL's Visible), so TForm.Hide would be
@@ -695,9 +1625,9 @@ begin
   Params.Style := (Params.Style and not WS_CHILD) or WS_POPUP;
 end;
 
-procedure TAutoImportHint.SetInfo(const AIdent: string);
+procedure TAutoImportHint.SetInfo(const AText: string);
 begin
-  FLbl.Caption := Format(#$1F4A1' Add unit for "%s"', [AIdent]);
+  FLbl.Caption := #$1F4A1' ' + AText;
   Width := Max(120, Canvas.TextWidth(FLbl.Caption) + 24);
 end;
 
@@ -735,28 +1665,45 @@ type
     FDirty: Boolean;
     FDirtyTick: Cardinal;
     FAnalysing: Boolean;
-    // Last analysis results (UI thread only).
+    // Last resolved quick fixes (UI thread only). TWO sources feed them:
+    // the Structure view (fast, ERRORS only) and our own LSP session
+    // (slower, errors + HINTS like H2443/H2164). The LSP result is the
+    // superset and REPLACES a structure result for the same buffer state;
+    // FResFromLsp guards the other direction - a late structure answer
+    // must never wipe the hint fixes again.
     FResFile: string;
     FResHash: Integer;
-    FResults: TArray<TMissingIdent>;
-    // Buffer hash the EXTERNAL source (IDE Structure view) last answered
-    // for. While it matches FHash the LSP polling fallback stays quiet -
-    // the IDE's own Error Insight already delivered fresher data than an
-    // extra LSP round-trip could.
-    FExternAnsweredHash: Integer;
+    FResults: TArray<TQuickFix>;
+    FResFromLsp: Boolean;
+    // External payload waiting for background resolution (fuzzy index
+    // scans are too slow for the notifier's main-thread context).
+    FPendFile: string;
+    FPendContent: string;
+    FPendDiags: TArray<TLspErrorDiag>;
+    FPendHash: Integer;
+    FHasPending: Boolean;
+    FResolving: Boolean;
+    // One-shot: run the LSP analysis on the next tick even though the
+    // Structure view answered this buffer state (set after a real
+    // compile, to pick up hint diagnostics like H2443).
+    FCompileRefreshPending: Boolean;
+    // Last results revision the editor markers were repainted for.
+    FLastPaintFile: string;
+    FLastPaintHash: Integer;
     procedure ApplyExternalDiags(const AFile, AContent: string;
       const ADiags: TArray<TLspErrorDiag>);
+    procedure StartPendingResolve;
     procedure DoTick(Sender: TObject);
     procedure StartAnalysis(const AFile, AContent: string; AHash: Integer);
     procedure AnalysisDone(const AFile: string; AHash: Integer;
-      const AResults: TArray<TMissingIdent>);
+      const AResults: TArray<TQuickFix>);
     procedure UpdateHint;
     procedure RunFix;
     function HasFresh(const AFile: string): Boolean;
-    /// <summary>The missing identifier whose error LINE the caret is on -
-    ///  the hint is bound to the error location (VS-style), not shown for
-    ///  arbitrary caret positions in the file.</summary>
-    function FindAtCaretLine(out AMissing: TMissingIdent): Boolean;
+    /// <summary>All quick fixes anchored to the caret's LINE - the hint is
+    ///  bound to the error location (VS-style), not shown for arbitrary
+    ///  caret positions in the file.</summary>
+    function FindFixesAtCaretLine(out AFixes: TArray<TQuickFix>): Boolean;
   public
     constructor Create;
     destructor Destroy; override;
@@ -764,6 +1711,13 @@ type
 
 var
   GLive: TAutoImportLive = nil;
+  // Number of live resolver/analysis worker threads still running, and the
+  // shutdown latch. StopAutoImportLive waits for the count to reach zero
+  // and drains the sync queue BEFORE the package can unload - otherwise a
+  // worker (or its queued TThread.Queue closure) would execute unmapped
+  // BPL code, or race TUnitIndex's finalization.
+  GLiveWorkers: Integer = 0;
+  GLiveShutdown: Boolean = False;
 
 const
   LiveTickMs  = 400;   // poll interval (also the max hint-update latency,
@@ -792,19 +1746,18 @@ begin
     and SameText(FResFile, FFile) and (FResHash = FHash);
 end;
 
-function TAutoImportLive.FindAtCaretLine(out AMissing: TMissingIdent): Boolean;
+function TAutoImportLive.FindFixesAtCaretLine(out AFixes: TArray<TQuickFix>): Boolean;
 var
   Line, Col: Integer;
 begin
   Result := False;
+  AFixes := nil;
   if not HasFresh(FFile) then Exit;
   if (Editor = nil) or not Editor.GetCaretLineCol(Line, Col) then Exit;
   for var R in FResults do
     if R.Line = Line - 1 then   // R.Line is 0-based
-    begin
-      AMissing := R;
-      Exit(True);
-    end;
+      AFixes := AFixes + [R];
+  Result := Length(AFixes) > 0;
 end;
 
 procedure TAutoImportLive.DoTick(Sender: TObject);
@@ -852,15 +1805,42 @@ begin
     if FHint <> nil then FHint.HideHint;   // results are stale now
   end;
 
-  if FDirty and (not FAnalysing) and (Tick - FDirtyTick >= LiveIdleMs)
-    and (FExternAnsweredHash <> FHash) then
+  if FCompileRefreshPending and (not FAnalysing)
+    and (TLspManager.Instance.PeekClient <> nil) then
+  begin
+    // Post-compile refresh: immediate LSP round (no idle wait) - the
+    // compile just produced the full diagnostic picture.
+    FCompileRefreshPending := False;
+    StartAnalysis(F, Content, H);
+  end
+  else if FDirty and (not FAnalysing) and (Tick - FDirtyTick >= LiveIdleMs) then
+    // One LSP pass per buffer state, ALWAYS - even when the Structure
+    // view answered it: that source carries only errors, the hint fixes
+    // (H2443/H2164) exist solely in our own session's diagnostics. The
+    // LSP result replaces the structure result as the superset.
     StartAnalysis(F, Content, H);
 
   UpdateHint;
+
+  // Editor line markers: repaint once per published results revision.
+  // Deliberately from THIS tick (WM_TIMER) - never from the notifier or
+  // queue contexts that update the results (state-only rule).
+  if ((FResFile <> FLastPaintFile) or (FResHash <> FLastPaintHash))
+    and Assigned(GLiveRepaintHook) then
+  begin
+    FLastPaintFile := FResFile;
+    FLastPaintHash := FResHash;
+    try
+      GLiveRepaintHook();
+    except
+    end;
+  end;
 end;
 
 procedure TAutoImportLive.ApplyExternalDiags(const AFile, AContent: string;
   const ADiags: TArray<TLspErrorDiag>);
+var
+  NewHash: Integer;
 begin
   if AFile = '' then Exit;
   // STATE ONLY - no window operations. This runs inside the IDE's
@@ -869,15 +1849,104 @@ begin
   // there triggers a synchronous activation cascade into
   // TEditWindow.ActivateModule -> ParserThread.CancelAndLock and can
   // DEADLOCK the IDE against its parser thread. The poll tick (a plain
-  // WM_TIMER, safe context) picks these results up and updates the hint.
-  FFile := AFile;
-  FHash := THashBobJenkins.GetHashValue(AContent);
-  FExternAnsweredHash := FHash;
-  FDirty := False;
+  // WM_TIMER, safe context) picks the results up and updates the hint.
+  //
+  // The RESOLUTION itself (index lookups + fuzzy scans) is too heavy for
+  // this context as well - it runs on a worker thread; the latest payload
+  // wins when notifications arrive faster than the resolver finishes.
+  NewHash := THashBobJenkins.GetHashValue(AContent);
 
-  FResFile := AFile;
-  FResHash := FHash;
-  FResults := ExtractMissing(AContent, ADiags);
+  // Already resolved for exactly this buffer state? The Structure pane
+  // rebuilds repeatedly for the same content (every IDE LSP refresh) -
+  // re-running the resolver (incl. the O(IdentCount) fuzzy scan) for a
+  // byte-identical buffer would just burn a core. This also protects an
+  // LSP-published result (with hint fixes) from being re-queued.
+  if SameText(AFile, FResFile) and (NewHash = FResHash) then
+  begin
+    FFile := AFile;
+    FHash := NewHash;
+    FHasPending := False;
+    Exit;
+  end;
+
+  // A NEW buffer state: schedule the complementary LSP pass too - the
+  // Structure view only carries ERRORS, the hint fixes (H2443/H2164)
+  // exist only in our own LSP session's diagnostics. Without this, a
+  // hint fix would only ever (re)appear after a compile.
+  if (NewHash <> FHash) or not SameText(AFile, FFile) then
+  begin
+    FDirty := True;
+    FDirtyTick := GetTickCount;
+  end;
+  FFile := AFile;
+  FHash := NewHash;
+
+  FPendFile := AFile;
+  FPendContent := AContent;
+  FPendDiags := ADiags;
+  FPendHash := FHash;
+  FHasPending := True;
+  if not FResolving then
+    StartPendingResolve;
+end;
+
+procedure TAutoImportLive.StartPendingResolve;
+var
+  RFile, RContent: string;
+  RDiags: TArray<TLspErrorDiag>;
+  RHash: Integer;
+begin
+  if not FHasPending or GLiveShutdown then Exit;
+  FHasPending := False;
+  FResolving := True;
+  RFile := FPendFile;
+  RContent := FPendContent;
+  RDiags := FPendDiags;
+  RHash := FPendHash;
+
+  // Exception-safe start: if thread creation fails, FResolving must not
+  // wedge True (that would silence the whole live feature until restart).
+  TInterlocked.Increment(GLiveWorkers);
+  try
+    TThread.CreateAnonymousThread(
+      procedure
+      var
+        R: TArray<TQuickFix>;
+      begin
+        try
+          try
+            R := ResolveQuickFixes(RContent, RDiags);
+          except
+            R := nil;
+          end;
+          TThread.Queue(nil,
+            procedure
+            begin
+              if GLive = nil then Exit;
+              GLive.FResolving := False;
+              // Accept only when the buffer has not changed since - and
+              // never downgrade an LSP result (errors + hints) for the
+              // same state to this errors-only structure result.
+              if SameText(RFile, GLive.FFile) and (RHash = GLive.FHash)
+                and not (GLive.FResFromLsp and SameText(RFile, GLive.FResFile)
+                         and (RHash = GLive.FResHash)) then
+              begin
+                GLive.FResFile := RFile;
+                GLive.FResHash := RHash;
+                GLive.FResults := R;
+                GLive.FResFromLsp := False;
+              end;
+              // A newer payload may have arrived while we were resolving.
+              GLive.StartPendingResolve;
+            end);
+        finally
+          TInterlocked.Decrement(GLiveWorkers);
+        end;
+      end).Start;
+  except
+    TInterlocked.Decrement(GLiveWorkers);
+    FResolving := False;
+  end;
 end;
 
 procedure TAutoImportLive.StartAnalysis(const AFile, AContent: string; AHash: Integer);
@@ -912,66 +1981,87 @@ begin
   FAnalysing := True;
   FDirty := False;
 
-  TThread.CreateAnonymousThread(
-    procedure
-    var
-      R: TArray<TMissingIdent>;
-      I: Integer;
-    begin
-      R := nil;
-      try
-        try Client.WaitForResponse(ReqId, 20000).Free; except end;
-        for I := 1 to 40 do
-        begin
-          if Client.GetDiagnosticsCount > Before then Break;
-          Sleep(150);
+  TInterlocked.Increment(GLiveWorkers);
+  try
+    TThread.CreateAnonymousThread(
+      procedure
+      var
+        R: TArray<TQuickFix>;
+        I: Integer;
+      begin
+        try
+          R := nil;
+          try
+            try Client.WaitForResponse(ReqId, 20000).Free; except end;
+            for I := 1 to 40 do
+            begin
+              if GLiveShutdown or (Client.GetDiagnosticsCount > Before) then Break;
+              Sleep(150);
+            end;
+            if not GLiveShutdown then
+            begin
+              Sleep(300);   // let this file's push settle
+              R := ResolveQuickFixes(AContent, Client.GetErrorDiagnostics(AFile));
+            end;
+          except
+            R := nil;
+          end;
+          TThread.Queue(nil,
+            procedure
+            begin
+              if GLive <> nil then
+                GLive.AnalysisDone(AFile, AHash, R);
+            end);
+        finally
+          TInterlocked.Decrement(GLiveWorkers);
         end;
-        Sleep(300);   // let this file's push settle
-        R := ExtractMissing(AContent, Client.GetErrorDiagnostics(AFile));
-      except
-        R := nil;
-      end;
-      TThread.Queue(nil,
-        procedure
-        begin
-          if GLive <> nil then
-            GLive.AnalysisDone(AFile, AHash, R);
-        end);
-    end).Start;
+      end).Start;
+  except
+    TInterlocked.Decrement(GLiveWorkers);
+    FAnalysing := False;
+  end;
 end;
 
 procedure TAutoImportLive.AnalysisDone(const AFile: string; AHash: Integer;
-  const AResults: TArray<TMissingIdent>);
+  const AResults: TArray<TQuickFix>);
 begin
   // STATE ONLY (arrives via TThread.Queue, i.e. inside CheckSynchronize -
   // see ApplyExternalDiags for why no window operation may happen here).
   // The next poll tick shows/hides the hint.
   FAnalysing := False;
-  // Only accept results that still match the current buffer.
+  // Only accept results that still match the current buffer. LSP results
+  // are the SUPERSET (errors + hints) - they replace whatever the
+  // Structure view published for this state.
   if SameText(AFile, FFile) and (AHash = FHash) then
   begin
     FResFile := AFile;
     FResHash := AHash;
     FResults := AResults;
+    FResFromLsp := True;
   end;
 end;
 
 procedure TAutoImportLive.UpdateHint;
 var
   Pt: TPoint;
-  M: TMissingIdent;
+  Fixes: TArray<TQuickFix>;
+  Text: string;
 begin
   // Bound to the ERROR LINE: shown only while the caret is on a line with
-  // a missing identifier (and that line is scrolled into view -
+  // at least one quick fix (and that line is scrolled into view -
   // CaretScreenPos rejects carets outside the visible client area).
-  if FindAtCaretLine(M) and CaretScreenPos(Pt) then
+  if FindFixesAtCaretLine(Fixes) and CaretScreenPos(Pt) then
   begin
     if FHint = nil then
     begin
       FHint := TAutoImportHint.CreateHint;
       FHint.OnFix := RunFix;
     end;
-    FHint.SetInfo(M.Identifier);
+    if Length(Fixes) = 1 then
+      Text := Fixes[0].Caption
+    else
+      Text := Format('%d quick fixes', [Length(Fixes)]);
+    FHint.SetInfo(Text);
     FHint.ShowNoActivateAt(Pt);
   end
   else if FHint <> nil then
@@ -981,32 +2071,64 @@ end;
 procedure TAutoImportLive.RunFix;
 var
   Pt: TPoint;
-  M: TMissingIdent;
+  Fixes: TArray<TQuickFix>;
 begin
-  if not FindAtCaretLine(M) then Exit;
+  if not FindFixesAtCaretLine(Fixes) then Exit;
   if FHint <> nil then FHint.HideHint;
-  var Popup := TAutoImportPopup.CreatePopup(FFile, M);
+  var Popup := TQuickFixPopup.CreatePopup(FFile, Fixes);
   if CaretScreenPos(Pt) then Popup.ShowAt(Pt)
   else Popup.ShowAt(Mouse.CursorPos);
 end;
 
 procedure StartAutoImportLive;
 begin
+  GLiveShutdown := False;
   if GLive = nil then
     GLive := TAutoImportLive.Create;
 end;
 
 procedure StopAutoImportLive;
+var
+  Waited: Integer;
 begin
+  // Latch first so no NEW workers start, then wait for the running ones
+  // and drain their queued TThread.Queue closures - both live inside this
+  // package's code, which is about to be unmapped on uninstall. While
+  // waiting, keep the sync queue moving (the closures are state-only).
+  GLiveShutdown := True;
+  Waited := 0;
+  while (TInterlocked.CompareExchange(GLiveWorkers, 0, 0) <> 0)
+    and (Waited < 15000) do
+  begin
+    CheckSynchronize(10);
+    Inc(Waited, 10);
+  end;
+  CheckSynchronize(0);   // drain closures queued by the last worker
   FreeAndNil(GLive);
 end;
 
 function LiveFreshInfo(const AFile: string; out ACount: Integer): Boolean;
+var
+  Seen: TDictionary<string, Boolean>;
 begin
+  // Counts only DISTINCT add-unit identifiers: the consumer is the
+  // "Add unit for identifier at cursor" menu entry, whose action handles
+  // exactly that case - rename/uses-repair/header fixes would inflate the
+  // count with work that action cannot perform.
   ACount := 0;
   Result := (GLive <> nil) and GLive.HasFresh(AFile);
-  if Result then
-    ACount := Length(GLive.FResults);
+  if not Result then Exit;
+  Seen := TDictionary<string, Boolean>.Create;
+  try
+    for var F in GLive.FResults do
+      if (F.Kind = qfAddUnit) and not Seen.ContainsKey(UpperCase(F.Identifier)) then
+      begin
+        Seen.Add(UpperCase(F.Identifier), True);
+        Inc(ACount);
+      end;
+  finally
+    Seen.Free;
+  end;
 end;
 
 procedure LiveReportErrorDiags(const AFile, AContent: string;
@@ -1016,27 +2138,39 @@ begin
     GLive.ApplyExternalDiags(AFile, AContent, ADiags);
 end;
 
-function LiveShowFixAtCaret(const AFile, AIdent: string): Boolean;
+function LiveShowFixAtCaret(const AFile: string): Boolean;
 var
   Pt: TPoint;
-  M: TMissingIdent;
-  Found: Boolean;
+  Fixes: TArray<TQuickFix>;
 begin
   Result := False;
-  if (GLive = nil) or not GLive.HasFresh(AFile) then Exit;
-  Found := False;
-  for var R in GLive.FResults do
-    if (AIdent = '') or SameText(R.Identifier, AIdent) then
-    begin
-      M := R;
-      Found := True;
-      Break;
-    end;
-  if not Found then Exit;
-  var Popup := TAutoImportPopup.CreatePopup(AFile, M);
+  if (GLive = nil) or not SameText(GLive.FFile, AFile) then Exit;
+  if not GLive.FindFixesAtCaretLine(Fixes) then Exit;
+  var Popup := TQuickFixPopup.CreatePopup(AFile, Fixes);
   if CaretScreenPos(Pt) then Popup.ShowAt(Pt)
   else Popup.ShowAt(Mouse.CursorPos);
   Result := True;
+end;
+
+function LiveResolveBusy: Boolean;
+begin
+  Result := (GLive <> nil)
+    and (GLive.FResolving or GLive.FHasPending or GLive.FAnalysing);
+end;
+
+procedure LiveRefreshAfterCompile;
+begin
+  if GLive <> nil then
+    GLive.FCompileRefreshPending := True;   // state only - tick acts on it
+end;
+
+function LiveFixesForLine(const AFile: string; ALine0: Integer): TArray<TQuickFix>;
+begin
+  Result := nil;
+  if (GLive = nil) or not GLive.HasFresh(AFile) then Exit;
+  for var F in GLive.FResults do
+    if F.Line = ALine0 then
+      Result := Result + [F];
 end;
 
 // ---------------------------------------------------------------------------
@@ -1099,8 +2233,18 @@ begin
     Exit;
   end;
 
+  // Several candidates -> the quick-fix chooser popup at the caret.
+  var F := Default(TQuickFix);
+  F.Kind := qfAddUnit;
+  F.Line := Chosen.Line;
+  F.Identifier := Chosen.Identifier;
+  F.Section := Chosen.Section;
+  F.Caption := Format('Add unit for "%s"', [Chosen.Identifier]);
+  for var H in Chosen.Units do
+    F.UnitNames := F.UnitNames + [H.UnitName];
+
   var Pt: TPoint;
-  var Popup := TAutoImportPopup.CreatePopup(Ctx.FileName, Chosen);
+  var Popup := TQuickFixPopup.CreatePopup(Ctx.FileName, [F]);
   if CaretScreenPos(Pt) then Popup.ShowAt(Pt)
   else Popup.ShowAt(Mouse.CursorPos);
 end;

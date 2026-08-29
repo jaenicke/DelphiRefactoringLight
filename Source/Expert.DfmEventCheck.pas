@@ -199,6 +199,13 @@ type
       out AFailReason: string; AContext: TFixContext = nil): Boolean;
   end;
 
+/// <summary>Builds a parameter list that keeps ACurrent's parameter NAMES
+///  but takes modifiers and TYPES from AExpected. Falls back to AExpected
+///  when the arities differ. Shared with the E2037 quick fix
+///  (Expert.AutoImport), which aligns an implementation header to its
+///  declaration the same way the DFM auto-fix does.</summary>
+function MergeParamNames(const ACurrent, AExpected: string): string;
+
 implementation
 
 uses

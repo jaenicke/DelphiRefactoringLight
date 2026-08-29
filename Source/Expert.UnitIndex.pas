@@ -44,6 +44,17 @@ type
     ['{2B7A9C31-6E4D-4F2A-9C1B-7D5E0A3F8B44}']
     function Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
+    /// <summary>"Did you mean" candidates: known identifiers within
+    ///  AMaxDist edit operations (incl. adjacent transposition) of AIdent,
+    ///  best first, at most AMax DISTINCT identifiers (each with its first
+    ///  declaring unit - use Lookup for the full unit list). Case is
+    ///  ignored; an exact (case-insensitive) match is never returned.
+    ///  O(IdentCount) - run on a background thread.</summary>
+    function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
+    /// <summary>Unit names within AMaxDist edit operations of AName
+    ///  (e.g. 'Windwos' -> 'Winapi.Windows' is found via its last segment
+    ///  as well as the full name), best first, at most AMax.</summary>
+    function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
@@ -624,9 +635,53 @@ type
     destructor Destroy; override;
     function Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
+    function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
+    function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
+
+// Optimal-string-alignment edit distance (Levenshtein + adjacent
+// transposition, the classic typo operations) with a cutoff: returns
+// AMax + 1 as soon as the distance must exceed AMax. Inputs are expected
+// to be same-cased by the caller.
+function BoundedEditDistance(const A, B: string; AMax: Integer): Integer;
+var
+  LenA, LenB, I, J, Cost, RowMin: Integer;
+  Prev2, Prev, Curr, Tmp: TArray<Integer>;
+begin
+  LenA := Length(A);
+  LenB := Length(B);
+  if Abs(LenA - LenB) > AMax then Exit(AMax + 1);
+  if LenA = 0 then Exit(LenB);
+  if LenB = 0 then Exit(LenA);
+
+  SetLength(Prev2, LenB + 1);
+  SetLength(Prev, LenB + 1);
+  SetLength(Curr, LenB + 1);
+  for J := 0 to LenB do Prev[J] := J;
+
+  for I := 1 to LenA do
+  begin
+    Curr[0] := I;
+    RowMin := Curr[0];
+    for J := 1 to LenB do
+    begin
+      if A[I] = B[J] then Cost := 0 else Cost := 1;
+      Curr[J] := Prev[J] + 1;                                   // deletion
+      if Prev[J - 1] + Cost < Curr[J] then Curr[J] := Prev[J - 1] + Cost; // subst
+      if Curr[J - 1] + 1 < Curr[J] then Curr[J] := Curr[J - 1] + 1;      // insertion
+      if (I > 1) and (J > 1) and (A[I] = B[J - 1]) and (A[I - 1] = B[J])
+         and (Prev2[J - 2] + 1 < Curr[J]) then
+        Curr[J] := Prev2[J - 2] + 1;                            // transposition
+      if Curr[J] < RowMin then RowMin := Curr[J];
+    end;
+    if RowMin > AMax then Exit(AMax + 1);   // cannot get better - bail out
+    Tmp := Prev2; Prev2 := Prev; Prev := Curr; Curr := Tmp;
+  end;
+  Result := Prev[LenB];
+  if Result > AMax then Result := AMax + 1;
+end;
 
 constructor TUnitSnapshot.Create(const AUnitName, AUnitPath, AKeysUpper,
   ADisplay: TArray<string>; AMap: TDictionary<string, TArray<Integer>>);
@@ -676,6 +731,117 @@ begin
     Result := Res.ToArray;
   finally
     Res.Free;
+  end;
+end;
+
+function TUnitSnapshot.FuzzyIdentifiers(const AIdent: string;
+  AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
+type
+  TCand = record Dist, KeyIdx: Integer; end;
+var
+  U: string;
+  L, I, D: Integer;
+  Cands: TList<TCand>;
+begin
+  Result := nil;
+  U := UpperCase(Trim(AIdent));
+  L := Length(U);
+  if (L < 3) or (AMax <= 0) then Exit;
+
+  Cands := TList<TCand>.Create;
+  try
+    for I := 0 to High(FKeysUpper) do
+    begin
+      if Abs(Length(FKeysUpper[I]) - L) > AMaxDist then Continue;
+      D := BoundedEditDistance(U, FKeysUpper[I], AMaxDist);
+      if (D = 0) or (D > AMaxDist) then Continue;   // 0 = same identifier
+      var C: TCand;
+      C.Dist := D;
+      C.KeyIdx := I;
+      Cands.Add(C);
+    end;
+    Cands.Sort(TComparer<TCand>.Construct(
+      function(const A, B: TCand): Integer
+      begin
+        Result := A.Dist - B.Dist;
+        if Result = 0 then
+          Result := CompareStr(FKeysUpper[A.KeyIdx], FKeysUpper[B.KeyIdx]);
+      end));
+
+    for I := 0 to Cands.Count - 1 do
+    begin
+      if Length(Result) >= AMax then Break;
+      var Ids := FMap[FKeysUpper[Cands[I].KeyIdx]];
+      if Length(Ids) = 0 then Continue;
+      var H: TFindUnitHit;
+      H.Identifier := FDisplay[Cands[I].KeyIdx];
+      H.UnitName := FUnitName[Ids[0]];
+      H.Path := FUnitPath[Ids[0]];
+      Result := Result + [H];
+    end;
+  finally
+    Cands.Free;
+  end;
+end;
+
+function TUnitSnapshot.FuzzyUnitNames(const AName: string;
+  AMaxDist, AMax: Integer): TArray<string>;
+type
+  TCand = record Dist: Integer; Name: string; end;
+var
+  U, KU, LastSeg: string;
+  I, D, P: Integer;
+  Cands: TList<TCand>;
+  Seen: TDictionary<string, Boolean>;
+begin
+  Result := nil;
+  U := UpperCase(Trim(AName));
+  if (Length(U) < 3) or (AMax <= 0) then Exit;
+
+  Cands := TList<TCand>.Create;
+  Seen := TDictionary<string, Boolean>.Create;
+  try
+    for I := 0 to High(FUnitName) do
+    begin
+      KU := UpperCase(FUnitName[I]);
+      if Seen.ContainsKey(KU) then Continue;
+      Seen.Add(KU, True);
+      if KU = U then Continue;   // exact (case-insensitive) - not a fix
+      // Match against the full dotted name AND against the last segment
+      // ('Windwos' should find 'Winapi.Windows').
+      D := BoundedEditDistance(U, KU, AMaxDist);
+      if D > AMaxDist then
+      begin
+        P := KU.LastDelimiter('.') + 1;   // 0-based helper -> 1-based char
+        if P > 1 then
+        begin
+          LastSeg := Copy(KU, P + 1, MaxInt);
+          if LastSeg <> U then
+            D := BoundedEditDistance(U, LastSeg, AMaxDist)
+          else
+            D := 1;   // exact last segment: near-certain candidate
+        end;
+      end;
+      if D > AMaxDist then Continue;
+      var C: TCand;
+      C.Dist := D;
+      C.Name := FUnitName[I];
+      Cands.Add(C);
+    end;
+    Cands.Sort(TComparer<TCand>.Construct(
+      function(const A, B: TCand): Integer
+      begin
+        Result := A.Dist - B.Dist;
+        if Result = 0 then Result := CompareText(A.Name, B.Name);
+      end));
+    for I := 0 to Cands.Count - 1 do
+    begin
+      if Length(Result) >= AMax then Break;
+      Result := Result + [Cands[I].Name];
+    end;
+  finally
+    Seen.Free;
+    Cands.Free;
   end;
 end;
 

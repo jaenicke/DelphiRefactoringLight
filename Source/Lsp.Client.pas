@@ -1218,8 +1218,14 @@ begin
          and (HasUnnecessaryTag or SameText(Code, 'H2655') or SameText(Code, 'H2656')) then
         List.Add(R);
 
-      // Error / warning diagnostics (severity 1 or 2) for auto-import.
-      if (Severity = 1) or (Severity = 2) then
+      // Diagnostics for the auto-import quick fixes: keep every severity -
+      // Delphi hints map to LSP severity 4 (H2655 arrives as severity 4),
+      // and hints matter too: H2443 ("inline function not expanded because
+      // unit 'X' is not in USES") carries a directly actionable uses fix.
+      // Only the inactive-region codes are excluded - they are the separate
+      // channel handled above and would only be noise here.
+      if (Severity >= 1) and not SameText(Code, 'H2655')
+        and not SameText(Code, 'H2656') then
       begin
         var ED: TLspErrorDiag;
         ED.Range := R;

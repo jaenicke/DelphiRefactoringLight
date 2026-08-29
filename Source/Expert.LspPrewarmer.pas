@@ -30,7 +30,8 @@ uses
 type
   TLspPrewarmer = class;
 
-  TPrewarmIdeNotifier = class(TNotifierObject, IOTANotifier, IOTAIDENotifier)
+  TPrewarmIdeNotifier = class(TNotifierObject, IOTANotifier, IOTAIDENotifier,
+    IOTAIDENotifier50)
   private
     FOwner: TLspPrewarmer;
   public
@@ -38,8 +39,14 @@ type
     // IOTAIDENotifier
     procedure FileNotification(NotifyCode: TOTAFileNotification;
       const FileName: string; var Cancel: Boolean);
-    procedure BeforeCompile(const Project: IOTAProject; var Cancel: Boolean);
-    procedure AfterCompile(Succeeded: Boolean);
+    procedure BeforeCompile(const Project: IOTAProject; var Cancel: Boolean); overload;
+    procedure AfterCompile(Succeeded: Boolean); overload;
+    // IOTAIDENotifier50 - the IDE calls these when the interface is
+    // implemented; IsCodeInsight separates real compiles from the
+    // background code-insight compiles.
+    procedure BeforeCompile(const Project: IOTAProject; IsCodeInsight: Boolean;
+      var Cancel: Boolean); overload;
+    procedure AfterCompile(Succeeded: Boolean; IsCodeInsight: Boolean); overload;
   end;
 
   TLspPrewarmer = class
@@ -69,7 +76,7 @@ implementation
 uses
   System.SysUtils, System.IOUtils, Winapi.Windows,
   Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
-  Expert.UnitIndex;
+  Expert.UnitIndex, Expert.AutoImport;
 
 { TPrewarmIdeNotifier }
 
@@ -100,7 +107,24 @@ end;
 
 procedure TPrewarmIdeNotifier.AfterCompile(Succeeded: Boolean);
 begin
+  // not needed (the IOTAIDENotifier50 overload is called instead)
+end;
+
+procedure TPrewarmIdeNotifier.BeforeCompile(const Project: IOTAProject;
+  IsCodeInsight: Boolean; var Cancel: Boolean);
+begin
   // not needed
+end;
+
+procedure TPrewarmIdeNotifier.AfterCompile(Succeeded: Boolean;
+  IsCodeInsight: Boolean);
+begin
+  // A REAL compile just produced the complete diagnostic picture (incl.
+  // hints the Structure view never shows). Re-arm the live quick-fix
+  // checker so one LSP analysis of the active buffer picks them up.
+  // Both outcomes matter: hints appear on success, errors on failure.
+  if not IsCodeInsight then
+    LiveRefreshAfterCompile;
 end;
 
 { TLspPrewarmer }

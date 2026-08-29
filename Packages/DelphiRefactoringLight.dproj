@@ -158,6 +158,7 @@
         <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.AutoImport.pas"/>
         <DCCReference Include="..\Source\Expert.StructureErrors.pas"/>
+        <DCCReference Include="..\Source\Expert.QuickFixMarkers.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

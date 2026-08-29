@@ -21,6 +21,10 @@ type
 ///  (whole-token, case-insensitive; dotted names compared whole).</summary>
 function UnitInUsesText(const AContent, AUnit: string): Boolean;
 
+/// <summary>Cuts a trailing '//' comment off a source line
+///  (string-literal aware). Shared helper for line-level Pascal parsing.</summary>
+function StripLineComment(const L: string): string;
+
 /// <summary>Adds AUnit to the requested section's uses clause of AFilePath
 ///  (creating the clause if the section has none). Returns True if the file
 ///  was changed; False if AUnit was already reachable or on error.
@@ -34,6 +38,12 @@ function UnitInUsesText(const AContent, AUnit: string): Boolean;
 ///  the move is refused (False) rather than risking a mangled clause.</summary>
 function AddUnitToUses(const AFilePath, AUnit: string;
   ASection: TUsesSection): Boolean;
+
+/// <summary>Removes AUnit from whichever uses clause of AFilePath lists it
+///  (interface or implementation). Same layout handling and IFDEF safety
+///  gate as the move logic in AddUnitToUses. False when the unit is not
+///  listed or the clause cannot be rewritten safely.</summary>
+function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 
 implementation
 
@@ -272,6 +282,58 @@ begin
   end;
 
   // Exotic layout (comma-first style etc.) - leave the file untouched.
+end;
+
+function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
+var
+  Content, Low: string;
+  SL: TStringList;
+  I, IntfIdx, ImplIdx, UsesIdx, SemiIdx: Integer;
+  Removed: Boolean;
+begin
+  Result := False;
+  if (AUnit = '') or (AFilePath = '') then Exit;
+  if (Editor = nil) or not Editor.ReadEditorContent(AFilePath, Content) then
+  begin
+    if not TFile.Exists(AFilePath) then Exit;
+    try Content := TFile.ReadAllText(AFilePath); except Exit; end;
+  end;
+
+  SL := TStringList.Create;
+  try
+    SL.Text := Content;
+    // Anchor at the section keywords (like AddUnitToUses) so text above
+    // 'interface' - the unit header comment, say - can never be mistaken
+    // for a uses clause. IntfIdx falls back to 0 for headerless files.
+    IntfIdx := 0;
+    ImplIdx := SL.Count;
+    for I := 0 to SL.Count - 1 do
+    begin
+      Low := LowerCase(Trim(StripLineComment(SL[I])));
+      if (Low = 'interface') and (IntfIdx = 0) then
+        IntfIdx := I + 1
+      else if Low = 'implementation' then
+      begin
+        ImplIdx := I;
+        Break;
+      end;
+    end;
+
+    Removed := False;
+    // Interface clause first, then implementation clause.
+    if FindUsesClause(SL, IntfIdx, ImplIdx, UsesIdx, SemiIdx)
+      and ClauseContains(SL, UsesIdx, SemiIdx, AUnit) then
+      Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit)
+    else if (ImplIdx < SL.Count)
+      and FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx)
+      and ClauseContains(SL, UsesIdx, SemiIdx, AUnit) then
+      Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit);
+
+    if Removed then
+      Result := Editor.ReplaceFileContent(AFilePath, SL.Text);
+  finally
+    SL.Free;
+  end;
 end;
 
 function AddUnitToUses(const AFilePath, AUnit: string;

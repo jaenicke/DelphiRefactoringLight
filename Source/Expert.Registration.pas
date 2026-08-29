@@ -22,7 +22,7 @@ uses
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
-  Expert.StructureErrors;
+  Expert.StructureErrors, Expert.QuickFixMarkers;
 
 type
   TShortcutChangeHook = class
@@ -108,6 +108,9 @@ begin
   // IDE's own Error Insight; its notifier feeds the live checker without
   // any LSP round-trip of our own (see Expert.StructureErrors).
   InstallStructureErrorSource;
+  // Dotted-underline markers in the code editor for every fix location
+  // (hints get no squiggle from the IDE itself).
+  InstallQuickFixMarkers;
 
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;
@@ -116,6 +119,7 @@ end;
 initialization
 
 finalization
+  UninstallQuickFixMarkers;
   UninstallStructureErrorSource;
   StopAutoImportLive;
   TExpertsShortCut.RemoveListener(TShortcutChangeHook.HandleChanged);

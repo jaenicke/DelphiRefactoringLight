@@ -61,12 +61,12 @@ type
   private
     FTimer: TTimer;
     FFile: string;
-    FIdent: string;
+    FTriesLeft: Integer;
     procedure Tick(Sender: TObject);
   public
     constructor Create;
     destructor Destroy; override;
-    procedure Queue(const AFile, AIdent: string);
+    procedure Queue(const AFile: string);
   end;
 
 var
@@ -87,10 +87,10 @@ begin
   inherited;
 end;
 
-procedure TShowFixDefer.Queue(const AFile, AIdent: string);
+procedure TShowFixDefer.Queue(const AFile: string);
 begin
   FFile := AFile;
-  FIdent := AIdent;
+  FTriesLeft := 12;          // resolve may still be running - retry ~3 s
   FTimer.Enabled := False;   // restart on rapid double-clicks
   FTimer.Enabled := True;
 end;
@@ -99,16 +99,22 @@ procedure TShowFixDefer.Tick(Sender: TObject);
 begin
   FTimer.Enabled := False;
   try
-    LiveShowFixAtCaret(FFile, FIdent);
+    Dec(FTriesLeft);
+    if LiveShowFixAtCaret(FFile) then Exit;
+    // Not ready yet? The background resolver may still be chewing on the
+    // fuzzy scan - retry until it published, then give up quietly (False
+    // with an idle resolver really means "no fix on this line").
+    if (FTriesLeft > 0) and LiveResolveBusy then
+      FTimer.Enabled := True;
   except
   end;
 end;
 
-procedure QueueShowFix(const AFile, AIdent: string);
+procedure QueueShowFix(const AFile: string);
 begin
   if GShowFixDefer = nil then
     GShowFixDefer := TShowFixDefer.Create;
-  GShowFixDefer.Queue(AFile, AIdent);
+  GShowFixDefer.Queue(AFile);
 end;
 
 // "E2003 Undeklarierter Bezeichner: 'X' in Zeile 27 (27:6)"  (German IDE)
@@ -152,33 +158,6 @@ begin
   Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
 end;
 
-// Identifier in ALine1 (a single buffer line) at/around the 1-based column.
-function WordAt(const ALine1: string; ACol: Integer;
-  out AStartCol0, ALen: Integer): Boolean;
-
-  function IsWordCh(C: Char): Boolean;
-  begin
-    Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-  end;
-
-var
-  P, StartP, EndP: Integer;
-begin
-  Result := False;
-  P := ACol;
-  if (P > Length(ALine1)) or ((P >= 1) and not IsWordCh(ALine1[P])) then
-    P := ACol - 1;
-  if (P < 1) or (P > Length(ALine1)) or not IsWordCh(ALine1[P]) then Exit;
-  StartP := P;
-  while (StartP > 1) and IsWordCh(ALine1[StartP - 1]) do Dec(StartP);
-  EndP := P;
-  while (EndP < Length(ALine1)) and IsWordCh(ALine1[EndP + 1]) do Inc(EndP);
-  if CharInSet(ALine1[StartP], ['0'..'9']) then Exit;   // number literal
-  AStartCol0 := StartP - 1;
-  ALen := EndP - StartP + 1;
-  Result := True;
-end;
-
 procedure TStructureErrorNotifier.StructureChanged(const Context: IOTAStructureContext);
 var
   FileName, Content: string;
@@ -188,29 +167,32 @@ var
 
   procedure CollectFrom(const ANode: IOTAStructureNode; ADepth: Integer);
   var
-    I, ErrLine, ErrCol, StartCol0, WLen: Integer;
+    I, ErrLine, ErrCol: Integer;
     Code: string;
     D: TLspErrorDiag;
   begin
     if (ANode = nil) or (ADepth > 3) then Exit;
     if ParseErrorCaption(ANode.Caption, Code, ErrLine, ErrCol) then
     begin
-      if SameText(Code, 'E2003') and (ErrLine <= Length(Lines)) then
-        if WordAt(Lines[ErrLine - 1], ErrCol, StartCol0, WLen) then
-        begin
-          D := Default(TLspErrorDiag);
-          D.Code := 'E2003';
-          D.Severity := 1;
-          D.Message := ANode.Caption;
-          D.Range.Start.Line := ErrLine - 1;
-          D.Range.Start.Character := StartCol0;
-          D.Range.End_.Line := ErrLine - 1;
-          D.Range.End_.Character := StartCol0 + WLen;
-          if DiagCount >= Length(Diags) then
-            SetLength(Diags, Length(Diags) + 8);
-          Diags[DiagCount] := D;
-          Inc(DiagCount);
-        end;
+      // Forward EVERY parsed entry (E2003, F2613, E2037, hints, ...) -
+      // the quick-fix resolver in Expert.AutoImport decides which codes
+      // it can act on. The range is zero-length at the reported position
+      // (0-based); the resolver extracts the affected token from the
+      // buffer content itself.
+      if ErrLine <= Length(Lines) then
+      begin
+        D := Default(TLspErrorDiag);
+        D.Code := Code;
+        D.Severity := 1;
+        D.Message := ANode.Caption;
+        D.Range.Start.Line := ErrLine - 1;
+        D.Range.Start.Character := ErrCol - 1;
+        D.Range.End_ := D.Range.Start;
+        if DiagCount >= Length(Diags) then
+          SetLength(Diags, Length(Diags) + 8);
+        Diags[DiagCount] := D;
+        Inc(DiagCount);
+      end;
     end
     else
       for I := 0 to ANode.ChildCount - 1 do
@@ -256,26 +238,19 @@ procedure TStructureErrorNotifier.NodeSelected(const Node: IOTAStructureNode);
 begin
 end;
 
-// Double-click on an E2003 entry in the Structure pane: the IDE's default
+// Double-click on an error entry in the Structure pane: the IDE's default
 // action jumps to the error position; right after that we open our quick-fix
-// chooser at the caret (if the live checker has a unit for the identifier).
+// chooser at the caret (a no-op when the live checker has no fix there).
 procedure TStructureErrorNotifier.DefaultNodeAction(const Node: IOTAStructureNode);
 var
-  Code, FileName, Content, Ident: string;
-  Lines: TArray<string>;
-  ErrLine, ErrCol, StartCol0, WLen: Integer;
+  Code, FileName: string;
+  ErrLine, ErrCol: Integer;
 begin
   try
     if (Node = nil) or (Editor = nil) then Exit;
     if not ParseErrorCaption(Node.Caption, Code, ErrLine, ErrCol) then Exit;
-    if not SameText(Code, 'E2003') then Exit;
     FileName := Editor.GetActiveFileName;
     if FileName = '' then Exit;
-    if not Editor.ReadEditorContent(FileName, Content) then Exit;
-    Lines := SplitLines(Content);
-    if ErrLine > Length(Lines) then Exit;
-    if not WordAt(Lines[ErrLine - 1], ErrCol, StartCol0, WLen) then Exit;
-    Ident := Copy(Lines[ErrLine - 1], StartCol0 + 1, WLen);
     // Defer via a one-shot TIMER (plain WM_TIMER from the message loop):
     // 1. it waits for the IDE to finish its own default action (navigating
     //    to the error), so the popup anchors at the NEW caret position;
@@ -283,7 +258,7 @@ begin
     //    window inside it (or inside CheckSynchronize, where
     //    TThread.ForceQueue procs run) can deadlock the IDE against its
     //    parser thread via TEditWindow.ActivateModule -> CancelAndLock.
-    QueueShowFix(FileName, Ident);
+    QueueShowFix(FileName);
   except
     // Never let anything escape into the IDE's notifier dispatch.
   end;

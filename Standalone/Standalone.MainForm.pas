@@ -77,6 +77,7 @@ type
     MenuFindUnit: TMenuItem;
     MenuAddUnitCursor: TMenuItem;
     MenuResolveMissing: TMenuItem;
+    MenuUsesCleanup: TMenuItem;
     MenuFindOriginal: TMenuItem;
     MenuSep2: TMenuItem;
     MenuIface: TMenuItem;
@@ -133,6 +134,7 @@ type
     procedure DoFindUnit(Sender: TObject);
     procedure DoAddUnitAtCursor(Sender: TObject);
     procedure DoResolveMissingUnits(Sender: TObject);
+    procedure DoUsesCleanup(Sender: TObject);
     procedure DoFindOriginalSymbol(Sender: TObject);
     procedure DoRefactorExtractInterface(Sender: TObject);
     procedure DoRefactorAddToInterface(Sender: TObject);
@@ -294,6 +296,7 @@ uses
   Expert.FindUnitDialog,
   Expert.AutoImport,
   Expert.FindOriginalSymbolWizard,
+  Expert.UsesCleanup,
   Expert.LspManager;
 
 {$R *.dfm}
@@ -1157,6 +1160,9 @@ begin RunWizard(procedure begin ResolveMissingUnits; end); end;
 
 procedure TMainForm.DoFindOriginalSymbol(Sender: TObject);
 begin RunWizard(procedure begin FindOriginalSymbol; end); end;
+
+procedure TMainForm.DoUsesCleanup(Sender: TObject);
+begin RunWizard(procedure begin CleanupUsesCurrentUnit; end); end;
 
 procedure TMainForm.DoRefactorSemanticProject(Sender: TObject);
 begin RunWizard(procedure begin ApplySemanticReplacements_Project; end); end;

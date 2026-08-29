@@ -285,6 +285,10 @@ object MainForm: TMainForm
         Caption = 'Resolve missing units...'
         OnClick = DoResolveMissingUnits
       end
+      object MenuUsesCleanup: TMenuItem
+        Caption = 'Uses cleanup (current unit)...'
+        OnClick = DoUsesCleanup
+      end
       object MenuSep2: TMenuItem
         Caption = '-'
       end

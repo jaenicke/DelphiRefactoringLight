@@ -565,12 +565,29 @@ var
   procedure AddF2613(const D: TLspErrorDiag);
   var
     Col0, Len: Integer;
-    UnitName: string;
+    UnitName, LnTxt, Entry: string;
     F: TQuickFix;
   begin
     if not DiagToken(D, True, Col0, Len, UnitName) then Exit;
     if Seen.ContainsKey('U|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(UnitName)) then Exit;
     Seen.Add('U|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(UnitName), True);
+
+    // The clause entry may be syntactically BROKEN ('PP.;' - trailing dot):
+    // TokenAt trims edge dots, but removal/replacement must cover the RAW
+    // entry text up to the ','/';' delimiter, or the leftover dot keeps
+    // the clause broken (and the remove action cannot even find it).
+    LnTxt := Lines[D.Range.Start.Line];
+    Entry := UnitName;
+    var EndP := Col0 + Len;   // 0-based char AFTER the trimmed token
+    while (EndP < Length(LnTxt))
+      and not CharInSet(LnTxt[EndP + 1], [',', ';', ' ', #9, '/', '{']) do
+      Inc(EndP);
+    if EndP > Col0 + Len then
+    begin
+      Entry := Copy(LnTxt, Col0 + 1, EndP - Col0);
+      Len := EndP - Col0;
+    end;
+
     if Snap <> nil then
       for var Cand in Snap.FuzzyUnitNames(UnitName, 2, 3) do
       begin
@@ -582,7 +599,7 @@ var
         F.Kind := qfFixUsesName;
         F.Line := D.Range.Start.Line;
         F.Col := Col0;
-        F.TokenLen := Len;
+        F.TokenLen := Len;   // replaces the FULL broken entry
         F.NewText := Cand;
         F.Caption := Format('Unit "%s"?', [Cand]);
         Res.Add(F);
@@ -590,8 +607,10 @@ var
     F := Default(TQuickFix);
     F.Kind := qfRemoveUses;
     F.Line := D.Range.Start.Line;
-    F.OldUnit := UnitName;
-    F.Caption := Format('Remove "%s" from uses', [UnitName]);
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.OldUnit := Entry;      // raw entry text, incl. a trailing dot
+    F.Caption := Format('Remove "%s" from uses', [Entry]);
     Res.Add(F);
   end;
 
@@ -1881,11 +1900,20 @@ begin
   if (FList.ItemIndex < 0) or (FList.ItemIndex > High(FActions)) then Exit;
   A := FActions[FList.ItemIndex];
   Ok := ApplyQuickFix(FFile, FFixes[A.FixIdx], A.UnitChoice);
-  Close;
   if not Ok then
+  begin
+    // ORDER MATTERS: the message must come BEFORE Close. Close triggers
+    // caFree (deferred CM_RELEASE); a modal ShowMessage AFTER it pumps
+    // messages, the release executes, and the VCL then returns into the
+    // mouse handlers of the FREED listbox (observed AV on double-click).
+    // Also detach OnDeactivate first - the message box deactivates us and
+    // the handler would Close (and thereby free) us mid-pump.
+    OnDeactivate := nil;
     ShowMessage('The fix could not be applied (the target may already be ' +
       'in place, or the affected code could not be rewritten safely - ' +
       'e.g. IFDEFs inside a uses clause, or an ambiguous overload).');
+  end;
+  Close;
 end;
 
 procedure TQuickFixPopup.DoDeactivate(Sender: TObject);

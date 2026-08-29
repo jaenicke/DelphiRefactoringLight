@@ -70,6 +70,7 @@ Refactor
 ├── Find unit for identifier...
 ├── Add unit for identifier at cursor
 ├── Resolve missing units...
+├── Uses cleanup (current unit)...
 ├── -----
 ├── Extract / extend interface
 │   ├── Extract new interface from class...
@@ -131,6 +132,7 @@ not the wizard.
 | Semantic replace (all modes) |    yes     | Reads `semantic-replace.json` from the project root.                                                     |
 | Find unit for identifier     |    yes     | Background identifier index over the project + search paths; the lookup itself needs no LSP.             |
 | Live quick fixes             |    yes     | Lightbulb + on-demand entries: add-unit (E2003/H2443), "did you mean" renames, F2613 uses repair, E2037 header align. Diagnostics come from the standalone's own LSP session (push after an idle-time background analysis); the IDE-only Structure-view source does not apply here. |
+| Uses cleanup                 |    yes     | Index-based unused / move-to-implementation analysis; no LSP needed.                                     |
 | Project checks: DFM events   |    yes     | Parses `.dfm` + component source; auto-fix writes to disk (type-unit resolution for the fix uses LSP when available). |
 | Project checks: Iface GUIDs  |    yes     | Pure source scan.                                                                                        |
 | Project checks: Circular refs|    yes     | Pure `uses`-graph analysis.                                                                              |

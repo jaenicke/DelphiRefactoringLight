@@ -55,6 +55,8 @@ type
     ///  (e.g. 'Windwos' -> 'Winapi.Windows' is found via its last segment
     ///  as well as the full name), best first, at most AMax.</summary>
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
+    /// <summary>True when a unit of exactly this (dotted) name is indexed.</summary>
+    function HasUnit(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
@@ -637,6 +639,7 @@ type
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
     function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
+    function HasUnit(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
@@ -698,6 +701,17 @@ destructor TUnitSnapshot.Destroy;
 begin
   FMap.Free;
   inherited;
+end;
+
+function TUnitSnapshot.HasUnit(const AUnitName: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if AUnitName = '' then Exit;
+  for I := 0 to High(FUnitName) do
+    if SameText(FUnitName[I], AUnitName) then
+      Exit(True);
 end;
 
 function TUnitSnapshot.UnitCount: Integer;

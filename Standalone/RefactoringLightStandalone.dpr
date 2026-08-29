@@ -33,6 +33,7 @@ uses
   Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.FindOriginalSymbolWizard in '..\Source\Expert.FindOriginalSymbolWizard.pas',
+  Expert.UsesCleanup in '..\Source\Expert.UsesCleanup.pas',
   Expert.RenameDialog in '..\Source\Expert.RenameDialog.pas',
   Lsp.Protocol in '..\Source\Lsp.Protocol.pas',
   Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',

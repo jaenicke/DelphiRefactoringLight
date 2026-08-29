@@ -160,6 +160,7 @@
         <DCCReference Include="..\Source\Expert.StructureErrors.pas"/>
         <DCCReference Include="..\Source\Expert.QuickFixMarkers.pas"/>
         <DCCReference Include="..\Source\Expert.FindOriginalSymbolWizard.pas"/>
+        <DCCReference Include="..\Source\Expert.UsesCleanup.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

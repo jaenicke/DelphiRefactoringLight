@@ -86,6 +86,7 @@ type
     procedure OnFindUnit(Sender: TObject);
     procedure OnAddUnitAtCursor(Sender: TObject);
     procedure OnResolveMissingUnits(Sender: TObject);
+    procedure OnUsesCleanup(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
@@ -146,7 +147,8 @@ uses
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
-  Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard;
+  Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
+  Expert.UsesCleanup;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -295,6 +297,7 @@ begin
   Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
   Plain(Root, 'Add unit for identifier at cursor', OnAddUnitAtCursor, REQ_LIVEFIX);
   Plain(Root, 'Resolve missing units...', OnResolveMissingUnits,  REQ_EDITOR);
+  Plain(Root, 'Uses cleanup (current unit)...', OnUsesCleanup,    REQ_EDITOR);
 
   IfaceSub := Sub(Root, 'Extract / extend interface');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
@@ -1097,6 +1100,11 @@ end;
 procedure TContextMenuInstaller.OnResolveMissingUnits(Sender: TObject);
 begin
   Expert.AutoImport.ResolveMissingUnits;
+end;
+
+procedure TContextMenuInstaller.OnUsesCleanup(Sender: TObject);
+begin
+  CleanupUsesCurrentUnit;
 end;
 
 procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);

@@ -224,6 +224,11 @@ object MainForm: TMainForm
         ShortCut = 24649
         OnClick = DoRefactorFindImplementations
       end
+      object MenuFindOriginal: TMenuItem
+        Caption = 'Find &original symbol'
+        ShortCut = 57415
+        OnClick = DoFindOriginalSymbol
+      end
       object MenuAlignSig: TMenuItem
         Caption = '&Align method signature...'
         OnClick = DoRefactorAlignSignature

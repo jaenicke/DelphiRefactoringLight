@@ -258,11 +258,18 @@ begin
             Inc(SigCount);
           end;
       end;
-      // Fix column: check-mark for auto-fixable rows, and pre-tick them.
-      if (Issue.Kind = eikSignatureMismatch) and (Issue.ExpectedRawParams <> '') then
+      // Fix column: check-mark for auto-fixable rows. Signature mismatches
+      // are corrected in place and PRE-TICKED; missing handlers get an
+      // empty handler stub GENERATED when the expected parameter list
+      // could be resolved - those are fixable but NOT pre-ticked: on
+      // inherited forms the "missing" handler may exist in the (out-of-
+      // project) ancestor unit, and generating an empty override there
+      // would silently disable the inherited behavior. The user opts in
+      // per row.
+      if Issue.ExpectedRawParams <> '' then
       begin
         Item.SubItems.Add(#$2713);   // check mark
-        Item.Checked := True;
+        Item.Checked := Issue.Kind = eikSignatureMismatch;
       end
       else
         Item.SubItems.Add('');
@@ -272,6 +279,9 @@ begin
       Item.SubItems.Add(Issue.HandlerName);
       if Issue.Kind = eikSignatureMismatch then
         Item.SubItems.Add('expected ' + Issue.Expected + ', found ' + Issue.Actual)
+      else if Issue.ExpectedRawParams <> '' then
+        Item.SubItems.Add('crashes with "Method not found" at form load - ' +
+          'fix generates an empty handler (' + Issue.ExpectedRawParams + ')')
       else
         Item.SubItems.Add('crashes with "Method not found" at form load');
     end;

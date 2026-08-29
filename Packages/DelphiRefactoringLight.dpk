@@ -99,6 +99,7 @@ contains
   Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.StructureErrors in '..\Source\Expert.StructureErrors.pas',
-  Expert.QuickFixMarkers in '..\Source\Expert.QuickFixMarkers.pas';
+  Expert.QuickFixMarkers in '..\Source\Expert.QuickFixMarkers.pas',
+  Expert.FindOriginalSymbolWizard in '..\Source\Expert.FindOriginalSymbolWizard.pas';
 
 end.

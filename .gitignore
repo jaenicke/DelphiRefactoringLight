@@ -87,3 +87,6 @@ modules/
 delinst.exe
 DelphiRefactoringLight.log
 Packages/Output2/DelphiRefactoringLight370.bpl
+/.mcp.json
+/dih/delinst.err
+/Standalone/RefactoringLightStandalone.res

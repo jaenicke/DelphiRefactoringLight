@@ -665,6 +665,66 @@ begin
   end;
 end;
 
+// Builds a named parameter list from a normalized pipe signature
+// ("TObject|var Word|TShiftState" -> "Sender: TObject; var AWord: Word;
+// AShiftState: TShiftState") - for generating handler stubs when only the
+// built-in table signature is known. A leading TObject becomes 'Sender';
+// other names are derived from the type and deduped with a numeric suffix.
+function SynthesizeParamNames(const ANormSig: string): string;
+var
+  Used: TDictionary<string, Integer>;
+  SB: TStringBuilder;
+  Entry, Modifier, Typ, Base, Nm: string;
+  First: Boolean;
+  N: Integer;
+begin
+  Result := '';
+  if Trim(ANormSig) = '' then Exit;
+  Used := TDictionary<string, Integer>.Create;
+  SB := TStringBuilder.Create;
+  try
+    First := True;
+    for Entry in ANormSig.Split(['|']) do
+    begin
+      Typ := Trim(Entry);
+      if Typ = '' then Continue;
+      Modifier := '';
+      for var Pre in ['var ', 'const ', 'out '] do
+        if StartsText(Pre, Typ) then
+        begin
+          Modifier := Trim(Copy(Typ, 1, Length(Pre)));
+          Typ := Trim(Copy(Typ, Length(Pre) + 1, MaxInt));
+          Break;
+        end;
+      if First and SameText(Typ, 'TObject') and (Modifier = '') then
+        Nm := 'Sender'
+      else
+      begin
+        Base := Typ;
+        if (Length(Base) > 1) and (Base[1] = 'T')
+          and CharInSet(Base[2], ['A'..'Z']) then
+          Base := Copy(Base, 2, MaxInt);
+        Nm := 'A' + Base;
+      end;
+      if Used.TryGetValue(UpperCase(Nm), N) then
+      begin
+        Used[UpperCase(Nm)] := N + 1;
+        Nm := Nm + IntToStr(N + 1);
+      end
+      else
+        Used.Add(UpperCase(Nm), 1);
+      if not First then SB.Append('; ');
+      if Modifier <> '' then SB.Append(Modifier + ' ');
+      SB.Append(Nm + ': ' + Typ);
+      First := False;
+    end;
+    Result := SB.ToString;
+  finally
+    SB.Free;
+    Used.Free;
+  end;
+end;
+
 function ResolveConditionals(const S: string): string;
 var
   I, N: Integer;
@@ -1121,6 +1181,51 @@ begin
                 Issue.HandlerName := PropValue;
                 Issue.DfmLine := I + 1;
                 Issue.Kind := eikMissingHandler;
+                Issue.FormClass := FormClass;
+                // Auto-fix enablement: resolve the expected parameter list
+                // so ApplyFix can GENERATE the handler stub. Source
+                // resolution first (exact, with real parameter names)...
+                if (CompStack.Count > 0) and (CompStack.Peek.Value <> '') then
+                begin
+                  var MResolvedSig, MTypeName, MRawParams, MTypeLoc: string;
+                  if TryResolveEventSignature(CompStack.Peek.Value, PropName,
+                       MResolvedSig, MTypeName, MRawParams, MTypeLoc) then
+                  begin
+                    Issue.ExpectedRawParams := MRawParams;
+                    Issue.ExpectedNorm := MResolvedSig;
+                    Issue.EventTypeName := MTypeName;
+                    if MTypeLoc <> '' then
+                    begin
+                      var MBar := Pos('|', MTypeLoc);
+                      if MBar > 0 then
+                      begin
+                        Issue.EventTypeFile := Copy(MTypeLoc, 1, MBar - 1);
+                        Issue.EventTypeLine :=
+                          StrToIntDef(Copy(MTypeLoc, MBar + 1, MaxInt), 0);
+                      end;
+                    end;
+                  end;
+                end;
+                // ... else the built-in table, with the SAME trust gating as
+                // the signature check (form itself / whitelisted classes
+                // only - third parties may redeclare event names).
+                if Issue.ExpectedRawParams = '' then
+                begin
+                  var MSigCheckable := CompStack.Count <= 1;
+                  if not MSigCheckable then
+                    for var MSafeIdx := Low(SafeVclClasses) to High(SafeVclClasses) do
+                      if SameText(SafeVclClasses[MSafeIdx], CompStack.Peek.Value) then
+                      begin
+                        MSigCheckable := True;
+                        Break;
+                      end;
+                  var MExpected: string;
+                  if MSigCheckable and ExpectedSignature(PropName, MExpected) then
+                  begin
+                    Issue.ExpectedRawParams := SynthesizeParamNames(MExpected);
+                    Issue.ExpectedNorm := MExpected;
+                  end;
+                end;
                 Issues.Add(Issue);
               end
               else
@@ -1919,33 +2024,127 @@ begin
   Lines := TStringList.Create;
   try
     Lines.Text := Content;
-    // Both the declaration AND the implementation must be rewritten, or
-    // the two signatures would disagree and the unit would not compile.
-    // If we cannot locate the implementation, change nothing.
-    ImplIdx := FindImplIndex;
-    if ImplIdx < 0 then
+    if AIssue.Kind = eikMissingHandler then
     begin
-      AFailReason := Format('implementation "%s" not found in %s',
-        [AIssue.HandlerName, ExtractFileName(AIssue.PasFile)]);
-      Exit;
-    end;
-    // Implementation FIRST (it sits below the declaration, so collapsing
-    // its continuation lines does not shift the declaration above it).
-    Changed := RewriteHeaderAt(ImplIdx);
-    // Then find the DECLARATION FRESH by name - never by a stored line
-    // number: fixing earlier handlers in this same file already shifted
-    // the line numbers.
-    DeclIdx := FindDeclIndex;
-    if DeclIdx < 0 then
-    begin
-      AFailReason := Format('declaration "%s" not found in %s',
-        [AIssue.HandlerName, ExtractFileName(AIssue.PasFile)]);
-      Exit;
-    end;
-    if RewriteHeaderAt(DeclIdx) then Changed := True;
+      // GENERATE the missing handler: declaration inside the form class
+      // plus an empty implementation before the final 'end.'.
+      if AIssue.FormClass = '' then
+      begin AFailReason := 'form class unknown'; Exit; end;
+      // Re-run safety: bail out when the handler meanwhile exists.
+      if (FindDeclIndex >= 0) or (FindImplIndex >= 0) then
+      begin AFailReason := 'handler already exists'; Exit; end;
 
-    if not Changed then
-    begin AFailReason := 'no header rewritten'; Exit; end;
+      // Locate "<FormClass> = class" and the insertion point: before the
+      // first visibility keyword (the DFM-bound members live in the
+      // default section above it), else before the class's 'end;'.
+      var ClsIdx := -1;
+      for var K := 0 to Lines.Count - 1 do
+      begin
+        var T := Trim(Lines[K]);
+        if StartsText(AIssue.FormClass, T) then
+        begin
+          var Rest := Trim(Copy(T, Length(AIssue.FormClass) + 1, MaxInt));
+          if StartsText('=', Rest) and (Pos('CLASS', UpperCase(Rest)) > 0)
+            and not Rest.EndsWith(';') then
+          begin
+            ClsIdx := K;
+            Break;
+          end;
+        end;
+      end;
+      if ClsIdx < 0 then
+      begin
+        AFailReason := Format('class "%s" not found in %s',
+          [AIssue.FormClass, ExtractFileName(AIssue.PasFile)]);
+        Exit;
+      end;
+      var InsIdx := -1;
+      var Indent := '    ';
+      for var K := ClsIdx + 1 to Lines.Count - 1 do
+      begin
+        var T := LowerCase(Trim(Lines[K]));
+        if (T = 'private') or (T = 'protected') or (T = 'public')
+          or (T = 'published') or (T = 'strict private')
+          or (T = 'strict protected') or (T = 'end;') then
+        begin
+          InsIdx := K;
+          Break;
+        end;
+      end;
+      if InsIdx < 0 then
+      begin AFailReason := 'class body end not found'; Exit; end;
+      for var K := InsIdx - 1 downto ClsIdx + 1 do
+        if Trim(Lines[K]) <> '' then
+        begin
+          Indent := Copy(Lines[K], 1, Length(Lines[K]) - Length(TrimLeft(Lines[K])));
+          Break;
+        end;
+
+      var ParamsPart := '';
+      if Trim(AIssue.ExpectedRawParams) <> '' then
+        ParamsPart := '(' + AIssue.ExpectedRawParams + ')';
+      Lines.Insert(InsIdx, Indent + 'procedure ' + AIssue.HandlerName + ParamsPart + ';');
+
+      // Insertion anchor: BEFORE an 'initialization'/'finalization'
+      // section when the unit has one (inserting before the final 'end.'
+      // would land inside that statement block), else before 'end.'.
+      var EndDotIdx := -1;
+      for var K := 0 to Lines.Count - 1 do
+      begin
+        var T := LowerCase(Trim(Lines[K]));
+        if (T = 'initialization') or (T = 'finalization') then
+        begin
+          EndDotIdx := K;
+          Break;
+        end;
+      end;
+      if EndDotIdx < 0 then
+        for var K := Lines.Count - 1 downto 0 do
+          if SameText(Trim(Lines[K]), 'end.') then
+          begin
+            EndDotIdx := K;
+            Break;
+          end;
+      if EndDotIdx < 0 then
+      begin AFailReason := 'final "end." not found'; Exit; end;
+      Lines.Insert(EndDotIdx, 'procedure ' + AIssue.FormClass + '.'
+        + AIssue.HandlerName + ParamsPart + ';');
+      Lines.Insert(EndDotIdx + 1, 'begin');
+      Lines.Insert(EndDotIdx + 2, '');
+      Lines.Insert(EndDotIdx + 3, 'end;');
+      Lines.Insert(EndDotIdx + 4, '');
+      Changed := True;
+    end
+    else
+    begin
+      // Both the declaration AND the implementation must be rewritten, or
+      // the two signatures would disagree and the unit would not compile.
+      // If we cannot locate the implementation, change nothing.
+      ImplIdx := FindImplIndex;
+      if ImplIdx < 0 then
+      begin
+        AFailReason := Format('implementation "%s" not found in %s',
+          [AIssue.HandlerName, ExtractFileName(AIssue.PasFile)]);
+        Exit;
+      end;
+      // Implementation FIRST (it sits below the declaration, so collapsing
+      // its continuation lines does not shift the declaration above it).
+      Changed := RewriteHeaderAt(ImplIdx);
+      // Then find the DECLARATION FRESH by name - never by a stored line
+      // number: fixing earlier handlers in this same file already shifted
+      // the line numbers.
+      DeclIdx := FindDeclIndex;
+      if DeclIdx < 0 then
+      begin
+        AFailReason := Format('declaration "%s" not found in %s',
+          [AIssue.HandlerName, ExtractFileName(AIssue.PasFile)]);
+        Exit;
+      end;
+      if RewriteHeaderAt(DeclIdx) then Changed := True;
+
+      if not Changed then
+      begin AFailReason := 'no header rewritten'; Exit; end;
+    end;
 
     // The new parameter types may reference a unit not yet in uses (e.g.
     // VirtualTrees for TDimension, System.UITypes for TColor). The handler

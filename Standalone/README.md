@@ -57,6 +57,7 @@ Refactor
 ├── Rename identifier...      (Ctrl+Alt+Shift+R)
 ├── Find references           (Ctrl+Alt+Shift+F)
 ├── Find implementations      (Ctrl+Alt+Shift+I)
+├── Find original symbol      (Ctrl+Alt+Shift+G)
 ├── Align method signature...
 ├── -----
 ├── Remove with
@@ -119,6 +120,7 @@ not the wizard.
 | Rename identifier            |    yes     | Needs LSP. Edits go through `Editor.ApplyEditViaEditor` → disk write + buffer sync.                      |
 | Find references              |    yes     | Needs LSP.                                                                                               |
 | Find implementations         |    yes     | Needs LSP.                                                                                               |
+| Find original symbol         |    yes     | Needs LSP (GotoDefinition + jump).                                                                       |
 | Align method signature       |    yes     | Needs LSP.                                                                                               |
 | Remove with (any scope)      |    yes     | Needs LSP for type resolution.                                                                           |
 | Move to unit                 |    yes     | Cross-file edits via the same path as Rename.                                                            |

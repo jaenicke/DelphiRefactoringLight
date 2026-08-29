@@ -24,7 +24,7 @@ uses
   Vcl.Menus;
 
 type
-  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit);
+  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit, skFindOriginal);
 
   TShortcutChangedProc = procedure of object;
 
@@ -71,6 +71,7 @@ type
     class function scRemoveWith: TShortCut; static;
     class function scUnitRefs: TShortCut; static;
     class function scMoveToUnit: TShortCut; static;
+    class function scFindOriginal: TShortCut; static;
   end;
 
 implementation
@@ -88,13 +89,17 @@ const
     TShortCut(vkA     or scAlt or scCtrl or scShift),
     TShortCut(vkW     or scAlt or scCtrl or scShift),
     TShortCut(vkF     or scAlt or scCtrl or scShift),
-    TShortCut(vkM     or scCtrl or scShift)
+    TShortCut(vkM     or scCtrl or scShift),
+    // Deliberately NOT plain Ctrl+G (the PR's original choice): our
+    // key binding captures the chord globally and would shadow the IDE's
+    // own Ctrl+G (goto line). Rebind in Tools > Options if preferred.
+    TShortCut(vkG     or scAlt or scCtrl or scShift)
   );
 
   ValueNames: array[TShortcutKind] of string = (
     'Rename', 'Completion', 'ExtractMethod',
     'FindReferences', 'FindImplementations', 'AlignSignature',
-    'RemoveWith', 'UnitReferences', 'MoveToUnit'
+    'RemoveWith', 'UnitReferences', 'MoveToUnit', 'FindOriginalSymbol'
   );
 
   DisplayNames: array[TShortcutKind] of string = (
@@ -106,7 +111,8 @@ const
     'Align method signature',
     'Remove with (project-wide)',
     'Find unit references (project-wide)',
-    'Move to unit (project-wide)'
+    'Move to unit (project-wide)',
+    'Find original symbol (go to declaration)'
   );
 
 { TExpertsShortCut }
@@ -292,6 +298,11 @@ end;
 class function TExpertsShortCut.scMoveToUnit: TShortCut;
 begin
   Result := FShortcuts[skMoveToUnit];
+end;
+
+class function TExpertsShortCut.scFindOriginal: TShortCut;
+begin
+  Result := FShortcuts[skFindOriginal];
 end;
 
 end.

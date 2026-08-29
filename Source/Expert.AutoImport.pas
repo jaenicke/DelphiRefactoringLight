@@ -42,7 +42,8 @@ uses
 
 type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
-    qfAlignHeader, qfRemoveVar);
+    qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
+    qfAddReintroduce, qfImplStub, qfClassStub);
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -50,16 +51,17 @@ type
     Kind: TQuickFixKind;
     Line: Integer;              // 0-based line the fix anchors to
     Caption: string;            // short hint-label text
-    // token replacement (qfRenameIdent / qfFixUsesName):
+    // token replacement / marker anchor:
     Col: Integer;               // 0-based start column of the token
     TokenLen: Integer;
-    NewText: string;
+    NewText: string;            // replacement / generated text (kind-specific)
     // uses handling:
-    Identifier: string;         // qfAddUnit: the unresolved identifier
+    Identifier: string;         // affected identifier (kind-specific)
     UnitNames: TArray<string>;  // qfAddUnit: candidate units (deduped)
     Section: TUsesSection;      // target section for uses additions
     FollowUpUnit: string;       // qfRenameIdent: unit to add after renaming
     OldUnit: string;            // qfRemoveUses: unit to remove
+    AuxLine: Integer;           // qfInitVar: 0-based line of the routine's 'begin'
   end;
 
 /// <summary>Turns compiler diagnostics into concrete quick fixes. Pure
@@ -67,7 +69,12 @@ type
 ///  snapshot - safe on any thread. Providers: E2003 (add unit / "did you
 ///  mean" rename), F2613/F2063 (fix or remove a uses entry), E2037 (align
 ///  the implementation header with the declaration), H2443 (add the unit
-///  the hint names to uses), H2164 (remove an unused variable).</summary>
+///  the hint names to uses), H2164 (remove an unused variable),
+///  E2029/E2066 (insert a missing ';'), W1036 (initialize a variable with
+///  Default at the routine's begin), H2077 (remove a dead assignment),
+///  W1010 (add reintroduce), E2065 (generate an empty implementation for
+///  an unsatisfied forward - method, routine, or class forward
+///  declaration stub).</summary>
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
 
@@ -213,6 +220,102 @@ begin
     try AContent := TFile.ReadAllText(AFile); Result := True; except Result := False; end;
   end;
 end;
+
+// ---- shared Pascal-header helpers (E2037 align + E2065 stub) --------------
+
+function IsHeaderLine(const S: string; out AKind: string;
+  out AIsClassMethod: Boolean): Boolean;
+var
+  T: string;
+begin
+  Result := False;
+  AKind := '';
+  T := Trim(S);
+  AIsClassMethod := StartsText('class ', T);
+  if AIsClassMethod then T := Trim(Copy(T, 7, MaxInt));
+  for var KW in ['procedure', 'function', 'constructor', 'destructor'] do
+    if StartsText(KW + ' ', T) then
+    begin
+      AKind := KW;
+      Exit(True);
+    end;
+end;
+
+// Joins lines from AStart until the first ';' outside parentheses;
+// AEndLine returns the last joined line. '' when no terminator found.
+function CollectHeader(const ALines: TArray<string>; AStart: Integer;
+  out AEndLine: Integer): string;
+var
+  I, J, Depth: Integer;
+  L: string;
+begin
+  Result := '';
+  Depth := 0;
+  for I := AStart to Min(AStart + 11, High(ALines)) do
+  begin
+    L := StripLineComment(ALines[I]);
+    for J := 1 to Length(L) do
+    begin
+      case L[J] of
+        '(', '[': Inc(Depth);
+        ')', ']': if Depth > 0 then Dec(Depth);
+        ';': if Depth = 0 then
+          begin
+            AEndLine := I;
+            Exit(Trim(Result + ' ' + Copy(L, 1, J)));
+          end;
+      end;
+    end;
+    Result := Result + ' ' + L;
+  end;
+  Result := '';
+end;
+
+// Splits a collected header into name / params / return type.
+function ParseHeader(const AHeader, AKind: string;
+  out AQualified, AParams, ARetType: string): Boolean;
+var
+  T: string;
+  P, Depth, I, OpenP, CloseP, ColonP: Integer;
+begin
+  Result := False;
+  T := Trim(AHeader);
+  if StartsText('class ', T) then T := Trim(Copy(T, 7, MaxInt));
+  if not StartsText(AKind + ' ', T) then Exit;
+  T := Trim(Copy(T, Length(AKind) + 2, MaxInt));
+  // Name runs until '(' / ':' / ';'.
+  P := 1;
+  while (P <= Length(T)) and not CharInSet(T[P], ['(', ':', ';']) do Inc(P);
+  AQualified := Trim(Copy(T, 1, P - 1));
+  if AQualified = '' then Exit;
+  AParams := '';
+  ARetType := '';
+  OpenP := 0; CloseP := 0; Depth := 0;
+  for I := 1 to Length(T) do
+    case T[I] of
+      '(': begin if Depth = 0 then OpenP := I; Inc(Depth); end;
+      ')': begin Dec(Depth); if Depth = 0 then begin CloseP := I; Break; end; end;
+    end;
+  if (OpenP > 0) and (CloseP > OpenP) then
+    AParams := Trim(Copy(T, OpenP + 1, CloseP - OpenP - 1));
+  // Return type: ':' after the params (or after the name) up to ';'.
+  ColonP := 0; Depth := 0;
+  for I := Max(1, CloseP + 1) to Length(T) do
+    case T[I] of
+      '(', '[': Inc(Depth);
+      ')', ']': if Depth > 0 then Dec(Depth);
+      ':': if Depth = 0 then begin ColonP := I; Break; end;
+      ';': if Depth = 0 then Break;
+    end;
+  if ColonP > 0 then
+  begin
+    I := ColonP + 1;
+    while (I <= Length(T)) and (T[I] <> ';') do Inc(I);
+    ARetType := Trim(Copy(T, ColonP + 1, I - ColonP - 1));
+  end;
+  Result := True;
+end;
+
 
 // Turns the E2003 diagnostics for a buffer into missing-identifier records
 // with candidate units. Pure function of (content, diagnostics) - safe on
@@ -590,6 +693,289 @@ var
     Res.Add(F);
   end;
 
+  // E2029 "';' expected but X found" / E2066 "Missing operator or
+  // semicolon": insert the ';' at the end of the statement it terminates.
+  procedure AddInsertSemi(const D: TLspErrorDiag);
+  var
+    L0, C0, InsLine, InsCol, I: Integer;
+    S, Prefix: string;
+    F: TQuickFix;
+  begin
+    L0 := D.Range.Start.Line;
+    C0 := D.Range.Start.Character;
+    if (L0 < 0) or (L0 > High(Lines)) then Exit;
+
+    // Text BEFORE the unexpected token on the same line? Then the ';'
+    // belongs right after it; otherwise after the previous non-blank line.
+    InsLine := L0;
+    S := StripLineComment(Lines[L0]);
+    Prefix := Copy(S, 1, Min(Max(C0, 0), Length(S)));
+    if Trim(Prefix) = '' then
+    begin
+      I := L0 - 1;
+      while (I >= 0) and (Trim(StripLineComment(Lines[I])) = '') do Dec(I);
+      if I < 0 then Exit;
+      InsLine := I;
+      S := StripLineComment(Lines[I]);
+      Prefix := S;
+    end;
+    InsCol := Length(Prefix);
+    while (InsCol >= 1) and (Prefix[InsCol] = ' ') do Dec(InsCol);
+    if InsCol < 1 then Exit;
+    if CharInSet(Prefix[InsCol], [';', ',']) then Exit;   // stale / odd spot
+
+    if Seen.ContainsKey('S|' + IntToStr(InsLine)) then Exit;
+    Seen.Add('S|' + IntToStr(InsLine), True);
+
+    F := Default(TQuickFix);
+    F.Kind := qfInsertSemi;
+    // Anchor (hint/marker/caret matching) at the DIAGNOSED line - that is
+    // where the IDE points the user; the actual insertion position lives
+    // in AuxLine/Col (usually the previous non-blank line).
+    F.Line := D.Range.Start.Line;
+    F.AuxLine := InsLine;
+    F.Col := InsCol - 1;   // 0-based col of the last statement char
+    F.TokenLen := 0;       // marker: first-word fallback on the diag line
+    F.NewText := ';';
+    F.Caption := 'Insert missing ";"';
+    Res.Add(F);
+  end;
+
+  // W1036 "Variable 'X' might not have been initialized": initialize it
+  // with Default(<type>) right after the enclosing routine's 'begin'.
+  procedure AddW1036(const D: TLspErrorDiag);
+  var
+    Col0, Len, HdrLine, BeginLine, I, ColonP: Integer;
+    Ident, Kind, T, TypeText, Indent: string;
+    IsCM, FoundName: Boolean;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    if Seen.ContainsKey('W36|' + UpperCase(Ident) + '|' + IntToStr(D.Range.Start.Line)) then Exit;
+    Seen.Add('W36|' + UpperCase(Ident) + '|' + IntToStr(D.Range.Start.Line), True);
+
+    // Enclosing routine header: walking upward, every bare 'end;' we pass
+    // closes a NESTED routine (or a try/case block) - skip one header per
+    // counted terminator, otherwise a use below a nested routine would
+    // anchor to the nested header and the fix would edit the wrong body.
+    // Over-counting from try/case 'end;' lines only degrades to "no fix".
+    HdrLine := -1;
+    var EndCount := 0;
+    for I := D.Range.Start.Line downto Max(0, D.Range.Start.Line - 400) do
+    begin
+      T := Trim(StripLineComment(Lines[I]));
+      if SameText(T, 'end;') then
+        Inc(EndCount)
+      else if IsHeaderLine(Lines[I], Kind, IsCM) then
+      begin
+        if EndCount > 0 then
+          Dec(EndCount)
+        else
+        begin
+          HdrLine := I;
+          Break;
+        end;
+      end;
+    end;
+    if HdrLine < 0 then Exit;
+
+    BeginLine := -1;
+    TypeText := '';
+    for I := HdrLine + 1 to Min(High(Lines), HdrLine + 200) do
+    begin
+      T := Trim(StripLineComment(Lines[I]));
+      // A NESTED routine header before the 'begin'? Its var block and its
+      // 'begin' would be mistaken for the outer routine's - refuse the fix
+      // for routines with nested subroutines rather than guessing.
+      var K2: string;
+      var CM2: Boolean;
+      if IsHeaderLine(T, K2, CM2) then Exit;
+      if SameText(T, 'begin') then
+      begin
+        BeginLine := I;
+        Break;
+      end;
+      if Pos(':=', T) > 0 then Continue;   // inline var / statement - not a decl
+      ColonP := Pos(':', T);
+      if ColonP > 1 then
+      begin
+        FoundName := False;
+        for var N in Copy(T, 1, ColonP - 1).Split([',']) do
+          if SameText(Trim(N), Ident) then
+          begin
+            FoundName := True;
+            Break;
+          end;
+        if FoundName then
+        begin
+          TypeText := Trim(Copy(T, ColonP + 1, MaxInt));
+          if TypeText.EndsWith(';') then
+            TypeText := Trim(Copy(TypeText, 1, Length(TypeText) - 1));
+        end;
+      end;
+    end;
+    if (BeginLine < 0) or (TypeText = '') then Exit;
+    // Default(T) requires a plain (dotted) TYPE IDENTIFIER - reject inline
+    // type constructions ('set of X', '^Integer', 'array of Y', 'record',
+    // parameterized shapes) outright.
+    if not CharInSet(TypeText[1], ['A'..'Z', 'a'..'z', '_']) then Exit;
+    for I := 1 to Length(TypeText) do
+      if not CharInSet(TypeText[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) then Exit;
+
+    Indent := Copy(Lines[BeginLine], 1,
+      Length(Lines[BeginLine]) - Length(TrimLeft(Lines[BeginLine]))) + '  ';
+
+    F := Default(TQuickFix);
+    F.Kind := qfInitVar;
+    F.Line := D.Range.Start.Line;   // hint/marker anchor: the flagged use
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := Ident;
+    F.AuxLine := BeginLine;
+    F.NewText := Indent + Ident + ' := Default(' + TypeText + ');';
+    F.Caption := Format('Initialize "%s" at begin', [Ident]);
+    Res.Add(F);
+  end;
+
+  // H2077 "Value assigned to 'X' never used": remove the dead assignment -
+  // but ONLY when the whole statement sits on one line and the right-hand
+  // side is a SAFE LITERAL. A blacklist ('no parentheses') is not enough
+  // in Delphi: parameterless functions, constructors and property getters
+  // are invoked WITHOUT parens ('X := Random;', 'L := TStringList.Create;'),
+  // so any identifier RHS may carry a side effect. Whitelist instead:
+  // numeric/string/char literals, nil, True/False, [].
+  procedure AddH2077(const D: TLspErrorDiag);
+
+    function IsSafeLiteral(const S: string): Boolean;
+    var
+      I: Integer;
+      V: string;
+    begin
+      Result := False;
+      V := Trim(S);
+      if V = '' then Exit;
+      if SameText(V, 'nil') or SameText(V, 'True') or SameText(V, 'False')
+        or (V = '[]') or (V = '''''') then Exit(True);
+      // String literal: fully quoted, no embedded expression.
+      if (Length(V) >= 2) and (V[1] = '''') and (V[Length(V)] = '''') then
+        Exit(True);
+      // Char/numeric literal: #13, $FF, 3.14, -42.
+      I := 1;
+      if CharInSet(V[1], ['-', '+', '#', '$']) then I := 2;
+      if I > Length(V) then Exit;
+      for var K := I to Length(V) do
+        if not CharInSet(V[K], ['0'..'9', '.', 'a'..'f', 'A'..'F']) then Exit;
+      // Hex chars only allowed for #/$ prefixed literals.
+      if not CharInSet(V[1], ['#', '$']) then
+        for var K := I to Length(V) do
+          if not CharInSet(V[K], ['0'..'9', '.']) then Exit;
+      Result := True;
+    end;
+
+  var
+    Col0, Len, P: Integer;
+    Ident, T, RHS: string;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    if Seen.ContainsKey('H77|' + IntToStr(D.Range.Start.Line)) then Exit;
+    Seen.Add('H77|' + IntToStr(D.Range.Start.Line), True);
+
+    T := Trim(StripLineComment(Lines[D.Range.Start.Line]));
+    P := Pos(':=', T);
+    if P <= 1 then Exit;
+    if not SameText(Trim(Copy(T, 1, P - 1)), Ident) then Exit;   // plain "X := ..." only
+    RHS := Trim(Copy(T, P + 2, MaxInt));
+    if (RHS = '') or not RHS.EndsWith(';') then Exit;
+    RHS := Trim(Copy(RHS, 1, Length(RHS) - 1));
+    if not IsSafeLiteral(RHS) then Exit;
+
+    F := Default(TQuickFix);
+    F.Kind := qfRemoveAssign;
+    F.Line := D.Range.Start.Line;
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := Ident;
+    F.NewText := T;   // exact statement - the applier refuses on any drift
+    F.Caption := Format('Remove dead assignment to "%s"', [Ident]);
+    Res.Add(F);
+  end;
+
+  // W1010 "Method hides virtual method of base type": add 'reintroduce;'.
+  procedure AddW1010(const D: TLspErrorDiag);
+  var
+    Col0, Len: Integer;
+    Ident, Kind, S: string;
+    IsCM: Boolean;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    if Seen.ContainsKey('W10|' + IntToStr(D.Range.Start.Line)) then Exit;
+    Seen.Add('W10|' + IntToStr(D.Range.Start.Line), True);
+
+    S := StripLineComment(Lines[D.Range.Start.Line]);
+    if not IsHeaderLine(S, Kind, IsCM) then Exit;
+    if Pos(';', S) = 0 then Exit;                       // multi-line decl - skip
+    if Pos('REINTRODUCE', UpperCase(S)) > 0 then Exit;  // already there
+
+    F := Default(TQuickFix);
+    F.Kind := qfAddReintroduce;
+    F.Line := D.Range.Start.Line;
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := Ident;
+    F.Caption := 'Add reintroduce';
+    Res.Add(F);
+  end;
+
+  // E2065 "Unsatisfied forward or external declaration": generate an empty
+  // implementation - or, for a forward CLASS declaration ("TNode = class;")
+  // that never got its full declaration, a class stub.
+  procedure AddE2065(const D: TLspErrorDiag);
+  var
+    Col0, Len: Integer;
+    Ident, T, Rest, Kind: string;
+    IsCM: Boolean;
+    F: TQuickFix;
+  begin
+    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    if Seen.ContainsKey('E65|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident)) then Exit;
+    Seen.Add('E65|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident), True);
+
+    T := Trim(StripLineComment(Lines[D.Range.Start.Line]));
+
+    // Forward class declaration: "<Ident> = class;"
+    if StartsText(Ident, T) then
+    begin
+      Rest := Trim(Copy(T, Length(Ident) + 1, MaxInt));
+      if StartsText('=', Rest) and SameText(Trim(Copy(Rest, 2, MaxInt)), 'class;') then
+      begin
+        F := Default(TQuickFix);
+        F.Kind := qfClassStub;
+        F.Line := D.Range.Start.Line;
+        F.Col := Col0;
+        F.TokenLen := Len;
+        F.Identifier := Ident;
+        F.Caption := Format('Declare class "%s" (stub)', [Ident]);
+        Res.Add(F);
+        Exit;
+      end;
+    end;
+
+    // Method / routine declaration without implementation.
+    if not IsHeaderLine(T, Kind, IsCM) then Exit;
+    if Pos('EXTERNAL', UpperCase(T)) > 0 then Exit;   // cannot generate that
+
+    F := Default(TQuickFix);
+    F.Kind := qfImplStub;
+    F.Line := D.Range.Start.Line;
+    F.Col := Col0;
+    F.TokenLen := Len;
+    F.Identifier := Ident;
+    F.Caption := Format('Create empty implementation of "%s"', [Ident]);
+    Res.Add(F);
+  end;
+
 var
   Key: string;
 begin
@@ -617,7 +1003,15 @@ begin
       else if SameText(D.Code, 'F2613') or SameText(D.Code, 'F2063') then AddF2613(D)
       else if SameText(D.Code, 'E2037') then AddE2037(D)
       else if SameText(D.Code, 'H2443') then AddH2443(D)
-      else if SameText(D.Code, 'H2164') then AddH2164(D);
+      else if SameText(D.Code, 'H2164') then AddH2164(D)
+      // E2029 only when the EXPECTED token is ';' (first quoted part of the
+      // localized message); E2066 is always the missing-semicolon case.
+      else if (SameText(D.Code, 'E2029') and (FirstQuoted(D.Message) = ';'))
+        or SameText(D.Code, 'E2066') then AddInsertSemi(D)
+      else if SameText(D.Code, 'W1036') then AddW1036(D)
+      else if SameText(D.Code, 'H2077') then AddH2077(D)
+      else if SameText(D.Code, 'W1010') then AddW1010(D)
+      else if SameText(D.Code, 'E2065') then AddE2065(D);
     end;
     Result := Res.ToArray;
   finally
@@ -710,100 +1104,6 @@ function AlignImplHeaderToDecl(const AFile: string; ALine0: Integer): Boolean;
 var
   Content: string;
   Lines: TArray<string>;
-
-  function IsHeaderLine(const S: string; out AKind: string;
-    out AIsClassMethod: Boolean): Boolean;
-  var
-    T: string;
-  begin
-    Result := False;
-    AKind := '';
-    T := Trim(S);
-    AIsClassMethod := StartsText('class ', T);
-    if AIsClassMethod then T := Trim(Copy(T, 7, MaxInt));
-    for var KW in ['procedure', 'function', 'constructor', 'destructor'] do
-      if StartsText(KW + ' ', T) then
-      begin
-        AKind := KW;
-        Exit(True);
-      end;
-  end;
-
-  // Joins lines from AStart until the first ';' outside parentheses;
-  // AEndLine returns the last joined line. '' when no terminator found.
-  function CollectHeader(AStart: Integer; out AEndLine: Integer): string;
-  var
-    I, J, Depth: Integer;
-    L: string;
-  begin
-    Result := '';
-    Depth := 0;
-    for I := AStart to Min(AStart + 11, High(Lines)) do
-    begin
-      L := StripLineComment(Lines[I]);
-      for J := 1 to Length(L) do
-      begin
-        case L[J] of
-          '(', '[': Inc(Depth);
-          ')', ']': if Depth > 0 then Dec(Depth);
-          ';': if Depth = 0 then
-            begin
-              AEndLine := I;
-              Exit(Trim(Result + ' ' + Copy(L, 1, J)));
-            end;
-        end;
-      end;
-      Result := Result + ' ' + L;
-    end;
-    Result := '';
-  end;
-
-  // Splits a collected header into name / params / return type.
-  function ParseHeader(const AHeader, AKind: string;
-    out AQualified, AParams, ARetType: string): Boolean;
-  var
-    T: string;
-    P, Depth, I, OpenP, CloseP, ColonP: Integer;
-  begin
-    Result := False;
-    T := Trim(AHeader);
-    if StartsText('class ', T) then T := Trim(Copy(T, 7, MaxInt));
-    if not StartsText(AKind + ' ', T) then Exit;
-    T := Trim(Copy(T, Length(AKind) + 2, MaxInt));
-    // Name runs until '(' / ':' / ';'.
-    P := 1;
-    while (P <= Length(T)) and not CharInSet(T[P], ['(', ':', ';']) do Inc(P);
-    AQualified := Trim(Copy(T, 1, P - 1));
-    if AQualified = '' then Exit;
-    AParams := '';
-    ARetType := '';
-    OpenP := 0; CloseP := 0; Depth := 0;
-    for I := 1 to Length(T) do
-      case T[I] of
-        '(': begin if Depth = 0 then OpenP := I; Inc(Depth); end;
-        ')': begin Dec(Depth); if Depth = 0 then begin CloseP := I; Break; end; end;
-      end;
-    if (OpenP > 0) and (CloseP > OpenP) then
-      AParams := Trim(Copy(T, OpenP + 1, CloseP - OpenP - 1));
-    // Return type: ':' after the params (or after the name) up to ';'.
-    ColonP := 0; Depth := 0;
-    for I := Max(1, CloseP + 1) to Length(T) do
-      case T[I] of
-        '(', '[': Inc(Depth);
-        ')', ']': if Depth > 0 then Dec(Depth);
-        ':': if Depth = 0 then begin ColonP := I; Break; end;
-        ';': if Depth = 0 then Break;
-      end;
-    if ColonP > 0 then
-    begin
-      I := ColonP + 1;
-      while (I <= Length(T)) and (T[I] <> ';') do Inc(I);
-      ARetType := Trim(Copy(T, ColonP + 1, I - ColonP - 1));
-    end;
-    Result := True;
-  end;
-
-var
   HdrStart, HdrEnd, I, P, DeclLine, DeclEnd, ClassLine, SearchFrom, SearchTo: Integer;
   Kind, DeclKind, Header, Qualified, ImplParams, ImplRet: string;
   ClassName, MethodName, DeclHeader, DeclQual, DeclParams, DeclRet: string;
@@ -826,7 +1126,7 @@ begin
     end;
   if HdrStart < 0 then Exit;
 
-  Header := CollectHeader(HdrStart, HdrEnd);
+  Header := CollectHeader(Lines, HdrStart, HdrEnd);
   if Header = '' then Exit;
   if not ParseHeader(Header, Kind, Qualified, ImplParams, ImplRet) then Exit;
 
@@ -914,7 +1214,7 @@ begin
   end;
   if (DeclLine < 0) or (Matches > 1) then Exit;   // none, or ambiguous overloads
 
-  DeclHeader := CollectHeader(DeclLine, DeclEnd);
+  DeclHeader := CollectHeader(Lines, DeclLine, DeclEnd);
   if DeclHeader = '' then Exit;
   if not IsHeaderLine(Lines[DeclLine], DeclKind, DeclIsClassMeth) then Exit;
   if not ParseHeader(DeclHeader, DeclKind, DeclQual, DeclParams, DeclRet) then Exit;
@@ -1044,6 +1344,271 @@ begin
   Editor.DeleteLineAt(AFile, PrevIdx + 1);
 end;
 
+// "<Name> = class..." / "<Name> = record..." opener that starts a type BODY
+// (forward declarations, metaclasses and one-line aliases excluded).
+// Handles 'class abstract'/'class sealed'/'class helper' and generic names
+// ('TFoo<T>' - the generic signature stays part of the returned name, which
+// is exactly what the qualified implementation header needs).
+// Returns the type name, or ''.
+function ClassOpenerName(const ATrimmed: string): string;
+var
+  EqP: Integer;
+  Name, Rest: string;
+begin
+  Result := '';
+  EqP := Pos('=', ATrimmed);
+  if EqP <= 1 then Exit;
+  Name := Trim(Copy(ATrimmed, 1, EqP - 1));
+  if (Name = '') or not CharInSet(Name[1], ['A'..'Z', 'a'..'z', '_']) then Exit;
+  for var I := 1 to Length(Name) do
+    if not CharInSet(Name[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '<', '>', ',', ' ', ':']) then Exit;
+  Rest := Trim(Copy(ATrimmed, EqP + 1, MaxInt));
+  if not (StartsText('class', Rest) or StartsText('record', Rest)) then Exit;
+  var After := '';
+  if StartsText('class', Rest) then After := Trim(Copy(Rest, 6, MaxInt))
+  else After := Trim(Copy(Rest, 7, MaxInt));
+  if (After <> '') and CharInSet(After[1], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+  begin
+    if StartsText('of ', After) then Exit;   // metaclass '= class of X'
+    if not (StartsText('helper', After) or StartsText('abstract', After)
+      or StartsText('sealed', After)) then Exit;
+  end;
+  if Rest.EndsWith(';') then Exit;   // forward decl or one-line alias
+  Result := Name;
+end;
+
+// The (possibly nested) class/record whose declaration body encloses
+// ALine0, FULLY QUALIFIED ('TOuter.TInner'); '' = none. Walks upward
+// counting 'end;' terminators against type-body openers, then keeps
+// walking to pick up enclosing containers of the container.
+function EnclosingContainerName(const ALines: TArray<string>; ALine0: Integer): string;
+var
+  I, Depth: Integer;
+  T, Name: string;
+begin
+  Result := '';
+  Depth := 0;
+  for I := ALine0 - 1 downto 0 do
+  begin
+    T := Trim(StripLineComment(ALines[I]));
+    if SameText(T, 'end;') then
+      Inc(Depth)
+    else
+    begin
+      Name := ClassOpenerName(T);
+      if Name <> '' then
+      begin
+        if Depth > 0 then
+          Dec(Depth)
+        else
+        begin
+          // Found the innermost container; prepend any outer ones.
+          if Result = '' then
+            Result := Name
+          else
+            Result := Name + '.' + Result;
+          // continue the walk for a possible enclosing type
+        end;
+      end
+      else if SameText(T, 'implementation') or SameText(T, 'interface') then
+        Exit;
+    end;
+  end;
+end;
+
+// The 0-based line an implementation block should be inserted BEFORE:
+// the 'initialization'/'finalization' keyword when the unit has one
+// (inserting before the final 'end.' would land INSIDE that statement
+// block), else the final 'end.'. -1 when the file has no implementation
+// section at all (a .dpr program - its 'end.' closes the main block).
+function ImplInsertLine(const ALines: TArray<string>): Integer;
+var
+  I, ImplLine: Integer;
+  T: string;
+begin
+  Result := -1;
+  ImplLine := ImplementationLineOf(ALines);
+  if ImplLine = MaxInt then Exit;   // program file - refuse
+  for I := ImplLine + 1 to High(ALines) do
+  begin
+    T := LowerCase(Trim(StripLineComment(ALines[I])));
+    if (T = 'initialization') or (T = 'finalization') then
+      Exit(I);
+  end;
+  for I := High(ALines) downto 0 do
+    if SameText(Trim(ALines[I]), 'end.') then
+      Exit(I);
+end;
+
+// E2065 fix (methods/routines): appends an empty implementation block for
+// the declaration at ALine0 at the end of the implementation section.
+function CreateImplStub(const AFile: string; ALine0: Integer): Boolean;
+var
+  Content, Kind, Hdr, Qualified, BareName, Params, Ret, ContainerName, Text: string;
+  Lines: TArray<string>;
+  HdrEnd, InsLine, I: Integer;
+  IsCM, DummyCM: Boolean;
+  ChkKind, ChkQual, ChkParams, ChkRet: string;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  if not IsHeaderLine(Lines[ALine0], Kind, IsCM) then Exit;
+  Hdr := CollectHeader(Lines, ALine0, HdrEnd);
+  if Hdr = '' then Exit;
+  if not ParseHeader(Hdr, Kind, Qualified, Params, Ret) then Exit;
+  if Pos('.', Qualified) > 0 then Exit;   // already an implementation header
+  BareName := Qualified;
+
+  ContainerName := EnclosingContainerName(Lines, ALine0);
+  // An INDENTED declaration with no detected container means we failed to
+  // recognise the enclosing type (exotic opener) - generating an
+  // unqualified free routine would just add junk. Refuse instead.
+  if (ContainerName = '') and (Length(Lines[ALine0]) > 0)
+    and (Lines[ALine0][1] = ' ') then Exit;
+  if ContainerName <> '' then
+    Qualified := ContainerName + '.' + Qualified;
+
+  InsLine := ImplInsertLine(Lines);
+  if InsLine < 0 then Exit;   // also guards the loop below (impl exists)
+
+  // Idempotence: refuse when a matching implementation header already
+  // exists (stale diagnostics / applying the same fix twice).
+  for I := ImplementationLineOf(Lines) + 1 to High(Lines) do
+    if IsHeaderLine(Lines[I], ChkKind, DummyCM) then
+    begin
+      Hdr := CollectHeader(Lines, I, HdrEnd);
+      if (Hdr <> '') and ParseHeader(Hdr, ChkKind, ChkQual, ChkParams, ChkRet)
+        and (SameText(ChkQual, Qualified)
+          or SameText(ChkQual, ContainerName + '.' + BareName)) then Exit;
+    end;
+
+  Text := '';
+  if IsCM then Text := 'class ';
+  Text := Text + Kind + ' ' + Qualified;
+  if Params <> '' then Text := Text + '(' + Params + ')';
+  if Ret <> '' then Text := Text + ': ' + Ret;
+  Text := Text + ';' + sLineBreak + 'begin' + sLineBreak + sLineBreak
+    + 'end;' + sLineBreak + sLineBreak;
+
+  Result := Editor.InsertTextAtLineStart(AFile, InsLine + 1, Text);
+end;
+
+// E2065 fix (forward class): inserts a minimal class declaration right
+// after the forward declaration line.
+function CreateClassStub(const AFile, AClassName: string; ALine0: Integer): Boolean;
+var
+  Content, T, Indent, Text: string;
+  Lines: TArray<string>;
+  I: Integer;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 + 1 > High(Lines)) then Exit;
+  T := Trim(StripLineComment(Lines[ALine0]));
+  if not StartsText(AClassName, T) then Exit;   // stale buffer
+  // Idempotence: refuse when a full (non-forward) declaration of the
+  // class already exists anywhere in the file.
+  for I := 0 to High(Lines) do
+    if (I <> ALine0)
+      and SameText(ClassOpenerName(Trim(StripLineComment(Lines[I]))), AClassName) then
+      Exit;
+  Indent := Copy(Lines[ALine0], 1,
+    Length(Lines[ALine0]) - Length(TrimLeft(Lines[ALine0])));
+  Text := sLineBreak + Indent + AClassName + ' = class(TObject)' + sLineBreak
+    + Indent + 'end;' + sLineBreak;
+  Result := Editor.InsertTextAtLineStart(AFile, ALine0 + 2, Text);
+end;
+
+// W1036 fix: inserts the Default() initialization right after 'begin'.
+function InsertInitAtBegin(const AFile, AStmtLine: string;
+  ABeginLine0: Integer): Boolean;
+var
+  Content: string;
+  Lines: TArray<string>;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ABeginLine0 < 0) or (ABeginLine0 >= High(Lines)) then Exit;
+  if not SameText(Trim(StripLineComment(Lines[ABeginLine0])), 'begin') then Exit;
+  Result := Editor.InsertTextAtLineStart(AFile, ABeginLine0 + 2,
+    AStmtLine + sLineBreak);
+end;
+
+// E2029/E2066 fix: inserts ';' right after the 0-based character index
+// ACol0 of line ALine0 - with the resolver's semantic guards REPEATED
+// against the current buffer, so a stale fix can never punch a ';' into
+// an arbitrary position.
+function InsertSemicolonAfter(const AFile: string; ALine0, ACol0: Integer): Boolean;
+var
+  Content, L: string;
+  Lines: TArray<string>;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  L := Lines[ALine0];
+  if (ACol0 < 0) or (ACol0 + 1 > Length(L)) then Exit;
+  // The marked character must still be a statement-end character (not
+  // whitespace / already terminated) and nothing may already follow it.
+  if CharInSet(L[ACol0 + 1], [' ', #9, ';', ',']) then Exit;
+  if (ACol0 + 2 <= Length(L)) and (L[ACol0 + 2] = ';') then Exit;
+  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
+    Copy(L, 1, ACol0 + 1) + ';' + Copy(L, ACol0 + 2, MaxInt));
+end;
+
+// H2077 fix: deletes the dead assignment line - only when the line still
+// contains the EXACT statement the fix was resolved for (AExpected), so a
+// stale/shifted buffer can never lose a live assignment.
+function RemoveDeadAssignment(const AFile, AExpected: string; ALine0: Integer): Boolean;
+var
+  Content: string;
+  Lines: TArray<string>;
+begin
+  Result := False;
+  if (Editor = nil) or (AExpected = '') or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  if Trim(StripLineComment(Lines[ALine0])) <> AExpected then Exit;
+  Result := Editor.DeleteLineAt(AFile, ALine0 + 1);
+end;
+
+// W1010 fix: appends ' reintroduce;' after the declaration's first
+// top-level ';' (reintroduce must be the first directive).
+function AddReintroduceAt(const AFile: string; ALine0: Integer): Boolean;
+var
+  Content, L, S: string;
+  Lines: TArray<string>;
+  I, Depth, SemiP: Integer;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  L := Lines[ALine0];
+  S := StripLineComment(L);
+  if Pos('REINTRODUCE', UpperCase(S)) > 0 then Exit;
+  Depth := 0;
+  SemiP := 0;
+  for I := 1 to Length(S) do
+    case S[I] of
+      '(', '[': Inc(Depth);
+      ')', ']': if Depth > 0 then Dec(Depth);
+      ';': if Depth = 0 then
+        begin
+          SemiP := I;
+          Break;
+        end;
+    end;
+  if SemiP = 0 then Exit;
+  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
+    Copy(L, 1, SemiP) + ' reintroduce;' + Copy(L, SemiP + 1, MaxInt));
+end;
+
 // Executes one quick fix. AUnitChoice picks the candidate unit for
 // qfAddUnit (index into UnitNames).
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
@@ -1074,6 +1639,18 @@ begin
       Result := AlignImplHeaderToDecl(AFile, AFix.Line);
     qfRemoveVar:
       Result := RemoveVarFromDecl(AFile, AFix.Identifier, AFix.Line);
+    qfInsertSemi:
+      Result := InsertSemicolonAfter(AFile, AFix.AuxLine, AFix.Col);
+    qfInitVar:
+      Result := InsertInitAtBegin(AFile, AFix.NewText, AFix.AuxLine);
+    qfRemoveAssign:
+      Result := RemoveDeadAssignment(AFile, AFix.NewText, AFix.Line);
+    qfAddReintroduce:
+      Result := AddReintroduceAt(AFile, AFix.Line);
+    qfImplStub:
+      Result := CreateImplStub(AFile, AFix.Line);
+    qfClassStub:
+      Result := CreateClassStub(AFile, AFix.Identifier, AFix.Line);
   end;
 end;
 
@@ -1257,6 +1834,16 @@ begin
         qfRemoveVar:
           begin
             A.Caption := Format('Remove unused variable "%s"', [FFixes[I].Identifier]);
+            A.FixIdx := I;
+            A.UnitChoice := -1;
+            FActions := FActions + [A];
+            FList.Items.Add(A.Caption);
+          end;
+        qfInsertSemi, qfInitVar, qfRemoveAssign, qfAddReintroduce,
+        qfImplStub, qfClassStub:
+          begin
+            // These carry an action-ready caption from the resolver.
+            A.Caption := FFixes[I].Caption;
             A.FixIdx := I;
             A.UnitChoice := -1;
             FActions := FActions + [A];

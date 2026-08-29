@@ -40,6 +40,8 @@ type
     edtRemoveWith: TEdit;
     lblMoveToUnit: TLabel;
     edtMoveToUnit: TEdit;
+    lblFindOriginal: TLabel;
+    edtFindOriginal: TEdit;
     lblHint: TLabel;
     grpLsp: TGroupBox;
     cbxPrewarmLsp: TCheckBox;
@@ -78,6 +80,7 @@ begin
     skAlign:      Result := edtAlign;
     skRemoveWith: Result := edtRemoveWith;
     skMoveToUnit: Result := edtMoveToUnit;
+    skFindOriginal: Result := edtFindOriginal;
   else
     Result := nil;
   end;

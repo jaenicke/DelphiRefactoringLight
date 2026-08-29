@@ -2,13 +2,13 @@ object LspOptionsFrame: TLspOptionsFrame
   Left = 0
   Top = 0
   Width = 520
-  Height = 448
+  Height = 480
   TabOrder = 0
   object grpShortcuts: TGroupBox
     Left = 8
     Top = 8
     Width = 504
-    Height = 320
+    Height = 352
     Caption = ' Keyboard shortcuts '
     TabOrder = 0
     object lblRename: TLabel
@@ -67,9 +67,16 @@ object LspOptionsFrame: TLspOptionsFrame
       Height = 13
       Caption = 'Move to unit (project-wide):'
     end
+    object lblFindOriginal: TLabel
+      Left = 16
+      Top = 284
+      Width = 130
+      Height = 13
+      Caption = 'Find original symbol:'
+    end
     object lblHint: TLabel
       Left = 16
-      Top = 288
+      Top = 320
       Width = 480
       Height = 13
       Caption =
@@ -149,10 +156,19 @@ object LspOptionsFrame: TLspOptionsFrame
       OnKeyDown = ShortcutEditKeyDown
       OnKeyPress = ShortcutEditKeyPress
     end
+    object edtFindOriginal: TEdit
+      Left = 160
+      Top = 280
+      Width = 200
+      Height = 21
+      TabOrder = 8
+      OnKeyDown = ShortcutEditKeyDown
+      OnKeyPress = ShortcutEditKeyPress
+    end
   end
   object grpLsp: TGroupBox
     Left = 8
-    Top = 340
+    Top = 372
     Width = 504
     Height = 65
     Caption = ' LSP '

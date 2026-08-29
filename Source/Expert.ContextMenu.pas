@@ -74,6 +74,7 @@ type
     procedure OnRename(Sender: TObject);
     procedure OnFindReferences(Sender: TObject);
     procedure OnFindImplementations(Sender: TObject);
+    procedure OnFindOriginal(Sender: TObject);
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
@@ -145,7 +146,7 @@ uses
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
-  Expert.FindUnitDialog, Expert.AutoImport;
+  Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -278,6 +279,7 @@ begin
   Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
   Leaf(Root, 'Find References',           OnFindReferences,       skFindRef,    REQ_EDITOR);
   Leaf(Root, 'Find Implementations',      OnFindImplementations,  skFindImp,    REQ_EDITOR);
+  Leaf(Root, 'Find original symbol',      OnFindOriginal,         skFindOriginal, REQ_EDITOR);
   Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
@@ -1027,6 +1029,11 @@ procedure TContextMenuInstaller.OnFindImplementations(Sender: TObject);
 begin
   if FindImplementationsInstance <> nil then
     FindImplementationsInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnFindOriginal(Sender: TObject);
+begin
+  FindOriginalSymbol;
 end;
 
 procedure TContextMenuInstaller.OnExtractMethod(Sender: TObject);

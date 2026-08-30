@@ -24,7 +24,7 @@ implementation
 uses
   System.SysUtils, System.Classes, System.UITypes, System.IOUtils,
   System.StrUtils, System.Win.Registry, System.Generics.Collections,
-  System.Generics.Defaults, Winapi.Windows, Winapi.CommCtrl,
+  System.Generics.Defaults, Winapi.Windows, Winapi.Messages, Winapi.CommCtrl,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.DfmEventCheck, Expert.DialogHelper,
@@ -35,9 +35,13 @@ type
   // (re)creation. Toggling GroupView/Checkboxes recreates the handle, so
   // setting LVS_EX_DOUBLEBUFFER once from outside would not stick;
   // CreateWnd runs after each recreation and makes it permanent.
+  // It also OWNER-DRAWS the group headers: the native painter uses a
+  // hard-coded dark-blue accent (and ignores clrText for groups), which
+  // is unreadable on the IDE's dark theme.
   TBufferedListView = class(TListView)
   protected
     procedure CreateWnd; override;
+    procedure CNNotify(var Message: TWMNotify); message CN_NOTIFY;
   end;
 
   TDfmEventCheckDialog = class(TForm)
@@ -85,6 +89,66 @@ begin
   inherited;
   SendMessage(Handle, LVM_SETEXTENDEDLISTVIEWSTYLE,
     LVS_EX_DOUBLEBUFFER, LVS_EX_DOUBLEBUFFER);
+end;
+
+procedure TBufferedListView.CNNotify(var Message: TWMNotify);
+var
+  Cd: PNMLVCustomDraw;
+begin
+  if Message.NMHdr.code = NM_CUSTOMDRAW then
+  begin
+    Cd := PNMLVCustomDraw(Message.NMHdr);
+    // Group headers get their own PREPAINT cycle with
+    // dwItemType = LVCDI_GROUP (empirically verified; they never arrive
+    // as ITEMPREPAINT, and the native painter ignores clrText) - draw
+    // them ourselves in theme-aware colors.
+    if (Cd.nmcd.dwDrawStage = CDDS_PREPAINT)
+      and (Cd.dwItemType = LVCDI_GROUP) then
+    begin
+      var Grp: TLVGroup;
+      var Buf: array[0..511] of Char;
+      FillChar(Grp, SizeOf(Grp), 0);
+      FillChar(Buf, SizeOf(Buf), 0);
+      Grp.cbSize := SizeOf(Grp);
+      Grp.mask := LVGF_HEADER;
+      Grp.pszHeader := @Buf[0];
+      Grp.cchHeader := Length(Buf);
+      SendMessage(Handle, LVM_GETGROUPINFO, Cd.nmcd.dwItemSpec, LPARAM(@Grp));
+
+      var R: TRect;
+      R.Top := LVGGR_HEADER;
+      R.Left := 0; R.Right := 0; R.Bottom := 0;
+      SendMessage(Handle, LVM_GETGROUPRECT, Cd.nmcd.dwItemSpec, LPARAM(@R));
+
+      var Hdc := Cd.nmcd.hdc;
+      var Br := CreateSolidBrush(ColorToRGB(GetThemedColor(clWindow)));
+      FillRect(Hdc, R, Br);
+      DeleteObject(Br);
+      var OldFont := SelectObject(Hdc, Font.Handle);
+      SetBkMode(Hdc, TRANSPARENT);
+      SetTextColor(Hdc, ColorToRGB(GetThemedColor(clWindowText)));
+      var TxtR := R;
+      Inc(TxtR.Left, 8);
+      var Txt: string := Grp.pszHeader;
+      DrawText(Hdc, PChar(Txt), Length(Txt), TxtR,
+        DT_SINGLELINE or DT_VCENTER or DT_LEFT or DT_END_ELLIPSIS);
+      // Separator line from the text to the right edge, like the native look.
+      var Sz: TSize;
+      GetTextExtentPoint32(Hdc, PChar(Txt), Length(Txt), Sz);
+      var Pen := CreatePen(PS_SOLID, 1, ColorToRGB(GetThemedColor(clGrayText)));
+      var OldPen := SelectObject(Hdc, Pen);
+      var Y := (R.Top + R.Bottom) div 2;
+      MoveToEx(Hdc, TxtR.Left + Sz.cx + 8, Y, nil);
+      LineTo(Hdc, R.Right - 4, Y);
+      SelectObject(Hdc, OldPen);
+      DeleteObject(Pen);
+      SelectObject(Hdc, OldFont);
+
+      Message.Result := CDRF_SKIPDEFAULT;
+      Exit;
+    end;
+  end;
+  inherited;
 end;
 
 constructor TDfmEventCheckDialog.CreateDialog(AOwner: TComponent;
@@ -602,7 +666,7 @@ begin
 
   // Progress window: applying fixes runs on the main thread (LSP calls,
   // file writes) - without it the IDE looks frozen on large batches.
-  Prog := TForm.CreateNew(Self);
+  Prog := TThemedToolForm.CreateNew(Self);
   Prog.Caption := 'Applying signature fixes';
   Prog.BorderStyle := bsToolWindow;
   Prog.FormStyle := fsStayOnTop;
@@ -624,6 +688,7 @@ begin
   ProgBar.Height := 18;
   ProgBar.Min := 0;
   ProgBar.Max := Total;
+  EnableThemes(Prog);
   PrepareDialog(Prog, Self);
 
   try
@@ -989,7 +1054,7 @@ begin
   // Progress window: the check reads every project file once for the
   // class index, then walks each form - visible feedback instead of a
   // silent multi-second hang on large projects.
-  ProgressForm := TForm.CreateNew(nil);
+  ProgressForm := TThemedToolForm.CreateNew(nil);
   try
     ProgressForm.Caption := 'DFM event handler check';
     ProgressForm.BorderStyle := bsToolWindow;
@@ -1012,6 +1077,7 @@ begin
     ProgressBar.Height := 18;
     ProgressBar.Min := 0;
     ProgressBar.Max := 100;
+    EnableThemes(ProgressForm);
     PrepareDialog(ProgressForm, nil);
     ProgressForm.Show;
     Screen.Cursor := crHourGlass;

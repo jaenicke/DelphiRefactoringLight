@@ -34,6 +34,13 @@ interface
 uses
   System.Classes, Vcl.Forms, Vcl.Controls;
 
+type
+  /// <summary>Class for the ad-hoc progress/tool windows built with
+  ///  CreateNew. A DISTINCT class name matters: the IDE theming service
+  ///  registers form CLASSES, and registering plain TForm would affect
+  ///  every TForm instance in the process.</summary>
+  TThemedToolForm = class(TForm);
+
 /// <summary>Registers AClass with the IDE theming service so new
 ///  instances pick up the active theme. Safe to call multiple times;
 ///  the theming service deduplicates internally.</summary>

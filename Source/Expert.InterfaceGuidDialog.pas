@@ -349,6 +349,10 @@ procedure TInterfaceGuidDialog.DoCustomDrawItem(Sender: TCustomListView;
   Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
 begin
   DefaultDraw := True;
+  // Touching the canvas in a custom-draw handler makes the native control
+  // use Brush.Color as the row background - without setting it, themed
+  // (dark) list views paint these rows on WHITE.
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
   if (Item.Index >= 0) and (Item.Index < Length(FEntries)) then
   begin
     if FEntries[Item.Index].IsDuplicate then

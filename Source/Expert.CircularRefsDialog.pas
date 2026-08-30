@@ -671,6 +671,9 @@ procedure TCircularRefsDialog.DoEdgeDraw(Sender: TCustomListView;
   Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
 begin
   DefaultDraw := True;
+  // Custom-draw rows take their background from Brush.Color - set the
+  // themed one, or dark-themed list views paint these rows on WHITE.
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
   if (Item.Index >= 0) and (Item.Index < Length(FResult.Edges)) then
     if FResult.Edges[Item.Index].InInterface then
       Sender.Canvas.Font.Color := clRed
@@ -682,6 +685,7 @@ procedure TCircularRefsDialog.DoPathDraw(Sender: TCustomListView;
   Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
 begin
   DefaultDraw := True;
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
   if (Item.Index >= 0) and (Item.Index < Length(FCurPath)) then
     if FCurPath[Item.Index].InInterface then
       Sender.Canvas.Font.Color := clRed
@@ -768,7 +772,7 @@ begin
     Exit;
   end;
 
-  ProgressForm := TForm.CreateNew(nil);
+  ProgressForm := TThemedToolForm.CreateNew(nil);
   try
     ProgressForm.Caption := 'Circular unit references';
     ProgressForm.BorderStyle := bsToolWindow;
@@ -782,6 +786,7 @@ begin
     ProgressLbl.Alignment := taCenter;
     ProgressLbl.Layout := tlCenter;
     ProgressLbl.Caption := 'Scanning...';
+    EnableThemes(ProgressForm);
     PrepareDialog(ProgressForm, nil);
     ProgressForm.Show;
     Screen.Cursor := crHourGlass;

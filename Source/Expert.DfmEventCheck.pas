@@ -238,7 +238,7 @@ implementation
 
 uses
   System.IOUtils, System.StrUtils, System.Math,
-  Expert.EditorHelperIntf, Delphi.FileEncoding,
+  Expert.EditorHelperIntf, Expert.UsesEditor, Delphi.FileEncoding,
   Expert.LspManager, Lsp.Uri, Lsp.Protocol;
 
 // Unit name (possibly dotted, e.g. "Vcl.Controls") declared by AFile, or ''.
@@ -2487,7 +2487,9 @@ begin
       Needed.Free;
     end;
 
-    Result := Editor.ReplaceFileContent(AIssue.PasFile, Lines.Text);
+    // Minimal write: only the changed lines are touched, so the IDE's
+    // change bars mark the actual fix instead of the whole unit.
+    Result := ApplyLinesMinimal(AIssue.PasFile, Lines, Content);
     if not Result then
       AFailReason := 'write failed: ' + AIssue.PasFile;
   finally

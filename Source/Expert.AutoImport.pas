@@ -38,7 +38,7 @@ unit Expert.AutoImport;
 interface
 
 uses
-  System.SysUtils, Lsp.Protocol, Expert.UsesEditor;
+  System.SysUtils, Lsp.Protocol, Expert.UsesEditor, Expert.UnitIndex;
 
 type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
@@ -77,6 +77,26 @@ type
 ///  declaration stub).</summary>
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
+
+/// <summary>Identifier of an E2003 diagnostic. Prefers the QUOTED name from
+///  the (localized) message - for generic types the compiler reports
+///  'TList<>' while the range points at/into the type ARGUMENTS, so the
+///  token at the range would be 'Integer' (or a type parameter). Falls back
+///  to the token at the range position. '' when nothing usable; ACol0/ALen
+///  anchor the identifier on its line (markers, rename replacement).</summary>
+function E2003IdentFromDiag(const ALines: TArray<string>;
+  const D: TLspErrorDiag; out ACol0, ALen: Integer): string;
+
+/// <summary>True when the identifier at ACol0/ALen (0-based col) is
+///  followed by '<' - a generic instantiation ("TList<Integer>").</summary>
+function IsGenericUseAt(const ALine: string; ACol0, ALen: Integer): Boolean;
+
+/// <summary>Drops candidate units whose declaration FORM cannot satisfy
+///  the use form: "TList<...>" is never System.Classes' non-generic TList,
+///  a bare "TList" never the generic one. Only filters when at least one
+///  matching-form candidate exists - otherwise all hits are kept.</summary>
+function FilterHitsByGenericUse(const AHits: TArray<TFindUnitHit>;
+  AGenericUse: Boolean): TArray<TFindUnitHit>;
 
 /// <summary>Executes one quick fix. AUnitChoice picks the candidate unit
 ///  for qfAddUnit (index into UnitNames).</summary>
@@ -155,13 +175,14 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Graphics, Vcl.Dialogs,
   Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf, Expert.UnitIndex,
+  Expert.EditorHelperIntf,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
   Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
 
 type
   TMissingIdent = record
-    Identifier: string;
+    Identifier: string;         // bare name (compared to the word at cursor)
+    GenericUse: Boolean;        // use site is "Name<...>" - display as "Name<>"
     Line: Integer;        // 0-based (from the diagnostic range)
     Section: TUsesSection;// smart default (interface if used above impl)
     Units: TArray<TFindUnitHit>;
@@ -339,22 +360,22 @@ begin
     begin
       if not SameText(D.Code, 'E2003') then Continue;   // undeclared identifier
       if (D.Range.Start.Line < 0) or (D.Range.Start.Line > High(Lines)) then Continue;
-      // Extract the identifier text from the diagnostic range.
-      var LnTxt := Lines[D.Range.Start.Line];
-      var A := D.Range.Start.Character + 1;   // 1-based for Copy
-      var B := D.Range.End_.Character;
-      if D.Range.End_.Line <> D.Range.Start.Line then B := Length(LnTxt);
-      if (A < 1) or (B < A) or (A > Length(LnTxt)) then Continue;
-      var Ident := Trim(Copy(LnTxt, A, B - A + 1));
+      // Message-first extraction (generics: message says 'TList<>', the
+      // range points at/into the type arguments).
+      var ECol0, ELen: Integer;
+      var Ident := E2003IdentFromDiag(Lines, D, ECol0, ELen);
       if Ident = '' then Continue;
       if Seen.ContainsKey(UpperCase(Ident)) then Continue;
       Seen.Add(UpperCase(Ident), True);
 
-      var Hits := DedupeByUnitName(TUnitIndex.Instance.Lookup(Ident));
+      var EGenericUse := IsGenericUseAt(Lines[D.Range.Start.Line], ECol0, ELen);
+      var Hits := DedupeByUnitName(FilterHitsByGenericUse(
+        TUnitIndex.Instance.Lookup(Ident), EGenericUse));
       if Length(Hits) = 0 then Continue;   // nothing we can add - skip
 
       var M: TMissingIdent;
       M.Identifier := Ident;
+      M.GenericUse := EGenericUse;
       M.Line := D.Range.Start.Line;
       if M.Line < ImplLine then M.Section := usInterface else M.Section := usImplementation;
       M.Units := Hits;
@@ -468,6 +489,103 @@ begin
   Result := S[Length(S)] <> '.';
 end;
 
+function IsBareIdent(const S: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := (S <> '') and not CharInSet(S[1], ['0'..'9']);
+  if Result then
+    for I := 1 to Length(S) do
+      if not CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+        Exit(False);
+end;
+
+function IsGenericUseAt(const ALine: string; ACol0, ALen: Integer): Boolean;
+var
+  P: Integer;
+begin
+  P := ACol0 + ALen + 1;   // 1-based char after the token
+  while (P <= Length(ALine)) and CharInSet(ALine[P], [' ', #9]) do
+    Inc(P);
+  Result := (P <= Length(ALine)) and (ALine[P] = '<');
+end;
+
+function FilterHitsByGenericUse(const AHits: TArray<TFindUnitHit>;
+  AGenericUse: Boolean): TArray<TFindUnitHit>;
+var
+  HasMatchingForm: Boolean;
+  H: TFindUnitHit;
+begin
+  HasMatchingForm := False;
+  for H in AHits do
+    if H.IsGeneric = AGenericUse then
+    begin
+      HasMatchingForm := True;
+      Break;
+    end;
+  if not HasMatchingForm then Exit(AHits);
+  Result := nil;
+  for H in AHits do
+    if H.IsGeneric = AGenericUse then
+      Result := Result + [H];
+end;
+
+function E2003IdentFromDiag(const ALines: TArray<string>;
+  const D: TLspErrorDiag; out ACol0, ALen: Integer): string;
+var
+  LnTxt, TokTxt: string;
+  P, LtP, TCol0, TLen: Integer;
+begin
+  Result := '';
+  ACol0 := 0; ALen := 0;
+  if (D.Range.Start.Line < 0) or (D.Range.Start.Line > High(ALines)) then Exit;
+  LnTxt := ALines[D.Range.Start.Line];
+
+  // Quoted name from the message; everything from '<' on is the generic
+  // arity marker ("TList<>", "TDictionary<,>").
+  Result := FirstQuoted(D.Message);
+  LtP := Pos('<', Result);
+  if LtP > 0 then Result := Copy(Result, 1, LtP - 1);
+  if not IsBareIdent(Result) then Result := '';
+
+  TokTxt := '';
+  if TokenAt(LnTxt, D.Range.Start.Character + 1, False, TCol0, TLen) then
+    TokTxt := Copy(LnTxt, TCol0 + 1, TLen);
+
+  if Result = '' then
+  begin
+    // No usable quote - the range token is all we have.
+    Result := TokTxt;
+    ACol0 := TCol0;
+    ALen := TLen;
+    Exit;
+  end;
+  if SameText(TokTxt, Result) then
+  begin
+    ACol0 := TCol0;
+    ALen := TLen;
+    Exit;
+  end;
+  // Range and message disagree (generics): anchor at the first whole-word
+  // occurrence of the reported name on the line.
+  ALen := Length(Result);
+  ACol0 := D.Range.Start.Character;   // last resort for the markers
+  P := 1;
+  while P <= Length(LnTxt) - ALen + 1 do
+  begin
+    P := PosEx(UpperCase(Result), UpperCase(LnTxt), P);
+    if P = 0 then Break;
+    if ((P = 1) or not CharInSet(LnTxt[P - 1], ['A'..'Z', 'a'..'z', '0'..'9', '_']))
+       and ((P + ALen > Length(LnTxt))
+         or not CharInSet(LnTxt[P + ALen], ['A'..'Z', 'a'..'z', '0'..'9', '_'])) then
+    begin
+      ACol0 := P - 1;
+      Exit;
+    end;
+    Inc(P);
+  end;
+end;
+
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
 var
@@ -503,7 +621,11 @@ var
     Hits, Cands: TArray<TFindUnitHit>;
     F: TQuickFix;
   begin
-    if not DiagToken(D, False, Col0, Len, Ident) then Exit;
+    // Message-first extraction: for "TList<Integer>" the compiler reports
+    // 'TList<>' but the range points at/into the type arguments, so the
+    // token there would be 'Integer' (or a type parameter T).
+    Ident := E2003IdentFromDiag(Lines, D, Col0, Len);
+    if Ident = '' then Exit;
     // Semantic dedup: both diagnostic sources report one E2003 per
     // OCCURRENCE, so the same identifier twice on a line would otherwise
     // produce identical fixes. One fix per (identifier, line).
@@ -511,16 +633,25 @@ var
     Seen.Add('I|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident), True);
 
     if Snap = nil then Exit;
-    Hits := DedupeByUnitName(Snap.Lookup(Ident));
+    // "TList<Integer>" must not offer System.Classes' non-generic TList
+    // (and a bare "TList" not the generic one). Filter BEFORE the unit
+    // dedupe so per-declaration genericity flags are still intact.
+    var GenericUse := (D.Range.Start.Line >= 0)
+      and (D.Range.Start.Line <= High(Lines))
+      and IsGenericUseAt(Lines[D.Range.Start.Line], Col0, Len);
+    Hits := DedupeByUnitName(FilterHitsByGenericUse(Snap.Lookup(Ident), GenericUse));
     if Length(Hits) > 0 then
     begin
+      // Display form: "TList<>" makes clear the GENERIC variant is meant.
+      var Disp := Ident;
+      if GenericUse then Disp := Disp + '<>';
       F := Default(TQuickFix);
       F.Kind := qfAddUnit;
       F.Line := D.Range.Start.Line;
       F.Col := Col0;           // for the editor line markers
       F.TokenLen := Len;
-      F.Identifier := Ident;
-      F.Caption := Format('Add unit for "%s"', [Ident]);
+      F.Identifier := Disp;
+      F.Caption := Format('Add unit for "%s"', [Disp]);
       F.Section := SectionFor(F.Line);
       for var H in Hits do
         F.UnitNames := F.UnitNames + [H.UnitName];
@@ -2104,7 +2235,10 @@ begin
     begin
       Item := FList.Items.Add;
       Item.Data := Pointer(NativeInt(I));   // survives column sorting
-      Item.Caption := FItems[I].Identifier;
+      if FItems[I].GenericUse then
+        Item.Caption := FItems[I].Identifier + '<>'
+      else
+        Item.Caption := FItems[I].Identifier;
       Item.Checked := True;
       Item.SubItems.Add(FItems[I].Units[FSel[I]].UnitName);
       Item.SubItems.Add(SectionName(FSecSel[I]));
@@ -2842,6 +2976,15 @@ begin
     Chosen.Line := Ctx.Line - 1;
     Chosen.Units := Hits;
     Chosen.Section := usInterface;
+    // No diagnostic line at hand: mark generic when only generic
+    // declarations exist (the word can only be used as "Name<...>").
+    Chosen.GenericUse := True;
+    for var H in Hits do
+      if not H.IsGeneric then
+      begin
+        Chosen.GenericUse := False;
+        Break;
+      end;
   end;
 
   // One obvious choice -> apply straight away; else show the chooser popup.
@@ -2855,12 +2998,14 @@ begin
   end;
 
   // Several candidates -> the quick-fix chooser popup at the caret.
+  var Disp := Chosen.Identifier;
+  if Chosen.GenericUse then Disp := Disp + '<>';
   var F := Default(TQuickFix);
   F.Kind := qfAddUnit;
   F.Line := Chosen.Line;
-  F.Identifier := Chosen.Identifier;
+  F.Identifier := Disp;
   F.Section := Chosen.Section;
-  F.Caption := Format('Add unit for "%s"', [Chosen.Identifier]);
+  F.Caption := Format('Add unit for "%s"', [Disp]);
   for var H in Chosen.Units do
     F.UnitNames := F.UnitNames + [H.UnitName];
 

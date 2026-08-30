@@ -532,7 +532,14 @@ begin
   try
     Lines.Text := Content;
     if (ALine < 1) or (ALine > Lines.Count + 1) then Exit;
-    Lines.Insert(ALine - 1, AText);
+    // Same contract as the IDE helper: AText is RAW text inserted at the
+    // line's start (callers pass "new line" + CRLF to insert whole lines).
+    // Lines.Insert(AText) would treat it as one ITEM and render the
+    // embedded trailing CRLF as an extra blank line.
+    if ALine <= Lines.Count then
+      Lines[ALine - 1] := AText + Lines[ALine - 1]
+    else
+      Lines.Add(AText.TrimRight([#13, #10]));
     Result := ReplaceFileContent(AFilePath, Lines.Text);
   finally
     Lines.Free;

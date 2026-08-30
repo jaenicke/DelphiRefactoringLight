@@ -273,7 +273,10 @@ begin
     for I := 0 to High(FHits) do
     begin
       Item := FList.Items.Add;
-      Item.Caption := FHits[I].Identifier;
+      if FHits[I].IsGeneric then
+        Item.Caption := FHits[I].Identifier + '<>'   // generic declaration
+      else
+        Item.Caption := FHits[I].Identifier;
       Item.SubItems.Add(FHits[I].UnitName);
       Item.SubItems.Add(FHits[I].Path);
       Item.Data := Pointer(NativeInt(I));   // survives click-to-sort reorder

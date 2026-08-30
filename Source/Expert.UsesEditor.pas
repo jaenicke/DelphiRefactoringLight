@@ -14,6 +14,9 @@ unit Expert.UsesEditor;
 
 interface
 
+uses
+  System.Classes;
+
 type
   TUsesSection = (usInterface, usImplementation);
 
@@ -45,11 +48,146 @@ function AddUnitToUses(const AFilePath, AUnit: string;
 ///  listed or the clause cannot be rewritten safely.</summary>
 function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 
+/// <summary>Writes ASL (an edited copy of AOriginal's lines) back to
+///  AFilePath touching ONLY the lines that actually changed, so the IDE's
+///  change bars mark just the edit instead of the whole unit (and no other
+///  line loses its exact whitespace / layout). Falls back to a full
+///  ReplaceFileContent when a line operation is not applicable.</summary>
+function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;
+  const AOriginal: string): Boolean;
+
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils,
+  System.SysUtils, System.IOUtils, System.Math,
   Expert.EditorHelperIntf;
+
+function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;
+  const AOriginal: string): Boolean;
+const
+  // Above this many line operations a single ReplaceFileContent is the
+  // better deal: one undo step instead of one per line, and the change
+  // bars would cover the span anyway.
+  MaxLineOps = 16;
+var
+  Orig: TStringList;
+  Live: string;
+  P, S, OldWin, NewWin, K, OI, NI, Ops: Integer;
+  InsPos: TArray<Integer>;   // pure-insert: 0-based ORIGINAL line to insert before
+  InsTxt: TArray<string>;
+  DelPos: TArray<Integer>;   // pure-delete: 0-based original line to remove
+begin
+  if Editor = nil then Exit(False);
+  // Only files OPEN in an editor buffer get line-level edits. For closed
+  // files ReplaceFileContent writes straight to disk (encoding-preserving,
+  // no IDE tab) - the line ops would OpenModule and flood the editor with
+  // tabs on batch fixes; change bars don't matter for closed files anyway.
+  if not Editor.ReadEditorContent(AFilePath, Live) then
+    Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+  Orig := TStringList.Create;
+  try
+    Orig.Text := AOriginal;
+    // Minimal contiguous diff window: common prefix / suffix (exact,
+    // case- and whitespace-sensitive compare).
+    P := 0;
+    while (P < Orig.Count) and (P < ASL.Count) and (Orig[P] = ASL[P]) do
+      Inc(P);
+    S := 0;
+    while (S < Orig.Count - P) and (S < ASL.Count - P)
+          and (Orig[Orig.Count - 1 - S] = ASL[ASL.Count - 1 - S]) do
+      Inc(S);
+    OldWin := Orig.Count - P - S;
+    NewWin := ASL.Count - P - S;
+    if (OldWin = 0) and (NewWin = 0) then Exit(True);   // nothing changed
+
+    Result := True;
+
+    // PURE INSERTION: every old window line survives in order (a stub
+    // insertion high up + one further down, say). Apply each insert at
+    // its exact spot - bottom-up, so upper ORIGINAL line numbers stay
+    // valid - instead of positionally rewriting the shifted span.
+    if (NewWin > OldWin) and (S > 0) then
+    begin
+      OI := 0;
+      InsPos := nil;
+      InsTxt := nil;
+      for NI := 0 to NewWin - 1 do
+        if (OI < OldWin) and (Orig[P + OI] = ASL[P + NI]) then
+          Inc(OI)
+        else
+        begin
+          InsPos := InsPos + [P + OI];      // insert BEFORE this original line
+          InsTxt := InsTxt + [ASL[P + NI]];
+        end;
+      if (OI = OldWin) and (Length(InsPos) <= MaxLineOps) then
+      begin
+        for K := High(InsPos) downto 0 do
+          if not Editor.InsertTextAtLineStart(AFilePath, InsPos[K] + 1,
+               InsTxt[K] + sLineBreak) then
+            Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+        Exit;
+      end;
+    end;
+
+    // PURE DELETION: every new window line existed in order in the old
+    // window - remove exactly the dropped lines, bottom-up.
+    if OldWin > NewWin then
+    begin
+      NI := 0;
+      DelPos := nil;
+      for OI := 0 to OldWin - 1 do
+        if (NI < NewWin) and (Orig[P + OI] = ASL[P + NI]) then
+          Inc(NI)
+        else
+          DelPos := DelPos + [P + OI];
+      if (NI = NewWin) and (Length(DelPos) <= MaxLineOps) then
+      begin
+        for K := High(DelPos) downto 0 do
+          if not Editor.DeleteLineAt(AFilePath, DelPos[K] + 1) then
+            Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+        Exit;
+      end;
+    end;
+
+    // GENERAL: positional in-place replace + surplus delete/insert at the
+    // window end. When the window spans two size-changing edits, the
+    // shifted interior would degenerate into per-line rewrites - cap the
+    // operation count and take the single full write instead (one undo
+    // step, same visual outcome).
+    Ops := Abs(OldWin - NewWin);
+    for K := 0 to Min(OldWin, NewWin) - 1 do
+      if Orig[P + K] <> ASL[P + K] then
+        Inc(Ops);
+    if (Ops > MaxLineOps) or ((NewWin > OldWin) and (S = 0)) then
+      Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+
+    // Replace in place first (line numbers stay stable). Skip identical
+    // lines - a window can span TWO edits with untouched lines between
+    // them (the interface->implementation move touches both clauses).
+    for K := 0 to Min(OldWin, NewWin) - 1 do
+      if Orig[P + K] <> ASL[P + K] then
+        if not Editor.ReplaceLineAt(AFilePath, P + K + 1, ASL[P + K]) then
+          Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+    // ... then drop surplus old lines bottom-up ...
+    if OldWin > NewWin then
+    begin
+      for K := OldWin - 1 downto NewWin do
+        if not Editor.DeleteLineAt(AFilePath, P + K + 1) then
+          Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+    end
+    // ... or insert surplus new lines (bottom-up at a fixed position, so
+    // each insert lands above the previous one).
+    else if NewWin > OldWin then
+    begin
+      for K := NewWin - 1 downto OldWin do
+        if not Editor.InsertTextAtLineStart(AFilePath, P + OldWin + 1,
+             ASL[P + K] + sLineBreak) then
+          Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+    end;
+  finally
+    Orig.Free;
+  end;
+end;
 
 function StripLineComment(const L: string): string;
 var
@@ -330,7 +468,7 @@ begin
       Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit);
 
     if Removed then
-      Result := Editor.ReplaceFileContent(AFilePath, SL.Text);
+      Result := ApplyLinesMinimal(AFilePath, SL, Content);
   finally
     SL.Free;
   end;
@@ -417,7 +555,7 @@ begin
     else
       SL.Insert(StartIdx + 1, 'uses ' + AUnit + ';');
 
-    Result := Editor.ReplaceFileContent(AFilePath, SL.Text);
+    Result := ApplyLinesMinimal(AFilePath, SL, Content);
   finally
     SL.Free;
   end;

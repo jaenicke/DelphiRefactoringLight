@@ -34,6 +34,7 @@ type
     Identifier: string;   // the matched identifier (original case)
     UnitName: string;     // e.g. 'Vcl.Controls'
     Path: string;         // full path of the declaring .pas
+    IsGeneric: Boolean;   // declared with type parameters ("TList<T>")
   end;
 
   /// <summary>Immutable, reference-counted view of the index. Lookups run
@@ -175,7 +176,10 @@ const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
   MaxFileBytes  = 4 * 1024 * 1024;
   RefreshIntervalMs = 30000;  // background re-scan period
-  CacheMagic    = 'RLUIDX03';   // 03: HasInit flag + fixed enum/variant parser
+  CacheMagic    = 'RLUIDX05';   // 05: '<' marker on generic declarations
+  // Snapshot map entries are unit indexes with this flag bit set for
+  // GENERIC declarations (MaxFiles stays far below the bit).
+  GenericBit    = $40000000;
 
 // ---------------------------------------------------------------------------
 //  Lexical helpers
@@ -266,6 +270,34 @@ begin
     if OkBefore and OkAfter then Inc(Result);
     P := PosEx(AWord, AUpper, P + 1);
   end;
+end;
+
+// Blanks balanced '<...>' spans (generic parameter lists / constraints) so
+// their content never feeds the keyword counting. Unbalanced '<' is left
+// untouched (comparison operators, wrapped declarations).
+function StripAngleSpans(const S: string): string;
+var
+  I, J, Depth, SpanStart: Integer;
+begin
+  Result := S;
+  Depth := 0;
+  SpanStart := 0;
+  for I := 1 to Length(Result) do
+    case Result[I] of
+      '<':
+        begin
+          if Depth = 0 then SpanStart := I;
+          Inc(Depth);
+        end;
+      '>':
+        if Depth > 0 then
+        begin
+          Dec(Depth);
+          if Depth = 0 then
+            for J := SpanStart to I do
+              Result[J] := ' ';
+        end;
+    end;
 end;
 
 function StartsWithWord(const AUpperTrimmed, AWord: string): Boolean;
@@ -369,9 +401,13 @@ begin
       // ("record case Tag of ...") shares the record's single 'end', so
       // counting it left PendingEnds stuck and swallowed everything after
       // the first variant record (Winapi.Windows died at LARGE_INTEGER).
+      // Balanced '<...>' spans are blanked first: a generic method
+      // constraint ("Get<T: record>(...)") must not count as a nested
+      // record opener - that phantom END swallowed every declaration
+      // after the class.
       if PendingEnds > 0 then
       begin
-        Up := TrU;
+        Up := StripAngleSpans(TrU);
         PendingEnds := PendingEnds + CountWord(Up, 'RECORD')
                        - CountWord(Up, 'END');
         if PendingEnds < 0 then PendingEnds := 0;
@@ -430,9 +466,16 @@ begin
         var Rest := Trim(Copy(Tr, Pos(' ', Tr) + 1, MaxInt));
         var CutP := Length(Rest) + 1;
         for var K := 1 to Length(Rest) do
-          if CharInSet(Rest[K], ['(', ':', ';', ' ', #9]) then begin CutP := K; Break; end;
+          if CharInSet(Rest[K], ['(', ':', ';', ' ', #9, '<']) then begin CutP := K; Break; end;
         var Nm := Trim(Copy(Rest, 1, CutP - 1));
-        if IsIdent(Nm) then Idents.Add(Nm);
+        if IsIdent(Nm) then
+        begin
+          // Generic routine: keep the marker (see the type branch below).
+          if (CutP <= Length(Rest)) and (Rest[CutP] = '<') then
+            Idents.Add(Nm + '<')
+          else
+            Idents.Add(Nm);
+        end;
         Continue;
       end;
 
@@ -443,10 +486,29 @@ begin
             if EqP > 1 then
             begin
               var Name := Trim(Copy(Tr, 1, EqP - 1));
+              // GENERIC type declarations: "TList<T> = class ..." - index
+              // the base name (the user types "TList<Integer>", the E2003
+              // token / dialog search is 'TList'). Without this the name
+              // failed IsIdent, the type was never indexed AND the class
+              // body below was scanned as top level (its methods leaked
+              // into the index). Generic declarations carry a trailing '<'
+              // MARKER in the raw ident list (stripped when the snapshot
+              // map is built): quick fixes must not offer System.Classes'
+              // non-generic TList for a "TList<Integer>" use site.
+              var IsGenericDecl := False;
+              var LtP := Pos('<', Name);
+              if (LtP > 1) and Name.EndsWith('>') then
+              begin
+                Name := Trim(Copy(Name, 1, LtP - 1));
+                IsGenericDecl := True;
+              end;
               // Guard against "A = B" continuation lines with commas etc.
               if IsIdent(Name) then
               begin
-                Idents.Add(Name);
+                if IsGenericDecl then
+                  Idents.Add(Name + '<')
+                else
+                  Idents.Add(Name);
                 var RhsU := UpperCase(Trim(Copy(Tr, EqP + 1, MaxInt)));
                 var Rhs := Trim(Copy(Tr, EqP + 1, MaxInt));
                 // Enum: "= ( a, b, c )" - possibly spanning MANY lines
@@ -820,14 +882,18 @@ begin
   Res := TList<TFindUnitHit>.Create;
   try
     for var Id in Ids do
-      if (Id >= 0) and (Id < Length(FUnitName)) then
+    begin
+      var UnitIdx := Id and not GenericBit;
+      if (UnitIdx >= 0) and (UnitIdx < Length(FUnitName)) then
       begin
         var H: TFindUnitHit;
         H.Identifier := AIdentifier;
-        H.UnitName := FUnitName[Id];
-        H.Path := FUnitPath[Id];
+        H.UnitName := FUnitName[UnitIdx];
+        H.Path := FUnitPath[UnitIdx];
+        H.IsGeneric := (Id and GenericBit) <> 0;
         Res.Add(H);
       end;
+    end;
     Result := Res.ToArray;
   finally
     Res.Free;
@@ -873,10 +939,13 @@ begin
       if Length(Result) >= AMax then Break;
       var Ids := FMap[FKeysUpper[Cands[I].KeyIdx]];
       if Length(Ids) = 0 then Continue;
+      var UnitIdx := Ids[0] and not GenericBit;
+      if UnitIdx >= Length(FUnitName) then Continue;
       var H: TFindUnitHit;
       H.Identifier := FDisplay[Cands[I].KeyIdx];
-      H.UnitName := FUnitName[Ids[0]];
-      H.Path := FUnitPath[Ids[0]];
+      H.UnitName := FUnitName[UnitIdx];
+      H.Path := FUnitPath[UnitIdx];
+      H.IsGeneric := (Ids[0] and GenericBit) <> 0;
       Result := Result + [H];
     end;
   finally
@@ -961,11 +1030,13 @@ begin
       if Pos(Needle, FKeysUpper[I]) = 0 then Continue;
       for var Id in FMap[FKeysUpper[I]] do
       begin
-        if (Id < 0) or (Id >= Length(FUnitName)) then Continue;
+        var UnitIdx := Id and not GenericBit;
+        if (UnitIdx < 0) or (UnitIdx >= Length(FUnitName)) then Continue;
         var H: TFindUnitHit;
         H.Identifier := FDisplay[I];
-        H.UnitName := FUnitName[Id];
-        H.Path := FUnitPath[Id];
+        H.UnitName := FUnitName[UnitIdx];
+        H.Path := FUnitPath[UnitIdx];
+        H.IsGeneric := (Id and GenericBit) <> 0;
         Res.Add(H);
         if Res.Count >= AMax then Break;
       end;
@@ -1185,11 +1256,21 @@ begin
       for J := 0 to High(Units[I].Idents) do
       begin
         var Id := Units[I].Idents[J];
+        // Trailing '<' = generic-declaration marker from ParseUnit; the
+        // key is the bare name, genericity travels as a flag bit on the
+        // unit index (unit counts stay far below the bit).
+        var Entry := I;
+        if (Id <> '') and (Id[Length(Id)] = '<') then
+        begin
+          Id := Copy(Id, 1, Length(Id) - 1);
+          Entry := I or GenericBit;
+        end;
+        if Id = '' then Continue;
         var Key := UpperCase(Id);
         var Lst: TList<Integer>;
         if not Map.TryGetValue(Key, Lst) then
         begin Lst := TList<Integer>.Create; Map.Add(Key, Lst); DispD.Add(Key, Id); end;
-        if (Lst.Count = 0) or (Lst.Last <> I) then Lst.Add(I);
+        if (Lst.Count = 0) or (Lst.Last <> Entry) then Lst.Add(Entry);
       end;
     end;
 

@@ -149,6 +149,17 @@ function LiveResolveBusy: Boolean;
 ///  belong to another file. Main thread only.</summary>
 function LiveFixesForLine(const AFile: string; ALine0: Integer): TArray<TQuickFix>;
 
+/// <summary>ALL quick fixes the live check resolved for AFile - only when
+///  the results are FRESH for the active buffer state (False otherwise).
+///  Main thread only.</summary>
+function LiveAllFixes(const AFile: string; out AFixes: TArray<TQuickFix>): Boolean;
+
+/// <summary>Menu entry point: modal overview of EVERY quick fix in the
+///  active unit (line-sorted, sortable columns). Selecting one jumps to
+///  its line and opens the regular fix popup there. Waits briefly for a
+///  fresh live analysis when none is available yet.</summary>
+procedure ShowAllQuickFixes;
+
 var
   /// <summary>Set by Expert.QuickFixMarkers: invoked from the poll TICK
   ///  (safe WM_TIMER context) whenever the published live results change,
@@ -169,7 +180,8 @@ implementation
 
 uses
   System.Classes, System.Types, System.UITypes,
-  System.Generics.Collections, System.IOUtils, System.Math, System.StrUtils,
+  System.Generics.Collections, System.Generics.Defaults,
+  System.IOUtils, System.Math, System.StrUtils,
   System.Hash, System.JSON, System.SyncObjs,
   Winapi.Windows,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
@@ -2926,6 +2938,209 @@ begin
   for var F in GLive.FResults do
     if F.Line = ALine0 then
       Result := Result + [F];
+end;
+
+function LiveAllFixes(const AFile: string; out AFixes: TArray<TQuickFix>): Boolean;
+begin
+  AFixes := nil;
+  Result := (GLive <> nil) and GLive.HasFresh(AFile);
+  if Result then
+    AFixes := Copy(GLive.FResults);
+end;
+
+// ---------------------------------------------------------------------------
+//  "Show all quick fixes" overview dialog
+// ---------------------------------------------------------------------------
+
+type
+  TQuickFixListDialog = class(TForm)
+  private
+    FList: TListView;
+    FFixes: TArray<TQuickFix>;
+    FBtnGoto: TButton;
+    FBtnClose: TButton;
+    procedure DoDblClick(Sender: TObject);
+    procedure DoGotoClick(Sender: TObject);
+    procedure DoCloseClick(Sender: TObject);
+  public
+    HasChosen: Boolean;
+    ChosenFix: TQuickFix;
+    constructor CreateDialog(AOwner: TComponent;
+      const AFixes: TArray<TQuickFix>);
+  end;
+
+constructor TQuickFixListDialog.CreateDialog(AOwner: TComponent;
+  const AFixes: TArray<TQuickFix>);
+var
+  Col: TListColumn;
+  Item: TListItem;
+  Panel: TPanel;
+begin
+  inherited CreateNew(AOwner);
+  Caption := 'Quick fixes in this unit';
+  Width := 760;
+  Height := 440;
+  Position := poScreenCenter;
+  BorderStyle := bsSizeable;
+  HasChosen := False;
+
+  // Line-sorted copy; rows map back through Item.Data (sortable list).
+  FFixes := Copy(AFixes);
+  TArray.Sort<TQuickFix>(FFixes, TComparer<TQuickFix>.Construct(
+    function(const L, R: TQuickFix): Integer
+    begin
+      Result := L.Line - R.Line;
+      if Result = 0 then Result := L.Col - R.Col;
+    end));
+
+  FList := TListView.Create(Self);
+  FList.Parent := Self;
+  FList.Align := alClient;
+  FList.AlignWithMargins := True;
+  FList.ViewStyle := vsReport;
+  FList.ReadOnly := True;
+  FList.RowSelect := True;
+  FList.OnDblClick := DoDblClick;
+  Col := FList.Columns.Add; Col.Caption := 'Line';    Col.Width := 60;
+    Col.Alignment := taRightJustify;
+  Col := FList.Columns.Add; Col.Caption := 'Fix';     Col.Width := 320;
+  Col := FList.Columns.Add; Col.Caption := 'Details'; Col.Width := 330;
+
+  Panel := TPanel.Create(Self);
+  Panel.Parent := Self;
+  Panel.Align := alBottom;
+  Panel.Height := 40;
+  Panel.BevelOuter := bvNone;
+
+  FBtnClose := TButton.Create(Self);
+  FBtnClose.Parent := Panel;
+  FBtnClose.Caption := '&Close';
+  FBtnClose.Align := alRight;
+  FBtnClose.AlignWithMargins := True;
+  FBtnClose.Cancel := True;
+  FBtnClose.OnClick := DoCloseClick;
+
+  FBtnGoto := TButton.Create(Self);
+  FBtnGoto.Parent := Panel;
+  FBtnGoto.Caption := '&Go to && fix';
+  FBtnGoto.Align := alRight;
+  FBtnGoto.Width := 110;
+  FBtnGoto.AlignWithMargins := True;
+  FBtnGoto.Default := True;
+  FBtnGoto.OnClick := DoGotoClick;
+
+  FList.Items.BeginUpdate;
+  try
+    for var I := 0 to High(FFixes) do
+    begin
+      Item := FList.Items.Add;
+      Item.Data := Pointer(NativeInt(I));
+      Item.Caption := IntToStr(FFixes[I].Line + 1);
+      Item.SubItems.Add(FFixes[I].Caption);
+      case FFixes[I].Kind of
+        qfAddUnit:
+          Item.SubItems.Add('uses: ' + string.Join(', ', FFixes[I].UnitNames));
+        qfRenameIdent, qfFixUsesName:
+          Item.SubItems.Add('-> ' + FFixes[I].NewText);
+        qfRemoveUses:
+          Item.SubItems.Add('remove ' + FFixes[I].OldUnit);
+      else
+        Item.SubItems.Add('');
+      end;
+    end;
+    if FList.Items.Count > 0 then
+      FList.Items[0].Selected := True;
+  finally
+    FList.Items.EndUpdate;
+  end;
+
+  EnableListViewSorting(FList);
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
+end;
+
+procedure TQuickFixListDialog.DoGotoClick(Sender: TObject);
+begin
+  if FList.Selected = nil then Exit;
+  var Idx := NativeInt(FList.Selected.Data);
+  if (Idx < 0) or (Idx > High(FFixes)) then Exit;
+  ChosenFix := FFixes[Idx];
+  HasChosen := True;
+  ModalResult := mrOk;
+end;
+
+procedure TQuickFixListDialog.DoDblClick(Sender: TObject);
+begin
+  DoGotoClick(Sender);
+end;
+
+procedure TQuickFixListDialog.DoCloseClick(Sender: TObject);
+begin
+  ModalResult := mrCancel;
+end;
+
+procedure ShowAllQuickFixes;
+var
+  Ctx: TEditorContext;
+  Fixes: TArray<TQuickFix>;
+  Waited: Integer;
+begin
+  if Editor = nil then Exit;
+  Ctx := Editor.GetCurrentContext;
+  if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
+  begin
+    ShowMessage('Open a .pas unit first.');
+    Exit;
+  end;
+
+  if not LiveAllFixes(Ctx.FileName, Fixes) then
+  begin
+    // No fresh analysis for the current buffer state yet: re-arm one (the
+    // same state-only signal the post-compile refresh uses - the poll
+    // tick acts on it) and wait briefly for the result.
+    LiveRefreshAfterCompile;
+    Waited := 0;
+    Screen.Cursor := crHourGlass;
+    try
+      while (Waited < 8000) and not LiveAllFixes(Ctx.FileName, Fixes) do
+      begin
+        Sleep(100);
+        Inc(Waited, 100);
+        Application.ProcessMessages;   // live tick + queued results run here
+      end;
+    finally
+      Screen.Cursor := crDefault;
+    end;
+    if not LiveAllFixes(Ctx.FileName, Fixes) then
+    begin
+      ShowMessage('The live analysis produced no result for this unit yet - ' +
+        'try again in a moment.');
+      Exit;
+    end;
+  end;
+
+  if Length(Fixes) = 0 then
+  begin
+    ShowMessage('No quick fixes found in this unit.');
+    Exit;
+  end;
+
+  var Dlg := TQuickFixListDialog.CreateDialog(Application.MainForm, Fixes);
+  try
+    Dlg.ShowModal;
+    if Dlg.HasChosen then
+    begin
+      // Jump to the fix and open the regular chooser popup there - it
+      // offers the unit choice / target section exactly like the caret
+      // lightbulb does.
+      Editor.GotoLocation(Ctx.FileName, Dlg.ChosenFix.Line, Dlg.ChosenFix.Col,
+        Dlg.ChosenFix.TokenLen);
+      Application.ProcessMessages;   // let the editor scroll + place the caret
+      LiveShowFixAtCaret(Ctx.FileName);
+    end;
+  finally
+    Dlg.Free;
+  end;
 end;
 
 // ---------------------------------------------------------------------------

@@ -85,6 +85,7 @@ type
     procedure OnUnitRefs(Sender: TObject);
     procedure OnFindUnit(Sender: TObject);
     procedure OnAddUnitAtCursor(Sender: TObject);
+    procedure OnShowQuickFixes(Sender: TObject);
     procedure OnResolveMissingUnits(Sender: TObject);
     procedure OnUsesCleanup(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
@@ -161,8 +162,10 @@ const
   SyncIntervalMs = 2000;
 
   // Context requirement for a main-menu entry.
-  REQ_PROJECT = 1;   // needs an open project
-  REQ_EDITOR  = 2;   // needs an active source editor (cursor context)
+  REQ_PROJECT  = 1;  // needs an open project
+  REQ_EDITOR   = 2;  // needs an active source editor (cursor context)
+  REQ_LIVEALL  = 4;  // like REQ_EDITOR; caption annotated with the TOTAL
+                     // live quick-fix count ("Show all quick fixes (N)")
   REQ_LIVEFIX = 3;   // like REQ_EDITOR, but additionally reflects the live
                      // auto-import check: disabled when the checker KNOWS
                      // there is nothing to fix; annotated with the count
@@ -269,6 +272,13 @@ function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
     Req(Result, REQ_PROJECT);   // a group is usable whenever a project is open
   end;
 
+  procedure Sep(AParent: TMenuItem);
+  begin
+    var Item := TMenuItem.Create(AOwner);
+    Item.Caption := '-';
+    AParent.Add(Item);          // no Req: separators are never dis/enabled
+  end;
+
 var
   Root, RemoveWithSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
 begin
@@ -278,13 +288,11 @@ begin
   Root := TMenuItem.Create(AOwner);
   Root.Caption := 'Refactoring Light';
 
+  // ---- Refactor code at the cursor ----------------------------------------
   Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
-  Leaf(Root, 'Find References',           OnFindReferences,       skFindRef,    REQ_EDITOR);
-  Leaf(Root, 'Find Implementations',      OnFindImplementations,  skFindImp,    REQ_EDITOR);
-  Leaf(Root, 'Find original symbol',      OnFindOriginal,         skFindOriginal, REQ_EDITOR);
   Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
-  Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
+  Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
 
   RemoveWithSub := Sub(Root, 'Remove with');
   Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);
@@ -292,18 +300,28 @@ begin
   Plain(RemoveWithSub, 'In selected units...', OnRemoveWithSelectedUnits, REQ_PROJECT);
   Plain(RemoveWithSub, 'In whole project...', OnRemoveWithProjectWide,   REQ_PROJECT);
 
-  Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
-  Leaf(Root, 'Find unit references...',   OnUnitRefs,             skUnitRefs,   REQ_EDITOR);
-  Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
-  Plain(Root, 'Add unit for identifier at cursor', OnAddUnitAtCursor, REQ_LIVEFIX);
-  Plain(Root, 'Resolve missing units...', OnResolveMissingUnits,  REQ_EDITOR);
-  Plain(Root, 'Uses cleanup (current unit)...', OnUsesCleanup,    REQ_EDITOR);
-
   IfaceSub := Sub(Root, 'Extract / extend interface');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
   Plain(IfaceSub, 'Add to existing interface...',        OnAddToExistingInterface, REQ_EDITOR);
   Plain(IfaceSub, 'Add IInterface support to class...',  OnDelegateInterface,      REQ_EDITOR);
 
+  // ---- Find / navigate ----------------------------------------------------
+  Sep(Root);
+  Leaf(Root, 'Find References',           OnFindReferences,       skFindRef,    REQ_EDITOR);
+  Leaf(Root, 'Find Implementations',      OnFindImplementations,  skFindImp,    REQ_EDITOR);
+  Leaf(Root, 'Find original symbol',      OnFindOriginal,         skFindOriginal, REQ_EDITOR);
+  Leaf(Root, 'Find unit references...',   OnUnitRefs,             skUnitRefs,   REQ_EDITOR);
+
+  // ---- Uses clause / missing units ----------------------------------------
+  Sep(Root);
+  Plain(Root, 'Show all quick fixes...', OnShowQuickFixes,        REQ_LIVEALL);
+  Plain(Root, 'Add unit for identifier at cursor', OnAddUnitAtCursor, REQ_LIVEFIX);
+  Plain(Root, 'Resolve missing units...', OnResolveMissingUnits,  REQ_EDITOR);
+  Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
+  Plain(Root, 'Uses cleanup (current unit)...', OnUsesCleanup,    REQ_EDITOR);
+
+  // ---- Project-wide tools & checks ----------------------------------------
+  Sep(Root);
   SemSub := Sub(Root, 'Semantic replace');
   Plain(SemSub, 'In current unit',    OnSemanticReplaceCurrent,   REQ_EDITOR);
   Plain(SemSub, 'In selected units...', OnSemanticReplaceSelected, REQ_PROJECT);
@@ -314,6 +332,9 @@ begin
   Plain(ChecksSub, 'DFM event handlers...',        OnCheckDfmEvents,       REQ_PROJECT);
   Plain(ChecksSub, 'Interface GUIDs...',           OnCheckInterfaceGuids,  REQ_PROJECT);
   Plain(ChecksSub, 'Circular unit references...',  OnCheckCircularRefs,    REQ_PROJECT);
+
+  Sep(Root);
+  Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
 
   Result := Root;
 end;
@@ -564,17 +585,28 @@ begin
         begin
           En := HasProject and HasEditor;
           // When the live auto-import check holds FRESH results for the
-          // active buffer, reflect them: no missing units -> disabled;
-          // otherwise annotate the caption with the count. Without fresh
-          // data the entry stays enabled (on-demand path decides).
+          // active buffer, reflect them: no missing units -> disabled.
+          // (No count annotation here - the count is file-wide while this
+          // action only works AT the cursor, which read as a broken
+          // promise; the count lives on "Show all quick fixes" now.)
           var LiveCount: Integer;
-          var BaseCap := 'Add unit for identifier at cursor';
-          var Cap := BaseCap;
           if En and LiveFreshInfo(Editor.GetActiveFileName, LiveCount) then
-          begin
             En := LiveCount > 0;
-            if LiveCount > 0 then
-              Cap := Format('%s (%d found)', [BaseCap, LiveCount]);
+        end;
+      REQ_LIVEALL:
+        begin
+          En := HasProject and HasEditor;
+          // File-wide overview: annotate with the TOTAL number of live
+          // quick fixes. Fresh data with zero fixes -> disabled; without
+          // fresh data the entry stays enabled (the action waits for the
+          // next analysis itself).
+          var AllFixes: TArray<TQuickFix>;
+          var Cap := 'Show all quick fixes...';
+          if En and LiveAllFixes(Editor.GetActiveFileName, AllFixes) then
+          begin
+            En := Length(AllFixes) > 0;
+            if Length(AllFixes) > 0 then
+              Cap := Format('Show all quick fixes... (%d found)', [Length(AllFixes)]);
           end;
           // Only write on an actual change - TMenuItem setters trigger
           // MenuChanged up to the menu bar, which repaints it.
@@ -1095,6 +1127,11 @@ end;
 procedure TContextMenuInstaller.OnAddUnitAtCursor(Sender: TObject);
 begin
   Expert.AutoImport.AddUnitForIdentifierAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnShowQuickFixes(Sender: TObject);
+begin
+  Expert.AutoImport.ShowAllQuickFixes;
 end;
 
 procedure TContextMenuInstaller.OnResolveMissingUnits(Sender: TObject);

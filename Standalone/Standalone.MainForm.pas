@@ -75,6 +75,7 @@ type
     MenuMoveToUnit: TMenuItem;
     MenuUnitRefs: TMenuItem;
     MenuFindUnit: TMenuItem;
+    MenuShowFixes: TMenuItem;
     MenuAddUnitCursor: TMenuItem;
     MenuResolveMissing: TMenuItem;
     MenuUsesCleanup: TMenuItem;
@@ -85,6 +86,7 @@ type
     MenuIfaceAdd: TMenuItem;
     MenuIfaceImpl: TMenuItem;
     MenuSep3: TMenuItem;
+    MenuSep4: TMenuItem;
     MenuChecks: TMenuItem;
     MenuCheckDfm: TMenuItem;
     MenuCheckGuids: TMenuItem;
@@ -133,6 +135,7 @@ type
     procedure DoRefactorUnitRefs(Sender: TObject);
     procedure DoFindUnit(Sender: TObject);
     procedure DoAddUnitAtCursor(Sender: TObject);
+    procedure DoShowQuickFixes(Sender: TObject);
     procedure DoResolveMissingUnits(Sender: TObject);
     procedure DoUsesCleanup(Sender: TObject);
     procedure DoFindOriginalSymbol(Sender: TObject);
@@ -1154,6 +1157,9 @@ begin RunWizard(procedure begin FindUnitForIdentifier; end); end;
 
 procedure TMainForm.DoAddUnitAtCursor(Sender: TObject);
 begin RunWizard(procedure begin AddUnitForIdentifierAtCursor; end); end;
+
+procedure TMainForm.DoShowQuickFixes(Sender: TObject);
+begin RunWizard(procedure begin ShowAllQuickFixes; end); end;
 
 procedure TMainForm.DoResolveMissingUnits(Sender: TObject);
 begin RunWizard(procedure begin ResolveMissingUnits; end); end;

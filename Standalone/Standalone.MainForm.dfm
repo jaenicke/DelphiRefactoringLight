@@ -214,37 +214,18 @@ object MainForm: TMainForm
         ShortCut = 24658
         OnClick = DoRefactorRename
       end
-      object MenuFindRef: TMenuItem
-        Caption = 'Find &references'
-        ShortCut = 24646
-        OnClick = DoRefactorFindReferences
-      end
-      object MenuFindImp: TMenuItem
-        Caption = 'Find &implementations'
-        ShortCut = 24649
-        OnClick = DoRefactorFindImplementations
-      end
-      object MenuFindOriginal: TMenuItem
-        Caption = 'Find &original symbol'
-        ShortCut = 57415
-        OnClick = DoFindOriginalSymbol
-      end
-      object MenuAlignSig: TMenuItem
-        Caption = '&Align method signature...'
-        OnClick = DoRefactorAlignSignature
-      end
       object MenuExtractMethod: TMenuItem
         Caption = 'E&xtract method...'
         ShortCut = 57421
         OnClick = DoRefactorExtractMethod
       end
-      object MenuCompletion: TMenuItem
-        Caption = 'Code &completion'
-        ShortCut = 16416
-        OnClick = DoRefactorCompletion
+      object MenuAlignSig: TMenuItem
+        Caption = '&Align method signature...'
+        OnClick = DoRefactorAlignSignature
       end
-      object MenuSep1: TMenuItem
-        Caption = '-'
+      object MenuMoveToUnit: TMenuItem
+        Caption = '&Move to unit...'
+        OnClick = DoRefactorMoveToUnit
       end
       object MenuRemoveWith: TMenuItem
         Caption = 'Remove &with'
@@ -265,33 +246,6 @@ object MainForm: TMainForm
           OnClick = DoRefactorRemoveWithProject
         end
       end
-      object MenuMoveToUnit: TMenuItem
-        Caption = '&Move to unit...'
-        OnClick = DoRefactorMoveToUnit
-      end
-      object MenuUnitRefs: TMenuItem
-        Caption = 'Find &unit references...'
-        OnClick = DoRefactorUnitRefs
-      end
-      object MenuFindUnit: TMenuItem
-        Caption = 'Find unit for &identifier...'
-        OnClick = DoFindUnit
-      end
-      object MenuAddUnitCursor: TMenuItem
-        Caption = 'Add unit for identifier at cursor'
-        OnClick = DoAddUnitAtCursor
-      end
-      object MenuResolveMissing: TMenuItem
-        Caption = 'Resolve missing units...'
-        OnClick = DoResolveMissingUnits
-      end
-      object MenuUsesCleanup: TMenuItem
-        Caption = 'Uses cleanup (current unit)...'
-        OnClick = DoUsesCleanup
-      end
-      object MenuSep2: TMenuItem
-        Caption = '-'
-      end
       object MenuIface: TMenuItem
         Caption = '&Extract / extend interface'
         object MenuIfaceExtract: TMenuItem
@@ -307,23 +261,53 @@ object MainForm: TMainForm
           OnClick = DoRefactorAddIInterface
         end
       end
-      object MenuSep3: TMenuItem
+      object MenuSep1: TMenuItem
         Caption = '-'
       end
-      object MenuChecks: TMenuItem
-        Caption = 'Project chec&ks'
-        object MenuCheckDfm: TMenuItem
-          Caption = 'DFM event handlers...'
-          OnClick = DoCheckDfmEvents
-        end
-        object MenuCheckGuids: TMenuItem
-          Caption = 'Interface GUIDs...'
-          OnClick = DoCheckInterfaceGuids
-        end
-        object MenuCheckCircular: TMenuItem
-          Caption = 'Circular unit references...'
-          OnClick = DoCheckCircularRefs
-        end
+      object MenuFindRef: TMenuItem
+        Caption = 'Find &references'
+        ShortCut = 24646
+        OnClick = DoRefactorFindReferences
+      end
+      object MenuFindImp: TMenuItem
+        Caption = 'Find &implementations'
+        ShortCut = 24649
+        OnClick = DoRefactorFindImplementations
+      end
+      object MenuFindOriginal: TMenuItem
+        Caption = 'Find &original symbol'
+        ShortCut = 57415
+        OnClick = DoFindOriginalSymbol
+      end
+      object MenuUnitRefs: TMenuItem
+        Caption = 'Find &unit references...'
+        OnClick = DoRefactorUnitRefs
+      end
+      object MenuSep2: TMenuItem
+        Caption = '-'
+      end
+      object MenuShowFixes: TMenuItem
+        Caption = 'Show all &quick fixes...'
+        OnClick = DoShowQuickFixes
+      end
+      object MenuAddUnitCursor: TMenuItem
+        Caption = 'Add unit for identifier at cursor'
+        OnClick = DoAddUnitAtCursor
+      end
+      object MenuResolveMissing: TMenuItem
+        Caption = 'Resolve missing units...'
+        OnClick = DoResolveMissingUnits
+      end
+      object MenuFindUnit: TMenuItem
+        Caption = 'Find unit for &identifier...'
+        OnClick = DoFindUnit
+      end
+      object MenuUsesCleanup: TMenuItem
+        Caption = 'Uses cleanup (current unit)...'
+        OnClick = DoUsesCleanup
+      end
+      object MenuSep3: TMenuItem
+        Caption = '-'
       end
       object MenuSemRep: TMenuItem
         Caption = '&Semantic replace'
@@ -343,6 +327,29 @@ object MainForm: TMainForm
           Caption = 'Edit rules...'
           OnClick = DoRefactorSemanticEditRules
         end
+      end
+      object MenuChecks: TMenuItem
+        Caption = 'Project chec&ks'
+        object MenuCheckDfm: TMenuItem
+          Caption = 'DFM event handlers...'
+          OnClick = DoCheckDfmEvents
+        end
+        object MenuCheckGuids: TMenuItem
+          Caption = 'Interface GUIDs...'
+          OnClick = DoCheckInterfaceGuids
+        end
+        object MenuCheckCircular: TMenuItem
+          Caption = 'Circular unit references...'
+          OnClick = DoCheckCircularRefs
+        end
+      end
+      object MenuSep4: TMenuItem
+        Caption = '-'
+      end
+      object MenuCompletion: TMenuItem
+        Caption = 'Code &completion'
+        ShortCut = 16416
+        OnClick = DoRefactorCompletion
       end
     end
   end

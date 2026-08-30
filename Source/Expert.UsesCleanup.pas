@@ -30,7 +30,11 @@ uses
   System.SysUtils, Expert.UsesEditor;
 
 type
-  TUsesVerdict = (uvUsed, uvUnused, uvMovable, uvUnknown);
+  TUsesVerdict = (uvUsed, uvUnused, uvMovable, uvUnknown,
+    uvInitCode,     // textually unused, but the unit runs initialization/
+                    // finalization code - removing it would change behavior
+    uvIdeManaged);  // the IDE auto-manages this uses entry for form units
+                    // (it would silently re-add it - don't fight it)
 
   TUsesEntryInfo = record
     UnitName: string;
@@ -46,9 +50,11 @@ type
   TUnitKnown = reference to function(const AUnitName: string): Boolean;
 
 /// <summary>Analyses AContent's uses entries. Pure function of the content
-///  plus the injected lookups - unit-testable without an index.</summary>
+///  plus the injected lookups - unit-testable without an index.
+///  AHasInitCode: does the unit run initialization/finalization code?</summary>
 function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
-  const AUnitKnown: TUnitKnown): TArray<TUsesEntryInfo>;
+  const AUnitKnown: TUnitKnown;
+  const AHasInitCode: TUnitKnown): TArray<TUsesEntryInfo>;
 
 /// <summary>Opens the cleanup dialog for the active editor file.</summary>
 procedure CleanupUsesCurrentUnit;
@@ -60,7 +66,8 @@ uses
   System.UITypes,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Dialogs,
-  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.DialogHelper;
+  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.DialogHelper,
+  Expert.IdeThemes, Expert.ListViewSort;
 
 // ---------------------------------------------------------------------------
 //  Analysis
@@ -73,6 +80,25 @@ type
     Names: TArray<string>;
     HasDirectives: Boolean;         // {$IFDEF} etc. inside - do not analyse
   end;
+
+const
+  // Units the IDE inserts and maintains ITSELF for form units (action
+  // manager styles, touch keyboard, ...). Removing them just makes the
+  // IDE silently re-add them - a pointless tug-of-war, so they are never
+  // offered for removal or moving.
+  IdeManagedUnits: array[0..3] of string = (
+    'System.Actions', 'Vcl.XPStyleActnCtrls',
+    'Vcl.PlatformDefaultStyleActnCtrls', 'Vcl.Touch.Keyboard');
+
+function IsIdeManagedUnit(const AName: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := Low(IdeManagedUnits) to High(IdeManagedUnits) do
+    if SameText(IdeManagedUnits[I], AName) then
+      Exit(True);
+end;
 
 function SplitLines(const AContent: string): TArray<string>;
 begin
@@ -136,7 +162,8 @@ begin
 end;
 
 function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
-  const AUnitKnown: TUnitKnown): TArray<TUsesEntryInfo>;
+  const AUnitKnown: TUnitKnown;
+  const AHasInitCode: TUnitKnown): TArray<TUsesEntryInfo>;
 var
   Lines: TArray<string>;
   ImplLine, I, CI: Integer;
@@ -326,8 +353,16 @@ begin
       E := Entries[I];
       if E.Verdict = uvUnknown then Continue;
       if E.UsageCount = 0 then
-        E.Verdict := uvUnused
-      else if (E.Section = usInterface) and not IntfUse.ContainsKey(I) then
+      begin
+        if IsIdeManagedUnit(E.UnitName) then
+          E.Verdict := uvIdeManaged
+        else if Assigned(AHasInitCode) and AHasInitCode(E.UnitName) then
+          E.Verdict := uvInitCode
+        else
+          E.Verdict := uvUnused;
+      end
+      else if (E.Section = usInterface) and not IntfUse.ContainsKey(I)
+        and not IsIdeManagedUnit(E.UnitName) then
         E.Verdict := uvMovable
       else
         E.Verdict := uvUsed;
@@ -461,6 +496,8 @@ begin
   FBtnNone.OnClick := DoSelectNone;
 
   Fill;
+  EnableListViewSorting(FList);
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
 end;
 
@@ -473,8 +510,9 @@ end;
 procedure TUsesCleanupDialog.DoItemChecked(Sender: TObject; Item: TListItem);
 begin
   // Non-actionable rows (used / not analysable) cannot be ticked.
+  // Rows map through Item.Data - the list is sortable, Index shifts.
   if FFilling or (Item = nil) then Exit;
-  if Item.Checked and not IsActionable(Item.Index) then
+  if Item.Checked and not IsActionable(NativeInt(Item.Data)) then
   begin
     FFilling := True;
     try
@@ -490,7 +528,7 @@ begin
   FFilling := True;
   try
     for var I := 0 to FList.Items.Count - 1 do
-      FList.Items[I].Checked := IsActionable(I);
+      FList.Items[I].Checked := IsActionable(NativeInt(FList.Items[I].Data));
   finally
     FFilling := False;
   end;
@@ -517,9 +555,11 @@ begin
   FList.Items.BeginUpdate;
   try
     FList.Items.Clear;
-    for var E in FEntries do
+    for var EIdx := 0 to High(FEntries) do
     begin
+      var E := FEntries[EIdx];
       Item := FList.Items.Add;
+      Item.Data := Pointer(NativeInt(EIdx));   // survives column sorting
       Item.Caption := E.UnitName;
       Item.SubItems.Add(SectionNames[E.Section]);
       case E.Verdict of
@@ -527,6 +567,10 @@ begin
         uvMovable: Item.SubItems.Add('only used in implementation - move?');
         uvUsed:    Item.SubItems.Add('used');
         uvUnknown: Item.SubItems.Add('not analysable (no indexed source / IFDEF)');
+        uvInitCode:
+          Item.SubItems.Add('no direct usage, but has initialization code - kept');
+        uvIdeManaged:
+          Item.SubItems.Add('managed by the IDE (auto re-added) - kept');
       end;
       Item.SubItems.Add(IntToStr(E.UsageCount));
       if E.FirstUseLine >= 0 then
@@ -550,10 +594,12 @@ var
 begin
   Done := 0;
   FailCount := 0;
-  for I := 0 to Min(FList.Items.Count, Length(FEntries)) - 1 do
+  for I := 0 to FList.Items.Count - 1 do
   begin
     if not FList.Items[I].Checked then Continue;
-    E := FEntries[I];
+    var Idx := NativeInt(FList.Items[I].Data);
+    if (Idx < 0) or (Idx > High(FEntries)) then Continue;
+    E := FEntries[Idx];
     case E.Verdict of
       uvUnused:
         if RemoveUnitFromUses(FFile, E.UnitName) then Inc(Done)
@@ -591,14 +637,18 @@ end;
 //  Entry point
 // ---------------------------------------------------------------------------
 
+var
+  GCleanupBusy: Boolean = False;
+
 procedure CleanupUsesCurrentUnit;
 var
   Ctx: TEditorContext;
   Content: string;
   Snap: IUnitSnapshot;
   Entries: TArray<TUsesEntryInfo>;
+  Cycle0, Waited: Integer;
 begin
-  if Editor = nil then Exit;
+  if (Editor = nil) or GCleanupBusy then Exit;
   Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
   begin
@@ -610,17 +660,32 @@ begin
     ShowMessage('Could not read the editor buffer.');
     Exit;
   end;
-  TUnitIndex.Instance.RefreshSourcesFromEditor;
-  Snap := TUnitIndex.Instance.Snapshot;
-  if (Snap = nil) or (Snap.IdentCount = 0) then
-  begin
-    ShowMessage('The identifier index is still building - try again in a ' +
-      'few seconds.');
-    Exit;
-  end;
 
+  GCleanupBusy := True;
   Screen.Cursor := crHourGlass;
   try
+    // Trigger a rescan and WAIT for the worker to complete one cycle over
+    // the refreshed sources - otherwise the first run after an edit works
+    // on the stale snapshot and only the second run sees the truth (the
+    // index parses files from DISK, so unsaved edits stay invisible).
+    Cycle0 := TUnitIndex.Instance.ScanCycle;
+    TUnitIndex.Instance.RefreshSourcesFromEditor;
+    Waited := 0;
+    while (TUnitIndex.Instance.ScanCycle = Cycle0) and (Waited < 5000) do
+    begin
+      Sleep(50);
+      Inc(Waited, 50);
+      Application.ProcessMessages;
+    end;
+
+    Snap := TUnitIndex.Instance.Snapshot;
+    if (Snap = nil) or (Snap.IdentCount = 0) then
+    begin
+      ShowMessage('The identifier index is still building - try again in a ' +
+        'few seconds.');
+      Exit;
+    end;
+
     Entries := AnalyzeUses(Content,
       function(const AIdent: string): TArray<string>
       var
@@ -634,9 +699,14 @@ begin
       function(const AUnitName: string): Boolean
       begin
         Result := Snap.HasUnit(AUnitName);
+      end,
+      function(const AUnitName: string): Boolean
+      begin
+        Result := Snap.HasInitCode(AUnitName);
       end);
   finally
     Screen.Cursor := crDefault;
+    GCleanupBusy := False;
   end;
 
   if Length(Entries) = 0 then

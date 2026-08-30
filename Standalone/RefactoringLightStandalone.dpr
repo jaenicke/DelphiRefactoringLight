@@ -57,7 +57,8 @@ uses
   Lsp.JsonRpc in '..\Source\Lsp.JsonRpc.pas',
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',
-  Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas';
+  Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas',
+  Expert.ListViewSort in '..\Source\Expert.ListViewSort.pas';
 
 begin
   Application.Initialize;

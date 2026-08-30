@@ -102,7 +102,7 @@ type
 implementation
 
 uses
-  System.StrUtils, Expert.DialogHelper;
+  System.StrUtils, Expert.DialogHelper, Expert.ListViewSort;
 
 { TUnitReferencesDialog }
 
@@ -227,6 +227,8 @@ begin
   Col := FListView.Columns.Add;
   Col.Caption := 'Preview';
   Col.Width := 360;
+
+  EnableListViewSorting(FListView);
 end;
 
 function TUnitReferencesDialog.CommonPathPrefix(const AItems: TUnitRefItems): string;
@@ -252,6 +254,7 @@ end;
 
 procedure TUnitReferencesDialog.SetItems(const AItems: TUnitRefItems);
 var
+  I: Integer;
   Item: TUnitRefItem;
   LI: TListItem;
   Prefix, DisplayPath: string;
@@ -262,9 +265,11 @@ begin
   FListView.Items.BeginUpdate;
   try
     FListView.Clear;
-    for Item in AItems do
+    for I := 0 to High(AItems) do
     begin
+      Item := AItems[I];
       LI := FListView.Items.Add;
+      LI.Data := Pointer(NativeInt(I)); // FItems index - rows may be re-sorted
       if Item.IsDead then
         LI.Caption := '(unused)'
       else
@@ -321,7 +326,7 @@ var
   Idx: Integer;
 begin
   if not Assigned(FListView.Selected) then Exit;
-  Idx := FListView.Selected.Index;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
   if Assigned(FOnGotoLocation) then
     FOnGotoLocation(FItems[Idx]);

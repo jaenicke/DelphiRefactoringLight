@@ -27,7 +27,8 @@ uses
   System.Generics.Defaults, Winapi.Windows, Winapi.CommCtrl,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
-  Expert.EditorHelperIntf, Expert.DfmEventCheck, Expert.DialogHelper;
+  Expert.EditorHelperIntf, Expert.DfmEventCheck, Expert.DialogHelper,
+  Expert.IdeThemes, Expert.ListViewSort;
 
 type
   // ListView that re-applies native double buffering on every handle
@@ -44,6 +45,7 @@ type
     FListView: TListView;
     FLblSummary: TLabel;
     FLblStatus: TLabel;    // shows which unit is being processed right now
+    FEdtFilter: TEdit;
     FBtnClose: TButton;
     FBtnGoto: TButton;
     FBtnGotoType: TButton;
@@ -52,6 +54,13 @@ type
     FChkAliasDiff: TCheckBox;
     FIssues: TArray<TDfmEventIssue>;
     FExpTok, FActTok: TArray<TArray<string>>;   // pre-split for fast painting
+    /// <summary>Check state per ISSUE (not per row): the list is sortable
+    ///  and filterable, so rows come and go - ticks must survive both.</summary>
+    FChecked: TArray<Boolean>;
+    FFillingRows: Boolean;
+    procedure FillRows;
+    procedure DoFilterChange(Sender: TObject);
+    procedure DoItemChecked(Sender: TObject; Item: TListItem);
     procedure DoAdvancedDrawSubItem(Sender: TCustomListView; Item: TListItem;
       SubItem: Integer; State: TCustomDrawState; Stage: TCustomDrawStage;
       var DefaultDraw: Boolean);
@@ -82,14 +91,8 @@ constructor TDfmEventCheckDialog.CreateDialog(AOwner: TComponent;
   const AIssues: TArray<TDfmEventIssue>);
 var
   Col: TListColumn;
-  Issue: TDfmEventIssue;
-  Item: TListItem;
   MissCount, SigCount, N: Integer;
   Panel: TPanel;
-  GroupCounts, GroupIds: TDictionary<string, Integer>;
-  GroupKeys: TArray<string>;
-  Key: string;
-  Grp: TListGroup;
 begin
   inherited CreateNew(AOwner);
   Caption := 'DFM event handler check';
@@ -107,10 +110,17 @@ begin
   // column never allocates (this list is custom-drawn on every scroll).
   SetLength(FExpTok, Length(FIssues));
   SetLength(FActTok, Length(FIssues));
+  SetLength(FChecked, Length(FIssues));
   for N := 0 to High(FIssues) do
   begin
     FExpTok[N] := FIssues[N].ExpectedNorm.Split(['|']);
     FActTok[N] := FIssues[N].ActualNorm.Split(['|']);
+    // Signature mismatches are corrected in place and PRE-TICKED; missing
+    // handlers are fixable but NOT pre-ticked - on inherited forms the
+    // "missing" handler may exist in the (out-of-project) ancestor unit,
+    // and generating an empty override would silently disable it.
+    FChecked[N] := (FIssues[N].Kind = eikSignatureMismatch)
+      and (FIssues[N].ExpectedRawParams <> '');
   end;
 
   FLblSummary := TLabel.Create(Self);
@@ -128,6 +138,15 @@ begin
   FLblStatus.Font.Style := [fsBold];
   FLblStatus.Caption := '';
 
+  FEdtFilter := TEdit.Create(Self);
+  FEdtFilter.Parent := Self;
+  FEdtFilter.Top := FLblStatus.Top + FLblStatus.Height + 1;  // below the labels
+  FEdtFilter.Align := alTop;
+  FEdtFilter.AlignWithMargins := True;
+  FEdtFilter.Margins.SetBounds(8, 0, 8, 4);
+  FEdtFilter.TextHint := 'Filter (form / component / event / handler / details)...';
+  FEdtFilter.OnChange := DoFilterChange;
+
   FListView := TBufferedListView.Create(Self);
   FListView.Parent := Self;
   FListView.Align := alClient;
@@ -139,6 +158,7 @@ begin
   FListView.Checkboxes := True;   // tick the rows to auto-fix
   FListView.OnAdvancedCustomDrawSubItem := DoAdvancedDrawSubItem;
   FListView.OnDblClick := DoDblClick;
+  FListView.OnItemChecked := DoItemChecked;
 
   Col := FListView.Columns.Add; Col.Caption := 'Problem';   Col.Width := 140;
   Col := FListView.Columns.Add; Col.Caption := 'Auto-fix';  Col.Width := 56;
@@ -206,98 +226,141 @@ begin
   FChkAliasDiff.Checked := False;   // show alias differences (bold) by default
   FChkAliasDiff.OnClick := DoAliasDiffClick;
 
-  // Group identical event types together. Build the group headers first
-  // (sorted, with per-group counts) so rows can be assigned to them.
-  GroupCounts := TDictionary<string, Integer>.Create;
-  GroupIds := TDictionary<string, Integer>.Create;
-  try
-    for Issue in FIssues do
-    begin
-      Key := GroupKeyOf(Issue);
-      GroupCounts.TryGetValue(Key, N);
-      GroupCounts.AddOrSetValue(Key, N + 1);
-    end;
-    GroupKeys := GroupCounts.Keys.ToArray;
-    TArray.Sort<string>(GroupKeys, TComparer<string>.Construct(
-      function(const L, R: string): Integer
-      begin
-        Result := CompareText(L, R);
-      end));
+  FillRows;
+  EnableListViewSorting(FListView);
 
-    FListView.GroupView := True;
-    // Force the window handle to exist before adding groups and ticking
-    // rows. On the FIRST handle creation VCL only replays check states
-    // when a saved stream exists (see TCustomListView.CreateWnd), so a
-    // pre-tick done while the handle is unallocated is cached in FChecked
-    // but never written to the native control - and Checked would then
-    // read back False. With the handle live, Item.Checked writes through.
-    FListView.HandleNeeded;
-    for Key in GroupKeys do
-    begin
-      Grp := FListView.Groups.Add;
-      Grp.Header := Format('%s  (%d)', [Key, GroupCounts[Key]]);
-      GroupIds.Add(Key, Grp.GroupID);
-    end;
-
-    MissCount := 0; SigCount := 0;
-    FListView.Items.BeginUpdate;
-    try
-    for Issue in FIssues do
-    begin
-      Item := FListView.Items.Add;
-      Item.GroupID := GroupIds[GroupKeyOf(Issue)];
-      case Issue.Kind of
-        eikMissingHandler:
-          begin
-            Item.Caption := 'Missing handler';
-            Inc(MissCount);
-          end;
-        eikSignatureMismatch:
-          begin
-            Item.Caption := 'Signature mismatch';
-            Inc(SigCount);
-          end;
-      end;
-      // Fix column: check-mark for auto-fixable rows. Signature mismatches
-      // are corrected in place and PRE-TICKED; missing handlers get an
-      // empty handler stub GENERATED when the expected parameter list
-      // could be resolved - those are fixable but NOT pre-ticked: on
-      // inherited forms the "missing" handler may exist in the (out-of-
-      // project) ancestor unit, and generating an empty override there
-      // would silently disable the inherited behavior. The user opts in
-      // per row.
-      if Issue.ExpectedRawParams <> '' then
-      begin
-        Item.SubItems.Add(#$2713);   // check mark
-        Item.Checked := Issue.Kind = eikSignatureMismatch;
-      end
-      else
-        Item.SubItems.Add('');
-      Item.SubItems.Add(ExtractFileName(Issue.DfmFile));
-      Item.SubItems.Add(Issue.ComponentName + ': ' + Issue.ComponentType);
-      Item.SubItems.Add(Issue.EventName);
-      Item.SubItems.Add(Issue.HandlerName);
-      if Issue.Kind = eikSignatureMismatch then
-        Item.SubItems.Add('expected ' + Issue.Expected + ', found ' + Issue.Actual)
-      else if Issue.ExpectedRawParams <> '' then
-        Item.SubItems.Add('crashes with "Method not found" at form load - ' +
-          'fix generates an empty handler (' + Issue.ExpectedRawParams + ')')
-      else
-        Item.SubItems.Add('crashes with "Method not found" at form load');
-    end;
-    finally
-      FListView.Items.EndUpdate;
-    end;
-  finally
-    GroupCounts.Free;
-    GroupIds.Free;
-  end;
-
+  MissCount := 0; SigCount := 0;
+  for N := 0 to High(FIssues) do
+    if FIssues[N].Kind = eikMissingHandler then Inc(MissCount)
+    else Inc(SigCount);
   FLblSummary.Caption := Format(
     '%d issue(s): %d missing handler(s), %d signature mismatch(es).',
     [Length(FIssues), MissCount, SigCount]);
 
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
+end;
+
+// (Re)builds groups + rows for the issues matching the filter box. Rows
+// carry the ISSUE index in Item.Data (the list is sortable - Item.Index
+// is meaningless for mapping); check states live in FChecked.
+procedure TDfmEventCheckDialog.FillRows;
+var
+  Issue: TDfmEventIssue;
+  Item: TListItem;
+  N, IssueIdx: Integer;
+  GroupCounts, GroupIds: TDictionary<string, Integer>;
+  GroupKeys: TArray<string>;
+  Key, Filter: string;
+  Grp: TListGroup;
+
+  function Matches(const AIssue: TDfmEventIssue): Boolean;
+  begin
+    Result := (Filter = '')
+      or (Pos(Filter, UpperCase(ExtractFileName(AIssue.DfmFile))) > 0)
+      or (Pos(Filter, UpperCase(AIssue.ComponentName)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.ComponentType)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.EventName)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.HandlerName)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.Expected)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.Actual)) > 0);
+  end;
+
+begin
+  Filter := UpperCase(Trim(FEdtFilter.Text));
+  FFillingRows := True;
+  try
+    // Group identical event types together. Build the group headers first
+    // (sorted, with per-group counts over the FILTERED rows) so rows can
+    // be assigned to them.
+    GroupCounts := TDictionary<string, Integer>.Create;
+    GroupIds := TDictionary<string, Integer>.Create;
+    try
+      for Issue in FIssues do
+      begin
+        if not Matches(Issue) then Continue;
+        Key := GroupKeyOf(Issue);
+        GroupCounts.TryGetValue(Key, N);
+        GroupCounts.AddOrSetValue(Key, N + 1);
+      end;
+      GroupKeys := GroupCounts.Keys.ToArray;
+      TArray.Sort<string>(GroupKeys, TComparer<string>.Construct(
+        function(const L, R: string): Integer
+        begin
+          Result := CompareText(L, R);
+        end));
+
+      FListView.GroupView := True;
+      // Force the window handle to exist before adding groups and ticking
+      // rows. On the FIRST handle creation VCL only replays check states
+      // when a saved stream exists (see TCustomListView.CreateWnd), so a
+      // pre-tick done while the handle is unallocated is cached but never
+      // written to the native control - and Checked would then read back
+      // False. With the handle live, Item.Checked writes through.
+      FListView.HandleNeeded;
+      FListView.Items.BeginUpdate;
+      try
+        FListView.Items.Clear;
+        FListView.Groups.Clear;
+        for Key in GroupKeys do
+        begin
+          Grp := FListView.Groups.Add;
+          Grp.Header := Format('%s  (%d)', [Key, GroupCounts[Key]]);
+          GroupIds.Add(Key, Grp.GroupID);
+        end;
+
+        for IssueIdx := 0 to High(FIssues) do
+        begin
+          Issue := FIssues[IssueIdx];
+          if not Matches(Issue) then Continue;
+          Item := FListView.Items.Add;
+          Item.Data := Pointer(NativeInt(IssueIdx));
+          Item.GroupID := GroupIds[GroupKeyOf(Issue)];
+          case Issue.Kind of
+            eikMissingHandler:    Item.Caption := 'Missing handler';
+            eikSignatureMismatch: Item.Caption := 'Signature mismatch';
+          end;
+          // Fix column: check-mark for auto-fixable rows.
+          if Issue.ExpectedRawParams <> '' then
+            Item.SubItems.Add(#$2713)   // check mark
+          else
+            Item.SubItems.Add('');
+          Item.Checked := FChecked[IssueIdx];
+          Item.SubItems.Add(ExtractFileName(Issue.DfmFile));
+          Item.SubItems.Add(Issue.ComponentName + ': ' + Issue.ComponentType);
+          Item.SubItems.Add(Issue.EventName);
+          Item.SubItems.Add(Issue.HandlerName);
+          if Issue.Kind = eikSignatureMismatch then
+            Item.SubItems.Add('expected ' + Issue.Expected + ', found ' + Issue.Actual)
+          else if Issue.ExpectedRawParams <> '' then
+            Item.SubItems.Add('crashes with "Method not found" at form load - ' +
+              'fix generates an empty handler (' + Issue.ExpectedRawParams + ')')
+          else
+            Item.SubItems.Add('crashes with "Method not found" at form load');
+        end;
+      finally
+        FListView.Items.EndUpdate;
+      end;
+    finally
+      GroupCounts.Free;
+      GroupIds.Free;
+    end;
+  finally
+    FFillingRows := False;
+  end;
+end;
+
+procedure TDfmEventCheckDialog.DoFilterChange(Sender: TObject);
+begin
+  FillRows;
+end;
+
+procedure TDfmEventCheckDialog.DoItemChecked(Sender: TObject; Item: TListItem);
+begin
+  if FFillingRows or (Item = nil) then Exit;
+  var Idx := NativeInt(Item.Data);
+  if (Idx >= 0) and (Idx <= High(FChecked)) then
+    FChecked[Idx] := Item.Checked;
 end;
 
 // Canonical name for interchangeable integer types, so e.g. LongInt and
@@ -357,12 +420,13 @@ begin
   DefaultDraw := True;
   if Stage <> cdPrePaint then Exit;
   if SubItem <> DetailsCol then Exit;
-  if (Item.Index < 0) or (Item.Index >= Length(FIssues)) then Exit;
-  Issue := FIssues[Item.Index];
+  var IssueIdx := NativeInt(Item.Data);   // sortable list - never Item.Index
+  if (IssueIdx < 0) or (IssueIdx >= Length(FIssues)) then Exit;
+  Issue := FIssues[IssueIdx];
   if (Issue.Kind <> eikSignatureMismatch) or (Issue.ExpectedNorm = '') then Exit;
 
-  Exp := FExpTok[Item.Index];
-  Act := FActTok[Item.Index];
+  Exp := FExpTok[IssueIdx];
+  Act := FActTok[IssueIdx];
 
   // Bounds of the Details subitem cell.
   R.Left := LVIR_LABEL;
@@ -373,13 +437,13 @@ begin
   Cv := Sender.Canvas;
   if Item.Selected then
   begin
-    Cv.Brush.Color := clHighlight;
-    Cv.Font.Color := clHighlightText;
+    Cv.Brush.Color := GetThemedColor(clHighlight);
+    Cv.Font.Color := GetThemedColor(clHighlightText);
   end
   else
   begin
-    Cv.Brush.Color := clWindow;
-    Cv.Font.Color := clWindowText;
+    Cv.Brush.Color := GetThemedColor(clWindow);
+    Cv.Font.Color := GetThemedColor(clWindowText);
   end;
   Cv.FillRect(R);
   SetBkMode(Cv.Handle, TRANSPARENT);
@@ -463,7 +527,7 @@ var
   Idx, Col: Integer;
 begin
   if FListView.Selected = nil then Exit;
-  Idx := FListView.Selected.Index;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx >= Length(FIssues)) then Exit;
   // Signature mismatch -> jump to the .pas declaration; missing
   // handler -> jump to the offending .dfm line so the user sees which
@@ -499,7 +563,7 @@ var
   Idx: Integer;
 begin
   if FListView.Selected = nil then Exit;
-  Idx := FListView.Selected.Index;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx >= Length(FIssues)) then Exit;
   if (FIssues[Idx].EventTypeFile = '') or (FIssues[Idx].EventTypeLine <= 0) then
   begin
@@ -560,6 +624,7 @@ begin
   ProgBar.Height := 18;
   ProgBar.Min := 0;
   ProgBar.Max := Total;
+  PrepareDialog(Prog, Self);
 
   try
     Forms.Duplicates := dupIgnore;
@@ -568,29 +633,32 @@ begin
     Screen.Cursor := crHourGlass;
     try
       try
+      // Rows map to issues through Item.Data (sortable/filterable list).
       for I := 0 to FListView.Items.Count - 1 do
       begin
         if not FListView.Items[I].Checked then Continue;
+        var Idx := NativeInt(FListView.Items[I].Data);
         Inc(CheckedCount);
         Inc(Done);
         ProgBar.Position := Done;
-        if (I >= 0) and (I < Length(FIssues)) then
+        if (Idx >= 0) and (Idx < Length(FIssues)) then
           ProgLbl.Caption := Format('%d / %d  -  %s', [Done, Total,
-            ExtractFileName(FIssues[I].PasFile)]);
+            ExtractFileName(FIssues[Idx].PasFile)]);
         Application.ProcessMessages;
-        if (I < 0) or (I >= Length(FIssues)) then Continue;
-        if FIssues[I].ExpectedRawParams = '' then
+        if (Idx < 0) or (Idx >= Length(FIssues)) then Continue;
+        if FIssues[Idx].ExpectedRawParams = '' then
         begin
           Inc(NotFixable);
           Continue;
         end;
-        if TDfmEventChecker.ApplyFix(FIssues[I], Reason, Ctx) then
+        if TDfmEventChecker.ApplyFix(FIssues[Idx], Reason, Ctx) then
         begin
           Inc(Fixed);
-          Forms.Add(FIssues[I].PasFile);
+          Forms.Add(FIssues[Idx].PasFile);
           FListView.Items[I].SubItems[FListView.Items[I].SubItems.Count - 1] :=
-            'FIXED -> (' + FIssues[I].ExpectedRawParams + ')';
+            'FIXED -> (' + FIssues[Idx].ExpectedRawParams + ')';
           FListView.Items[I].Checked := False;
+          FChecked[Idx] := False;
         end
         else
         begin
@@ -944,6 +1012,7 @@ begin
     ProgressBar.Height := 18;
     ProgressBar.Min := 0;
     ProgressBar.Max := 100;
+    PrepareDialog(ProgressForm, nil);
     ProgressForm.Show;
     Screen.Cursor := crHourGlass;
     try

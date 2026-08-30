@@ -153,7 +153,35 @@ type
     ///  of a scan over every file. Classes NOT in the index (TForm,
     ///  TFrame, any VCL/RTL base) simply terminate the ancestor walk.</summary>
     FClassIndex: TDictionary<string, string>;
+    /// <summary>UPPER(classname) -> declaring file for classes seen by
+    ///  BuildSignatureIndex (library/search-path units). Kept SEPARATE
+    ///  from FClassIndex so the form-ancestor method walk stays
+    ///  project-only; used by the item-class resolver and as file
+    ///  preference in proc-type resolution.</summary>
+    FLibClassFile: TDictionary<string, string>;
+    /// <summary>UPPER(ownerclass.collectionprop) -> item class name
+    ///  ('' = not resolvable). Collection items in a DFM carry no class
+    ///  name, so the item class is derived from source: the collection
+    ///  property's type, then that class's default array property.</summary>
+    FItemClassCache: TDictionary<string, string>;
     function GetLines(const AFile: string): TArray<string>;
+    /// <summary>Lines of AFile WITHOUT populating the permanent cache -
+    ///  used for on-demand scans of third-party units (the cache would
+    ///  otherwise grow with every library file, see BuildSignatureIndex).</summary>
+    function PeekLines(const AFile: string): TArray<string>;
+    /// <summary>Scans AClassName's declaration in its indexed file for
+    ///  "property APropName: TType" and returns the type name ('' when
+    ///  not found). ADefaultArray instead looks for the class's default
+    ///  ARRAY property ("property Items[..]: TItem ... default;") and
+    ///  ignores APropName.</summary>
+    function ScanClassPropertyType(const AClassName, APropName: string;
+      ADefaultArray: Boolean): string;
+    /// <summary>Resolves the ITEM class of a collection property
+    ///  (AOwnerClass.APropName) from indexed source: walks the owner's
+    ///  ancestor chain to the typed property, then the collection
+    ///  class's chain to its default array property. '' when any hop is
+    ///  not resolvable. Cached.</summary>
+    function ResolveCollectionItemClass(const AOwnerClass, APropName: string): string;
     procedure BuildClassIndex(const AFiles: TArray<string>);
     function CheckPairInternal(const ADfmFile, APasFile: string): TArray<TDfmEventIssue>;
     /// <summary>Consistency pass over FAssignments (run after all
@@ -446,11 +474,16 @@ const
   //   OnPopup           - TPopupMenu.OnPopup is TNotifyEvent, but
   //                       TcxGridPopupMenu.OnPopup is TcxGridBeforePopupProc
   //                       (ASenderMenu, AHitTest, X, Y, var AllowPopup)
-  NotifyEvents: array[0..13] of string = (
+  //   OnExecute/OnUpdate - TAction has TNotifyEvent, but TActionList /
+  //                       TActionManager have TActionEvent
+  //                       (Action: TBasicAction; var Handled: Boolean).
+  //                       Both classes sit in the whitelist, so a single
+  //                       table entry is wrong for one of them; resolved
+  //                       from source instead.
+  NotifyEvents: array[0..11] of string = (
     'OnClick', 'OnDblClick', 'OnEnter', 'OnExit',
     'OnCreate', 'OnDestroy', 'OnShow', 'OnHide', 'OnActivate',
-    'OnDeactivate', 'OnResize', 'OnExecute', 'OnUpdate',
-    'OnTimer');
+    'OnDeactivate', 'OnResize', 'OnTimer');
 
   // Component classes whose events from the tables below verifiably
   // carry the standard VCL signatures. The signature check ONLY runs
@@ -1011,10 +1044,14 @@ begin
   FProcRawFile := TDictionary<string, string>.Create;
   FProcLocFile := TDictionary<string, string>.Create;
   FAliasFile := TDictionary<string, string>.Create;
+  FLibClassFile := TDictionary<string, string>.Create;
+  FItemClassCache := TDictionary<string, string>.Create;
 end;
 
 destructor TDfmEventChecker.Destroy;
 begin
+  FItemClassCache.Free;
+  FLibClassFile.Free;
   FAliasFile.Free;
   FProcLocFile.Free;
   FProcRawFile.Free;
@@ -1041,6 +1078,155 @@ begin
   FLinesCache.Add(Key, Result);
 end;
 
+function TDfmEventChecker.PeekLines(const AFile: string): TArray<string>;
+begin
+  if not FLinesCache.TryGetValue(UpperCase(AFile), Result) then
+    Result := ReadFileLines(AFile);
+end;
+
+function TDfmEventChecker.ScanClassPropertyType(const AClassName,
+  APropName: string; ADefaultArray: Boolean): string;
+var
+  F, DName, DAnc, L, U, Joined, PName, Rest: string;
+  Lines: TArray<string>;
+  I, J, Depth, P, K: Integer;
+  InClass: Boolean;
+  ItemsFallback: string;
+begin
+  Result := '';
+  if not FClassIndex.TryGetValue(UpperCase(AClassName), F)
+     and not FLibClassFile.TryGetValue(UpperCase(AClassName), F) then Exit;
+  Lines := PeekLines(F);
+  InClass := False;
+  Depth := 0;
+  ItemsFallback := '';
+  for I := 0 to High(Lines) do
+  begin
+    L := Lines[I];
+    U := UpperCase(Trim(L));
+    if U.StartsWith('//') then Continue;
+    if not InClass then
+    begin
+      if TryParseClassDecl(L, DName, DAnc) and SameText(DName, AClassName) then
+      begin
+        InClass := True;
+        Depth := 0;
+      end;
+      Continue;
+    end;
+    if (U = 'END;') and (Depth = 0) then Break;
+    if U.EndsWith('= RECORD') or U.EndsWith('= CLASS') then Inc(Depth)
+    else if (U = 'END;') and (Depth > 0) then Dec(Depth);
+    if (Depth > 0) or not U.StartsWith('PROPERTY ') then Continue;
+
+    // Join a property declaration that spans lines (read/write on the
+    // next line) so the trailing "default;" marker is visible.
+    Joined := StripLineComment(Trim(L));
+    J := I;
+    while (J + 1 < Length(Lines)) and (J - I < 3)
+          and not Joined.TrimRight.EndsWith(';') do
+    begin
+      Inc(J);
+      Joined := Joined + ' ' + StripLineComment(Trim(Lines[J]));
+    end;
+
+    Rest := Trim(Copy(Joined, Length('property ') + 1, MaxInt));
+    // Property name = identifier up to ':' / '[' / whitespace.
+    K := 1;
+    while (K <= Length(Rest)) and
+          CharInSet(Rest[K], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+      Inc(K);
+    PName := Copy(Rest, 1, K - 1);
+    if PName = '' then Continue;
+
+    if ADefaultArray then
+    begin
+      // "property Items[Index: Integer]: TItemClass ... ; default;"
+      if (K > Length(Rest)) or (Rest[K] <> '[') then Continue;
+      P := PosEx(']', Rest, K);
+      if P = 0 then Continue;
+      P := PosEx(':', Rest, P);
+      if P = 0 then Continue;
+      Rest := Trim(Copy(Rest, P + 1, MaxInt));
+      K := 1;
+      while (K <= Length(Rest)) and
+            CharInSet(Rest[K], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do
+        Inc(K);
+      var TypeName := Copy(Rest, 1, K - 1);
+      P := LastDelimiter('.', TypeName);
+      if P > 0 then TypeName := Copy(TypeName, P + 1, MaxInt);
+      if TypeName = '' then Continue;
+      if Pos('; DEFAULT;', UpperCase(Joined)) > 0 then
+        Exit(TypeName);
+      // No default marker: remember an array property named 'Items' as
+      // fallback (the idiomatic TCollection accessor).
+      if SameText(PName, 'Items') and (ItemsFallback = '') then
+        ItemsFallback := TypeName;
+    end
+    else
+    begin
+      if not SameText(PName, APropName) then Continue;
+      // Reject array properties here; require ": Type".
+      if (K <= Length(Rest)) and (Rest[K] = '[') then Continue;
+      P := PosEx(':', Rest, K);
+      if P = 0 then Exit;   // typeless republish - type lives in an ancestor
+      Rest := Trim(Copy(Rest, P + 1, MaxInt));
+      K := 1;
+      while (K <= Length(Rest)) and
+            CharInSet(Rest[K], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do
+        Inc(K);
+      var TypeName := Copy(Rest, 1, K - 1);
+      P := LastDelimiter('.', TypeName);
+      if P > 0 then TypeName := Copy(TypeName, P + 1, MaxInt);
+      Exit(TypeName);
+    end;
+  end;
+  Result := ItemsFallback;
+end;
+
+function TDfmEventChecker.ResolveCollectionItemClass(const AOwnerClass,
+  APropName: string): string;
+var
+  Key, Cls, CollType, Next: string;
+  Hops: Integer;
+begin
+  Key := UpperCase(AOwnerClass) + '.' + UpperCase(APropName);
+  if FItemClassCache.TryGetValue(Key, Result) then Exit;
+  Result := '';
+
+  // 1) Owner chain -> the typed collection property.
+  CollType := '';
+  Cls := AOwnerClass;
+  Hops := 0;
+  while (Cls <> '') and (Hops < 40) do
+  begin
+    Inc(Hops);
+    CollType := ScanClassPropertyType(Cls, APropName, False);
+    if CollType <> '' then Break;
+    if FClassAncestor.TryGetValue(UpperCase(Cls), Next) then Cls := Next
+    else if FClassAlias.TryGetValue(UpperCase(Cls), Next) then Cls := Next
+    else Break;
+  end;
+
+  // 2) Collection-class chain -> its default array (item) property.
+  if CollType <> '' then
+  begin
+    Cls := CollType;
+    Hops := 0;
+    while (Cls <> '') and (Hops < 40) do
+    begin
+      Inc(Hops);
+      Result := ScanClassPropertyType(Cls, '', True);
+      if Result <> '' then Break;
+      if FClassAncestor.TryGetValue(UpperCase(Cls), Next) then Cls := Next
+      else if FClassAlias.TryGetValue(UpperCase(Cls), Next) then Cls := Next
+      else Break;
+    end;
+  end;
+
+  FItemClassCache.Add(Key, Result);
+end;
+
 procedure TDfmEventChecker.BuildClassIndex(const AFiles: TArray<string>);
 // One pass over every project source: register "TFoo = class..." with
 // its declaring file. First declaration wins; forwards ("= class;")
@@ -1065,15 +1251,61 @@ begin
   end;
 end;
 
+type
+  // One level of DFM nesting. Besides object/inherited/inline blocks the
+  // walk now tracks COLLECTION properties ("Prop = <" .. "item" .. "end>")
+  // explicitly: collection items carry no class name in the DFM, and the
+  // plain "end" that closes a non-last item used to pop the OBJECT stack,
+  // shifting every following event onto the wrong component.
+  TDfmFrameKind = (dfObject, dfCollection, dfItem);
+  TDfmFrame = record
+    Kind: TDfmFrameKind;
+    Name: string;       // dfObject: component name; dfCollection: "owner.Prop";
+                        // dfItem: "owner.Prop[n]"
+    ClsName: string;    // dfObject: class name; dfItem: item class ('' unknown)
+    PropName: string;   // dfCollection: the property name
+    ItemCls: string;    // dfCollection: resolved item class ('' unknown)
+    PoolCls: string;    // dfCollection/dfItem: pseudo comp-type for the
+                        // consistency pool when the item class is unknown
+    NextIndex: Integer; // dfCollection: running item index
+  end;
+
 function TDfmEventChecker.CheckPairInternal(const ADfmFile, APasFile: string): TArray<TDfmEventIssue>;
 var
   DfmLines, PasLines: TArray<string>;
   Issues: TList<TDfmEventIssue>;
   Methods: TDictionary<string, TPair<Integer, string>>;
-  CompStack: TStack<TPair<string, string>>;  // name, type
+  Frames: TList<TDfmFrame>;
+  ObjDepth: Integer;
   FormClass, Ancestor, NextClass, ProbeFile: string;
   I, Hops: Integer;
   Issue: TDfmEventIssue;
+
+  // Innermost object/item frame = the component the event belongs to.
+  procedure GetContext(out AName, ACls, APool: string; out AIsItem: Boolean);
+  var
+    K: Integer;
+  begin
+    AName := ''; ACls := ''; APool := ''; AIsItem := False;
+    for K := Frames.Count - 1 downto 0 do
+      case Frames[K].Kind of
+        dfObject:
+          begin
+            AName := Frames[K].Name;
+            ACls := Frames[K].ClsName;
+            Exit;
+          end;
+        dfItem:
+          begin
+            AName := Frames[K].Name;
+            ACls := Frames[K].ClsName;
+            APool := Frames[K].PoolCls;
+            AIsItem := True;
+            Exit;
+          end;
+      end;
+  end;
+
 begin
   Result := nil;
   DfmLines := GetLines(ADfmFile);
@@ -1093,7 +1325,7 @@ begin
 
   Methods := TDictionary<string, TPair<Integer, string>>.Create;
   Issues := TList<TDfmEventIssue>.Create;
-  CompStack := TStack<TPair<string, string>>.Create;
+  Frames := TList<TDfmFrame>.Create;
   try
     // Collect methods of the form class + project-resolvable ancestors
     // (visual form inheritance keeps handlers in the base class). The
@@ -1112,9 +1344,14 @@ begin
       NextClass := NextAncestor;
     end;
 
-    // Walk the DFM: track the object stack, find "OnXxx = Handler".
-    CompStack.Push(TPair<string, string>.Create(
-      Trim(RootParts[0]).Split([' '])[High(Trim(RootParts[0]).Split([' ']))], FormClass));
+    // Walk the DFM: track the nesting frames, find "OnXxx = Handler".
+    var RootFrame := Default(TDfmFrame);
+    RootFrame.Kind := dfObject;
+    RootFrame.Name :=
+      Trim(RootParts[0]).Split([' '])[High(Trim(RootParts[0]).Split([' ']))];
+    RootFrame.ClsName := FormClass;
+    Frames.Add(RootFrame);
+    ObjDepth := 1;
     I := 1;
     while I < Length(DfmLines) do
     begin
@@ -1123,14 +1360,60 @@ begin
       if U.StartsWith('OBJECT ') or U.StartsWith('INHERITED ') or U.StartsWith('INLINE ') then
       begin
         var Parts := L.Split([' ', ':'], TStringSplitOptions.ExcludeEmpty);
-        if Length(Parts) >= 3 then
-          CompStack.Push(TPair<string, string>.Create(Parts[1], Parts[2]))
-        else if Length(Parts) >= 2 then
-          CompStack.Push(TPair<string, string>.Create(Parts[1], ''));
+        var F := Default(TDfmFrame);
+        F.Kind := dfObject;
+        if Length(Parts) >= 2 then F.Name := Parts[1];
+        if Length(Parts) >= 3 then F.ClsName := Parts[2];
+        Frames.Add(F);
+        Inc(ObjDepth);
+      end
+      else if U = 'ITEM' then
+      begin
+        if (Frames.Count > 0) and (Frames.Last.Kind = dfCollection) then
+        begin
+          var C := Frames.Last;
+          var F := Default(TDfmFrame);
+          F.Kind := dfItem;
+          F.Name := C.Name + '[' + IntToStr(C.NextIndex) + ']';
+          F.ClsName := C.ItemCls;
+          F.PoolCls := C.PoolCls;
+          C.NextIndex := C.NextIndex + 1;
+          Frames[Frames.Count - 1] := C;   // write back the item counter
+          Frames.Add(F);
+        end;
       end
       else if U = 'END' then
       begin
-        if CompStack.Count > 1 then CompStack.Pop;
+        // Plain "end" closes a collection item OR an object - never let
+        // an item's end pop the object stack (that shifted attribution
+        // of everything after a multi-item collection one level up).
+        if Frames.Count > 0 then
+          case Frames.Last.Kind of
+            dfItem:
+              Frames.Delete(Frames.Count - 1);
+            dfObject:
+              if Frames.Count > 1 then
+              begin
+                Frames.Delete(Frames.Count - 1);
+                Dec(ObjDepth);
+              end;
+            dfCollection:            // malformed DFM - stay balanced
+              Frames.Delete(Frames.Count - 1);
+          end;
+      end
+      else if U = 'END>' then
+      begin
+        // Last item's end also closes the collection.
+        if (Frames.Count > 0) and (Frames.Last.Kind = dfItem) then
+          Frames.Delete(Frames.Count - 1);
+        if (Frames.Count > 0) and (Frames.Last.Kind = dfCollection) then
+          Frames.Delete(Frames.Count - 1);
+      end
+      else if U = '>' then
+      begin
+        // Multi-line empty collection "Prop = <" / ">".
+        if (Frames.Count > 0) and (Frames.Last.Kind = dfCollection) then
+          Frames.Delete(Frames.Count - 1);
       end
       else
       begin
@@ -1146,9 +1429,29 @@ begin
         end
         else if U.EndsWith('= <') then
         begin
-          // Collection property - items may contain events too, but
-          // their handlers follow the same rules; keep scanning inside.
-          // (No skip: item> lines parse as normal properties.)
+          // Collection property: the items that follow carry NO class
+          // name in the DFM, so resolve the ITEM class from source -
+          // events inside items must check against the item's event
+          // type, not the owner's (TcxGridPopupMenu.OnPopup and
+          // PopupMenus[i].OnPopup have different signatures!).
+          var OwnerName, OwnerCls, OwnerPool: string;
+          var OwnerIsItem: Boolean;
+          GetContext(OwnerName, OwnerCls, OwnerPool, OwnerIsItem);
+          var F := Default(TDfmFrame);
+          F.Kind := dfCollection;
+          F.PropName := Trim(Copy(L, 1, Pos('=', L) - 1));
+          if OwnerName <> '' then
+            F.Name := OwnerName + '.' + F.PropName
+          else
+            F.Name := F.PropName;
+          if OwnerCls <> '' then
+          begin
+            F.ItemCls := ResolveCollectionItemClass(OwnerCls, F.PropName);
+            F.PoolCls := OwnerCls + '.' + F.PropName;
+          end
+          else
+            F.PoolCls := F.PropName;
+          Frames.Add(F);
         end
         else
         begin
@@ -1166,17 +1469,17 @@ begin
                and not SameText(PropValue, 'True') and not SameText(PropValue, 'False')
                and not SameText(PropValue, 'nil') then
             begin
+              var CtxName, CtxType, CtxPool: string;
+              var CtxIsItem: Boolean;
+              GetContext(CtxName, CtxType, CtxPool, CtxIsItem);
               var MethodInfo: TPair<Integer, string>;
               if not Methods.TryGetValue(UpperCase(PropValue), MethodInfo) then
               begin
                 Issue := Default(TDfmEventIssue);
                 Issue.DfmFile := ADfmFile;
                 Issue.PasFile := APasFile;
-                if CompStack.Count > 0 then
-                begin
-                  Issue.ComponentName := CompStack.Peek.Key;
-                  Issue.ComponentType := CompStack.Peek.Value;
-                end;
+                Issue.ComponentName := CtxName;
+                Issue.ComponentType := CtxType;
                 Issue.EventName := PropName;
                 Issue.HandlerName := PropValue;
                 Issue.DfmLine := I + 1;
@@ -1185,10 +1488,10 @@ begin
                 // Auto-fix enablement: resolve the expected parameter list
                 // so ApplyFix can GENERATE the handler stub. Source
                 // resolution first (exact, with real parameter names)...
-                if (CompStack.Count > 0) and (CompStack.Peek.Value <> '') then
+                if CtxType <> '' then
                 begin
                   var MResolvedSig, MTypeName, MRawParams, MTypeLoc: string;
-                  if TryResolveEventSignature(CompStack.Peek.Value, PropName,
+                  if TryResolveEventSignature(CtxType, PropName,
                        MResolvedSig, MTypeName, MRawParams, MTypeLoc) then
                   begin
                     Issue.ExpectedRawParams := MRawParams;
@@ -1208,13 +1511,15 @@ begin
                 end;
                 // ... else the built-in table, with the SAME trust gating as
                 // the signature check (form itself / whitelisted classes
-                // only - third parties may redeclare event names).
+                // only - third parties may redeclare event names; collection
+                // items never use the table, their events belong to the
+                // ITEM class which the table cannot know).
                 if Issue.ExpectedRawParams = '' then
                 begin
-                  var MSigCheckable := CompStack.Count <= 1;
-                  if not MSigCheckable then
+                  var MSigCheckable := (not CtxIsItem) and (ObjDepth <= 1);
+                  if not MSigCheckable and not CtxIsItem then
                     for var MSafeIdx := Low(SafeVclClasses) to High(SafeVclClasses) do
-                      if SameText(SafeVclClasses[MSafeIdx], CompStack.Peek.Value) then
+                      if SameText(SafeVclClasses[MSafeIdx], CtxType) then
                       begin
                         MSigCheckable := True;
                         Break;
@@ -1230,103 +1535,104 @@ begin
               end
               else
               begin
-                // Signature checking is only sound where we KNOW the
-                // event type: on the form itself (stack depth 1) or on
-                // whitelisted standard classes. Other components may
-                // declare same-named events with different signatures.
-                var SigCheckable := CompStack.Count <= 1;
-                if not SigCheckable then
+                // Signature verification - SOURCE resolution FIRST. It is
+                // exact, version-correct, and the only way to tell apart
+                // events that share a name but not a type (TActionList.
+                // OnUpdate is TActionEvent(Action: TBasicAction; var
+                // Handled: Boolean), TAction.OnUpdate is TNotifyEvent -
+                // the table can only know one of them). The built-in
+                // table is a FALLBACK for components whose source is not
+                // indexed, gated to the form itself / whitelisted VCL
+                // classes; collection items never use the table (their
+                // events belong to the ITEM class, unknowable there).
+                var SigCheckable := (not CtxIsItem) and (ObjDepth <= 1);
+                if not SigCheckable and not CtxIsItem then
                   for var SafeIdx := Low(SafeVclClasses) to High(SafeVclClasses) do
-                    if SameText(SafeVclClasses[SafeIdx], CompStack.Peek.Value) then
+                    if SameText(SafeVclClasses[SafeIdx], CtxType) then
                     begin
                       SigCheckable := True;
                       Break;
                     end;
                 var Expected: string;
                 var HasTableSig := ExpectedSignature(PropName, Expected);
-                if SigCheckable and HasTableSig
-                   and not SameText(MethodInfo.Value, Expected) then
+                var ResolvedSig, TypeName, RawParams, TypeLoc: string;
+                var FromSource := (CtxType <> '') and TryResolveEventSignature(
+                  CtxType, PropName, ResolvedSig, TypeName, RawParams, TypeLoc);
+                if FromSource then
                 begin
-                  Issue := Default(TDfmEventIssue);
-                  Issue.DfmFile := ADfmFile;
-                  Issue.PasFile := APasFile;
-                  if CompStack.Count > 0 then
+                  if not SameText(MethodInfo.Value, ResolvedSig) then
                   begin
-                    Issue.ComponentName := CompStack.Peek.Key;
-                    Issue.ComponentType := CompStack.Peek.Value;
-                  end;
-                  Issue.EventName := PropName;
-                  Issue.HandlerName := PropValue;
-                  Issue.DfmLine := I + 1;
-                  Issue.PasLine := MethodInfo.Key;
-                  Issue.Kind := eikSignatureMismatch;
-                  Issue.Expected := '(' + Expected.Replace('|', '; ') + ')';
-                  Issue.Actual := '(' + MethodInfo.Value.Replace('|', '; ') + ')';
-                  Issue.ExpectedNorm := Expected;
-                  Issue.ActualNorm := MethodInfo.Value;
-                  Issues.Add(Issue);
-                end
-                else if (not (SigCheckable and HasTableSig)) and (CompStack.Count > 0)
-                        and (CompStack.Peek.Value <> '') then
-                begin
-                  // Not using the built-in table (either the event isn't in
-                  // it, or the component is not whitelisted - a third-party
-                  // class may redeclare a standard event name with a
-                  // different type, e.g. TcxGridPopupMenu.OnPopup). Resolve
-                  // the event type EXACTLY from the component's own source
-                  // (indexed from the search path); if that works, check the
-                  // real signature, otherwise pool it for the cross-project
-                  // consistency check.
-                  var ResolvedSig, TypeName, RawParams, TypeLoc: string;
-                  if TryResolveEventSignature(CompStack.Peek.Value, PropName,
-                       ResolvedSig, TypeName, RawParams, TypeLoc) then
-                  begin
-                    if not SameText(MethodInfo.Value, ResolvedSig) then
+                    Issue := Default(TDfmEventIssue);
+                    Issue.DfmFile := ADfmFile;
+                    Issue.PasFile := APasFile;
+                    Issue.ComponentName := CtxName;
+                    Issue.ComponentType := CtxType;
+                    Issue.EventName := PropName;
+                    Issue.HandlerName := PropValue;
+                    Issue.DfmLine := I + 1;
+                    Issue.PasLine := MethodInfo.Key;
+                    Issue.Kind := eikSignatureMismatch;
+                    Issue.Expected := Format('(%s)  [%s]',
+                      [ResolvedSig.Replace('|', '; '), TypeName]);
+                    Issue.Actual := '(' + MethodInfo.Value.Replace('|', '; ') + ')';
+                    Issue.ExpectedNorm := ResolvedSig;
+                    Issue.ActualNorm := MethodInfo.Value;
+                    Issue.ExpectedRawParams := RawParams;   // enables auto-fix
+                    Issue.FormClass := FormClass;
+                    Issue.EventTypeName := TypeName;
+                    if TypeLoc <> '' then
                     begin
-                      Issue := Default(TDfmEventIssue);
-                      Issue.DfmFile := ADfmFile;
-                      Issue.PasFile := APasFile;
-                      Issue.ComponentName := CompStack.Peek.Key;
-                      Issue.ComponentType := CompStack.Peek.Value;
-                      Issue.EventName := PropName;
-                      Issue.HandlerName := PropValue;
-                      Issue.DfmLine := I + 1;
-                      Issue.PasLine := MethodInfo.Key;
-                      Issue.Kind := eikSignatureMismatch;
-                      Issue.Expected := Format('(%s)  [%s]',
-                        [ResolvedSig.Replace('|', '; '), TypeName]);
-                      Issue.Actual := '(' + MethodInfo.Value.Replace('|', '; ') + ')';
-                      Issue.ExpectedNorm := ResolvedSig;
-                      Issue.ActualNorm := MethodInfo.Value;
-                      Issue.ExpectedRawParams := RawParams;   // enables auto-fix
-                      Issue.FormClass := FormClass;
-                      Issue.EventTypeName := TypeName;
-                      if TypeLoc <> '' then
+                      var Bar := Pos('|', TypeLoc);
+                      if Bar > 0 then
                       begin
-                        var Bar := Pos('|', TypeLoc);
-                        if Bar > 0 then
-                        begin
-                          Issue.EventTypeFile := Copy(TypeLoc, 1, Bar - 1);
-                          Issue.EventTypeLine := StrToIntDef(Copy(TypeLoc, Bar + 1, MaxInt), 0);
-                        end;
+                        Issue.EventTypeFile := Copy(TypeLoc, 1, Bar - 1);
+                        Issue.EventTypeLine := StrToIntDef(Copy(TypeLoc, Bar + 1, MaxInt), 0);
                       end;
-                      Issues.Add(Issue);
                     end;
-                  end
-                  else
-                  begin
-                    var A: TEventAssignment;
-                    A.CompType := CompStack.Peek.Value;
-                    A.EventName := PropName;
-                    A.HandlerName := PropValue;
-                    A.Signature := MethodInfo.Value;
-                    A.ComponentName := CompStack.Peek.Key;
-                    A.DfmFile := ADfmFile;
-                    A.PasFile := APasFile;
-                    A.DfmLine := I + 1;
-                    A.PasLine := MethodInfo.Key;
-                    FAssignments.Add(A);
+                    Issues.Add(Issue);
                   end;
+                end
+                else if SigCheckable and HasTableSig then
+                begin
+                  if not SameText(MethodInfo.Value, Expected) then
+                  begin
+                    Issue := Default(TDfmEventIssue);
+                    Issue.DfmFile := ADfmFile;
+                    Issue.PasFile := APasFile;
+                    Issue.ComponentName := CtxName;
+                    Issue.ComponentType := CtxType;
+                    Issue.EventName := PropName;
+                    Issue.HandlerName := PropValue;
+                    Issue.DfmLine := I + 1;
+                    Issue.PasLine := MethodInfo.Key;
+                    Issue.Kind := eikSignatureMismatch;
+                    Issue.Expected := '(' + Expected.Replace('|', '; ') + ')';
+                    Issue.Actual := '(' + MethodInfo.Value.Replace('|', '; ') + ')';
+                    Issue.ExpectedNorm := Expected;
+                    Issue.ActualNorm := MethodInfo.Value;
+                    Issues.Add(Issue);
+                  end;
+                end
+                else if (CtxType <> '') or (CtxPool <> '') then
+                begin
+                  // No exact type knowledge at all: pool for the
+                  // cross-project consistency check. Items without a
+                  // resolvable class pool under "OwnerClass.PropName" so
+                  // same-collection events still group together.
+                  var A: TEventAssignment;
+                  if CtxType <> '' then
+                    A.CompType := CtxType
+                  else
+                    A.CompType := CtxPool;
+                  A.EventName := PropName;
+                  A.HandlerName := PropValue;
+                  A.Signature := MethodInfo.Value;
+                  A.ComponentName := CtxName;
+                  A.DfmFile := ADfmFile;
+                  A.PasFile := APasFile;
+                  A.DfmLine := I + 1;
+                  A.PasLine := MethodInfo.Key;
+                  FAssignments.Add(A);
                 end;
               end;
             end;
@@ -1338,7 +1644,7 @@ begin
 
     Result := Issues.ToArray;
   finally
-    CompStack.Free;
+    Frames.Free;
     Issues.Free;
     Methods.Free;
   end;
@@ -1490,6 +1796,13 @@ begin
           MethodOwnerClass := DName;
           if (DAnc <> '') and not FClassAncestor.ContainsKey(UpperCase(DName)) then
             FClassAncestor.Add(UpperCase(DName), DAnc);
+          // Register class -> file for LIBRARY classes too (separate from
+          // FClassIndex, which stays project-only for the form-ancestor
+          // method walk): the item-class resolver and the file-preferring
+          // proc resolution need the declaring file of third-party
+          // components. Strings only - file content stays uncached.
+          if not FLibClassFile.ContainsKey(UpperCase(DName)) then
+            FLibClassFile.Add(UpperCase(DName), F);
         end
         else if (Pos(' = PROCEDURE', U) > 0) or (Pos(' = FUNCTION', U) > 0) then
         begin
@@ -1647,7 +1960,8 @@ begin
     begin
       // The type name resolves in the scope of the unit that declares Cls.
       PropFile := '';
-      FClassIndex.TryGetValue(UpperCase(Cls), PropFile);
+      if not FClassIndex.TryGetValue(UpperCase(Cls), PropFile) then
+        FLibClassFile.TryGetValue(UpperCase(Cls), PropFile);
       var Sig, Raw, Loc, Final: string;
       if ResolveProc(TypeName, PropFile, Sig, Raw, Loc, Final) then
       begin

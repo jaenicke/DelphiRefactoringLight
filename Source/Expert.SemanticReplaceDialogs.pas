@@ -91,7 +91,7 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, System.StrUtils;
+  System.UITypes, System.IOUtils, System.StrUtils, Expert.ListViewSort;
 
 { ---------- TSemanticReplaceRuleEditDialog ---------- }
 
@@ -225,6 +225,7 @@ begin
   Col := FListView.Columns.Add; Col.Caption := 'Replace'; Col.Width := 320;
   Col := FListView.Columns.Add; Col.Caption := 'Uses'; Col.Width := 180;
   Col := FListView.Columns.Add; Col.Caption := 'Local var?'; Col.Width := 80;
+  EnableListViewSorting(FListView);
 
   var Pnl: TPanel := TPanel.Create(Self);
   Pnl.Parent := Self;
@@ -267,6 +268,7 @@ begin
     begin
       R := FRules[I];
       Item := FListView.Items.Add;
+      Item.Data := Pointer(NativeInt(I)); // rule index; rows may be sorted
       Item.Caption := R.Find;
       Item.SubItems.Add(R.Replace);
       Item.SubItems.Add(string.Join(', ', R.UsesToAdd));
@@ -300,7 +302,8 @@ var
   Idx: Integer;
   R: TSemanticReplaceRule;
 begin
-  Idx := FListView.ItemIndex;
+  if FListView.Selected = nil then Exit;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FRules)) then Exit;
   R := FRules[Idx];
   if TSemanticReplaceRuleEditDialog.Edit(Self, R) then
@@ -316,7 +319,8 @@ var
   Idx, I: Integer;
   NewRules: TArray<TSemanticReplaceRule>;
 begin
-  Idx := FListView.ItemIndex;
+  if FListView.Selected = nil then Exit;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FRules)) then Exit;
   if MessageDlg('Delete this rule?', mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
   SetLength(NewRules, Length(FRules) - 1);

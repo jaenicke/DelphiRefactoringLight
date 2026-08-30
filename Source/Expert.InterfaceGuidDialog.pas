@@ -23,7 +23,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.InterfaceGuidCheck, Expert.DialogHelper,
-  Delphi.FileEncoding;
+  Expert.IdeThemes, Expert.ListViewSort, Delphi.FileEncoding;
 
 // Small helper: bottom-aligned button panel. Kept local to avoid
 // pulling a whole layout framework into this dialog.
@@ -55,6 +55,13 @@ type
     FWatchTimer: TTimer;
     FWatchFile: string;
     FWatchContent: string;
+    // Header-click sort state (-1 = default duplicates-first ordering).
+    // Virtual list: sorting means reordering FEntries + Invalidate.
+    FSortCol: Integer;
+    FSortAsc: Boolean;
+    function CompareByColumn(const L, R: TInterfaceGuidEntry): Integer;
+    procedure ApplyColumnSort;
+    procedure DoColumnClick(Sender: TObject; Column: TListColumn);
     procedure DoWatchTick(Sender: TObject);
     procedure RefreshFileEntries(const AFile: string);
     procedure UpdateSummary;
@@ -110,6 +117,8 @@ begin
   FListView.OnData := DoData;
   FListView.OnCustomDrawItem := DoCustomDrawItem;
   FListView.OnDblClick := DoDblClick;
+  FListView.OnColumnClick := DoColumnClick;
+  FSortCol := -1;
 
   Col := FListView.Columns.Add; Col.Caption := 'GUID';      Col.Width := 290;
   Col := FListView.Columns.Add; Col.Caption := 'Interface'; Col.Width := 220;
@@ -141,6 +150,7 @@ begin
   FWatchTimer.OnTimer := DoWatchTick;
   FWatchTimer.Enabled := True;
 
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
 end;
 
@@ -271,10 +281,52 @@ begin
       end));
   FEntries := Sorted;
 
+  // A header-click sort (if any) overrides the default ordering, also
+  // after a live refresh re-sorted the array above.
+  ApplyColumnSort;
+
   // Virtual list: no item creation - just announce the row count and
   // let DoData serve rows as they scroll into view.
   FListView.Items.Count := Length(FEntries);
   FListView.Invalidate;
+end;
+
+// Column-to-field mapping mirrors DoData.
+function TInterfaceGuidDialog.CompareByColumn(const L, R: TInterfaceGuidEntry): Integer;
+begin
+  case FSortCol of
+    0: Result := CompareText(L.Guid, R.Guid);
+    1: Result := CompareText(L.InterfaceName, R.InterfaceName);
+    2: Result := CompareText(ExtractFileName(L.FileName), ExtractFileName(R.FileName));
+    3: Result := L.Line - R.Line;
+  else
+    Result := 0;
+  end;
+  if Result = 0 then
+    Result := CompareText(L.InterfaceName, R.InterfaceName);
+  if not FSortAsc then
+    Result := -Result;
+end;
+
+procedure TInterfaceGuidDialog.ApplyColumnSort;
+begin
+  if FSortCol < 0 then Exit;
+  TArray.Sort<TInterfaceGuidEntry>(FEntries,
+    TComparer<TInterfaceGuidEntry>.Construct(CompareByColumn));
+end;
+
+procedure TInterfaceGuidDialog.DoColumnClick(Sender: TObject; Column: TListColumn);
+begin
+  if FSortCol = Column.Index then
+    FSortAsc := not FSortAsc
+  else
+  begin
+    FSortCol := Column.Index;
+    FSortAsc := True;
+  end;
+  ApplyColumnSort;
+  FListView.Invalidate;
+  SetListViewSortArrow(FListView, FSortCol, FSortAsc);
 end;
 
 procedure TInterfaceGuidDialog.DoData(Sender: TObject; Item: TListItem);
@@ -302,9 +354,9 @@ begin
     if FEntries[Item.Index].IsDuplicate then
       Sender.Canvas.Font.Color := clRed
     else if not FEntries[Item.Index].HasGuid then
-      Sender.Canvas.Font.Color := clGrayText
+      Sender.Canvas.Font.Color := GetThemedColor(clGrayText)
     else
-      Sender.Canvas.Font.Color := clWindowText;
+      Sender.Canvas.Font.Color := GetThemedColor(clWindowText);
   end;
 end;
 

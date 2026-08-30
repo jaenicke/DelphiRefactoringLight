@@ -174,7 +174,7 @@ implementation
 
 uses
   System.IOUtils, Vcl.CheckLst,
-  Expert.DialogHelper;
+  Expert.DialogHelper, Expert.ListViewSort;
 
 { TWithRefactorDialog }
 
@@ -423,6 +423,9 @@ begin
   Col := FListView.Columns.Add;
   Col.Caption := 'Status';
   Col.Width := 200;
+
+  // Click-to-sort; rows carry their FItems index in Data (see SetItems).
+  EnableListViewSorting(FListView);
 end;
 
 function TWithRefactorDialog.ComputeCommonPathPrefix: string;
@@ -517,22 +520,23 @@ end;
 
 procedure TWithRefactorDialog.RefreshAllListItems;
 var
-  I: Integer;
+  I, Idx: Integer;
 begin
   FAutoRewritableCount := 0;
   FListView.Items.BeginUpdate;
   try
-    for I := 0 to High(FItems) do
+    for I := 0 to FListView.Items.Count - 1 do
     begin
-      if I < FListView.Items.Count then
-      begin
-        // SubItem[2] = status column
-        if FListView.Items[I].SubItems.Count >= 3 then
-          FListView.Items[I].SubItems[2] := StatusTextOf(FItems[I]);
-      end;
+      // Rows may be sorted - map row -> FItems via Data.
+      Idx := NativeInt(FListView.Items[I].Data);
+      if (Idx < 0) or (Idx > High(FItems)) then Continue;
+      // SubItem[2] = status column
+      if FListView.Items[I].SubItems.Count >= 3 then
+        FListView.Items[I].SubItems[2] := StatusTextOf(FItems[Idx]);
+    end;
+    for I := 0 to High(FItems) do
       if FItems[I].IsAutoRewritable then
         Inc(FAutoRewritableCount);
-    end;
   finally
     FListView.Items.EndUpdate;
   end;
@@ -573,6 +577,8 @@ begin
     for I := 0 to High(AItems) do
     begin
       LI := FListView.Items.Add;
+      // Sorting reorders rows - Data keeps the FItems index stable.
+      LI.Data := Pointer(NativeInt(I));
       DisplayPath := AItems[I].FileName;
       if (FCommonPathPrefix <> '') and DisplayPath.StartsWith(FCommonPathPrefix, True) then
         DisplayPath := Copy(DisplayPath, Length(FCommonPathPrefix) + 1, MaxInt);
@@ -588,7 +594,7 @@ begin
     begin
       FListView.Items[0].Selected := True;
       FListView.Items[0].Focused := True;
-      UpdatePreview(0);
+      UpdatePreview(NativeInt(FListView.Items[0].Data));
     end
     else
     begin
@@ -622,10 +628,14 @@ end;
 
 function TWithRefactorDialog.SelectedIndex: Integer;
 begin
+  Result := -1;
   if Assigned(FListView.Selected) then
-    Result := FListView.Selected.Index
-  else
-    Result := -1;
+  begin
+    // Rows may be sorted - Data carries the FItems index, not Item.Index.
+    Result := NativeInt(FListView.Selected.Data);
+    if (Result < 0) or (Result > High(FItems)) then
+      Result := -1;
+  end;
 end;
 
 procedure TWithRefactorDialog.UpdatePreview(AIndex: Integer);
@@ -784,7 +794,7 @@ end;
 procedure TWithRefactorDialog.DoListSelect(Sender: TObject; AItem: TListItem; Selected: Boolean);
 begin
   if Selected and Assigned(AItem) then
-    UpdatePreview(AItem.Index);
+    UpdatePreview(NativeInt(AItem.Data));
   UpdateApplyButtons;
 end;
 

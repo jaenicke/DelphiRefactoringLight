@@ -72,7 +72,7 @@ type
 implementation
 
 uses
-  System.IOUtils, Expert.IdeThemes, Expert.DialogHelper;
+  System.IOUtils, Expert.IdeThemes, Expert.DialogHelper, Expert.ListViewSort;
 
 { TFindReferencesDialog }
 
@@ -92,6 +92,7 @@ begin
   OnClose := DoFormClose;
 
   CreateControls;
+  EnableListViewSorting(FListView);
   Expert.IdeThemes.EnableThemes(Self);
 
   PrepareDialog(Self, AOwner);
@@ -207,7 +208,7 @@ end;
 
 procedure TFindReferencesDialog.SetItems(const AItems: TFindReferenceItems);
 var
-  Item: TFindReferenceItem;
+  I: Integer;
   LI: TListItem;
   Prefix, DisplayPath: string;
 begin
@@ -217,16 +218,17 @@ begin
   FListView.Items.BeginUpdate;
   try
     FListView.Clear;
-    for Item in AItems do
+    for I := 0 to High(AItems) do
     begin
       LI := FListView.Items.Add;
-      DisplayPath := Item.FilePath;
+      LI.Data := Pointer(NativeInt(I));  // FItems index; survives sorting
+      DisplayPath := AItems[I].FilePath;
       if (Prefix <> '') and DisplayPath.StartsWith(Prefix, True) then
         DisplayPath := Copy(DisplayPath, Length(Prefix) + 1, MaxInt);
       LI.Caption := DisplayPath;
-      LI.SubItems.Add(IntToStr(Item.Line + 1));
-      LI.SubItems.Add(IntToStr(Item.Col + 1));
-      LI.SubItems.Add(Item.Preview);
+      LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
+      LI.SubItems.Add(IntToStr(AItems[I].Col + 1));
+      LI.SubItems.Add(AItems[I].Preview);
     end;
     if FListView.Items.Count > 0 then
     begin
@@ -263,7 +265,7 @@ var
   Idx: Integer;
 begin
   if not Assigned(FListView.Selected) then Exit;
-  Idx := FListView.Selected.Index;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
   if Assigned(FOnGotoLocation) then
     FOnGotoLocation(FItems[Idx]);

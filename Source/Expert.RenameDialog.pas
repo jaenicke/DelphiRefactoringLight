@@ -98,7 +98,8 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
+  System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes,
+  Expert.ListViewSort;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -279,6 +280,8 @@ begin
   Col.Caption := 'Preview';
   Col.Width := 220;
 
+  EnableListViewSorting(FListView);
+
   FTabDetails := TTabSheet.Create(FPageControl);
   FTabDetails.PageControl := FPageControl;
   FTabDetails.Caption := 'Details';
@@ -426,6 +429,7 @@ end;
 
 procedure TRenameDialog.SetPreviewItems(const AItems: TRenamePreviewItems);
 var
+  I: Integer;
   Item: TRenamePreviewItem;
   LI: TListItem;
   Prefix, DisplayPath: string;
@@ -435,9 +439,11 @@ begin
   FListView.Items.BeginUpdate;
   try
     FListView.Clear;
-    for Item in AItems do
+    for I := 0 to High(AItems) do
     begin
+      Item := AItems[I];
       LI := FListView.Items.Add;
+      LI.Data := Pointer(NativeInt(I)); // array index survives sorting
       DisplayPath := Item.FilePath;
       if (Prefix <> '') and DisplayPath.StartsWith(Prefix, True) then
         DisplayPath := Copy(DisplayPath, Length(Prefix) + 1, MaxInt);

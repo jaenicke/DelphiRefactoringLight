@@ -144,7 +144,7 @@ implementation
 
 uses
   System.UITypes, System.StrUtils,
-  Expert.DialogHelper;
+  Expert.DialogHelper, Expert.IdeThemes;
 
 { TExtractInterfaceDialog }
 
@@ -178,6 +178,8 @@ begin
     FCurrentInterfaceKey := UpperCase(FInfo.InterfaceName);
   RefreshExistingMemberMarks;
   RefreshPreview;
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
 end;
 
 destructor TExtractInterfaceDialog.Destroy;

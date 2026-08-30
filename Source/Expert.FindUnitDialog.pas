@@ -22,7 +22,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.UsesEditor,
-  Expert.DialogHelper;
+  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
 
 type
   // Reference-counted hand-off from the search thread back to the UI poll
@@ -151,6 +151,7 @@ begin
   Col := FList.Columns.Add; Col.Caption := 'Identifier'; Col.Width := 200;
   Col := FList.Columns.Add; Col.Caption := 'Unit';       Col.Width := 190;
   Col := FList.Columns.Add; Col.Caption := 'File';       Col.Width := 290;
+  EnableListViewSorting(FList);
 
   Panel := TPanel.Create(Self);
   Panel.Parent := Self;
@@ -205,6 +206,7 @@ begin
   FEdit.Text := AInitial;
   FEdit.SelectAll;
 
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
 end;
 
@@ -261,19 +263,20 @@ end;
 
 procedure TFindUnitDialog.FillResults(const AHits: TArray<TFindUnitHit>);
 var
-  H: TFindUnitHit;
+  I: Integer;
   Item: TListItem;
 begin
   FHits := AHits;
   FList.Items.BeginUpdate;
   try
     FList.Items.Clear;
-    for H in FHits do
+    for I := 0 to High(FHits) do
     begin
       Item := FList.Items.Add;
-      Item.Caption := H.Identifier;
-      Item.SubItems.Add(H.UnitName);
-      Item.SubItems.Add(H.Path);
+      Item.Caption := FHits[I].Identifier;
+      Item.SubItems.Add(FHits[I].UnitName);
+      Item.SubItems.Add(FHits[I].Path);
+      Item.Data := Pointer(NativeInt(I));   // survives click-to-sort reorder
     end;
     if FList.Items.Count > 0 then
       FList.Items[0].Selected := True;
@@ -284,11 +287,11 @@ end;
 
 function TFindUnitDialog.SelectedHit(out AHit: TFindUnitHit): Boolean;
 var
-  Idx: Integer;
+  Idx: NativeInt;
 begin
   Result := False;
   if FList.Selected = nil then Exit;
-  Idx := FList.Selected.Index;
+  Idx := NativeInt(FList.Selected.Data);   // fill index, not row index (sortable)
   if (Idx < 0) or (Idx >= Length(FHits)) then Exit;
   AHit := FHits[Idx];
   Result := True;

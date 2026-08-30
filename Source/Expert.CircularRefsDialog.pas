@@ -48,9 +48,11 @@ implementation
 
 uses
   System.SysUtils, System.Classes, System.UITypes, System.IOUtils, System.StrUtils,
+  System.Generics.Defaults, System.Generics.Collections,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
-  Expert.EditorHelperIntf, Expert.UsesGraph, Expert.DialogHelper;
+  Expert.EditorHelperIntf, Expert.UsesGraph, Expert.DialogHelper,
+  Expert.IdeThemes, Expert.ListViewSort;
 
 type
   TCircularRefsDialog = class(TForm)
@@ -60,6 +62,8 @@ type
     FGroups: TArray<TCycleGroupInfo>;
     FLevers: TArray<TEdgeLever>;
     FCurPath: TArray<TCycleHop>;
+    FEdgeSortCol: Integer;    // -1 = unsorted (FEdgeList is virtual)
+    FEdgeSortAsc: Boolean;
 
     FPages: TPageControl;
     FTabCycles: TTabSheet;
@@ -87,6 +91,7 @@ type
     procedure FillAllCycles;
     procedure DoGroupDblClick(Sender: TObject);
     procedure DoLeverDblClick(Sender: TObject);
+    procedure DoEdgeColumnClick(Sender: TObject; Column: TListColumn);
     procedure DoEdgeData(Sender: TObject; Item: TListItem);
     procedure DoEdgeSelect(Sender: TObject; Item: TListItem; Selected: Boolean);
     procedure DoEdgeDraw(Sender: TCustomListView; Item: TListItem;
@@ -128,6 +133,7 @@ begin
   FHotspots := FResult.Hotspots;
   FGroups := FResult.GroupInfos;
   FLevers := FResult.EdgeLevers;
+  FEdgeSortCol := -1;
 
   BuildLayout;
 
@@ -136,6 +142,9 @@ begin
   FillLevers;
   FillAllCycles;
   FillHotspots;
+  EnableListViewSorting(FGroupList);
+  EnableListViewSorting(FLeverList);
+  EnableListViewSorting(FHotList);
 
   Groups := 0; IntfEdges := 0;
   for E in FResult.Edges do
@@ -149,6 +158,7 @@ begin
     'Hotspots tab: the most entangled units.',
     [Groups, Length(FResult.Edges), IntfEdges]);
 
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
 end;
 
@@ -207,6 +217,7 @@ begin
   FEdgeList.OnSelectItem := DoEdgeSelect;
   FEdgeList.OnCustomDrawItem := DoEdgeDraw;
   FEdgeList.OnDblClick := DoEdgeDblClick;
+  FEdgeList.OnColumnClick := DoEdgeColumnClick;
   Col := FEdgeList.Columns.Add; Col.Caption := 'Group';    Col.Width := 70;
   Col := FEdgeList.Columns.Add; Col.Caption := 'Unit';     Col.Width := 250;
   Col := FEdgeList.Columns.Add; Col.Caption := 'Section';  Col.Width := 110;
@@ -565,6 +576,47 @@ begin
     end;
 end;
 
+procedure TCircularRefsDialog.DoEdgeColumnClick(Sender: TObject;
+  Column: TListColumn);
+var
+  Col: Integer;
+  Asc: Boolean;
+  A: TArray<TCycleEdge>;
+begin
+  Col := Column.Index;
+  if FEdgeSortCol = Col then
+    FEdgeSortAsc := not FEdgeSortAsc
+  else
+  begin
+    FEdgeSortCol := Col;
+    FEdgeSortAsc := True;
+  end;
+  Asc := FEdgeSortAsc;
+  // FEdgeList is virtual: sort the backing array itself. All consumers
+  // (DoEdgeData/Select/Draw/DblClick, group jump) index FResult.Edges,
+  // so they stay consistent after the sort.
+  A := FResult.Edges;
+  TArray.Sort<TCycleEdge>(A, TComparer<TCycleEdge>.Construct(
+    function(const L, R: TCycleEdge): Integer
+    begin
+      case Col of
+        0: Result := L.Group - R.Group;
+        1: Result := CompareText(L.FromUnit, R.FromUnit);
+        2: Result := Ord(L.InInterface) - Ord(R.InInterface);
+        3: Result := CompareText(L.ToUnit, R.ToUnit);
+        4: Result := L.Line - R.Line;
+      else Result := L.GroupSize - R.GroupSize;
+      end;
+      if Result = 0 then
+        Result := CompareText(L.FromUnit, R.FromUnit);
+      if not Asc then
+        Result := -Result;
+    end));
+  FEdgeList.ClearSelection;   // old selected index = a different edge now
+  FEdgeList.Invalidate;
+  SetListViewSortArrow(FEdgeList, Col, Asc);
+end;
+
 procedure TCircularRefsDialog.DoEdgeData(Sender: TObject; Item: TListItem);
 var
   E: TCycleEdge;
@@ -730,6 +782,7 @@ begin
     ProgressLbl.Alignment := taCenter;
     ProgressLbl.Layout := tlCenter;
     ProgressLbl.Caption := 'Scanning...';
+    PrepareDialog(ProgressForm, nil);
     ProgressForm.Show;
     Screen.Cursor := crHourGlass;
     try

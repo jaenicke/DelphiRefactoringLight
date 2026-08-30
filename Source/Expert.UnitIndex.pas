@@ -57,6 +57,11 @@ type
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     /// <summary>True when a unit of exactly this (dotted) name is indexed.</summary>
     function HasUnit(const AUnitName: string): Boolean;
+    /// <summary>True when the indexed unit has an initialization or
+    ///  finalization section (load-time side effects - the uses cleanup
+    ///  must never flag such a unit as removable). False for unknown
+    ///  units.</summary>
+    function HasInitCode(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
@@ -69,6 +74,7 @@ type
       MTime: TDateTime;
       Size: Int64;
       Idents: TArray<string>;
+      HasInit: Boolean;   // unit has an initialization/finalization section
     end;
     TIndexWorker = class(TThread)
     private
@@ -103,6 +109,7 @@ type
     FProjectByPath: TObjectDictionary<string, TIndexedUnit>;
     FGlobalKey: string;    // cache path the global dict was last loaded for
     FProjectKey: string;   // cache path the project dict was last loaded for
+    FScanCycle: Integer;   // completed worker cycles (interlocked)
     class var FInstance: TUnitIndex;
     function CacheFileFor(const AKey: string): string;
     function GetSnapshot: IUnitSnapshot;
@@ -135,6 +142,11 @@ type
     function Ready: Boolean;
     function StatusLine: string;
 
+    /// <summary>Number of completed worker scan cycles. Callers that just
+    ///  requested a refresh (RefreshSourcesFromEditor) can wait for this
+    ///  to advance to know the snapshot reflects the current sources.</summary>
+    function ScanCycle: Integer;
+
     /// <summary>Take a reference to the current immutable snapshot (may be
     ///  nil before the first build). Scan it on any thread without a lock.</summary>
     function Snapshot: IUnitSnapshot;
@@ -145,6 +157,12 @@ type
     ///  returning up to AMax (identifier, unit) hits.</summary>
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
   end;
+
+/// <summary>Parses the interface section of a .pas into its exported
+///  identifiers; AHasInit reports an initialization/finalization section
+///  (load-time side effects). Exposed for the console test suite.</summary>
+function ParseUnit(const AFile: string; out AUnitName: string;
+  out AHasInit: Boolean): TArray<string>;
 
 implementation
 
@@ -157,7 +175,7 @@ const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
   MaxFileBytes  = 4 * 1024 * 1024;
   RefreshIntervalMs = 30000;  // background re-scan period
-  CacheMagic    = 'RLUIDX02';
+  CacheMagic    = 'RLUIDX03';   // 03: HasInit flag + fixed enum/variant parser
 
 // ---------------------------------------------------------------------------
 //  Lexical helpers
@@ -273,19 +291,35 @@ end;
 //  The interface-section parser
 // ---------------------------------------------------------------------------
 
-function ParseUnit(const AFile: string; out AUnitName: string): TArray<string>;
+function ParseUnit(const AFile: string; out AUnitName: string;
+  out AHasInit: Boolean): TArray<string>;
 type
   TSect = (secNone, secType, secConst, secVar);
 var
   Raw: string;
   Lines: TArray<string>;
   Idents: TList<string>;
-  I, Block, PendingEnds: Integer;
-  Started: Boolean;         // seen 'interface'
+  I, Block, PendingEnds, ImplIdx: Integer;
+  Started, InEnum: Boolean;
   Sect: TSect;
   Code, Up, Tr, TrU: string;
+
+  procedure AddEnumMembers(const S: string);
+  begin
+    for var M in S.Split([',']) do
+    begin
+      var MM := Trim(M);
+      var Sp := Pos(' ', MM);        // "a = 1"
+      var Eq := Pos('=', MM);
+      if Eq > 0 then MM := Trim(Copy(MM, 1, Eq - 1))
+      else if Sp > 0 then MM := Trim(Copy(MM, 1, Sp - 1));
+      if IsIdent(MM) then Idents.Add(MM);
+    end;
+  end;
+
 begin
   AUnitName := '';
+  AHasInit := False;
   Result := nil;
   try
     Raw := TDelphiFileEncoding.ReadAll(AFile);
@@ -297,6 +331,7 @@ begin
   Idents := TList<string>.Create;
   try
     Block := 0; PendingEnds := 0; Started := False; Sect := secNone;
+    InEnum := False; ImplIdx := -1;
     for I := 0 to High(Lines) do
     begin
       Code := CleanLine(Lines[I], Block);
@@ -323,15 +358,37 @@ begin
       end;
 
       // End of the interface section.
-      if TrU = 'IMPLEMENTATION' then Break;
+      if TrU = 'IMPLEMENTATION' then
+      begin
+        ImplIdx := I;
+        Break;
+      end;
 
       // Inside a class/record/interface body: only track nesting.
+      // NOTE: 'case' is deliberately NOT counted - a variant-record part
+      // ("record case Tag of ...") shares the record's single 'end', so
+      // counting it left PendingEnds stuck and swallowed everything after
+      // the first variant record (Winapi.Windows died at LARGE_INTEGER).
       if PendingEnds > 0 then
       begin
         Up := TrU;
-        PendingEnds := PendingEnds + CountWord(Up, 'RECORD') + CountWord(Up, 'CASE')
+        PendingEnds := PendingEnds + CountWord(Up, 'RECORD')
                        - CountWord(Up, 'END');
         if PendingEnds < 0 then PendingEnds := 0;
+        Continue;
+      end;
+
+      // Enum members continuing from a previous line ("TTyp = (A," ...).
+      if InEnum then
+      begin
+        var CP := Pos(')', Tr);
+        if CP > 0 then
+        begin
+          AddEnumMembers(Copy(Tr, 1, CP - 1));
+          InEnum := False;
+        end
+        else
+          AddEnumMembers(Tr);
         Continue;
       end;
 
@@ -392,19 +449,18 @@ begin
                 Idents.Add(Name);
                 var RhsU := UpperCase(Trim(Copy(Tr, EqP + 1, MaxInt)));
                 var Rhs := Trim(Copy(Tr, EqP + 1, MaxInt));
-                // Enum: "= ( a, b, c )"
+                // Enum: "= ( a, b, c )" - possibly spanning MANY lines
+                // (one member per line); the continuation is collected by
+                // the InEnum handler above.
                 if (Rhs <> '') and (Rhs[1] = '(') then
                 begin
                   var CP := Pos(')', Rhs);
-                  var Inner := Copy(Rhs, 2, IfThen(CP > 0, CP - 2, Length(Rhs) - 1));
-                  for var M in Inner.Split([',']) do
+                  if CP > 0 then
+                    AddEnumMembers(Copy(Rhs, 2, CP - 2))
+                  else
                   begin
-                    var MM := Trim(M);
-                    var Sp := Pos(' ', MM);        // "a = 1"
-                    var Eq := Pos('=', MM);
-                    if Eq > 0 then MM := Trim(Copy(MM, 1, Eq - 1))
-                    else if Sp > 0 then MM := Trim(Copy(MM, 1, Sp - 1));
-                    if IsIdent(MM) then Idents.Add(MM);
+                    AddEnumMembers(Copy(Rhs, 2, MaxInt));
+                    InEnum := True;
                   end;
                 end
                 // Body opener: class / record / object / interface.
@@ -423,10 +479,11 @@ begin
                     var Fwd := RhsU.EndsWith(';') and (CountWord(RhsU, 'END') = 0);
                     if not Fwd then
                     begin
-                      // Ends expected to close the body = same-line openers
-                      // (record/case) plus the primary non-record body,
-                      // minus any 'end' already on this line.
-                      var Opens := CountWord(RhsU, 'RECORD') + CountWord(RhsU, 'CASE');
+                      // Ends expected to close the body = same-line record
+                      // openers plus the primary non-record body, minus any
+                      // 'end' already on this line. ('case' variant parts
+                      // have no own 'end' - see the note above.)
+                      var Opens := CountWord(RhsU, 'RECORD');
                       if IsClass or IsObj or IsIntf then Inc(Opens);
                       PendingEnds := Opens - CountWord(RhsU, 'END');
                       if PendingEnds < 0 then PendingEnds := 0;
@@ -451,6 +508,19 @@ begin
           end;
       end;
     end;
+
+    // Side-effect detection: does the unit run code at load/unload time?
+    // (Feeds the uses-cleanup - such units must never be flagged unused.)
+    if ImplIdx >= 0 then
+      for I := ImplIdx + 1 to High(Lines) do
+      begin
+        Code := UpperCase(Trim(CleanLine(Lines[I], Block)));
+        if (Code = 'INITIALIZATION') or (Code = 'FINALIZATION') then
+        begin
+          AHasInit := True;
+          Break;
+        end;
+      end;
 
     Result := Idents.ToArray;
   finally
@@ -628,11 +698,13 @@ type
   private
     FUnitName: TArray<string>;
     FUnitPath: TArray<string>;
+    FUnitHasInit: TArray<Boolean>;
     FKeysUpper: TArray<string>;    // sorted UPPER identifiers
     FDisplay: TArray<string>;      // parallel original-case
     FMap: TDictionary<string, TArray<Integer>>;
   public
     constructor Create(const AUnitName, AUnitPath, AKeysUpper, ADisplay: TArray<string>;
+      const AUnitHasInit: TArray<Boolean>;
       AMap: TDictionary<string, TArray<Integer>>);
     destructor Destroy; override;
     function Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
@@ -640,6 +712,7 @@ type
     function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function HasUnit(const AUnitName: string): Boolean;
+    function HasInitCode(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
   end;
@@ -687,11 +760,13 @@ begin
 end;
 
 constructor TUnitSnapshot.Create(const AUnitName, AUnitPath, AKeysUpper,
-  ADisplay: TArray<string>; AMap: TDictionary<string, TArray<Integer>>);
+  ADisplay: TArray<string>; const AUnitHasInit: TArray<Boolean>;
+  AMap: TDictionary<string, TArray<Integer>>);
 begin
   inherited Create;
   FUnitName := AUnitName;
   FUnitPath := AUnitPath;
+  FUnitHasInit := AUnitHasInit;
   FKeysUpper := AKeysUpper;
   FDisplay := ADisplay;
   FMap := AMap;   // takes ownership
@@ -712,6 +787,17 @@ begin
   for I := 0 to High(FUnitName) do
     if SameText(FUnitName[I], AUnitName) then
       Exit(True);
+end;
+
+function TUnitSnapshot.HasInitCode(const AUnitName: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if AUnitName = '' then Exit;
+  for I := 0 to High(FUnitName) do
+    if SameText(FUnitName[I], AUnitName) then
+      Exit((I <= High(FUnitHasInit)) and FUnitHasInit[I]);
 end;
 
 function TUnitSnapshot.UnitCount: Integer;
@@ -1089,10 +1175,13 @@ begin
 
     SetLength(Names, Units.Count);
     SetLength(Paths, Units.Count);
+    var InitFlags: TArray<Boolean>;
+    SetLength(InitFlags, Units.Count);
     for I := 0 to Units.Count - 1 do
     begin
       Names[I] := Units[I].UnitName;
       Paths[I] := Units[I].Path;
+      InitFlags[I] := Units[I].HasInit;
       for J := 0 to High(Units[I].Idents) do
       begin
         var Id := Units[I].Idents[J];
@@ -1115,7 +1204,8 @@ begin
       Display[I] := DispD[KeysUpper[I]];
     end;
 
-    var Snap: IUnitSnapshot := TUnitSnapshot.Create(Names, Paths, KeysUpper, Display, Flat);
+    var Snap: IUnitSnapshot := TUnitSnapshot.Create(Names, Paths, KeysUpper,
+      Display, InitFlags, Flat);
     FLock.Enter;
     try
       FSnapshot := Snap;   // atomic reference swap; readers scan lock-free
@@ -1180,6 +1270,7 @@ begin
         WStr(U.Path); WStr(U.UnitName);
         FS.WriteBuffer(U.MTime, SizeOf(U.MTime));
         FS.WriteBuffer(U.Size, SizeOf(U.Size));
+        FS.WriteBuffer(U.HasInit, SizeOf(U.HasInit));
         var IC := Length(U.Idents);
         FS.WriteBuffer(IC, SizeOf(IC));
         for var Id in U.Idents do WStr(Id);
@@ -1221,6 +1312,7 @@ begin
         U.Path := RStr; U.UnitName := RStr;
         FS.ReadBuffer(U.MTime, SizeOf(U.MTime));
         FS.ReadBuffer(U.Size, SizeOf(U.Size));
+        FS.ReadBuffer(U.HasInit, SizeOf(U.HasInit));
         var IC: Integer;
         FS.ReadBuffer(IC, SizeOf(IC));
         SetLength(U.Idents, IC);
@@ -1287,11 +1379,13 @@ begin
            (Abs(Info.MTime - MT) < 1 / 86400) then
           Continue;   // unchanged
         var UName: string;
-        var Idents := ParseUnit(F, UName);
+        var HasInit: Boolean;
+        var Idents := ParseUnit(F, UName, HasInit);
         if UName = '' then UName := ChangeFileExt(ExtractFileName(F), '');
         var NU := TIndexedUnit.Create;
         NU.Path := F; NU.UnitName := UName; NU.Size := Size; NU.MTime := MT;
         NU.Idents := Idents;
+        NU.HasInit := HasInit;
         ADict.AddOrSetValue(Key, NU);
         Result := True;
       end;
@@ -1364,10 +1458,16 @@ begin
     except
       // never let a parse error kill the worker
     end;
+    TInterlocked.Increment(FScanCycle);
     Inc(Cycle);
     if (FWorker <> nil) and not FWorker.Terminated then
       FWake.WaitFor(RefreshIntervalMs);
   end;
+end;
+
+function TUnitIndex.ScanCycle: Integer;
+begin
+  Result := TInterlocked.CompareExchange(FScanCycle, 0, 0);
 end;
 
 { TUnitIndex.TIndexWorker }

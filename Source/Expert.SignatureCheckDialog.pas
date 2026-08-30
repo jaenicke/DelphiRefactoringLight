@@ -64,7 +64,7 @@ type
 implementation
 
 uses
-  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes;
+  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
 
 { TSignatureCheckDialog }
 
@@ -171,6 +171,8 @@ begin
   Col := FListView.Columns.Add;
   Col.Caption := 'Signature';
   Col.Width := 320;
+
+  EnableListViewSorting(FListView);
 end;
 
 function TSignatureCheckDialog.PickReference(const AEntries: TSignatureEntries): string;
@@ -214,9 +216,11 @@ begin
   FListView.Items.BeginUpdate;
   try
     FListView.Clear;
-    for var E in AEntries do
+    for var I := 0 to High(AEntries) do
     begin
+      var E := AEntries[I];
       LI := FListView.Items.Add;
+      LI.Data := Pointer(NativeInt(I));  // entry index; survives sorting
       LI.Caption := TSignatureChecker.RoleToString(E.Role);
       LI.SubItems.Add(E.Container);
       LI.SubItems.Add(ExtractFileName(E.FilePath));
@@ -247,10 +251,13 @@ end;
 
 procedure TSignatureCheckDialog.DoListCustomDrawItem(Sender: TCustomListView;
   Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+var
+  Idx: NativeInt;
 begin
-  if (Item.Index >= 0) and (Item.Index <= High(FEntries)) then
+  Idx := NativeInt(Item.Data);
+  if (Idx >= 0) and (Idx <= High(FEntries)) then
   begin
-    if FEntries[Item.Index].Normalized <> FReferenceNormalized then
+    if FEntries[Idx].Normalized <> FReferenceNormalized then
       Sender.Canvas.Brush.Color := RGB(255, 230, 230)  // light red
     else
       Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
@@ -260,10 +267,10 @@ end;
 
 procedure TSignatureCheckDialog.GotoSelected;
 var
-  Idx: Integer;
+  Idx: NativeInt;
 begin
   if not Assigned(FListView.Selected) then Exit;
-  Idx := FListView.Selected.Index;
+  Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FEntries)) then Exit;
   if Assigned(FOnGotoLocation) then
     FOnGotoLocation(FEntries[Idx]);

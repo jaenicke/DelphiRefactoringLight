@@ -157,7 +157,7 @@ uses
   Lsp.Client, Lsp.Uri, Expert.LspManager,
   Expert.EditorHelperIntf, Expert.UnitIndex,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
-  Expert.DialogHelper;
+  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
 
 type
   TMissingIdent = record
@@ -1723,7 +1723,7 @@ begin
   FFixes := AFixes;
   BorderStyle := bsNone;
   FormStyle := fsStayOnTop;
-  Color := clWindow;
+  Color := GetThemedColor(clWindow);
   Width := 380;
   KeyPreview := True;
   OnDeactivate := DoDeactivate;
@@ -1792,6 +1792,7 @@ begin
 
   RebuildActions;
   ClientHeight := FLbl.Height + FList.Height + Panel.Height + 20;
+  EnableThemes(Self);
 end;
 
 procedure TQuickFixPopup.RebuildActions;
@@ -2088,6 +2089,8 @@ begin
   FBtnClose.OnClick := DoCloseClick;
 
   Fill;
+  EnableListViewSorting(FList);
+  EnableThemes(Self);
   PrepareDialog(Self, AOwner);
 end;
 
@@ -2100,6 +2103,7 @@ begin
     for var I := 0 to High(FItems) do
     begin
       Item := FList.Items.Add;
+      Item.Data := Pointer(NativeInt(I));   // survives column sorting
       Item.Caption := FItems[I].Identifier;
       Item.Checked := True;
       Item.SubItems.Add(FItems[I].Units[FSel[I]].UnitName);
@@ -2117,7 +2121,7 @@ end;
 procedure TAutoImportDialog.DoSelect(Sender: TObject; Item: TListItem; Selected: Boolean);
 begin
   if not Selected or (Item = nil) then Exit;
-  var Idx := Item.Index;
+  var Idx := NativeInt(Item.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
   FCombo.Items.BeginUpdate;
   try
@@ -2133,7 +2137,7 @@ end;
 procedure TAutoImportDialog.DoComboChange(Sender: TObject);
 begin
   if FList.Selected = nil then Exit;
-  var Idx := FList.Selected.Index;
+  var Idx := NativeInt(FList.Selected.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
   if (FCombo.ItemIndex >= 0) and (FCombo.ItemIndex <= High(FItems[Idx].Units)) then
   begin
@@ -2145,7 +2149,7 @@ end;
 procedure TAutoImportDialog.DoRadioClick(Sender: TObject);
 begin
   if FList.Selected = nil then Exit;
-  var Idx := FList.Selected.Index;
+  var Idx := NativeInt(FList.Selected.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
   if FRadio.ItemIndex >= 0 then
   begin
@@ -2158,10 +2162,12 @@ procedure TAutoImportDialog.DoApply(Sender: TObject);
 var Added, Failed: Integer;
 begin
   Added := 0; Failed := 0;
-  for var I := 0 to High(FItems) do
+  for var I := 0 to FList.Items.Count - 1 do
     if FList.Items[I].Checked then
     begin
-      if ApplyOne(FFile, FItems[I].Units[FSel[I]].UnitName, FSecSel[I]) then Inc(Added)
+      var Idx := NativeInt(FList.Items[I].Data);
+      if (Idx < 0) or (Idx > High(FItems)) then Continue;
+      if ApplyOne(FFile, FItems[Idx].Units[FSel[Idx]].UnitName, FSecSel[Idx]) then Inc(Added)
       else Inc(Failed);
     end;
   ShowMessage(Format('%d unit(s) added.%s', [Added,
@@ -2215,7 +2221,7 @@ constructor TAutoImportHint.CreateHint;
 begin
   inherited CreateNew(nil);
   BorderStyle := bsNone;
-  Color := clInfoBk;
+  Color := GetThemedColor(clInfoBk);
   Height := 24;
   Width := 160;
   Cursor := crHandPoint;
@@ -2226,7 +2232,7 @@ begin
   FLbl.Align := alClient;
   FLbl.Alignment := taCenter;
   FLbl.Layout := tlCenter;
-  FLbl.Font.Color := clInfoText;
+  FLbl.Font.Color := GetThemedColor(clInfoText);
   FLbl.Cursor := crHandPoint;
   FLbl.OnClick := DoClick;
 end;

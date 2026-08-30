@@ -31,6 +31,8 @@ type
       const ABuildConfig, ADcuDir, ABplDir, ADcpDir: string);
     procedure ReadBdsErrFile(const AErrPath: string);
     procedure CleanupBdsTempFiles(const AGroupProjPath: string);
+    function RelocateBdsArtifacts(const AProjectPath, ABplDir, ADcpDir: string;
+      AStart: TDateTime): Boolean;
   public
     constructor Create(ALogger: TDIHLogger; AResolver: TDIHPlaceholderResolver; const ABaseDir: string; AUseBds: Boolean);
     function Build(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform; const ABuildConfig: string): Boolean;
@@ -326,12 +328,68 @@ begin
     System.SysUtils.DeleteFile(TvsPath);
 end;
 
+function TDIHBuilder.RelocateBdsArtifacts(const AProjectPath, ABplDir, ADcpDir: string;
+  AStart: TDateTime): Boolean;
+// bds.exe builds the temp groupproj with the IDE's OWN project builder,
+// which ignores the MSBuild property overrides (DCC_BplOutput etc.) baked
+// into it - the artifacts land in the .dproj's own output directories
+// (e.g. Packages\Output). The registered package path expects them under
+// the BDS common Bpl/Dcp dirs, so without this step the IDE cannot load
+// the package on installations without a command-line compiler (Delphi
+// Community Edition - the only setups that take the bds.exe path at all).
+var
+  ProjectDir, Target, TargetDir, Mask: string;
+  Kind: Integer;
+begin
+  Result := True;
+  ProjectDir := ExtractFilePath(AProjectPath);
+  if ProjectDir = '' then Exit;
+
+  for Kind := 0 to 1 do
+  begin
+    if Kind = 0 then
+    begin
+      TargetDir := ABplDir;
+      Mask := '*.bpl';
+    end
+    else
+    begin
+      TargetDir := ADcpDir;
+      Mask := '*.dcp';
+    end;
+    if TargetDir.IsEmpty then Continue;
+    TargetDir := IncludeTrailingPathDelimiter(TargetDir);
+    try
+      TDirectory.CreateDirectory(TargetDir);
+      for var F in TDirectory.GetFiles(ProjectDir, Mask, TSearchOption.soAllDirectories) do
+      begin
+        // Only artifacts THIS build produced (2 min slack against
+        // filesystem/clock granularity); anything already in the target
+        // directory stays untouched.
+        if TFile.GetLastWriteTime(F) < AStart - (2 / (24 * 60)) then Continue;
+        if SameText(IncludeTrailingPathDelimiter(ExtractFilePath(F)), TargetDir) then Continue;
+        Target := TargetDir + ExtractFileName(F);
+        TFile.Copy(F, Target, True);
+        FLogger.Detail('Relocated: %s -> %s', [F, Target]);
+      end;
+    except
+      on E: Exception do
+      begin
+        FLogger.Error('Could not relocate build artifacts to %s: %s',
+          [TargetDir, E.Message]);
+        Result := False;
+      end;
+    end;
+  end;
+end;
+
 function TDIHBuilder.BuildWithBds(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform;
   const ABuildConfig: string): Boolean;
 var
   BdsExe, BdsProfile, Cmd, FullProjectPath, DcuDir, BplDir, DcpDir, GroupProjPath, ErrPath: string;
   Proj: TDIHBuildProject;
   I: Integer;
+  BuildStart: TDateTime;
 begin
   Result := True;
   BdsExe := IncludeTrailingPathDelimiter(FResolver.Resolve('{#BDSRootDir}')) + 'bin' + PathDelim + 'bds.exe';
@@ -364,6 +422,7 @@ begin
         Cmd := Format('"%s" -b -ns "%s"', [BdsExe, GroupProjPath]);
       FLogger.Detail('Executing: %s', [Cmd]);
 
+      BuildStart := Now;
       // Auto-close dialogs: bds.exe may show a save dialog if it upgrades the .dproj ProjectVersion
       if ExecuteProcess(Cmd, True) <> 0 then
       begin
@@ -376,6 +435,10 @@ begin
       begin
         ReadBdsErrFile(ErrPath);
         FLogger.Success('Build succeeded (bds.exe): %s', [ExtractFileName(Proj.ProjectPath)]);
+        // bds.exe ignored the output-dir overrides - move the BPL/DCP to
+        // the registered target dirs.
+        if not RelocateBdsArtifacts(FullProjectPath, BplDir, DcpDir, BuildStart) then
+          Result := False;
       end;
     finally
       CleanupBdsTempFiles(GroupProjPath);

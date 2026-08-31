@@ -168,6 +168,13 @@ begin
 
   // Ctrl+G -> Find original symbol (go to declaration)
   BindingServices.AddKeyBinding([TExpertsShortCut.scFindOriginal], FindOriginalKeyProc, nil);
+
+  // NOTE: do NOT bind plain editing keys (arrows, Enter, Tab, Escape)
+  // here for the completion popup. Empirically, registering them eats
+  // the keys EVEN when the proc returns krUnhandled - the IDE does not
+  // fall back to the default editor action. The popup's navigation is a
+  // thread-local WH_KEYBOARD hook instead, installed only while the
+  // popup is on screen (Expert.CompletionPopup).
 end;
 
 var

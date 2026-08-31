@@ -10,7 +10,7 @@ unit Expert.CompletionWizard;
 interface
 
 uses
-  System.SysUtils, System.Types, System.Classes, System.JSON, Winapi.Windows, Vcl.Forms, Vcl.Controls, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
+  System.SysUtils, System.Types, System.Classes, System.JSON, Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.ExtCtrls, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}
   Expert.EditorHelperIntf, Expert.LspManager, Expert.CompletionPopup, Lsp.Client;
 
 type
@@ -24,14 +24,29 @@ type
     ///  popup that the user has long since dismissed (or replaced
     ///  with a fresh trigger).</summary>
     FCallSeq: Integer;
+    /// <summary>Watches the editor while the popup is visible (the popup
+    ///  is WS_EX_NOACTIVATE, so it never learns about clicks/scrolling
+    ///  elsewhere by itself): keeps the filter prefix live while the
+    ///  user types, moves the popup along when the editor scrolls, and
+    ///  dismisses it when the caret leaves the trigger word, the line
+    ///  changes, or the editor loses focus. All window operations happen
+    ///  here - a plain WM_TIMER tick (safe context).</summary>
+    FPoll: TTimer;
+    FShowFile: string;
+    FShowLine: Integer;        // 1-based line the popup was opened on
+    FShowWordStart: Integer;   // 1-based start column of the trigger word
+    FLastPos: TPoint;
+    procedure DoPollTick(Sender: TObject);
     procedure DoInsert(const AText: string);
     function GetCaretScreenPos: TPoint;
+    function TryCaretScreenPos(out APos: TPoint): Boolean;
     /// <summary>Walks left from the current editor cursor collecting
     ///  word characters until a non-word character (or column 1) is
     ///  reached. Returns the collected characters as a prefix string.
     ///  Empty if the cursor is not immediately after a word character.</summary>
     function GetCurrentWordPrefix: string;
   public
+    destructor Destroy; override;
     procedure Execute;
 
     // ---- Facade for the host editor ----
@@ -90,27 +105,128 @@ begin
   Result := Copy(Line, Start + 1, Col - Start);
 end;
 
-function TLspCompletionWizard.GetCaretScreenPos: TPoint;
+destructor TLspCompletionWizard.Destroy;
+begin
+  FPoll.Free;
+  FreeAndNil(FPopup);
+  inherited;
+end;
+
+// Caret position in SCREEN coordinates - only when the focused window is
+// an EDITOR control and the caret sits inside its client area (a caret
+// scrolled out of view must not reposition the popup).
+function TLspCompletionWizard.TryCaretScreenPos(out APos: TPoint): Boolean;
 var
   FocusHwnd: HWND;
   CaretPos: TPoint;
+  R: TRect;
+  Cls: array[0..63] of Char;
 begin
-  Result := Point(300, 300);
-
+  Result := False;
   FocusHwnd := GetFocus;
-  if FocusHwnd <> 0 then
-  begin
-    if GetCaretPos(CaretPos) then
-    begin
-      ClientToScreen(FocusHwnd, CaretPos);
-      Result := CaretPos;
-      Inc(Result.Y, 20);
-      Exit;
-    end;
-  end;
+  if FocusHwnd = 0 then Exit;
+  GetClassName(FocusHwnd, Cls, Length(Cls));
+  if (StrIComp(Cls, 'TEditControl') <> 0) and (StrIComp(Cls, 'TMemo') <> 0) then
+    Exit;
+  if not GetCaretPos(CaretPos) then Exit;
+  if not GetClientRect(FocusHwnd, R) then Exit;
+  if (CaretPos.X < 0) or (CaretPos.Y < 0)
+    or (CaretPos.X > R.Right) or (CaretPos.Y > R.Bottom) then Exit;
+  ClientToScreen(FocusHwnd, CaretPos);
+  APos := CaretPos;
+  Inc(APos.Y, 20);
+  Result := True;
+end;
 
+function TLspCompletionWizard.GetCaretScreenPos: TPoint;
+begin
+  if TryCaretScreenPos(Result) then Exit;
   GetCursorPos(Result);
   Inc(Result.Y, 20);
+end;
+
+// 1-based start column of the identifier that ends just before ACol1.
+function WordStartAt(const ALine: string; ACol1: Integer): Integer;
+var
+  Col: Integer;
+begin
+  Col := ACol1 - 1;
+  if Col > Length(ALine) then Col := Length(ALine);
+  Result := Col;
+  while (Result >= 1) and CharInSet(ALine[Result], ['A'..'Z','a'..'z','0'..'9','_']) do
+    Dec(Result);
+  Inc(Result);   // first char OF the word (= ACol1 when there is no word)
+end;
+
+procedure TLspCompletionWizard.DoPollTick(Sender: TObject);
+// The popup never takes focus and never sees editor events - this tick
+// is its senses: live filter, follow-scroll, and every dismiss reason
+// (line change, caret left the trigger word, focus lost, buffer switch).
+var
+  Line, Col, Start: Integer;
+  Content, LineText: string;
+  Lines: TArray<string>;
+  Pt: TPoint;
+begin
+  if (FPopup = nil) or not FPopup.IsOnScreen then
+  begin
+    FPoll.Enabled := False;
+    Exit;
+  end;
+
+  // NEVER GetCurrentContext in a timer (it moves the IDE caret) - the
+  // cheap TopBuffer-based queries are safe.
+  if not SameText(Editor.GetActiveFileName, FShowFile)
+    or not Editor.GetCaretLineCol(Line, Col) then
+  begin
+    HidePopup;
+    Exit;
+  end;
+  if Line <> FShowLine then
+  begin
+    HidePopup;   // Enter / click on another line
+    Exit;
+  end;
+
+  // Focus / caret checks double as the "clicked somewhere else" and
+  // "scrolled out of view" dismissal.
+  if not TryCaretScreenPos(Pt) then
+  begin
+    HidePopup;
+    Exit;
+  end;
+
+  if not Editor.ReadEditorContent(FShowFile, Content) then
+  begin
+    HidePopup;
+    Exit;
+  end;
+  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  if (Line < 1) or (Line > Length(Lines)) then
+  begin
+    HidePopup;
+    Exit;
+  end;
+  LineText := Lines[Line - 1];
+  Start := WordStartAt(LineText, Col);
+  if Start <> FShowWordStart then
+  begin
+    HidePopup;   // caret left the trigger word (click, arrow keys, ';', ...)
+    Exit;
+  end;
+
+  // Live filter with whatever the user typed since the last tick.
+  FPopup.SetPrefix(Copy(LineText, Start, Col - Start));
+
+  // Follow the caret when the editor scrolls under the popup.
+  if (Pt.X <> FLastPos.X) or (Pt.Y <> FLastPos.Y) then
+  begin
+    FLastPos := Pt;
+    if Pt.X + FPopup.Width > Screen.Width then Pt.X := Screen.Width - FPopup.Width;
+    if Pt.Y + FPopup.Height > Screen.Height then Pt.Y := Pt.Y - FPopup.Height - 40;
+    SetWindowPos(FPopup.Handle, 0, Pt.X, Pt.Y, 0, 0,
+      SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE);
+  end;
 end;
 
 procedure TLspCompletionWizard.Execute;
@@ -175,6 +291,20 @@ begin
     end;
   FPopup.ShowLoading(PopupPos.X, PopupPos.Y);
 
+  // Arm the watcher: it keeps the filter live, follows editor scrolling
+  // and dismisses the popup when the caret leaves the trigger word.
+  FShowFile := Context.FileName;
+  FShowLine := Context.Line;
+  FShowWordStart := Context.Column - Length(Prefix);
+  FLastPos := PopupPos;
+  if FPoll = nil then
+  begin
+    FPoll := TTimer.Create(nil);
+    FPoll.Interval := 150;
+    FPoll.OnTimer := DoPollTick;
+  end;
+  FPoll.Enabled := True;
+
   Inc(FCallSeq);
   MySeq := FCallSeq;
 
@@ -213,7 +343,7 @@ begin
           // possibly with a fresh FPopup). In both cases, do not push
           // items into a popup the user is no longer waiting on.
           if MySeq <> FCallSeq then Exit;
-          if (FPopup = nil) or not FPopup.Visible then Exit;
+          if (FPopup = nil) or not FPopup.IsOnScreen then Exit;
           if Err <> '' then
             FPopup.ShowMessage('Error: ' + Err)
           else if Length(Items) = 0 then
@@ -257,7 +387,8 @@ end;
 
 function TLspCompletionWizard.IsPopupVisible: Boolean;
 begin
-  Result := (FPopup <> nil) and FPopup.Visible;
+  // IsOnScreen, never the VCL Visible flag - see TCompletionPopup.
+  Result := (FPopup <> nil) and FPopup.IsOnScreen;
 end;
 
 function TLspCompletionWizard.IsPopupActive: Boolean;
@@ -282,6 +413,7 @@ end;
 
 procedure TLspCompletionWizard.HidePopup;
 begin
+  if FPoll <> nil then FPoll.Enabled := False;
   if FPopup <> nil then FPopup.HidePopup;
 end;
 

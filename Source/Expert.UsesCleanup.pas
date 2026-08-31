@@ -622,7 +622,7 @@ begin
       Inc(FailCount);   // checked a non-actionable row
     end;
   end;
-  ShowMessage(Format('%d change(s) applied.%s', [Done,
+  ShowThemedMessage(Format('%d change(s) applied.%s', [Done,
     IfThen(FailCount > 0, Format(#13#10'%d entr%s could not be changed.',
       [FailCount, IfThen(FailCount = 1, 'y', 'ies')]), '')]));
   Close;
@@ -652,12 +652,12 @@ begin
   Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
   begin
-    ShowMessage('Open a .pas unit first.');
+    ShowThemedMessage('Open a .pas unit first.');
     Exit;
   end;
   if not Editor.ReadEditorContent(Ctx.FileName, Content) then
   begin
-    ShowMessage('Could not read the editor buffer.');
+    ShowThemedMessage('Could not read the editor buffer.');
     Exit;
   end;
 
@@ -681,7 +681,7 @@ begin
     Snap := TUnitIndex.Instance.Snapshot;
     if (Snap = nil) or (Snap.IdentCount = 0) then
     begin
-      ShowMessage('The identifier index is still building - try again in a ' +
+      ShowThemedMessage('The identifier index is still building - try again in a ' +
         'few seconds.');
       Exit;
     end;
@@ -711,7 +711,7 @@ begin
 
   if Length(Entries) = 0 then
   begin
-    ShowMessage('No uses entries found.');
+    ShowThemedMessage('No uses entries found.');
     Exit;
   end;
   var Dlg := TUsesCleanupDialog.CreateDialog(Application.MainForm,

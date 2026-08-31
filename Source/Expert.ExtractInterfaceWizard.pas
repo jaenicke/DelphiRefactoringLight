@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -52,7 +52,7 @@ uses
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
   {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
   Expert.EditorHelperIntf, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
-  Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
+  Expert.DialogHelper, Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
   Delphi.FileEncoding;
 
 function StringListToArray(ASL: TStringList): TArray<string>;
@@ -1110,7 +1110,7 @@ begin
   // original ExistingFile/DeclLine/EndLine fields).
   if (AInfo.ExistingFile = '') or (AInfo.ExistingEndLine < 1) then
   begin
-    ShowMessage('No target interface selected.');
+    ShowThemedMessage('No target interface selected.');
     Exit;
   end;
 
@@ -1259,13 +1259,13 @@ begin
   Editor.SaveAllFiles;
   if not GetEditorCursorLine(Src, CurLine) then
   begin
-    ShowMessage('No editor file at cursor.');
+    ShowThemedMessage('No editor file at cursor.');
     Exit;
   end;
   Lines := TDelphiFileEncoding.ReadLines(Src);
   if not TExtractInterfaceEngine.ParseClassAtLine(Lines, Src, CurLine, Info) then
   begin
-    ShowMessage('No class declaration found around the cursor.');
+    ShowThemedMessage('No class declaration found around the cursor.');
     Exit;
   end;
 
@@ -1286,7 +1286,7 @@ begin
     var AllProjectInterfaces := TProjectInterfaceScanner.ScanProject(ProjFiles);
     if Length(AllProjectInterfaces) = 0 then
     begin
-      ShowMessage('No interface declarations found in the project.');
+      ShowThemedMessage('No interface declarations found in the project.');
       Exit;
     end;
 
@@ -1354,7 +1354,7 @@ begin
         [Stats.TypesAttempted, Stats.TypesResolved,
          Stats.TypesAttempted - Stats.TypesResolved]);
 
-    ShowMessage('Interface ' +
+    ShowThemedMessage('Interface ' +
       IfThen(AMode = eimExtractNew, 'extracted to ' + Result_.TargetFile,
                                      'extended in ' + Result_.ExistingFile)
       + '.' + Diag);
@@ -1363,7 +1363,7 @@ begin
     begin
       Application.Title := OriginalTitle;
       Screen.Cursor := crDefault;
-      ShowMessage('Failed: ' + E.ClassName + ': ' + E.Message);
+      ShowThemedMessage('Failed: ' + E.ClassName + ': ' + E.Message);
     end;
   end;
 end;
@@ -1494,12 +1494,12 @@ begin
   Editor.SaveAllFiles;
   if not GetEditorCursorLine(Src, CurLine) then
   begin
-    ShowMessage('No editor file at cursor.'); Exit;
+    ShowThemedMessage('No editor file at cursor.'); Exit;
   end;
   Lines := ReadSourceLines(Src);
   if not TExtractInterfaceEngine.ParseClassAtLine(Lines, Src, CurLine, Info) then
   begin
-    ShowMessage('No class declaration found around the cursor.'); Exit;
+    ShowThemedMessage('No class declaration found around the cursor.'); Exit;
   end;
 
   // Skip if the class already lists IInterface / IUnknown.
@@ -1508,7 +1508,7 @@ begin
   for var A in Ancestors do
     if SameText(A, 'IInterface') or SameText(A, 'IUnknown') then
     begin
-      ShowMessage(Format(
+      ShowThemedMessage(Format(
         'Class %s already lists %s in its ancestor list - nothing to do.',
         [Info.ClassName, A]));
       Exit;
@@ -1697,7 +1697,7 @@ begin
         '- WARNING: could not locate the existing AfterConstruction body. ' +
         'Add  AtomicDecrement(FRefCount);  manually.';
 
-  ShowMessage(Format(
+  ShowThemedMessage(Format(
     'Class %s now implements IInterface (%s).' + sLineBreak +
     'The instance frees itself when the last interface reference is dropped.%s',
     [Info.ClassName, BaseDesc, ExtraNote]));

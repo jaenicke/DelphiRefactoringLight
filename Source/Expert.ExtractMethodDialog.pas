@@ -165,6 +165,12 @@ begin
   FIndex := TProjectTextIndex.Create;
 
   PrepareDialog(Self, AOwner);
+
+  // Setting Font.Size/Name above cleared ParentFont, so the theme's font
+  // color never reaches these controls - black text on dark. Re-theme.
+  FEdtMethodName.Font.Color := GetThemedColor(clWindowText);
+  FMemoPreview.Color := GetThemedColor(clWindow);
+  FMemoPreview.Font.Color := GetThemedColor(clWindowText);
 end;
 
 destructor TExtractMethodDialog.Destroy;

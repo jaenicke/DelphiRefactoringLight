@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -307,25 +307,25 @@ var
 begin
   if not SelectedHit(H) then
   begin
-    ShowMessage('Select a unit in the list first.');
+    ShowThemedMessage('Select a unit in the list first.');
     Exit;
   end;
   if FTargetFile = '' then
   begin
-    ShowMessage('No active editor file to add the uses entry to.');
+    ShowThemedMessage('No active editor file to add the uses entry to.');
     Exit;
   end;
   if SameText(ChangeFileExt(ExtractFileName(FTargetFile), ''), H.UnitName) then
   begin
-    ShowMessage('That is the current unit itself.');
+    ShowThemedMessage('That is the current unit itself.');
     Exit;
   end;
   if ASection = usInterface then SecName := 'interface' else SecName := 'implementation';
   if AddUnitToUses(FTargetFile, H.UnitName, ASection) then
-    ShowMessage(Format('Added "%s" to the %s uses of %s.',
+    ShowThemedMessage(Format('Added "%s" to the %s uses of %s.',
       [H.UnitName, SecName, ExtractFileName(FTargetFile)]))
   else
-    ShowMessage(Format('"%s" is already reachable from %s (or could not be written).',
+    ShowThemedMessage(Format('"%s" is already reachable from %s (or could not be written).',
       [H.UnitName, ExtractFileName(FTargetFile)]));
 end;
 

@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1844,6 +1844,13 @@ type
     FList: TListBox;
     FSecBtn: TButton;
     FApplyBtn: TButton;
+    /// <summary>Arms the close-on-deactivate handler AFTER the popup has
+    ///  settled on screen: showing a THEMED form makes the IDE attach its
+    ///  style hook, which can recreate/deactivate the window right after
+    ///  the first Show - an immediately-armed OnDeactivate then Closed
+    ///  (caFree!) the popup before the user ever saw it.</summary>
+    FArmDeactivate: TTimer;
+    procedure DoArmDeactivate(Sender: TObject);
     procedure RebuildActions;
     procedure DoApply(Sender: TObject);
     procedure DoToggleSection(Sender: TObject);
@@ -1869,9 +1876,14 @@ begin
   Color := GetThemedColor(clWindow);
   Width := 380;
   KeyPreview := True;
-  OnDeactivate := DoDeactivate;
+  // OnDeactivate is armed DEFERRED in ShowAt - see FArmDeactivate.
   OnKeyDown := DoKeyDown;
   OnClose := DoPopupClose;
+
+  FArmDeactivate := TTimer.Create(Self);
+  FArmDeactivate.Enabled := False;
+  FArmDeactivate.Interval := 250;
+  FArmDeactivate.OnTimer := DoArmDeactivate;
 
   // Section default + row kinds.
   FSection := usImplementation;
@@ -2053,7 +2065,7 @@ begin
     // Also detach OnDeactivate first - the message box deactivates us and
     // the handler would Close (and thereby free) us mid-pump.
     OnDeactivate := nil;
-    ShowMessage('The fix could not be applied (the target may already be ' +
+    ShowThemedMessage('The fix could not be applied (the target may already be ' +
       'in place, or the affected code could not be rewritten safely - ' +
       'e.g. IFDEFs inside a uses clause, or an ambiguous overload).');
   end;
@@ -2063,6 +2075,16 @@ end;
 procedure TQuickFixPopup.DoDeactivate(Sender: TObject);
 begin
   Close;
+end;
+
+procedure TQuickFixPopup.DoArmDeactivate(Sender: TObject);
+begin
+  FArmDeactivate.Enabled := False;
+  OnDeactivate := DoDeactivate;
+  // The user may have clicked elsewhere during the unarmed window - the
+  // Deactivate event for that is gone, so check the actual focus state.
+  if GetActiveWindow <> Handle then
+    Close;
 end;
 
 procedure TQuickFixPopup.DoKeyDown(Sender: TObject; var Key: Word;
@@ -2085,6 +2107,7 @@ begin
   Left := Min(APt.X, R.Right - Width - 4);
   Top := Min(APt.Y, R.Bottom - Height - 4);
   Show;
+  FArmDeactivate.Enabled := True;   // arm close-on-deactivate deferred
 end;
 
 // True when the focused window is a code editor we know how to anchor to:
@@ -2316,7 +2339,7 @@ begin
       if ApplyOne(FFile, FItems[Idx].Units[FSel[Idx]].UnitName, FSecSel[Idx]) then Inc(Added)
       else Inc(Failed);
     end;
-  ShowMessage(Format('%d unit(s) added.%s', [Added,
+  ShowThemedMessage(Format('%d unit(s) added.%s', [Added,
     IfThen(Failed > 0, Format(#13#10'%d already present / not written.', [Failed]), '')]));
   Close;
 end;
@@ -3089,7 +3112,7 @@ begin
   Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
   begin
-    ShowMessage('Open a .pas unit first.');
+    ShowThemedMessage('Open a .pas unit first.');
     Exit;
   end;
 
@@ -3113,7 +3136,7 @@ begin
     end;
     if not LiveAllFixes(Ctx.FileName, Fixes) then
     begin
-      ShowMessage('The live analysis produced no result for this unit yet - ' +
+      ShowThemedMessage('The live analysis produced no result for this unit yet - ' +
         'try again in a moment.');
       Exit;
     end;
@@ -3121,7 +3144,7 @@ begin
 
   if Length(Fixes) = 0 then
   begin
-    ShowMessage('No quick fixes found in this unit.');
+    ShowThemedMessage('No quick fixes found in this unit.');
     Exit;
   end;
 
@@ -3183,7 +3206,7 @@ begin
     var Hits := DedupeByUnitName(TUnitIndex.Instance.Lookup(Ctx.WordAtCursor));
     if Length(Hits) = 0 then
     begin
-      ShowMessage(Format('No unit found for "%s" (and it is not reported as ' +
+      ShowThemedMessage(Format('No unit found for "%s" (and it is not reported as ' +
         'an undeclared identifier).', [Ctx.WordAtCursor]));
       Exit;
     end;
@@ -3206,7 +3229,7 @@ begin
   if Length(Chosen.Units) = 1 then
   begin
     if not ApplyOne(Ctx.FileName, Chosen.Units[0].UnitName, Chosen.Section) then
-      ShowMessage(Format('"%s" is already reachable in uses, or the clause ' +
+      ShowThemedMessage(Format('"%s" is already reachable in uses, or the clause ' +
         'could not be rewritten (e.g. IFDEFs inside it).',
         [Chosen.Units[0].UnitName]));
     Exit;
@@ -3238,13 +3261,13 @@ begin
   if Editor = nil then Exit;
   Ctx := Editor.GetCurrentContext;
   if Ctx.FileName = '' then
-  begin ShowMessage('No active editor file.'); Exit; end;
+  begin ShowThemedMessage('No active editor file.'); Exit; end;
 
   Missing := nil;
   WithWaitCursor(procedure begin Missing := GatherMissing(Ctx.FileName, nil); end);
   if Length(Missing) = 0 then
   begin
-    ShowMessage('No unresolved identifiers with a known unit were found.');
+    ShowThemedMessage('No unresolved identifiers with a known unit were found.');
     Exit;
   end;
   var Dlg := TAutoImportDialog.CreateDialog(Application.MainForm, Ctx.FileName, Missing);

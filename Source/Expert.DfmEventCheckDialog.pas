@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -631,7 +631,7 @@ begin
   if (Idx < 0) or (Idx >= Length(FIssues)) then Exit;
   if (FIssues[Idx].EventTypeFile = '') or (FIssues[Idx].EventTypeLine <= 0) then
   begin
-    ShowMessage('The event type location is only known for mismatches ' +
+    ShowThemedMessage('The event type location is only known for mismatches ' +
       'resolved from source. This row has no resolved event type.');
     Exit;
   end;
@@ -646,9 +646,7 @@ var
   Reason: string;
   FirstReasons: TStringList;   // a few example failure reasons for the user
   Ctx: TFixContext;     // shared LSP client + type->unit cache for the batch
-  Prog: TForm;
-  ProgLbl: TLabel;
-  ProgBar: TProgressBar;
+  Prog: TCheckProgressWindow;
 begin
   CheckedCount := 0; Fixed := 0; NotFixable := 0; Failed := 0; Done := 0;
   Total := 0;
@@ -656,7 +654,7 @@ begin
     if FListView.Items[I].Checked then Inc(Total);
   if Total = 0 then
   begin
-    ShowMessage('No rows checked. Tick the signature mismatches you want to correct.');
+    ShowThemedMessage('No rows checked. Tick the signature mismatches you want to correct.');
     Exit;
   end;
 
@@ -666,35 +664,11 @@ begin
 
   // Progress window: applying fixes runs on the main thread (LSP calls,
   // file writes) - without it the IDE looks frozen on large batches.
-  Prog := TThemedToolForm.CreateNew(Self);
-  Prog.Caption := 'Applying signature fixes';
-  Prog.BorderStyle := bsToolWindow;
-  Prog.FormStyle := fsStayOnTop;
-  Prog.Position := poOwnerFormCenter;
-  Prog.ClientWidth := 460;
-  Prog.ClientHeight := 62;
-  ProgLbl := TLabel.Create(Prog);
-  ProgLbl.Parent := Prog;
-  ProgLbl.AlignWithMargins := True;
-  ProgLbl.Align := alTop;
-  ProgLbl.Margins.SetBounds(10, 8, 10, 2);
-  ProgLbl.EllipsisPosition := epPathEllipsis;
-  ProgLbl.Caption := 'Applying...';
-  ProgBar := TProgressBar.Create(Prog);
-  ProgBar.Parent := Prog;
-  ProgBar.AlignWithMargins := True;
-  ProgBar.Align := alTop;
-  ProgBar.Margins.SetBounds(10, 4, 10, 6);
-  ProgBar.Height := 18;
-  ProgBar.Min := 0;
-  ProgBar.Max := Total;
-  EnableThemes(Prog);
-  PrepareDialog(Prog, Self);
+  Prog := CreateCheckProgress('Applying signature fixes', Self, 'Applying...');
 
   try
     Forms.Duplicates := dupIgnore;
     Forms.Sorted := True;
-    Prog.Show;
     Screen.Cursor := crHourGlass;
     try
       try
@@ -705,11 +679,10 @@ begin
         var Idx := NativeInt(FListView.Items[I].Data);
         Inc(CheckedCount);
         Inc(Done);
-        ProgBar.Position := Done;
         if (Idx >= 0) and (Idx < Length(FIssues)) then
-          ProgLbl.Caption := Format('%d / %d  -  %s', [Done, Total,
-            ExtractFileName(FIssues[Idx].PasFile)]);
-        Application.ProcessMessages;
+          Prog.Step(Done, Total, ExtractFileName(FIssues[Idx].PasFile))
+        else
+          Prog.Step(Done, Total, '');
         if (Idx < 0) or (Idx >= Length(FIssues)) then Continue;
         if FIssues[Idx].ExpectedRawParams = '' then
         begin
@@ -759,9 +732,9 @@ begin
 
     FListView.Invalidate;
     if CheckedCount = 0 then
-      ShowMessage('No rows checked. Tick the signature mismatches you want to correct.')
+      ShowThemedMessage('No rows checked. Tick the signature mismatches you want to correct.')
     else
-      ShowMessage(Format('%d signature(s) corrected (of %d checked).%s%s',
+      ShowThemedMessage(Format('%d signature(s) corrected (of %d checked).%s%s',
         [Fixed, CheckedCount,
          IfThen(NotFixable > 0,
            sLineBreak + Format('%d checked row(s) are not auto-fixable ' +
@@ -1039,14 +1012,12 @@ var
   Files, SigFiles: TArray<string>;
   Issues: TArray<TDfmEventIssue>;
   Dlg: TDfmEventCheckDialog;
-  ProgressForm: TForm;
-  ProgressLbl: TLabel;
-  ProgressBar: TProgressBar;
+  ProgressForm: TCheckProgressWindow;
 begin
   Files := Editor.GetProjectSourceFiles;
   if Length(Files) = 0 then
   begin
-    ShowMessage('No project loaded / no source files found.');
+    ShowThemedMessage('No project loaded / no source files found.');
     Exit;
   end;
   SigFiles := GatherSignatureFiles;
@@ -1054,46 +1025,14 @@ begin
   // Progress window: the check reads every project file once for the
   // class index, then walks each form - visible feedback instead of a
   // silent multi-second hang on large projects.
-  ProgressForm := TThemedToolForm.CreateNew(nil);
+  ProgressForm := CreateCheckProgress('DFM event handler check', nil);
   try
-    ProgressForm.Caption := 'DFM event handler check';
-    ProgressForm.BorderStyle := bsToolWindow;
-    ProgressForm.FormStyle := fsStayOnTop;
-    ProgressForm.Position := poScreenCenter;
-    ProgressForm.ClientWidth := 460;
-    ProgressForm.ClientHeight := 62;
-    ProgressLbl := TLabel.Create(ProgressForm);
-    ProgressLbl.Parent := ProgressForm;
-    ProgressLbl.AlignWithMargins := True;
-    ProgressLbl.Align := alTop;
-    ProgressLbl.Margins.SetBounds(10, 8, 10, 2);
-    ProgressLbl.EllipsisPosition := epPathEllipsis;
-    ProgressLbl.Caption := 'Scanning...';
-    ProgressBar := TProgressBar.Create(ProgressForm);
-    ProgressBar.Parent := ProgressForm;
-    ProgressBar.AlignWithMargins := True;
-    ProgressBar.Align := alTop;
-    ProgressBar.Margins.SetBounds(10, 4, 10, 6);
-    ProgressBar.Height := 18;
-    ProgressBar.Min := 0;
-    ProgressBar.Max := 100;
-    EnableThemes(ProgressForm);
-    PrepareDialog(ProgressForm, nil);
-    ProgressForm.Show;
     Screen.Cursor := crHourGlass;
     try
       Issues := TDfmEventChecker.CheckProject(Files,
         procedure(ACurrent, ATotal: Integer; AFile: string)
         begin
-          ProgressLbl.Caption := Format('%d / %d  -  %s',
-            [ACurrent, ATotal, ExtractFileName(AFile)]);
-          if ATotal > 0 then
-          begin
-            ProgressBar.Max := ATotal;
-            if ACurrent > ATotal then ProgressBar.Position := ATotal
-            else ProgressBar.Position := ACurrent;
-          end;
-          Application.ProcessMessages;
+          ProgressForm.Step(ACurrent, ATotal, ExtractFileName(AFile));
         end,
         SigFiles);
 
@@ -1102,9 +1041,8 @@ begin
       Dlg := nil;
       if Length(Issues) > 0 then
       begin
-        ProgressLbl.Caption := Format('Building list (%d issues)...', [Length(Issues)]);
-        ProgressBar.Position := ProgressBar.Max;
-        Application.ProcessMessages;
+        ProgressForm.Bar.Position := ProgressForm.Bar.Max;
+        ProgressForm.Step(0, 0, Format('Building list (%d issues)...', [Length(Issues)]));
         // Non-modal (frees itself on close) so the user can fix findings
         // in the editor while the list stays open.
         Dlg := TDfmEventCheckDialog.CreateDialog(Application.MainForm, Issues);
@@ -1117,7 +1055,7 @@ begin
   end;
 
   if Length(Issues) = 0 then
-    ShowMessage('No problems found - every DFM event reference has a matching handler.')
+    ShowThemedMessage('No problems found - every DFM event reference has a matching handler.')
   else
     Dlg.Show;
 end;

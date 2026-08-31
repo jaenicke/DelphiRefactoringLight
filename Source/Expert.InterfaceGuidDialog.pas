@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -189,15 +189,16 @@ end;
 
 procedure TInterfaceGuidDialog.DoWatchTick(Sender: TObject);
 var
-  Ctx: TEditorContext;
-  Content, OldEffective: string;
+  FileName, Content, OldEffective: string;
 begin
-  Ctx := Editor.GetCurrentContext;
-  if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
+  // Timer context: only the cheap GetActiveFileName is allowed here -
+  // GetCurrentContext moves the IDE caret (see TAutoImportLive).
+  FileName := Editor.GetActiveFileName;
+  if (FileName = '') or not SameText(ExtractFileExt(FileName), '.pas') then
     Exit;
-  if not ReadEffectiveContent(Ctx.FileName, Content) then
+  if not ReadEffectiveContent(FileName, Content) then
     Exit;
-  if not SameText(Ctx.FileName, FWatchFile) then
+  if not SameText(FileName, FWatchFile) then
   begin
     // Active unit switched. Before re-baselining, give the PREVIOUS
     // watch file one final check: if the user closed it without
@@ -208,13 +209,13 @@ begin
       RefreshFileEntries(FWatchFile);
     // Baseline for the new file; refresh on the NEXT change so merely
     // viewing a file does not churn the list.
-    FWatchFile := Ctx.FileName;
+    FWatchFile := FileName;
     FWatchContent := Content;
     Exit;
   end;
   if Content = FWatchContent then Exit;
   FWatchContent := Content;
-  RefreshFileEntries(Ctx.FileName);
+  RefreshFileEntries(FileName);
 end;
 
 procedure TInterfaceGuidDialog.RefreshFileEntries(const AFile: string);
@@ -402,13 +403,12 @@ var
   Files: TArray<string>;
   Entries: TArray<TInterfaceGuidEntry>;
   Dlg: TInterfaceGuidDialog;
-  ProgressForm: TForm;
-  ProgressLbl: TLabel;
+  ProgressForm: TCheckProgressWindow;
 begin
   Files := Editor.GetProjectSourceFiles;
   if Length(Files) = 0 then
   begin
-    ShowMessage('No project loaded / no source files found.');
+    ShowThemedMessage('No project loaded / no source files found.');
     Exit;
   end;
 
@@ -416,32 +416,15 @@ begin
   // on the UI thread, so we pump messages every few files to keep the
   // label painting. Without this, big projects (many hundred files,
   // possibly on a network share) look like a silent hang.
-  ProgressForm := TForm.CreateNew(nil);
+  ProgressForm := CreateCheckProgress('Interface GUIDs', nil);
   try
-    ProgressForm.Caption := 'Interface GUIDs';
-    ProgressForm.BorderStyle := bsToolWindow;
-    ProgressForm.FormStyle := fsStayOnTop;
-    ProgressForm.Position := poScreenCenter;
-    ProgressForm.ClientWidth := 420;
-    ProgressForm.ClientHeight := 48;
-    ProgressLbl := TLabel.Create(ProgressForm);
-    ProgressLbl.Parent := ProgressForm;
-    ProgressLbl.Align := alClient;
-    ProgressLbl.Alignment := taCenter;
-    ProgressLbl.Layout := tlCenter;
-    ProgressLbl.Caption := 'Scanning...';
-    ProgressForm.Show;
     Screen.Cursor := crHourGlass;
     try
       Entries := TInterfaceGuidChecker.Scan(Files,
         procedure(ACurrent, ATotal: Integer; AFile: string)
         begin
           if (ACurrent mod 10 = 0) or (ACurrent = ATotal) then
-          begin
-            ProgressLbl.Caption := Format('Scanning %d / %d  -  %s',
-              [ACurrent, ATotal, ExtractFileName(AFile)]);
-            Application.ProcessMessages;
-          end;
+            ProgressForm.Step(ACurrent, ATotal, ExtractFileName(AFile));
         end);
     finally
       Screen.Cursor := crDefault;
@@ -452,7 +435,7 @@ begin
 
   if Length(Entries) = 0 then
   begin
-    ShowMessage('No interface declarations found in the project.');
+    ShowThemedMessage('No interface declarations found in the project.');
     Exit;
   end;
   // Non-modal (frees itself on close) so the user can keep navigating

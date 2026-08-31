@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -40,7 +40,7 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.StrUtils, System.UITypes,
   System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls,
-  Expert.EditorHelperIntf,
+  Expert.EditorHelperIntf, Expert.DialogHelper,
   Expert.SemanticReplace, Expert.SemanticReplaceDialogs,
   Delphi.FileEncoding;
 
@@ -67,7 +67,7 @@ begin
   ARules := nil;
   if not RulesFilePath(APath) then
   begin
-    ShowMessage('No active project root - cannot locate the rules file.');
+    ShowThemedMessage('No active project root - cannot locate the rules file.');
     Exit;
   end;
   if not TFile.Exists(APath) then
@@ -82,14 +82,14 @@ begin
     except
       on E: Exception do
       begin
-        ShowMessage('Could not create rules file: ' + E.Message); Exit;
+        ShowThemedMessage('Could not create rules file: ' + E.Message); Exit;
       end;
     end;
   end;
   ARules := TSemanticReplaceEngine.LoadRules(APath, Err);
   if Err <> '' then
   begin
-    ShowMessage('Rules file is invalid:' + sLineBreak + Err); Exit;
+    ShowThemedMessage('Rules file is invalid:' + sLineBreak + Err); Exit;
   end;
   if Length(ARules) = 0 then
   begin
@@ -115,7 +115,7 @@ var
 begin
   if not RulesFilePath(Path) then
   begin
-    ShowMessage('No active project root - cannot locate the rules file.');
+    ShowThemedMessage('No active project root - cannot locate the rules file.');
     Exit;
   end;
   if TFile.Exists(Path) then
@@ -322,7 +322,7 @@ var
 begin
   if Length(AFiles) = 0 then
   begin
-    ShowMessage('No source files to scan.'); Exit;
+    ShowThemedMessage('No source files to scan.'); Exit;
   end;
   if not EnsureRulesLoaded(Rules, Path) then Exit;
   Editor.SaveAllFiles;
@@ -373,7 +373,7 @@ begin
 
     if TotalFiles = 0 then
     begin
-      ShowMessage('No matches found.'); Exit;
+      ShowThemedMessage('No matches found.'); Exit;
     end;
 
     Preview := BuildPreviewText(Plans.ToArray, Rules);
@@ -396,7 +396,7 @@ begin
     finally
       Screen.Cursor := crDefault;
     end;
-    ShowMessage(Format('Applied to %d file(s), %d occurrence(s) replaced.',
+    ShowThemedMessage(Format('Applied to %d file(s), %d occurrence(s) replaced.',
       [TotalFiles, TotalEdits]));
   finally
     Plans.Free;
@@ -410,7 +410,7 @@ begin
   Ctx := Editor.GetCurrentContext;
   if not Ctx.IsValid then
   begin
-    ShowMessage('No file at cursor.'); Exit;
+    ShowThemedMessage('No file at cursor.'); Exit;
   end;
   RunReplaceOver([Ctx.FileName]);
 end;
@@ -422,13 +422,13 @@ begin
   AllFiles := Editor.GetProjectSourceFiles;
   if Length(AllFiles) = 0 then
   begin
-    ShowMessage('Project source file list is empty.'); Exit;
+    ShowThemedMessage('Project source file list is empty.'); Exit;
   end;
   if not TSemanticReplaceUnitsDialog.Choose(Application.MainForm, AllFiles, Chosen) then
     Exit;
   if Length(Chosen) = 0 then
   begin
-    ShowMessage('No units selected.'); Exit;
+    ShowThemedMessage('No units selected.'); Exit;
   end;
   RunReplaceOver(Chosen);
 end;

@@ -26,7 +26,7 @@ uses
   System.SysUtils, System.IOUtils, System.Math,
   Vcl.Forms, Vcl.Controls, Vcl.Dialogs,
   Lsp.Protocol, Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf;
+  Expert.EditorHelperIntf, Expert.DialogHelper;
 
 // 0-based column of AWord as a whole word in ALine (case-insensitive),
 // or -1. Word boundaries: identifier characters on either side disqualify.
@@ -61,13 +61,13 @@ begin
   Ctx := Editor.GetCurrentContext;
   if (Ctx.FileName = '') or (Ctx.WordAtCursor = '') then
   begin
-    ShowMessage('Place the caret on an identifier first.');
+    ShowThemedMessage('Place the caret on an identifier first.');
     Exit;
   end;
   Json := Editor.FindDelphiLspJson;
   if Json = '' then
   begin
-    ShowMessage('DelphiLSP is not configured for this project ' +
+    ShowThemedMessage('DelphiLSP is not configured for this project ' +
       '(missing .delphilsp.json next to the project file).');
     Exit;
   end;
@@ -90,7 +90,7 @@ begin
       on E: Exception do
       begin
         Screen.Cursor := crDefault;
-        ShowMessage('LSP request failed: ' + E.Message);
+        ShowThemedMessage('LSP request failed: ' + E.Message);
         Exit;
       end;
     end;
@@ -100,7 +100,7 @@ begin
 
   if Length(Locs) = 0 then
   begin
-    ShowMessage(Format('No declaration found for "%s".', [Ctx.WordAtCursor]));
+    ShowThemedMessage(Format('No declaration found for "%s".', [Ctx.WordAtCursor]));
     Exit;
   end;
 

@@ -254,13 +254,18 @@ procedure TSignatureCheckDialog.DoListCustomDrawItem(Sender: TCustomListView;
 var
   Idx: NativeInt;
 begin
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
+  Sender.Canvas.Font.Color := GetThemedColor(clWindowText);
   Idx := NativeInt(Item.Data);
   if (Idx >= 0) and (Idx <= High(FEntries)) then
   begin
     if FEntries[Idx].Normalized <> FReferenceNormalized then
-      Sender.Canvas.Brush.Color := RGB(255, 230, 230)  // light red
-    else
-      Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
+    begin
+      Sender.Canvas.Brush.Color := RGB(255, 230, 230);  // light red
+      // explicit black: the light-red brush stays light in dark mode, a
+      // themed (light) font color would be unreadable on it
+      Sender.Canvas.Font.Color := clBlack;
+    end;
   end;
   DefaultDraw := True;
 end;

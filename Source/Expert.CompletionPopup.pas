@@ -94,7 +94,13 @@ type
     /// <summary>Closes the popup. Public so the editor can dismiss it
     ///  on Escape / non-word character / focus loss.</summary>
     procedure HidePopup;
-    /// <summary>True when the popup is visible AND has items (i.e. the
+    /// <summary>ACTUAL on-screen state. The popup is shown via WinAPI
+    ///  ShowWindow (SW_SHOWNOACTIVATE), which can desync the VCL Visible
+    ///  bookkeeping - a stale Visible=True made the key binding keep
+    ///  swallowing Up/Down after the popup was gone. Always test the
+    ///  real window.</summary>
+    function IsOnScreen: Boolean;
+    /// <summary>True when the popup is on screen AND has items (i.e. the
     ///  LSP response has arrived). During the Loading state this is
     ///  False so the host editor still gets Enter / Up / Down for
     ///  normal keystroke handling.</summary>
@@ -113,6 +119,76 @@ implementation
 
 uses
   Expert.IdeThemes;
+
+{$IFNDEF STANDALONE_BUILD}
+// ---------------------------------------------------------------------------
+//  Keyboard interception (IDE only)
+// ---------------------------------------------------------------------------
+// The popup is WS_EX_NOACTIVATE - the editor keeps the focus and receives
+// every keystroke. An IOTAKeyboardBinding on the plain editing keys does
+// NOT work for this: registering VK_UP & co eats the keys even when the
+// binding proc returns krUnhandled (the IDE never falls back to the
+// default editor action - empirically confirmed, it killed the arrow keys
+// globally). Instead: a THREAD-LOCAL WH_KEYBOARD hook that exists ONLY
+// while the popup is on screen. No popup -> no hook -> zero effect on
+// normal editing. (The standalone host routes keys through its editor's
+// OnKeyDown instead - the hook would double-handle there.)
+var
+  GKeyHook: HHOOK = 0;
+  GHookPopup: TCompletionPopup = nil;
+
+function CompletionKeyHook(Code: Integer; WParam: WPARAM; LParam: LPARAM): LRESULT; stdcall;
+
+  function BareKey: Boolean;
+  begin
+    Result := (GetKeyState(VK_CONTROL) >= 0) and (GetKeyState(VK_MENU) >= 0)
+      and (GetKeyState(VK_SHIFT) >= 0);
+  end;
+
+begin
+  // Bit 31 of LParam: 1 = key-up transition; act on key-down only (auto
+  // repeats arrive as further key-downs and are handled naturally).
+  if (Code = HC_ACTION) and ((LParam and $80000000) = 0)
+    and (GHookPopup <> nil) and GHookPopup.IsOnScreen and BareKey then
+  begin
+    if WParam = VK_ESCAPE then
+    begin
+      GHookPopup.HidePopup;   // also removes this hook
+      Exit(1);                // nonzero = discard the keystroke
+    end;
+    if GHookPopup.IsActive then
+      case WParam of
+        VK_UP:     begin GHookPopup.MoveSelection(-1); Exit(1); end;
+        VK_DOWN:   begin GHookPopup.MoveSelection(1);  Exit(1); end;
+        VK_PRIOR:  begin GHookPopup.MoveSelection(-8); Exit(1); end;
+        VK_NEXT:   begin GHookPopup.MoveSelection(8);  Exit(1); end;
+        VK_RETURN,
+        VK_TAB:    begin GHookPopup.InsertSelected;    Exit(1); end;
+      end;
+    // Loading state / other keys: fall through - typing stays normal.
+  end;
+  Result := CallNextHookEx(GKeyHook, Code, WParam, LParam);
+end;
+
+procedure InstallCompletionKeyHook(APopup: TCompletionPopup);
+begin
+  GHookPopup := APopup;
+  if GKeyHook = 0 then
+    GKeyHook := SetWindowsHookEx(WH_KEYBOARD, @CompletionKeyHook, 0,
+      GetCurrentThreadId);
+end;
+
+procedure RemoveCompletionKeyHook(APopup: TCompletionPopup);
+begin
+  if (APopup <> nil) and (GHookPopup <> APopup) then Exit;   // not ours
+  GHookPopup := nil;
+  if GKeyHook <> 0 then
+  begin
+    UnhookWindowsHookEx(GKeyHook);   // legal even from inside the hook proc
+    GKeyHook := 0;
+  end;
+end;
+{$ENDIF}
 
 { TCompletionItems }
 
@@ -245,6 +321,9 @@ end;
 
 destructor TCompletionPopup.Destroy;
 begin
+  {$IFNDEF STANDALONE_BUILD}
+  RemoveCompletionKeyHook(Self);
+  {$ENDIF}
   FFilteredItems.Free;
   inherited;
 end;
@@ -275,6 +354,9 @@ begin
   // SW_SHOWNOACTIVATE preserves the editor's focus.
   ShowWindow(Handle, SW_SHOWNOACTIVATE);
   Visible := True;
+  {$IFNDEF STANDALONE_BUILD}
+  InstallCompletionKeyHook(Self);
+  {$ENDIF}
   FLoadingStart := Now;
   FLoadingTimer.Enabled := True;
   UpdateLoadingLine;
@@ -348,9 +430,14 @@ begin
     ApplyFilter;
 end;
 
+function TCompletionPopup.IsOnScreen: Boolean;
+begin
+  Result := HandleAllocated and IsWindowVisible(Handle);
+end;
+
 function TCompletionPopup.IsActive: Boolean;
 begin
-  Result := Visible and (Length(FAllItems) > 0);
+  Result := IsOnScreen and (Length(FAllItems) > 0);
 end;
 
 procedure TCompletionPopup.MoveSelection(ADelta: Integer);
@@ -368,7 +455,15 @@ end;
 procedure TCompletionPopup.HidePopup;
 begin
   FLoadingTimer.Enabled := False;
-  if Visible then Hide;
+  {$IFNDEF STANDALONE_BUILD}
+  RemoveCompletionKeyHook(Self);
+  {$ENDIF}
+  // Hide BOTH ways: the window was shown via WinAPI ShowWindow, so a
+  // plain VCL Hide can be a no-op when the Visible flag is out of sync
+  // (same lesson as the auto-import hint window).
+  if HandleAllocated then
+    ShowWindow(Handle, SW_HIDE);
+  Visible := False;
 end;
 
 procedure TCompletionPopup.ApplyFilter;
@@ -488,5 +583,13 @@ begin
   end;
   HidePopup;
 end;
+
+{$IFNDEF STANDALONE_BUILD}
+initialization
+
+finalization
+  // The hook proc lives in this BPL - it must never survive the unload.
+  RemoveCompletionKeyHook(nil);
+{$ENDIF}
 
 end.

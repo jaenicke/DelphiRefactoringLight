@@ -1,4 +1,4 @@
-﻿(*
+(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -762,44 +762,24 @@ var
   Files: TArray<string>;
   Res: TUsesCycleResult;
   Dlg: TCircularRefsDialog;
-  ProgressForm: TForm;
-  ProgressLbl: TLabel;
+  ProgressForm: TCheckProgressWindow;
 begin
   Files := Editor.GetProjectSourceFiles;
   if Length(Files) = 0 then
   begin
-    ShowMessage('No project loaded / no source files found.');
+    ShowThemedMessage('No project loaded / no source files found.');
     Exit;
   end;
 
-  ProgressForm := TThemedToolForm.CreateNew(nil);
+  ProgressForm := CreateCheckProgress('Circular unit references', nil);
   try
-    ProgressForm.Caption := 'Circular unit references';
-    ProgressForm.BorderStyle := bsToolWindow;
-    ProgressForm.FormStyle := fsStayOnTop;
-    ProgressForm.Position := poScreenCenter;
-    ProgressForm.ClientWidth := 420;
-    ProgressForm.ClientHeight := 48;
-    ProgressLbl := TLabel.Create(ProgressForm);
-    ProgressLbl.Parent := ProgressForm;
-    ProgressLbl.Align := alClient;
-    ProgressLbl.Alignment := taCenter;
-    ProgressLbl.Layout := tlCenter;
-    ProgressLbl.Caption := 'Scanning...';
-    EnableThemes(ProgressForm);
-    PrepareDialog(ProgressForm, nil);
-    ProgressForm.Show;
     Screen.Cursor := crHourGlass;
     try
       Res := TUsesGraphAnalyzer.Analyze(Files,
         procedure(ACurrent, ATotal: Integer; AFile: string)
         begin
           if (ACurrent mod 10 = 0) or (ACurrent = ATotal) then
-          begin
-            ProgressLbl.Caption := Format('Scanning %d / %d  -  %s',
-              [ACurrent, ATotal, ExtractFileName(AFile)]);
-            Application.ProcessMessages;
-          end;
+            ProgressForm.Step(ACurrent, ATotal, ExtractFileName(AFile));
         end);
     finally
       Screen.Cursor := crDefault;
@@ -811,7 +791,7 @@ begin
   if Length(Res.Edges) = 0 then
   begin
     Res.Free;
-    ShowMessage('No circular unit references found.');
+    ShowThemedMessage('No circular unit references found.');
     Exit;
   end;
   Dlg := TCircularRefsDialog.CreateDialog(Application.MainForm, Res);

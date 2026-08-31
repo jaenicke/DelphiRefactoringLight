@@ -32,7 +32,7 @@ unit Expert.DialogHelper;
 interface
 
 uses
-  System.Classes, Vcl.Forms, Vcl.Controls;
+  System.Classes, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
 
 type
   /// <summary>Class for the ad-hoc progress/tool windows built with
@@ -40,6 +40,24 @@ type
   ///  registers form CLASSES, and registering plain TForm would affect
   ///  every TForm instance in the process.</summary>
   TThemedToolForm = class(TForm);
+
+  /// <summary>Shared progress window for the project-wide checks (DFM
+  ///  events, circular refs, interface GUIDs) so they all look the
+  ///  same: themed tool window, path label with ellipsis, progress bar.
+  ///  Built + shown by CreateCheckProgress; drive it via Step.</summary>
+  TCheckProgressWindow = class(TThemedToolForm)
+  private
+    FLbl: TLabel;
+    FBar: TProgressBar;
+  public
+    /// <summary>Updates label + bar and pumps the message queue (the
+    ///  checks run synchronously on the UI thread). ATotal > 0 renders
+    ///  "Current / Total  -  Text" and moves the bar; otherwise AText
+    ///  is shown as-is and the bar is left untouched.</summary>
+    procedure Step(ACurrent, ATotal: Integer; const AText: string);
+    property ProgressLabel: TLabel read FLbl;
+    property Bar: TProgressBar read FBar;
+  end;
 
 /// <summary>Registers AClass with the IDE theming service so new
 ///  instances pick up the active theme. Safe to call multiple times;
@@ -52,10 +70,24 @@ procedure RegisterDialogClass(AClass: TCustomFormClass);
 ///  them as well.</summary>
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 
+/// <summary>Builds, themes (EnableThemes + PrepareDialog) and SHOWS a
+///  TCheckProgressWindow with the reference layout used by the project
+///  checks. Owner form -> centered on it, else screen center. The
+///  caller frees the window.</summary>
+function CreateCheckProgress(const ACaption: string; AOwner: TComponent;
+  const AInitialText: string = 'Scanning...'): TCheckProgressWindow;
+
+/// <summary>ShowMessage replacement that follows the IDE theme (the VCL
+///  message box stays light in dark mode). Deliberately built on our own
+///  registered form class - registering the VCL's TMessageForm with the
+///  IDE theming service would restyle every plugin's ShowMessage.</summary>
+procedure ShowThemedMessage(const AMsg: string);
+
 implementation
 
 uses
-  System.SysUtils {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
+  System.SysUtils, Winapi.Windows, Vcl.Graphics, Expert.IdeThemes
+  {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 
 {$IFNDEF STANDALONE_BUILD}
 function ThemingServices: IOTAIDEThemingServices;
@@ -113,6 +145,108 @@ begin
     // See RegisterDialogClass.
   end;
 {$ENDIF}
+end;
+
+procedure TCheckProgressWindow.Step(ACurrent, ATotal: Integer; const AText: string);
+begin
+  if ATotal > 0 then
+  begin
+    FLbl.Caption := Format('%d / %d  -  %s', [ACurrent, ATotal, AText]);
+    FBar.Max := ATotal;
+    if ACurrent > ATotal then FBar.Position := ATotal
+    else FBar.Position := ACurrent;
+  end
+  else
+    FLbl.Caption := AText;
+  Application.ProcessMessages;
+end;
+
+function CreateCheckProgress(const ACaption: string; AOwner: TComponent;
+  const AInitialText: string): TCheckProgressWindow;
+begin
+  Result := TCheckProgressWindow.CreateNew(AOwner);
+  Result.Caption := ACaption;
+  Result.BorderStyle := bsToolWindow;
+  Result.FormStyle := fsStayOnTop;
+  if AOwner is TCustomForm then
+    Result.Position := poOwnerFormCenter
+  else
+    Result.Position := poScreenCenter;
+  Result.ClientWidth := 460;
+  Result.ClientHeight := 62;
+  Result.FLbl := TLabel.Create(Result);
+  Result.FLbl.Parent := Result;
+  Result.FLbl.AlignWithMargins := True;
+  Result.FLbl.Align := alTop;
+  Result.FLbl.Margins.SetBounds(10, 8, 10, 2);
+  Result.FLbl.EllipsisPosition := epPathEllipsis;
+  Result.FLbl.Caption := AInitialText;
+  Result.FBar := TProgressBar.Create(Result);
+  Result.FBar.Parent := Result;
+  Result.FBar.AlignWithMargins := True;
+  Result.FBar.Align := alTop;
+  Result.FBar.Margins.SetBounds(10, 4, 10, 6);
+  Result.FBar.Height := 18;
+  Result.FBar.Min := 0;
+  Result.FBar.Max := 100;
+  EnableThemes(Result);
+  PrepareDialog(Result, AOwner);
+  Result.Show;
+end;
+
+procedure ShowThemedMessage(const AMsg: string);
+const
+  MaxTextWidth = 480;
+var
+  Dlg: TThemedToolForm;
+  Lbl: TLabel;
+  Btn: TButton;
+  Measure: Vcl.Graphics.TBitmap;
+  R: TRect;
+begin
+  Dlg := TThemedToolForm.CreateNew(nil);
+  try
+    Dlg.BorderStyle := bsDialog;
+    Dlg.Caption := 'Refactoring Light';
+    Dlg.Position := poScreenCenter;
+
+    // Measure the wrapped text with the form's font.
+    Measure := Vcl.Graphics.TBitmap.Create;
+    try
+      Measure.Canvas.Font := Dlg.Font;
+      R := Rect(0, 0, MaxTextWidth, 0);
+      DrawText(Measure.Canvas.Handle, PChar(AMsg), Length(AMsg), R,
+        DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
+    finally
+      Measure.Free;
+    end;
+    if R.Right < 220 then R.Right := 220;
+
+    Lbl := TLabel.Create(Dlg);
+    Lbl.Parent := Dlg;
+    Lbl.AutoSize := False;
+    Lbl.WordWrap := True;
+    Lbl.ShowAccelChar := False;
+    Lbl.SetBounds(16, 16, R.Right, R.Bottom);
+    Lbl.Caption := AMsg;
+
+    Btn := TButton.Create(Dlg);
+    Btn.Parent := Dlg;
+    Btn.Caption := 'OK';
+    Btn.Default := True;
+    Btn.Cancel := True;
+    Btn.ModalResult := mrOk;
+    Btn.SetBounds(16 + (R.Right - 90) div 2, R.Bottom + 28, 90, 26);
+
+    Dlg.ClientWidth := R.Right + 32;
+    Dlg.ClientHeight := Btn.Top + Btn.Height + 12;
+
+    EnableThemes(Dlg);
+    PrepareDialog(Dlg, nil);
+    Dlg.ShowModal;
+  finally
+    Dlg.Free;
+  end;
 end;
 
 end.

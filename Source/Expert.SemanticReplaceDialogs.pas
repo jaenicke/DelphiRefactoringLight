@@ -91,7 +91,8 @@ type
 implementation
 
 uses
-  System.UITypes, System.IOUtils, System.StrUtils, Expert.ListViewSort;
+  System.UITypes, System.IOUtils, System.StrUtils, Expert.ListViewSort,
+  Expert.IdeThemes, Expert.DialogHelper;
 
 { ---------- TSemanticReplaceRuleEditDialog ---------- }
 
@@ -113,6 +114,8 @@ begin
   FEdtVarType.Text := ARule.LocalVarType;
   FEdtVarValue.Text := ARule.LocalVarValue;
   FEdtVarReplace.Text := ARule.ReplaceWhenLocalVar;
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSemanticReplaceRuleEditDialog.BuildLayout;
@@ -208,6 +211,8 @@ begin
   FRules := ARules;
   BuildLayout;
   RefreshList;
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSemanticReplaceRulesListDialog.BuildLayout;
@@ -366,6 +371,8 @@ begin
   FAllFiles := AAllFiles;
   BuildLayout;
   RefreshList;
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSemanticReplaceUnitsDialog.BuildLayout;
@@ -487,6 +494,8 @@ begin
   BuildLayout;
   FLblSummary.Caption := ASummary;
   FMemo.Lines.Text := APreview;
+  EnableThemes(Self);
+  PrepareDialog(Self, AOwner);
 end;
 
 procedure TSemanticReplacePreviewDialog.BuildLayout;

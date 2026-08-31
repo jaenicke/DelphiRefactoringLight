@@ -111,6 +111,7 @@ type
     function FindPopupRefactorItem: TMenuItem;
     procedure DumpMainMenu(const AReason: string);
     procedure DumpEditorPopup(const AReason: string);
+    procedure LogPopupEvent(const AText: string);
     procedure HookRefactorAction(AParent: TMenuItem);
     procedure DoRefactorActionUpdate(Sender: TObject);
     function IsOurMainItem(AItem: TMenuItem): Boolean;
@@ -548,6 +549,33 @@ begin
   end;
 end;
 
+procedure TContextMenuInstaller.LogPopupEvent(const AText: string);
+begin
+  try
+    TFile.AppendAllText(
+      TPath.Combine(TPath.GetTempPath, 'RefactoringLight-editorpopup.log'),
+      FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + '  ' + AText + sLineBreak);
+  except
+    // diagnostics are best-effort
+  end;
+end;
+
+// Owner class of a TNotifyEvent's method pointer - identifies WHOSE
+// handler sits in the OnPopup chain (IDE window vs another plugin).
+function HandlerOwnerClass(const AHandler: TNotifyEvent): string;
+begin
+  Result := 'nil';
+  if not Assigned(AHandler) then Exit;
+  try
+    if TMethod(AHandler).Data <> nil then
+      Result := TObject(TMethod(AHandler).Data).ClassName
+    else
+      Result := 'no-data';
+  except
+    Result := 'unknown';
+  end;
+end;
+
 // True if a source editor is on top. Deliberately does NOT use
 // Editor.GetCurrentContext: that one walks the caret via IOTAEditPosition
 // to read the word under the cursor, which COLLAPSES an active selection.
@@ -892,6 +920,12 @@ begin
   FOldOnPopup := FPopupMenu.OnPopup;
   FPopupMenu.OnPopup := DoOnPopup;
   FHooked := True;
+  // FOldOnPopup is our permanent forward target: at hook time the chain
+  // below us is intact and ends at the IDE's own handler (which adds the
+  // DYNAMIC popup entries - "Deklaration suchen" & co). It must never be
+  // overwritten later.
+  LogPopupEvent('hooked OnPopup; forward target owner: ' +
+    HandlerOwnerClass(FOldOnPopup));
 end;
 
 function TContextMenuInstaller.IsOurHandler(const AHandler: TNotifyEvent): Boolean;
@@ -947,17 +981,7 @@ procedure TContextMenuInstaller.OnSyncTimer(Sender: TObject);
 var
   Current: TNotifyEvent;
 begin
-  // Another plugin may have replaced OnPopup with its own handler
-  // after we installed ours. Detect and re-hook on top.
-  //
-  // CAREFUL: if their handler internally chains to ours (e.g. they
-  // saved our DoOnPopup as their FOldOnPopup), then naively saving
-  // their handler as our new FOldOnPopup would create a cycle:
-  // we'd call them, they'd call us, we'd call them, ...
-  // The guard in DoOnPopup (re-entry returns immediately, and we
-  // never forward to a self-reference) is what actually breaks the
-  // cycle at runtime; but we still try to keep FOldOnPopup honest.
-  // Re-assert our main-menu entry too - the IDE may rebuild the Refactor
+  // Re-assert our main-menu entry - the IDE may rebuild the Refactor
   // menu contextually and drop our submenu.
   try InstallIntoMainMenu; except end;
 
@@ -966,16 +990,20 @@ begin
   if not Assigned(Current) then
   begin
     // Someone cleared the handler entirely - just put ours back.
+    LogPopupEvent('sync: OnPopup was nil - reinstalled ours');
     FPopupMenu.OnPopup := DoOnPopup;
     Exit;
   end;
-  if IsOurHandler(Current) then Exit; // already in place
 
-  // Save the new top-of-chain as our old, install ourselves on top.
-  // The DoOnPopup guards prevent runaway recursion if Current
-  // transitively chains back to us.
-  FOldOnPopup := Current;
-  FPopupMenu.OnPopup := DoOnPopup;
+  // A FOREIGN handler on top is FINE and must be left alone: whoever
+  // hooked after us saved OUR handler as their forward target, so we
+  // still run through their chain. The previous behavior re-took the
+  // top and saved the foreign handler as our new FOldOnPopup - that
+  // OVERWROTE our pointer to the IDE's ORIGINAL handler and formed the
+  // cycle ours -> Parnassus -> ours: the guard in DoOnPopup stopped the
+  // stack overflow, but the IDE handler had dropped out of the chain
+  // entirely, so its DYNAMIC popup entries ("Deklaration suchen" & co,
+  // added on every popup by the IDE itself) vanished for good.
 end;
 
 procedure TContextMenuInstaller.TryInstall;

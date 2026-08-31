@@ -9,6 +9,7 @@ object LspOptionsFrame: TLspOptionsFrame
     Top = 8
     Width = 504
     Height = 352
+    Anchors = [akLeft, akTop, akRight]
     Caption = ' Keyboard shortcuts '
     TabOrder = 0
     object lblRename: TLabel
@@ -171,6 +172,7 @@ object LspOptionsFrame: TLspOptionsFrame
     Top = 372
     Width = 504
     Height = 65
+    Anchors = [akLeft, akTop, akRight]
     Caption = ' LSP '
     TabOrder = 1
     object cbxPrewarmLsp: TCheckBox
@@ -178,11 +180,19 @@ object LspOptionsFrame: TLspOptionsFrame
       Top = 24
       Width = 470
       Height = 17
-      Caption =
-        'Pre-warm DelphiLSP in the background when a project is opened (' +
-        'speeds up the first refactoring action; costs one extra LSP pro' +
-        'cess)'
+      Caption = 'Pre-warm DelphiLSP in the background when a project is opened'
       TabOrder = 0
+    end
+    object lblLspNote: TLabel
+      Left = 34
+      Top = 44
+      Width = 450
+      Height = 26
+      AutoSize = False
+      WordWrap = True
+      Caption =
+        '(speeds up the first refactoring action; costs one extra LSP pr' +
+        'ocess)'
     end
   end
   object btnDefaults: TButton

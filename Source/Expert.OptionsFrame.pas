@@ -17,7 +17,7 @@ unit Expert.OptionsFrame;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms,
+  Winapi.Messages, System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms,
   Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.Menus,
   Expert.Shortcuts;
 
@@ -45,6 +45,7 @@ type
     lblHint: TLabel;
     grpLsp: TGroupBox;
     cbxPrewarmLsp: TCheckBox;
+    lblLspNote: TLabel;
     btnDefaults: TButton;
     procedure ShortcutEditKeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
@@ -53,6 +54,8 @@ type
   private
     function EditFor(Kind: TShortcutKind): TEdit;
     procedure ApplyToEdit(Kind: TShortcutKind);
+    procedure AdjustLayout;
+    procedure CMFontChanged(var Message: TMessage); message CM_FONTCHANGED;
   public
     /// <summary>Fills the edits from the current settings.</summary>
     procedure LoadFromSettings;
@@ -65,7 +68,7 @@ implementation
 {$R *.dfm}
 
 uses
-  Winapi.Windows, Vcl.Graphics, Expert.PluginSettings;
+  Winapi.Windows, System.Math, Vcl.Graphics, Expert.PluginSettings;
 
 { TLspOptionsFrame }
 
@@ -101,10 +104,67 @@ begin
   E.Tag := Integer(Kind);
 end;
 
+// The options host restyles the page with its own (larger) font AFTER the
+// frame is streamed - the designed 96-dpi edit column (Left = 160) then
+// starts inside the longer labels ("Remove with (project-wide):" was cut
+// off). Re-derive the column from the REAL label widths at runtime.
+procedure TLspOptionsFrame.AdjustLayout;
+var
+  I, MaxRight, EditLeft: Integer;
+  C: TControl;
+begin
+  MaxRight := 0;
+  for I := 0 to grpShortcuts.ControlCount - 1 do
+  begin
+    C := grpShortcuts.Controls[I];
+    if (C is TLabel) and (C <> lblHint) then
+      if C.Left + C.Width > MaxRight then
+        MaxRight := C.Left + C.Width;
+  end;
+  EditLeft := MaxRight + 12;
+  for I := 0 to grpShortcuts.ControlCount - 1 do
+  begin
+    C := grpShortcuts.Controls[I];
+    if C is TEdit then
+    begin
+      C.Left := EditLeft;
+      // Keep the edit inside the group when the column moved far right.
+      if EditLeft + C.Width > grpShortcuts.ClientWidth - 12 then
+        C.Width := Max(80, grpShortcuts.ClientWidth - 12 - EditLeft);
+    end;
+  end;
+  // Long texts: wrap within the group width instead of clipping at the
+  // designed 96-dpi widths, and grow the groups to fit the wrapped lines.
+  var LineH := Abs(lblHint.Font.Height) + 4;
+  lblHint.AutoSize := False;
+  lblHint.WordWrap := True;
+  lblHint.Width := grpShortcuts.ClientWidth - lblHint.Left - 12;
+  lblHint.Height := 2 * LineH;
+  grpShortcuts.Height := lblHint.Top + lblHint.Height + 14;
+
+  grpLsp.Top := grpShortcuts.Top + grpShortcuts.Height + 12;
+  cbxPrewarmLsp.Width := grpLsp.ClientWidth - cbxPrewarmLsp.Left - 12;
+  lblLspNote.Width := grpLsp.ClientWidth - lblLspNote.Left - 12;
+  lblLspNote.Height := 2 * LineH;
+  grpLsp.Height := lblLspNote.Top + lblLspNote.Height + 12;
+
+  btnDefaults.Top := grpLsp.Top + grpLsp.Height + 10;
+end;
+
+procedure TLspOptionsFrame.CMFontChanged(var Message: TMessage);
+begin
+  inherited;
+  // The host applies its font after streaming; the AutoSize labels have
+  // grown by now - move the edit column out of their way.
+  if not (csLoading in ComponentState) then
+    AdjustLayout;
+end;
+
 procedure TLspOptionsFrame.LoadFromSettings;
 var
   K: TShortcutKind;
 begin
+  AdjustLayout;
   for K := Low(TShortcutKind) to High(TShortcutKind) do
     ApplyToEdit(K);
   cbxPrewarmLsp.Checked := TPluginSettings.PrewarmLspOnProjectOpen;

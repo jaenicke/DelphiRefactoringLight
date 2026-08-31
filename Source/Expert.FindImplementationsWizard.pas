@@ -231,6 +231,35 @@ begin
       end;
     end);
 
+  // A PROPERTY has no implementation line of its own - fall back to its
+  // declarations plus the implementations of its read/write accessors.
+  if System.Length(Items) = 0 then
+  begin
+    FDialog.SetStatus(Format('Nothing found - checking whether "%s" is a property...',
+      [FContext.WordAtCursor]));
+    Items := TImplementationFinder.FindPropertyImplementations(
+      ProjFiles, FContext.WordAtCursor,
+      procedure(ACurrent, ATotal: Integer)
+      begin
+        FDialog.SetProgress(ACurrent, ATotal);
+        if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
+        begin
+          FDialog.SetStatus(Format('Scanning for property accessors (%d/%d)...',
+            [ACurrent, ATotal]));
+          Application.ProcessMessages;
+        end;
+      end);
+    if System.Length(Items) > 0 then
+    begin
+      FDialog.SetItems(Items);
+      FDialog.SetProgress(0, 0);
+      FDialog.SetStatus(Format(
+        'Property "%s": %d declaration(s) / accessor implementation(s).',
+        [FContext.WordAtCursor, System.Length(Items)]));
+      Exit;
+    end;
+  end;
+
   FDialog.SetItems(Items);
   FDialog.SetProgress(0, 0);
   if System.Length(Items) = 0 then

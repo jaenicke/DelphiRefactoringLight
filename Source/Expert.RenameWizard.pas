@@ -303,6 +303,20 @@ begin
     // the uses-clause occurrences don't start with a method keyword).
     PreviewItems := BuildPreviewItems(FEdit, '', -1, nil);
 
+    // A CANCELLED scan has only partial candidates - never present that
+    // as a finished preview (applying it would rename some occurrences
+    // and silently leave the rest behind).
+    if FDialog.ScanCancelled then
+    begin
+      FDialog.SetPreviewItems(nil);
+      FDialog.SetDetailsText('Preview cancelled by the user.' + sLineBreak +
+        sLineBreak + FDiagLog);
+      FDialog.SetStatus('Preview cancelled - nothing was changed.');
+      FDialog.EnableRename(False);
+      FDialog.SetBusy(False);
+      Exit;
+    end;
+
     TotalEdits := 0;
     for var FE in FEdit.FileEdits do
       Inc(TotalEdits, Length(FE.Edits));
@@ -392,9 +406,6 @@ begin
     Exit;
   end;
 
-  // Save all modified files so the LSP sees current data
-  Editor.SaveAllFiles;
-
   RootPath := FContext.ProjectRoot;
   if RootPath = '' then
     RootPath := ExtractFilePath(FContext.FileName);
@@ -402,7 +413,7 @@ begin
   FDialog.SetBusy(True);
   FDiagLog := '';
   try
-    // Save all unsaved files (so LSP sees the current state)
+    // Save all unsaved files (so LSP sees the current state).
     FDialog.SetStatus('Saving all files...');
     Editor.SaveAllFiles;
 
@@ -558,6 +569,20 @@ begin
     var PreviewItems := BuildPreviewItems(FEdit, DefFilePath, DefLine, ImplFilesArray);
 
     // Count for the status line
+    // A CANCELLED scan has only partial candidates - never present that
+    // as a finished preview (applying it would rename some occurrences
+    // and silently leave the rest behind).
+    if FDialog.ScanCancelled then
+    begin
+      FDialog.SetPreviewItems(nil);
+      FDialog.SetDetailsText('Preview cancelled by the user.' + sLineBreak +
+        sLineBreak + FDiagLog);
+      FDialog.SetStatus('Preview cancelled - nothing was changed.');
+      FDialog.EnableRename(False);
+      FDialog.SetBusy(False);
+      Exit;
+    end;
+
     var TotalEdits := 0;
     for var FE in FEdit.FileEdits do
       Inc(TotalEdits, Length(FE.Edits));
@@ -631,6 +656,7 @@ begin
       F := AFiles[FileIdx];
       if (FileIdx mod 10 = 0) then
         FDialog.SetProgress(FileIdx + 1, Length(AFiles));
+      if FDialog.ScanCancelled then Break;
 
       try
         RawContent := ReadDelphiFile(F);
@@ -691,7 +717,16 @@ begin
   // Shared finder (also used by the Find Implementations wizard).
   // Text scan over all project files, filtered by class method impl
   // syntax, with owner type verification.
-  Items := TImplementationFinder.FindByProjectScan(AProjectFiles, AOldName, AOwnerType, nil);
+  // Progress callback matters beyond the bar: it is what pumps the
+  // message queue during this full-project scan, so Stop stays clickable.
+  Items := TImplementationFinder.FindByProjectScan(AProjectFiles, AOldName, AOwnerType,
+    procedure(ACurrent, ATotal: Integer)
+    begin
+      FDialog.SetProgress(ACurrent, ATotal);
+      if (ACurrent mod 10 = 0) or (ACurrent = ATotal) then
+        FDialog.SetStatus(Format('Phase 2c: scanning implementations (%d/%d)...',
+          [ACurrent, ATotal]));
+    end);
 
   FDiagLog := FDiagLog + '  Result: ' + IntToStr(Length(Items)) + ' implementation(s)' + sLineBreak;
 
@@ -851,6 +886,7 @@ begin
 
     for I := 0 to High(ACandidates) do
     begin
+      if FDialog.ScanCancelled then Break;
       C := ACandidates[I];
       FDialog.SetProgress(I + 1, Length(ACandidates));
       if (I mod 3 = 0) then

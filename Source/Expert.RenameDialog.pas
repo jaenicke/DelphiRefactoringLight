@@ -41,6 +41,8 @@ type
     FBtnPreview: TButton;
     FBtnRename: TButton;
     FBtnCancel: TButton;
+    FBusy: Boolean;          // a scan is running inside the click handler
+    FScanCancelled: Boolean; // user pressed Stop / tried to close
     FProgressBar: TProgressBar;
     FLblStatus: TLabel;
     FPanelBottom: TPanel;
@@ -57,6 +59,8 @@ type
     FIndex: TProjectTextIndex;
     procedure DoFormShow(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
+    procedure DoBtnStopClick(Sender: TObject);
+    procedure DoCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure DoNewNameChange(Sender: TObject);
     procedure DoCheckTimer(Sender: TObject);
     procedure RunIdentifierCheck;
@@ -92,7 +96,13 @@ type
     procedure SetProgress(AValue, AMax: Integer);
     procedure SetStatus(const AText: string);
     procedure EnableRename(AEnabled: Boolean);
+    /// <summary>Brackets a long scan: disables the editing controls and
+    ///  turns Cancel into a STOP button. The scan runs inside the Preview
+    ///  button's click handler, so the modal message loop is blocked -
+    ///  SetStatus/SetProgress pump it, and the scan polls ScanCancelled.</summary>
     procedure SetBusy(ABusy: Boolean);
+    /// <summary>True when the user asked to stop the running scan.</summary>
+    function ScanCancelled: Boolean;
   end;
 
 implementation
@@ -296,6 +306,7 @@ begin
   FMemoDetails.WordWrap := False;
 
   FPageControl.ActivePage := FTabChanges;
+  OnCloseQuery := DoCloseQuery;
   Expert.IdeThemes.EnableThemes(Self);
 
   FIndex := TProjectTextIndex.Create;
@@ -317,6 +328,7 @@ end;
 
 procedure TRenameDialog.DoBtnPreviewClick(Sender: TObject);
 begin
+  if FBusy then Exit;   // ProcessMessages must not re-enter the scan
   if Assigned(OnPreviewRequested) then
     OnPreviewRequested(Self);
 end;
@@ -476,12 +488,17 @@ begin
   FProgressBar.Max := AMax;
   FProgressBar.Position := AValue;
   FProgressBar.Update;
+  // The scan blocks the modal loop - pump it so Stop stays clickable.
+  if FBusy then Application.ProcessMessages;
 end;
 
 procedure TRenameDialog.SetStatus(const AText: string);
 begin
   FLblStatus.Caption := AText;
   FLblStatus.Update;
+  // Like SetProgress: the scan owns the UI thread, so this is the only
+  // chance for the Stop button to be clicked.
+  if FBusy then Application.ProcessMessages;
 end;
 
 procedure TRenameDialog.EnableRename(AEnabled: Boolean);
@@ -491,14 +508,56 @@ end;
 
 procedure TRenameDialog.SetBusy(ABusy: Boolean);
 begin
+  FBusy := ABusy;
+  if ABusy then FScanCancelled := False;
   FBtnPreview.Enabled := not ABusy;
   if ABusy then
     FBtnRename.Enabled := False;
   FEdtNewName.Enabled := not ABusy;
+  // During the scan Cancel must NOT close the dialog: the scan runs
+  // inside the Preview click handler, so closing here would free the
+  // form under running code. It stops the scan instead.
+  if ABusy then
+  begin
+    FBtnCancel.Cancel := False;
+    FBtnCancel.ModalResult := mrNone;
+    FBtnCancel.Caption := 'Stop';
+    FBtnCancel.OnClick := DoBtnStopClick;
+  end
+  else
+  begin
+    FBtnCancel.OnClick := nil;
+    FBtnCancel.ModalResult := mrCancel;
+    FBtnCancel.Cancel := True;
+    FBtnCancel.Caption := 'Cancel';
+  end;
   if ABusy then
     Screen.Cursor := crHourGlass
   else
     Screen.Cursor := crDefault;
+end;
+
+function TRenameDialog.ScanCancelled: Boolean;
+begin
+  Result := FScanCancelled;
+end;
+
+procedure TRenameDialog.DoBtnStopClick(Sender: TObject);
+begin
+  FScanCancelled := True;
+  FBtnCancel.Enabled := False;      // one stop is enough
+  SetStatus('Stopping...');
+end;
+
+procedure TRenameDialog.DoCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  // Alt+F4 / the X button during a scan: stop it, do not tear the form
+  // down while the scan is still walking its loops.
+  if FBusy then
+  begin
+    FScanCancelled := True;
+    CanClose := False;
+  end;
 end;
 
 initialization

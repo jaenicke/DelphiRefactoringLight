@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -26,7 +26,8 @@ uses
   System.SysUtils, System.IOUtils, System.Math,
   Vcl.Forms, Vcl.Controls, Vcl.Dialogs,
   Lsp.Protocol, Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf, Expert.DialogHelper;
+  Expert.EditorHelperIntf, Expert.DialogHelper,
+  Expert.UnitIndex, Expert.FindUnitDialog;
 
 // 0-based column of AWord as a whole word in ALine (case-insensitive),
 // or -1. Word boundaries: identifier characters on either side disqualify.
@@ -48,6 +49,61 @@ begin
       Exit(P - 1);
     P := Pos(NeedleU, U, P + 1);
   end;
+end;
+
+// Index-based fallback for a symbol the LSP could not resolve. True when
+// it handled the request (jumped, or opened the chooser).
+function TryIndexFallback(const AIdent: string): Boolean;
+var
+  Hits: TArray<TFindUnitHit>;
+  Seen: TArray<string>;
+  Content: string;
+  DeclLine: Integer;
+
+  function AlreadySeen(const AUnit: string): Boolean;
+  begin
+    Result := False;
+    for var S in Seen do
+      if SameText(S, AUnit) then Exit(True);
+  end;
+
+begin
+  Result := False;
+  Hits := TUnitIndex.Instance.Lookup(AIdent);
+  if Length(Hits) = 0 then Exit;
+
+  // One declaring UNIT (the same unit can appear per declaration form) ->
+  // go there directly.
+  Seen := nil;
+  for var H in Hits do
+    if not AlreadySeen(H.UnitName) then
+      Seen := Seen + [H.UnitName];
+
+  if Length(Seen) > 1 then
+  begin
+    // Ambiguous - let the user pick in the dialog they know.
+    FindUnitForIdentifier;
+    Exit(True);
+  end;
+
+  if (Hits[0].Path = '') or not TFile.Exists(Hits[0].Path) then Exit;
+  if not Editor.ReadEditorContent(Hits[0].Path, Content) then
+    try
+      Content := TFile.ReadAllText(Hits[0].Path);
+    except
+      Exit;
+    end;
+
+  DeclLine := FindDeclarationLine(Content, AIdent);
+  if DeclLine < 0 then DeclLine := 0;
+  var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  var Col := 0;
+  if DeclLine <= High(Lines) then
+  begin
+    Col := FindWholeWord(Lines[DeclLine], AIdent);
+    if Col < 0 then Col := 0;
+  end;
+  Result := Editor.GotoLocation(Hits[0].Path, DeclLine, Col, Length(AIdent));
 end;
 
 procedure FindOriginalSymbol;
@@ -100,7 +156,14 @@ begin
 
   if Length(Locs) = 0 then
   begin
-    ShowThemedMessage(Format('No declaration found for "%s".', [Ctx.WordAtCursor]));
+    // FALLBACK: DelphiLSP frequently answers nothing for a symbol whose
+    // unit is not (yet) open - hover and the identifier index do know it.
+    // Use the index: one candidate -> jump straight to its declaration,
+    // several -> hand over to the Find-Unit dialog (same search the user
+    // would run manually).
+    if TryIndexFallback(Ctx.WordAtCursor) then Exit;
+    ShowThemedMessage(Format('No declaration found for "%s".'#13#10 +
+      'The identifier index does not know it either.', [Ctx.WordAtCursor]));
     Exit;
   end;
 

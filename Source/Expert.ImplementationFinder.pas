@@ -49,6 +49,21 @@ type
     ///    Vererbung diesen Typ implementiert. Dadurch werden Klassen mit
     ///    zufaellig gleichem Methodennamen, aber anderem Interface, gefiltert.
     /// </summary>
+    /// <summary>Parses a property declaration line for APropName and
+    ///  returns its read/write accessors ('' when the clause is missing).
+    ///  Handles array properties and the trailing specifiers
+    ///  (index/default/stored/nodefault/implements). False when ALine is
+    ///  not a declaration of that property.</summary>
+    class function ParsePropertyAccessors(const ALine, APropName: string;
+      out AGetter, ASetter: string): Boolean; static;
+
+    /// <summary>Implementations for a PROPERTY: a property has no
+    ///  implementation line of its own, so the result is every
+    ///  'property APropName ...' declaration in the project plus the
+    ///  implementations of its read/write ACCESSOR methods.</summary>
+    class function FindPropertyImplementations(const AProjectFiles: TArray<string>;
+      const APropName: string; AProgress: TImplementationScanProgress): TFindReferenceItems;
+
     class function FindByProjectScan(const AProjectFiles: TArray<string>; const AIdentifier: string;
       const AExpectedOwnerType: string; AProgress: TImplementationScanProgress = nil): TFindReferenceItems;
 
@@ -351,6 +366,133 @@ begin
     Result := TImplFinderHelper.ClassImplementsTypeRec(AProjectFiles, AClassName, ATargetType, Visited);
   finally
     Visited.Free;
+  end;
+end;
+
+class function TImplementationFinder.ParsePropertyAccessors(const ALine,
+  APropName: string; out AGetter, ASetter: string): Boolean;
+var
+  L, U, Name: string;
+  P, I: Integer;
+
+  // Identifier following the keyword AKey (word-bounded), '' when absent.
+  function AccessorAfter(const AKey: string): string;
+  var
+    Q, Start: Integer;
+  begin
+    Result := '';
+    Q := Pos(' ' + AKey + ' ', ' ' + U + ' ');
+    if Q = 0 then Exit;
+    // Q is 1-based in the padded string -> position of the keyword in U.
+    Start := Q + Length(AKey) + 1;
+    while (Start <= Length(L)) and CharInSet(L[Start], [' ', #9]) do Inc(Start);
+    Q := Start;
+    while (Q <= Length(L)) and CharInSet(L[Q],
+      ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Inc(Q);
+    Result := Copy(L, Start, Q - Start);
+  end;
+
+begin
+  Result := False;
+  AGetter := '';
+  ASetter := '';
+  L := Trim(ALine);
+  P := Pos('//', L);
+  if P > 0 then L := TrimRight(Copy(L, 1, P - 1));
+  if L = '' then Exit;
+  U := UpperCase(L);
+  if not (U.StartsWith('PROPERTY ') or U.StartsWith('CLASS PROPERTY ')) then Exit;
+
+  // Name = first identifier after the keyword, up to ':' / '[' / space.
+  P := Pos('PROPERTY ', U) + Length('PROPERTY ');
+  while (P <= Length(L)) and CharInSet(L[P], [' ', #9]) do Inc(P);
+  I := P;
+  while (I <= Length(L)) and CharInSet(L[I],
+    ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Inc(I);
+  Name := Copy(L, P, I - P);
+  if not SameText(Name, APropName) then Exit;
+
+  AGetter := AccessorAfter('READ');
+  ASetter := AccessorAfter('WRITE');
+  Result := True;
+end;
+
+class function TImplementationFinder.FindPropertyImplementations(
+  const AProjectFiles: TArray<string>; const APropName: string;
+  AProgress: TImplementationScanProgress): TFindReferenceItems;
+var
+  ResultList: TList<TFindReferenceItem>;
+  Accessors: TStringList;
+  Item: TFindReferenceItem;
+  RawContent, LineStr, Getter, Setter: string;
+  Lines: TArray<string>;
+  UpperId: string;
+  LineIdx, Col: Integer;
+
+  function AlreadyListed(const AFile: string; ALine: Integer): Boolean;
+  var
+    K: Integer;
+  begin
+    Result := False;
+    for K := 0 to ResultList.Count - 1 do
+      if (ResultList[K].Line = ALine)
+        and SameText(ResultList[K].FilePath, AFile) then
+        Exit(True);
+  end;
+
+begin
+  Result := nil;
+  if (APropName = '') or (System.Length(AProjectFiles) = 0) then Exit;
+  UpperId := UpperCase(APropName);
+
+  ResultList := TList<TFindReferenceItem>.Create;
+  Accessors := TStringList.Create;
+  try
+    Accessors.Duplicates := dupIgnore;
+    Accessors.Sorted := True;
+
+    // Pass 1: every declaration of that property + its accessors.
+    for var FileIdx := 0 to High(AProjectFiles) do
+    begin
+      if Assigned(AProgress) then
+        AProgress(FileIdx + 1, System.Length(AProjectFiles));
+      try
+        RawContent := ReadDelphiFile(AProjectFiles[FileIdx]);
+        if Pos(UpperId, UpperCase(RawContent)) = 0 then Continue;
+        Lines := ReadDelphiFileLines(AProjectFiles[FileIdx]);
+      except
+        Continue;
+      end;
+
+      for LineIdx := 0 to High(Lines) do
+      begin
+        LineStr := Lines[LineIdx];
+        if not ParsePropertyAccessors(LineStr, APropName, Getter, Setter) then
+          Continue;
+        Col := Pos(UpperId, UpperCase(LineStr)) - 1;
+        if Col < 0 then Col := 0;
+        Item.FilePath := AProjectFiles[FileIdx];
+        Item.Line := LineIdx;
+        Item.Col := Col;
+        Item.Length := System.Length(APropName);
+        Item.Preview := Trim(LineStr);
+        ResultList.Add(Item);
+        if Getter <> '' then Accessors.Add(Getter);
+        if Setter <> '' then Accessors.Add(Setter);
+      end;
+    end;
+
+    // Pass 2: the accessor METHODS' implementations (a field accessor
+    // simply has none - its declaration is already covered above).
+    for var A in Accessors do
+      for var Acc in FindByProjectScan(AProjectFiles, A, '', nil) do
+        if not AlreadyListed(Acc.FilePath, Acc.Line) then
+          ResultList.Add(Acc);
+
+    Result := ResultList.ToArray;
+  finally
+    Accessors.Free;
+    ResultList.Free;
   end;
 end;
 

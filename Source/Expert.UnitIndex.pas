@@ -168,6 +168,13 @@ type
 function ParseUnit(const AFile: string; out AUnitName: string;
   out AHasInit: Boolean): TArray<string>;
 
+/// <summary>0-based line of AIdent's DECLARATION inside AContent, or -1.
+///  Prefers a real declaration form (type/const alias, routine header,
+///  property, typed field/var) over a plain occurrence, and the
+///  interface section over the implementation. Lets callers jump to a
+///  symbol when the LSP has no definition for it (index fallback).</summary>
+function FindDeclarationLine(const AContent, AIdent: string): Integer;
+
 /// <summary>The COMPILE-relevant directories: the IDE Library "Search
 ///  Path" (browsing paths deliberately EXCLUDED - the compiler never
 ///  looks there), the active project's DCC_UnitSearchPath entries, and
@@ -763,6 +770,94 @@ begin
   finally
     Dirs.Free;
   end;
+end;
+
+function FindDeclarationLine(const AContent, AIdent: string): Integer;
+var
+  Lines: TArray<string>;
+  ImplLine, I, P, Score, BestScore, BestLine: Integer;
+  Raw, L, U, UIdent, Rest: string;
+
+  // Whole-word position of AIdent in AUpperLine (1-based), else 0.
+  function WordPos(const AUpperLine: string): Integer;
+  var
+    Q, AfterIdx: Integer;
+  begin
+    Result := 0;
+    Q := Pos(UIdent, AUpperLine);
+    while Q > 0 do
+    begin
+      AfterIdx := Q + Length(UIdent);
+      if ((Q = 1) or not IsIdentChar(AUpperLine[Q - 1]))
+        and ((AfterIdx > Length(AUpperLine)) or not IsIdentChar(AUpperLine[AfterIdx])) then
+        Exit(Q);
+      Q := PosEx(UIdent, AUpperLine, Q + 1);
+    end;
+  end;
+
+begin
+  Result := -1;
+  if (AContent = '') or not IsIdent(AIdent) then Exit;
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  UIdent := UpperCase(AIdent);
+
+  ImplLine := MaxInt;
+  for I := 0 to High(Lines) do
+    if SameText(Trim(Lines[I]), 'implementation') then
+    begin
+      ImplLine := I;
+      Break;
+    end;
+
+  BestScore := 0;
+  BestLine := -1;
+  for I := 0 to High(Lines) do
+  begin
+    Raw := Lines[I];
+    // Cheap comment guard: full-line comments and a trailing '//'.
+    L := Trim(Raw);
+    if L.StartsWith('//') or L.StartsWith('{') or L.StartsWith('(*') then Continue;
+    P := Pos('//', L);
+    if P > 0 then L := TrimRight(Copy(L, 1, P - 1));
+    if L = '' then Continue;
+
+    U := UpperCase(L);
+    P := WordPos(U);
+    if P = 0 then Continue;
+
+    Score := 1;   // plain occurrence
+    Rest := TrimLeft(Copy(L, P + Length(AIdent), MaxInt));
+    if StartsWithWord(U, 'PROPERTY ') then
+    begin
+      if WordPos(UpperCase(Copy(L, Length('property ') + 1, MaxInt))) = 1 then
+        Score := 3;
+    end
+    else if StartsWithWord(U, 'FUNCTION') or StartsWithWord(U, 'PROCEDURE')
+         or StartsWithWord(U, 'CONSTRUCTOR') or StartsWithWord(U, 'DESTRUCTOR')
+         or StartsWithWord(U, 'CLASS FUNCTION') or StartsWithWord(U, 'CLASS PROCEDURE') then
+    begin
+      // 'function Foo(' / 'procedure TBar.Foo;' - the name must follow
+      // the keyword (or the qualifying class name).
+      if P > 1 then Score := 3;
+    end
+    else if P = 1 then
+    begin
+      // Line STARTS with the identifier: 'TFoo = class', 'Bar: Integer;'
+      if Rest.StartsWith('=') then Score := 3
+      else if Rest.StartsWith(':') then Score := 2
+      else if Rest.StartsWith('<') then Score := 3;   // generic type decl
+    end;
+
+    // Interface-section declarations win over implementation ones.
+    if I < ImplLine then Inc(Score, 4);
+
+    if Score > BestScore then
+    begin
+      BestScore := Score;
+      BestLine := I;
+    end;
+  end;
+  Result := BestLine;
 end;
 
 function GatherCompileSearchDirs: TArray<string>;

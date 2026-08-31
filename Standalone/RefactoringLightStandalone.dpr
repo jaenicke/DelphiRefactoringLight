@@ -58,7 +58,8 @@ uses
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',
   Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas',
-  Expert.ListViewSort in '..\Source\Expert.ListViewSort.pas';
+  Expert.ListViewSort in '..\Source\Expert.ListViewSort.pas',
+  Expert.UnitAvailability in '..\Source\Expert.UnitAvailability.pas';
 
 begin
   Application.Initialize;

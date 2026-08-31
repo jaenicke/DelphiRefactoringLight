@@ -22,7 +22,8 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.UsesEditor,
-  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
+  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
+  Expert.UnitAvailability;
 
 type
   // Reference-counted hand-off from the search thread back to the UI poll
@@ -320,6 +321,8 @@ begin
     ShowThemedMessage('That is the current unit itself.');
     Exit;
   end;
+  // Browsing-path-only units: offer to make them project-visible first.
+  if not EnsureUnitAvailable(H.UnitName) then Exit;
   if ASection = usInterface then SecName := 'interface' else SecName := 'implementation';
   if AddUnitToUses(FTargetFile, H.UnitName, ASection) then
     ShowThemedMessage(Format('Added "%s" to the %s uses of %s.',

@@ -53,63 +53,72 @@ uses
 
 procedure TLspKeyBinding.RenameKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skRename) then Exit;
   if WizardInstance <> nil then
     WizardInstance.Execute;
 end;
 
 procedure TLspKeyBinding.CompletionKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skCompletion) then Exit;
   if CompletionWizardInstance <> nil then
     CompletionWizardInstance.Execute;
 end;
 
 procedure TLspKeyBinding.ExtractMethodKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skExtract) then Exit;
   if ExtractMethodInstance <> nil then
     ExtractMethodInstance.Execute;
 end;
 
 procedure TLspKeyBinding.FindReferencesKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skFindRef) then Exit;
   if FindReferencesInstance <> nil then
     FindReferencesInstance.Execute;
 end;
 
 procedure TLspKeyBinding.FindImplementationsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skFindImp) then Exit;
   if FindImplementationsInstance <> nil then
     FindImplementationsInstance.Execute;
 end;
 
 procedure TLspKeyBinding.SignatureCheckKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skAlign) then Exit;
   if SignatureCheckInstance <> nil then
     SignatureCheckInstance.Execute;
 end;
 
 procedure TLspKeyBinding.RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skRemoveWith) then Exit;
   if WithRefactorInstance <> nil then
     WithRefactorInstance.Execute;
 end;
 
 procedure TLspKeyBinding.UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skUnitRefs) then Exit;
   if UnitReferencesInstance <> nil then
     UnitReferencesInstance.Execute;
 end;
 
 procedure TLspKeyBinding.MoveToUnitKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skMoveToUnit) then Exit;
   if Assigned(MoveToUnitInstance) then
     MoveToUnitInstance.Execute;
 end;
@@ -132,7 +141,8 @@ end;
 procedure TLspKeyBinding.FindOriginalKeyProc(const Context: IOTAKeyContext;
   KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
 begin
-  BindingResult := krHandled;
+  BindingResult := krHandled;   // swallow the key either way
+  if not TExpertsShortCut.AllowAction(skFindOriginal) then Exit;
   FindOriginalSymbol;
 end;
 

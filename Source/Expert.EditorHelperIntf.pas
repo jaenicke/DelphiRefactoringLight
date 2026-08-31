@@ -125,6 +125,13 @@ type
     ///  active project.</summary>
     function AddFileToActiveProject(const AFilePath: string): Boolean;
 
+    /// <summary>Appends ADir to the active project's unit search path
+    ///  (DCC_UnitSearchPath of the BASE configuration in the IDE).
+    ///  Idempotent: a no-op returning True when the directory is already
+    ///  listed. False when there is no active project or the host cannot
+    ///  modify the project options (standalone).</summary>
+    function AddProjectSearchPath(const ADir: string): Boolean;
+
     /// <summary>Returns the active editor's current selection.
     ///  Line/Col are 1-based, AEndLine/AEndCol point one past the last
     ///  character (LSP-range-end style).

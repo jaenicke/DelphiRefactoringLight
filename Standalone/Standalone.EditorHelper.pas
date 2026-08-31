@@ -140,6 +140,7 @@ type
     function GotoLocation(const AFilePath: string;
       ALine, ACol: Integer; AHighlightLen: Integer = 0): Boolean;
     function AddFileToActiveProject(const AFilePath: string): Boolean;
+    function AddProjectSearchPath(const ADir: string): Boolean;
     function GetSelection(out AFilePath: string;
       out AStartLine, AStartCol, AEndLine, AEndCol: Integer;
       out AText: string): Boolean;
@@ -148,7 +149,7 @@ type
 implementation
 
 uses
-  Xml.XMLDoc, Xml.XMLIntf, Delphi.FileEncoding;
+  System.Variants, Xml.XMLDoc, Xml.XMLIntf, Delphi.FileEncoding;
 
 { TStandaloneProjectState }
 
@@ -692,6 +693,72 @@ begin
   if Result then
     FState.LoadFromDproj(Dproj);
   if Existing <> nil then ;  // suppress unused warning
+end;
+
+function TStandaloneEditorHelper.AddProjectSearchPath(const ADir: string): Boolean;
+// Appends ADir to <DCC_UnitSearchPath> of the Base configuration in the
+// active .dproj (same XmlDoc round-trip as AddFileToActiveProject).
+// Idempotent against already-listed entries (absolute or relative).
+var
+  Doc: IXMLDocument;
+  Root, Group, Node: IXMLNode;
+  I: Integer;
+  Dproj, Dir, Cur, Cond: string;
+  BaseGroup: IXMLNode;
+begin
+  Result := False;
+  Dproj := FState.ProjectFile;
+  if (Dproj = '') or not TFile.Exists(Dproj) or (ADir = '') then Exit;
+  Dir := ExcludeTrailingPathDelimiter(ADir);
+
+  Doc := TXMLDocument.Create(nil);
+  try
+    Doc.LoadFromFile(Dproj);
+    Root := Doc.DocumentElement;
+    if Root = nil then Exit;
+
+    // The Base configuration's PropertyGroup: Condition '$(Base)'!=''.
+    BaseGroup := nil;
+    for I := 0 to Root.ChildNodes.Count - 1 do
+    begin
+      Group := Root.ChildNodes[I];
+      if not SameText(Group.NodeName, 'PropertyGroup') then Continue;
+      Cond := VarToStrDef(Group.Attributes['Condition'], '');
+      if Cond.Replace(' ', '') = '''$(Base)''!=''''' then
+      begin
+        BaseGroup := Group;
+        Break;
+      end;
+    end;
+    if BaseGroup = nil then Exit;
+
+    Node := BaseGroup.ChildNodes.FindNode('DCC_UnitSearchPath');
+    Cur := '';
+    if Node <> nil then Cur := VarToStrDef(Node.NodeValue, '');
+    for var Ent in Cur.Split([';'], TStringSplitOptions.ExcludeEmpty) do
+    begin
+      var E := Trim(Ent);
+      if TPath.IsRelativePath(E) then
+        E := TPath.GetFullPath(IncludeTrailingPathDelimiter(FState.ProjectRoot) + E);
+      if SameText(ExcludeTrailingPathDelimiter(E), Dir) then
+        Exit(True);   // already listed
+    end;
+
+    if Node = nil then
+      Node := BaseGroup.AddChild('DCC_UnitSearchPath');
+    if Cur = '' then
+      Node.NodeValue := Dir
+    else
+      Node.NodeValue := Cur + ';' + Dir;
+
+    Doc.SaveToFile(Dproj);
+    Result := True;
+  finally
+    Doc := nil;
+  end;
+
+  if Result then
+    FState.LoadFromDproj(Dproj);
 end;
 
 function TStandaloneEditorHelper.GetSelection(out AFilePath: string;

@@ -139,6 +139,7 @@
         <DCCReference Include="..\Source\Expert.Shortcuts.pas"/>
         <DCCReference Include="..\Source\Expert.DialogHelper.pas"/>
         <DCCReference Include="..\Source\Expert.ListViewSort.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitAvailability.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnit.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnitWizard.pas"/>

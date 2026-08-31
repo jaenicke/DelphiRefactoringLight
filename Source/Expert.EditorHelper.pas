@@ -10,7 +10,7 @@ unit Expert.EditorHelper;
 interface
 
 uses
-  System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI,
+  System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI, DCCStrs,
   Expert.EditorHelperIntf, Delphi.FileEncoding;
 
 type
@@ -56,6 +56,7 @@ type
     function GotoLocation(const AFilePath: string;
       ALine, ACol: Integer; AHighlightLen: Integer = 0): Boolean;
     function AddFileToActiveProject(const AFilePath: string): Boolean;
+    function AddProjectSearchPath(const ADir: string): Boolean;
     function GetSelection(out AFilePath: string;
       out AStartLine, AStartCol, AEndLine, AEndCol: Integer;
       out AText: string): Boolean;
@@ -1132,6 +1133,50 @@ begin
         Project.AddFile(AFilePath, True);
         Exit(True);
       end;
+end;
+
+function TIDEEditorHelper.AddProjectSearchPath(const ADir: string): Boolean;
+var
+  MS: IOTAModuleServices;
+  ProjectGroup: IOTAProjectGroup;
+  Project: IOTAProject;
+  Cfgs: IOTAProjectOptionsConfigurations;
+  Base: IOTABuildConfiguration;
+  Cur, Dir: string;
+  I: Integer;
+begin
+  Result := False;
+  if ADir = '' then Exit;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
+  Project := nil;
+  for I := 0 to MS.ModuleCount - 1 do
+    if Supports(MS.Modules[I], IOTAProjectGroup, ProjectGroup) then
+    begin
+      Project := ProjectGroup.ActiveProject;
+      Break;
+    end;
+  if Project = nil then
+    for I := 0 to MS.ModuleCount - 1 do
+      if Supports(MS.Modules[I], IOTAProject, Project)
+        and not Supports(Project, IOTAProjectGroup) then
+        Break;
+  if Project = nil then Exit;
+  if not Supports(Project.ProjectOptions, IOTAProjectOptionsConfigurations, Cfgs) then Exit;
+  Base := Cfgs.BaseConfiguration;
+  if Base = nil then Exit;
+
+  Dir := ExcludeTrailingPathDelimiter(ADir);
+  Cur := Base.Value[DCCStrs.sUnitSearchPath];
+  // Idempotent: already listed (exact entry match, case-insensitive).
+  for var Ent in Cur.Split([';'], TStringSplitOptions.ExcludeEmpty) do
+    if SameText(ExcludeTrailingPathDelimiter(Trim(Ent)), Dir) then
+      Exit(True);
+  if Cur = '' then
+    Base.Value[DCCStrs.sUnitSearchPath] := Dir
+  else
+    Base.Value[DCCStrs.sUnitSearchPath] := Cur + ';' + Dir;
+  Project.MarkModified;   // the IDE persists it on the next project save
+  Result := True;
 end;
 
 { ---------------------------------------------------------------

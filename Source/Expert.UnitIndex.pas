@@ -58,6 +58,9 @@ type
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     /// <summary>True when a unit of exactly this (dotted) name is indexed.</summary>
     function HasUnit(const AUnitName: string): Boolean;
+    /// <summary>Full .pas path of the indexed unit AUnitName (project
+    ///  scope shadows global). False when the unit is not indexed.</summary>
+    function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
     /// <summary>True when the indexed unit has an initialization or
     ///  finalization section (load-time side effects - the uses cleanup
     ///  must never flag such a unit as removable). False for unknown
@@ -164,6 +167,13 @@ type
 ///  (load-time side effects). Exposed for the console test suite.</summary>
 function ParseUnit(const AFile: string; out AUnitName: string;
   out AHasInit: Boolean): TArray<string>;
+
+/// <summary>The COMPILE-relevant directories: the IDE Library "Search
+///  Path" (browsing paths deliberately EXCLUDED - the compiler never
+///  looks there), the active project's DCC_UnitSearchPath entries, and
+///  the project directory itself. Used to detect units the index found
+///  via browsing paths only, which the compiler cannot reach.</summary>
+function GatherCompileSearchDirs: TArray<string>;
 
 implementation
 
@@ -636,7 +646,8 @@ begin
   if Result = '' then Result := TryHive(HKEY_LOCAL_MACHINE);
 end;
 
-function GatherGlobalLibraryDirs(const ABdsRoot: string): TArray<string>;
+function GatherIdeLibraryDirsEx(const ABdsRoot: string;
+  AIncludeBrowsing: Boolean): TArray<string>;
 
   function ReadPath(const ASubKey, AValue: string): string;
   var Reg: TRegistry;
@@ -693,8 +704,12 @@ begin
       Reg.Free;
     end;
     if VerKey = '' then Exit;
-    for Raw in [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Search Path'),
-                ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Browsing Path')] do
+    var Raws: TArray<string> :=
+      [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Search Path')];
+    if AIncludeBrowsing then
+      Raws := Raws +
+        [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Browsing Path')];
+    for Raw in Raws do
       for Dir in Raw.Split([';'], TStringSplitOptions.ExcludeEmpty) do
       begin
         var D := Expand(Trim(Dir));
@@ -706,6 +721,13 @@ begin
   finally
     Dirs.Free;
   end;
+end;
+
+// Library + browsing dirs merged - the INDEXING scope (we want to index
+// everything the user can see, not just what compiles).
+function GatherGlobalLibraryDirs(const ABdsRoot: string): TArray<string>;
+begin
+  Result := GatherIdeLibraryDirsEx(ABdsRoot, True);
 end;
 
 function GatherDprojSearchDirs: TArray<string>;
@@ -736,6 +758,36 @@ begin
         if TDirectory.Exists(D) and not Dirs.Contains(D) then Dirs.Add(D);
       end;
       P1 := PosEx('<DCC_UnitSearchPath>', Content, P2);
+    end;
+    Result := Dirs.ToArray;
+  finally
+    Dirs.Free;
+  end;
+end;
+
+function GatherCompileSearchDirs: TArray<string>;
+var
+  Dirs: TList<string>;
+
+  procedure Add(const AList: TArray<string>);
+  begin
+    for var D in AList do
+      if not Dirs.Contains(D) then Dirs.Add(D);
+  end;
+
+begin
+  Dirs := TList<string>.Create;
+  try
+    Add(GatherIdeLibraryDirsEx(FindBdsRoot, False));   // library, NO browsing
+    Add(GatherDprojSearchDirs);
+    if Editor <> nil then
+    begin
+      var Dproj := Editor.GetCurrentProjectDproj;
+      if Dproj <> '' then
+      begin
+        var D := ExcludeTrailingPathDelimiter(ExtractFilePath(Dproj));
+        if (D <> '') and not Dirs.Contains(D) then Dirs.Add(D);
+      end;
     end;
     Result := Dirs.ToArray;
   finally
@@ -774,6 +826,7 @@ type
     function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function HasUnit(const AUnitName: string): Boolean;
+    function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
     function HasInitCode(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
@@ -849,6 +902,22 @@ begin
   for I := 0 to High(FUnitName) do
     if SameText(FUnitName[I], AUnitName) then
       Exit(True);
+end;
+
+function TUnitSnapshot.TryGetUnitPath(const AUnitName: string;
+  out APath: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  APath := '';
+  if AUnitName = '' then Exit;
+  for I := 0 to High(FUnitName) do
+    if SameText(FUnitName[I], AUnitName) then
+    begin
+      APath := FUnitPath[I];
+      Exit(True);
+    end;
 end;
 
 function TUnitSnapshot.HasInitCode(const AUnitName: string): Boolean;

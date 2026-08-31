@@ -8,39 +8,58 @@
 unit Expert.ContextMenu;
 
 {
-  Hooks a "Refactoring Light" submenu into the Delphi IDE code editor's
-  context menu (the popup that appears when right-clicking in the code
-  editor).
+  Puts a "Refactoring Light" submenu into the Delphi IDE code editor's
+  context menu, and a copy of the same tree into the IDE's top-level
+  Refactor menu.
 
-  IMPORTANT - why we hook OnPopup instead of just appending items:
+  TWO PATHS, in this order:
 
-  Permanently keeping our TMenuItems inside EditorLocalMenu.Items
-  triggers the IDE's "A component named X already exists" error when
-  the popup is opened. The IDE's own popup-open logic walks the menu
-  and re-registers component names; foreign items confuse it.
+  1. PREFERRED - the official ToolsAPI (Delphi 12+):
+     IOTAEditorServices.GetEditorLocalMenu -> INTAEditorLocalMenu
+     .RegisterActionList(<our TActionList>, <own category>,
+                         InsertAfter = cEdMenuCatRefactor).
+     The IDE rebuilds the local menu on every use and calls each
+     action's OnUpdate first, so nothing of ours stays inside the
+     popup between uses: no OnPopup hooking, no component-name
+     clashes, and the IDE's own (dynamically added) entries are never
+     touched. The registration MUST be undone before the BPL unloads
+     (RemoveLocalMenu).
 
-  CnPack solves this in CnMenuHook.pas with the same pattern we use
-  here: hook the popup's OnPopup, and on every popup:
-    1. remove our items so the menu looks pristine,
-    2. run the original OnPopup (the IDE bookkeeping sees only its
-       own items),
-    3. add our items back so the user can click them.
+  2. FALLBACK (older IDEs / registration refused) - hook the popup's
+     OnPopup, like CnPack's CnMenuHook does:
+       a. remove our items so the menu looks pristine,
+       b. run the original handler (the IDE bookkeeping sees only its
+          own items - permanently parked TMenuItems otherwise trigger
+          "A component named X already exists"),
+       c. add our items back.
+     HARD RULE on this path: capture the forward target ONCE and never
+     re-take the top of the chain later - overwriting it drops the
+     IDE's own handler out of the chain, and with it every entry the
+     IDE adds per popup ("Find declaration" & co).
 
-  We also re-hook periodically because other IDE plugins may override
-  OnPopup later and would otherwise displace us.
-
-  The popup may not exist yet when Register runs, so the install is
-  retried via TTimer until the menu is found or the retry budget is
-  exhausted.
+  The editor popup / the IDE services may not exist yet when Register
+  runs, so the install is retried via TTimer until one path succeeds or
+  the retry budget is exhausted.
 }
 
 interface
 
 uses
   System.Classes, System.Generics.Collections, Vcl.Menus, Vcl.ExtCtrls,
+  Vcl.ActnList,
   Expert.Shortcuts;
 
 type
+  /// <summary>Owns a menu item's real handler and gates it through the
+  ///  shortcut debounce (see TExpertsShortCut.AllowAction).</summary>
+  TMenuActionProxy = class(TComponent)
+  private
+    FKind: TShortcutKind;
+    FInner: TNotifyEvent;
+  public
+    procedure Click(Sender: TObject);
+  end;
+
   TContextMenuInstaller = class
   private
     FItems: TArray<TMenuItem>;
@@ -70,6 +89,42 @@ type
     FPopupTakenOver: TMenuItem;
     FPopupDumped: Boolean;
     FPopupNoMatchDumped: Boolean;
+    // OFFICIAL editor-popup integration (Delphi 12+): an action list
+    // registered through INTAEditorLocalMenu. When this works we never
+    // touch the popup's OnPopup chain at all.
+    FLocalMenuOwner: TComponent;      // owns the action list + source tree
+    FLocalMenuActions: TActionList;
+    FLocalMenuOk: Boolean;
+    FActReq: TDictionary<TObject, Integer>;      // action -> requirement
+    FLocalReq: TDictionary<TMenuItem, Integer>;  // local tree -> requirement
+    FLocalLastSep: Boolean;   // last emitted local-menu action was a separator
+    // Context cache: ReqState runs per menu item / per action, and
+    // GetCurrentProjectDproj walks every open module - query at most a
+    // few times per second instead.
+    FCtxTick: Cardinal;
+    FCtxProject: Boolean;
+    FCtxEditor: Boolean;
+    procedure MenuContext(out AHasProject, AHasEditor: Boolean);
+    /// <summary>Registers our tree via INTAEditorLocalMenu. False when
+    ///  the IDE does not expose it (pre-12) or registration fails - the
+    ///  caller then falls back to the OnPopup hook.</summary>
+    function TryInstallLocalMenu: Boolean;
+    procedure BuildLocalMenuActions(AParent: TMenuItem;
+      const ACat, APrefix: string);
+    procedure DoLocalActionUpdate(Sender: TObject);
+    /// <summary>The submenu ROOT must stay openable no matter what the
+    ///  context is - otherwise a disabled parent hides every entry (the
+    ///  IDE greys a parent whose action carries no handler / whose
+    ///  children are all disabled). Same reasoning as HookRefactorAction
+    ///  for the main menu.</summary>
+    procedure DoLocalRootUpdate(Sender: TObject);
+    procedure DoLocalRootExecute(Sender: TObject);
+    procedure RemoveLocalMenu;
+    /// <summary>Enabled state (and annotated caption) for a context
+    ///  requirement - shared by the main-menu updater and the editor
+    ///  local-menu actions.</summary>
+    function ReqState(AReq: Integer; const ABase: string;
+      out ACaption: string): Boolean;
     procedure UpdateMainItemStates;
     procedure OnRename(Sender: TObject);
     procedure OnFindReferences(Sender: TObject);
@@ -105,8 +160,16 @@ type
     function IsOurHandler(const AHandler: TNotifyEvent): Boolean;
     function FindEditorPopupMenu: TPopupMenu;
     function MakeItem(AOwner: TComponent; const ACaption: string;
-      AOnClick: TNotifyEvent; AKind: TShortcutKind; ATrackShortcut: Boolean): TMenuItem;
-    function BuildMenuTree(AOwner: TComponent; ATrackShortcut: Boolean): TMenuItem;
+      AOnClick: TNotifyEvent; AKind: TShortcutKind): TMenuItem;
+    /// <summary>Re-applies the ShortCut property of AItem and all its
+    ///  children from the current settings (Tag carries the kind).</summary>
+    procedure RefreshShortcutsIn(AItem: TMenuItem);
+    /// <summary>Builds the menu tree owned by AOwner. AReqMap (when
+    ///  assigned) receives each item's context requirement - pass the map
+    ///  belonging to THAT tree: mixing trees into one map means updating
+    ///  invisible items, and freeing one tree leaves dangling keys.</summary>
+    function BuildMenuTree(AOwner: TComponent;
+      AReqMap: TDictionary<TMenuItem, Integer>): TMenuItem;
     function FindRefactorMenu: TMenuItem;
     function FindPopupRefactorItem: TMenuItem;
     procedure DumpMainMenu(const AReason: string);
@@ -141,7 +204,7 @@ implementation
 uses
   System.SysUtils, System.UITypes, System.IOUtils, System.StrUtils,
   System.Actions, Winapi.Windows, ToolsAPI,
-  Vcl.Forms, Vcl.Controls, Vcl.ActnList,
+  Vcl.Forms, Vcl.Controls,
   Expert.EditorHelperIntf,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
@@ -167,6 +230,13 @@ const
   REQ_EDITOR   = 2;  // needs an active source editor (cursor context)
   REQ_LIVEALL  = 4;  // like REQ_EDITOR; caption annotated with the TOTAL
                      // live quick-fix count ("Show all quick fixes (N)")
+
+  // Base caption of the REQ_LIVEALL entry - annotated with the count by
+  // ReqState, so both menu copies and the action list stay in sync.
+  CapShowAllFixes = 'Show all quick fixes...';
+
+  // Our category in the editor local menu (INTAEditorLocalMenu).
+  LocalMenuCategory = 'RefactoringLight';
   REQ_LIVEFIX = 3;   // like REQ_EDITOR, but additionally reflects the live
                      // auto-import check: disabled when the checker KNOWS
                      // there is nothing to fix; annotated with the count
@@ -177,6 +247,8 @@ const
 destructor TContextMenuInstaller.Destroy;
 begin
   Uninstall;
+  FreeAndNil(FActReq);
+  FreeAndNil(FLocalReq);
   FreeAndNil(FItemReq);
   inherited;
 end;
@@ -201,19 +273,45 @@ begin
   end;
 end;
 
+{ TMenuActionProxy }
+
+procedure TMenuActionProxy.Click(Sender: TObject);
+begin
+  // One keystroke can reach us twice (menu accelerator + keyboard
+  // binding) - run the action once.
+  if not TExpertsShortCut.AllowAction(FKind) then Exit;
+  if Assigned(FInner) then FInner(Sender);
+end;
+
 function TContextMenuInstaller.MakeItem(AOwner: TComponent; const ACaption: string;
-  AOnClick: TNotifyEvent; AKind: TShortcutKind; ATrackShortcut: Boolean): TMenuItem;
+  AOnClick: TNotifyEvent; AKind: TShortcutKind): TMenuItem;
 begin
   Result := TMenuItem.Create(AOwner);
   Result.Caption := ACaption;
-  Result.OnClick := AOnClick;
-  if ATrackShortcut then
-  begin
-    // Tag stores the shortcut kind so RefreshShortcuts can find this item.
-    // Encoded as Ord+1 so 0 means "no shortcut tracked".
-    Result.Tag := Ord(AKind) + 1;
-    Result.ShortCut := TExpertsShortCut.Shortcuts[AKind];
-  end;
+  // Tag stores the shortcut kind so the refreshers can find this item.
+  // Encoded as Ord+1 so 0 means "no shortcut tracked".
+  Result.Tag := Ord(AKind) + 1;
+  // Both copies show the key natively (the IDE menu paints the ShortCut
+  // property; a caption with #9 is NOT rendered right-aligned there).
+  // Popup shortcuts are display-only in the VCL, main-MENU ones really
+  // dispatch - so the click goes through a proxy that debounces against
+  // our IOTAKeyboardBinding firing for the same keystroke.
+  Result.ShortCut := TExpertsShortCut.Shortcuts[AKind];
+  var Proxy := TMenuActionProxy.Create(AOwner);
+  Proxy.FKind := AKind;
+  Proxy.FInner := AOnClick;
+  Result.OnClick := Proxy.Click;
+end;
+
+procedure TContextMenuInstaller.RefreshShortcutsIn(AItem: TMenuItem);
+var
+  I: Integer;
+begin
+  if AItem = nil then Exit;
+  if (AItem.Tag >= 1) and (AItem.Tag <= Ord(High(TShortcutKind)) + 1) then
+    AItem.ShortCut := TExpertsShortCut.Shortcuts[TShortcutKind(AItem.Tag - 1)];
+  for I := 0 to AItem.Count - 1 do
+    RefreshShortcutsIn(AItem.Items[I]);
 end;
 
 procedure TContextMenuInstaller.RefreshShortcuts;
@@ -230,27 +328,38 @@ begin
       Item.ShortCut := TExpertsShortCut.Shortcuts[Kind];
     end;
   end;
+  // The main-menu copy is a separate tree - refresh it recursively.
+  for Item in FMainMenuAdded do
+    RefreshShortcutsIn(Item);
+  // ... and so are the editor local-menu ACTIONS: they copied the key at
+  // build time, so without this the popup advertises the old shortcut
+  // until the IDE restarts.
+  if FLocalMenuActions <> nil then
+    for var I := 0 to FLocalMenuActions.ActionCount - 1 do
+      if FLocalMenuActions.Actions[I] is TCustomAction then
+      begin
+        var Act := TCustomAction(FLocalMenuActions.Actions[I]);
+        if (Act.Tag >= 1) and (Act.Tag <= Ord(High(TShortcutKind)) + 1) then
+          Act.ShortCut := TExpertsShortCut.Shortcuts[TShortcutKind(Act.Tag - 1)];
+      end;
 end;
 
 // Builds the whole "Refactoring Light" submenu tree owned by AOwner and
-// returns its root item. ATrackShortcut controls whether the leaf items
-// carry the configurable shortcuts (True for the editor popup, False for
-// the copy hung into the IDE's main Refactor menu).
+// returns its root item. Every leaf carries its shortcut (display) and
+// routes its click through the debounce proxy; AReqMap collects the
+// context requirements for whoever updates THAT tree.
 function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
-  ATrackShortcut: Boolean): TMenuItem;
+  AReqMap: TDictionary<TMenuItem, Integer>): TMenuItem;
 
-  // Records the item's context requirement (only for the main-menu copy;
-  // the popup already only appears in an editor context).
   procedure Req(AItem: TMenuItem; AReq: Integer);
   begin
-    if (not ATrackShortcut) and (FItemReq <> nil) then
-      FItemReq.AddOrSetValue(AItem, AReq);
+    if AReqMap <> nil then AReqMap.AddOrSetValue(AItem, AReq);
   end;
 
   function Leaf(AParent: TMenuItem; const ACaption: string; AOnClick: TNotifyEvent;
     AKind: TShortcutKind; AReq: Integer): TMenuItem;
   begin
-    Result := MakeItem(AOwner, ACaption, AOnClick, AKind, ATrackShortcut);
+    Result := MakeItem(AOwner, ACaption, AOnClick, AKind);
     AParent.Add(Result);
     Req(Result, AReq);
   end;
@@ -283,9 +392,6 @@ function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
 var
   Root, RemoveWithSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
 begin
-  if (not ATrackShortcut) and (FItemReq = nil) then
-    FItemReq := TDictionary<TMenuItem, Integer>.Create;
-
   Root := TMenuItem.Create(AOwner);
   Root.Caption := 'Refactoring Light';
 
@@ -301,7 +407,7 @@ begin
   Plain(RemoveWithSub, 'In selected units...', OnRemoveWithSelectedUnits, REQ_PROJECT);
   Plain(RemoveWithSub, 'In whole project...', OnRemoveWithProjectWide,   REQ_PROJECT);
 
-  IfaceSub := Sub(Root, 'Extract / extend interface');
+  IfaceSub := Sub(Root, 'Interfaces');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
   Plain(IfaceSub, 'Add to existing interface...',        OnAddToExistingInterface, REQ_EDITOR);
   Plain(IfaceSub, 'Add IInterface support to class...',  OnDelegateInterface,      REQ_EDITOR);
@@ -315,7 +421,7 @@ begin
 
   // ---- Uses clause / missing units ----------------------------------------
   Sep(Root);
-  Plain(Root, 'Show all quick fixes...', OnShowQuickFixes,        REQ_LIVEALL);
+  Plain(Root, CapShowAllFixes,            OnShowQuickFixes,       REQ_LIVEALL);
   Plain(Root, 'Add unit for identifier at cursor', OnAddUnitAtCursor, REQ_LIVEFIX);
   Plain(Root, 'Resolve missing units...', OnResolveMissingUnits,  REQ_EDITOR);
   Plain(Root, 'Find unit for identifier...', OnFindUnit,          REQ_PROJECT);
@@ -346,7 +452,7 @@ var
 begin
   if Length(FItems) > 0 then Exit;
 
-  Submenu := BuildMenuTree(FPopupMenu, True);
+  Submenu := BuildMenuTree(FPopupMenu, nil);   // popup: no state map
 
   FSeparator := TMenuItem.Create(FPopupMenu);
   FSeparator.Caption := '-';
@@ -589,11 +695,253 @@ begin
     and (ES.TopBuffer <> nil);
 end;
 
-procedure TContextMenuInstaller.UpdateMainItemStates;
+procedure TContextMenuInstaller.MenuContext(out AHasProject, AHasEditor: Boolean);
+var
+  Tick: Cardinal;
+begin
+  // GetCurrentProjectDproj walks every open module - too expensive to
+  // repeat per menu item (ReqState runs once per entry, and the IDE
+  // rebuilds the local menu action by action).
+  Tick := GetTickCount;
+  if (FCtxTick = 0) or (Tick - FCtxTick > 250) then
+  begin
+    FCtxTick := Tick;
+    FCtxProject := (Editor <> nil) and (Editor.GetCurrentProjectDproj <> '');
+    FCtxEditor := HasActiveSourceEditor;
+  end;
+  AHasProject := FCtxProject;
+  AHasEditor := FCtxEditor;
+end;
+
+function TContextMenuInstaller.ReqState(AReq: Integer; const ABase: string;
+  out ACaption: string): Boolean;
 var
   HasProject, HasEditor: Boolean;
+  LiveCount: Integer;
+  AllFixes: TArray<TQuickFix>;
+begin
+  ACaption := ABase;
+  MenuContext(HasProject, HasEditor);
+  case AReq of
+    REQ_EDITOR: Result := HasProject and HasEditor;
+    REQ_LIVEFIX:
+      begin
+        // Fresh live data with zero missing units -> nothing to do at the
+        // caret. No count annotation here: it is file-wide, this action is
+        // not (that read as a broken promise).
+        Result := HasProject and HasEditor;
+        if Result and LiveFreshInfo(Editor.GetActiveFileName, LiveCount) then
+          Result := LiveCount > 0;
+      end;
+    REQ_LIVEALL:
+      begin
+        // File-wide overview: annotate with the TOTAL fix count.
+        Result := HasProject and HasEditor;
+        if Result and LiveAllFixes(Editor.GetActiveFileName, AllFixes) then
+        begin
+          Result := Length(AllFixes) > 0;
+          if Result then
+            ACaption := Format('%s (%d found)', [ABase, Length(AllFixes)]);
+        end;
+      end;
+  else          // REQ_PROJECT (and group headers)
+    Result := HasProject;
+  end;
+end;
+
+function TContextMenuInstaller.TryInstallLocalMenu: Boolean;
+// The OFFICIAL way to extend the editor popup (Delphi 12+): register a
+// TActionList under our own category, inserted after the IDE's Refactor
+// category. The IDE rebuilds the menu on every popup and calls each
+// action's OnUpdate first - so no OnPopup hooking, no re-entrancy guard,
+// and the IDE's own dynamic entries (Find declaration & co) are never
+// disturbed.
+var
+  ES: IOTAEditorServices;
+  LocalMenu: INTAEditorLocalMenu;
+  Root: TMenuItem;
+  RootAct: TAction;
+begin
+  Result := False;
+  if FLocalMenuOk then Exit(True);
+  if not Supports(BorlandIDEServices, IOTAEditorServices, ES) then Exit;
+  try
+    LocalMenu := ES.GetEditorLocalMenu;
+  except
+    LocalMenu := nil;
+  end;
+  if LocalMenu = nil then Exit;
+
+  if FActReq = nil then FActReq := TDictionary<TObject, Integer>.Create;
+  if FLocalReq = nil then FLocalReq := TDictionary<TMenuItem, Integer>.Create;
+  FLocalMenuOwner := TComponent.Create(nil);
+  FLocalMenuActions := TActionList.Create(FLocalMenuOwner);
+
+  // Source of truth stays BuildMenuTree - the action list mirrors it, so
+  // popup and main menu can never drift apart. The tree stays alive: the
+  // actions call its (debounced) click handlers.
+  Root := BuildMenuTree(FLocalMenuOwner, FLocalReq);
+  Root.Caption := 'Refactoring Light';
+
+  RootAct := TAction.Create(FLocalMenuOwner);
+  RootAct.ActionList := FLocalMenuActions;
+  RootAct.Caption := Root.Caption;
+  RootAct.Category := LocalMenuCategory;
+  RootAct.OnUpdate := DoLocalRootUpdate;
+  RootAct.OnExecute := DoLocalRootExecute;
+  RootAct.Enabled := True;
+  // Sub-items must FOLLOW their parent and carry the parent's category
+  // plus '.<name>' (INTAEditorLocalMenu contract).
+  FLocalLastSep := True;   // nothing emitted yet -> no leading separator
+  BuildLocalMenuActions(Root, LocalMenuCategory + '.Items', '');
+  // A group at the very end would leave a dangling separator.
+  if (FLocalMenuActions.ActionCount > 0)
+    and (TCustomAction(FLocalMenuActions.Actions[
+           FLocalMenuActions.ActionCount - 1]).Caption = '-') then
+    FLocalMenuActions.Actions[FLocalMenuActions.ActionCount - 1].Free;
+
+  try
+    LocalMenu.RegisterActionList(FLocalMenuActions, LocalMenuCategory,
+      cEdMenuCatRefactor);
+    FLocalMenuOk := True;
+    Result := True;
+    LogPopupEvent('editor local menu registered via INTAEditorLocalMenu');
+  except
+    on E: Exception do
+    begin
+      LogPopupEvent('INTAEditorLocalMenu registration failed: ' + E.Message);
+      FLocalMenuActions := nil;
+      // The owner frees the whole mirror tree AND its actions - their
+      // pointers must not stay behind as dictionary keys (the updaters
+      // would then write into freed memory).
+      FreeAndNil(FLocalMenuOwner);
+      FLocalReq.Clear;
+      FActReq.Clear;
+    end;
+  end;
+end;
+
+procedure TContextMenuInstaller.BuildLocalMenuActions(AParent: TMenuItem;
+  const ACat, APrefix: string);
+// The editor local menu renders exactly ONE nesting level below the
+// registered category (verified empirically: a second '.<name>' level is
+// NOT turned into a submenu, its actions just land flat next to their
+// parent - which then sits there as a dead row). Our tree has two levels,
+// so a GROUP is flattened into a separator-delimited block whose entries
+// carry the group name as a caption prefix ("Remove with > In current
+// unit"). The main-menu copy keeps the real submenus.
+var
+  I, Req: Integer;
+  Item: TMenuItem;
+  Act: TAction;
+
+  procedure EmitSeparator;
+  var
+    Sep: TAction;
+  begin
+    if FLocalLastSep then Exit;   // never two in a row / none at the top
+    Sep := TAction.Create(FLocalMenuOwner);
+    Sep.ActionList := FLocalMenuActions;
+    Sep.Caption := '-';
+    Sep.Category := ACat;
+    Sep.Enabled := False;
+    FLocalLastSep := True;
+  end;
+
+begin
+  for I := 0 to AParent.Count - 1 do
+  begin
+    Item := AParent.Items[I];
+
+    if Item.Count > 0 then
+    begin
+      // A group: fence it off and prefix its entries with the group name.
+      EmitSeparator;
+      BuildLocalMenuActions(Item, ACat, Item.Caption + ' > ');
+      EmitSeparator;
+      Continue;
+    end;
+
+    if Item.IsLine then
+    begin
+      EmitSeparator;
+      Continue;
+    end;
+
+    Act := TAction.Create(FLocalMenuOwner);
+    Act.ActionList := FLocalMenuActions;
+    Act.Caption := APrefix + Item.Caption;
+    Act.Category := ACat;
+    Act.Tag := Item.Tag;
+    Act.OnExecute := Item.OnClick;    // the debounce proxy from MakeItem
+    Act.ShortCut := Item.ShortCut;
+    Act.OnUpdate := DoLocalActionUpdate;
+    if (FLocalReq <> nil) and FLocalReq.TryGetValue(Item, Req) then
+      FActReq.AddOrSetValue(Act, Req);
+    FLocalLastSep := False;
+  end;
+end;
+
+procedure TContextMenuInstaller.DoLocalRootUpdate(Sender: TObject);
+begin
+  if Sender is TCustomAction then
+    TCustomAction(Sender).Enabled := True;
+end;
+
+procedure TContextMenuInstaller.DoLocalRootExecute(Sender: TObject);
+begin
+  // A parent item only opens its submenu - but an action WITHOUT an
+  // execute handler is greyed out by the action machinery.
+end;
+
+procedure TContextMenuInstaller.DoLocalActionUpdate(Sender: TObject);
+var
+  Req: Integer;
+  Cap: string;
+  Act: TCustomAction;
+begin
+  if not (Sender is TCustomAction) then Exit;
+  Act := TCustomAction(Sender);
+  if (FActReq = nil) or not FActReq.TryGetValue(Act, Req) then Exit;
+  try
+    Act.Enabled := ReqState(Req, CapShowAllFixes, Cap);
+    if (Req = REQ_LIVEALL) and (Act.Caption <> Cap) then Act.Caption := Cap;
+    // (the LIVEALL entry is never inside a group, so the base caption
+    //  needs no prefix handling)
+  except
+    // never let an exception escape into the IDE's menu build
+  end;
+end;
+
+procedure TContextMenuInstaller.RemoveLocalMenu;
+var
+  ES: IOTAEditorServices;
+  LocalMenu: INTAEditorLocalMenu;
+begin
+  if not FLocalMenuOk then Exit;
+  FLocalMenuOk := False;
+  // MANDATORY before the BPL unloads (documented in the ToolsAPI).
+  try
+    if Supports(BorlandIDEServices, IOTAEditorServices, ES) then
+    begin
+      LocalMenu := ES.GetEditorLocalMenu;
+      if LocalMenu <> nil then
+        LocalMenu.UnregisterActionList(LocalMenuCategory);
+    end;
+  except
+    // IDE shutting down - nothing left to unregister
+  end;
+  FLocalMenuActions := nil;
+  FreeAndNil(FLocalMenuOwner);   // frees the mirror tree + its actions
+  if FActReq <> nil then FActReq.Clear;
+  if FLocalReq <> nil then FLocalReq.Clear;
+end;
+
+procedure TContextMenuInstaller.UpdateMainItemStates;
+var
   Pair: TPair<TMenuItem, Integer>;
   En: Boolean;
+  Cap: string;
   Tick: Cardinal;
 begin
   if (FItemReq = nil) or (Editor = nil) then Exit;
@@ -603,48 +951,15 @@ begin
   if (FLastStateTick <> 0) and (Tick - FLastStateTick < 300) then Exit;
   FLastStateTick := Tick;
 
-  HasProject := Editor.GetCurrentProjectDproj <> '';
-  HasEditor := HasActiveSourceEditor;
   for Pair in FItemReq do
   begin
-    case Pair.Value of
-      REQ_EDITOR:  En := HasProject and HasEditor;
-      REQ_LIVEFIX:
-        begin
-          En := HasProject and HasEditor;
-          // When the live auto-import check holds FRESH results for the
-          // active buffer, reflect them: no missing units -> disabled.
-          // (No count annotation here - the count is file-wide while this
-          // action only works AT the cursor, which read as a broken
-          // promise; the count lives on "Show all quick fixes" now.)
-          var LiveCount: Integer;
-          if En and LiveFreshInfo(Editor.GetActiveFileName, LiveCount) then
-            En := LiveCount > 0;
-        end;
-      REQ_LIVEALL:
-        begin
-          En := HasProject and HasEditor;
-          // File-wide overview: annotate with the TOTAL number of live
-          // quick fixes. Fresh data with zero fixes -> disabled; without
-          // fresh data the entry stays enabled (the action waits for the
-          // next analysis itself).
-          var AllFixes: TArray<TQuickFix>;
-          var Cap := 'Show all quick fixes...';
-          if En and LiveAllFixes(Editor.GetActiveFileName, AllFixes) then
-          begin
-            En := Length(AllFixes) > 0;
-            if Length(AllFixes) > 0 then
-              Cap := Format('Show all quick fixes... (%d found)', [Length(AllFixes)]);
-          end;
-          // Only write on an actual change - TMenuItem setters trigger
-          // MenuChanged up to the menu bar, which repaints it.
-          try
-            if Pair.Key.Caption <> Cap then Pair.Key.Caption := Cap;
-          except
-          end;
-        end;
-    else           // REQ_PROJECT (and groups)
-      En := HasProject;
+    En := ReqState(Pair.Value, CapShowAllFixes, Cap);
+    // Only write on an actual change - TMenuItem setters trigger
+    // MenuChanged up to the menu bar, which repaints it.
+    try
+      if (Pair.Value = REQ_LIVEALL) and (Pair.Key.Caption <> Cap) then
+        Pair.Key.Caption := Cap;
+    except
     end;
     try
       if Pair.Key.Enabled <> En then Pair.Key.Enabled := En;
@@ -711,7 +1026,8 @@ begin
   // menu. No leading separator - we replace the menu's contents entirely.
   if Length(FMainMenuAdded) = 0 then
   begin
-    Root := BuildMenuTree(FMainMenuOwner, False);   // no shortcuts here
+    if FItemReq = nil then FItemReq := TDictionary<TMenuItem, Integer>.Create;
+    Root := BuildMenuTree(FMainMenuOwner, FItemReq);
     while Root.Count > 0 do
     begin
       Child := Root.Items[0];
@@ -951,12 +1267,12 @@ end;
 
 procedure TContextMenuInstaller.Install;
 begin
-  if FHooked then Exit; // already installed
+  if FHooked or FLocalMenuOk then Exit; // already installed
 
-  // Try once immediately; if the popup is not yet available, start a
-  // timer that keeps retrying until it shows up.
+  // Try once immediately; if neither path is available yet (no editor
+  // popup, services not up), start a timer that keeps retrying.
   TryInstall;
-  if FHooked then Exit;
+  if FHooked or FLocalMenuOk then Exit;
 
   if FRetryTimer = nil then
   begin
@@ -971,7 +1287,7 @@ end;
 procedure TContextMenuInstaller.OnRetryTimer(Sender: TObject);
 begin
   TryInstall;
-  if FHooked or (FRetryCount >= MaxRetries) then
+  if FHooked or FLocalMenuOk or (FRetryCount >= MaxRetries) then
     FRetryTimer.Enabled := False
   else
     Inc(FRetryCount);
@@ -1008,7 +1324,28 @@ end;
 
 procedure TContextMenuInstaller.TryInstall;
 begin
-  if FHooked then Exit;
+  if FHooked or FLocalMenuOk then Exit;
+
+  // PREFERRED: the official editor-menu API (Delphi 12+). Only when it is
+  // unavailable do we fall back to hooking the popup's OnPopup chain -
+  // that path has to hide/restore the IDE's own Refactoring entry on
+  // every popup and must never break the handler chain.
+  try
+    if TryInstallLocalMenu then
+    begin
+      try InstallIntoMainMenu; except end;
+      if FSyncTimer = nil then
+      begin
+        FSyncTimer := TTimer.Create(nil);
+        FSyncTimer.Interval := SyncIntervalMs;
+        FSyncTimer.OnTimer := OnSyncTimer;
+        FSyncTimer.Enabled := True;   // keeps the MAIN menu entry alive
+      end;
+      Exit;
+    end;
+  except
+    // fall through to the legacy hook
+  end;
 
   FPopupMenu := FindEditorPopupMenu;
   if FPopupMenu = nil then Exit;
@@ -1043,6 +1380,9 @@ begin
     FSyncTimer.Enabled := False;
     FreeAndNil(FSyncTimer);
   end;
+
+  // Official editor-menu registration must go before the BPL unloads.
+  RemoveLocalMenu;
 
   // Remove our copy from the IDE main Refactor menu (frees that tree).
   RemoveFromMainMenu;

@@ -80,6 +80,7 @@ contains
   Expert.UnitReferencesWizard in '..\Source\Expert.UnitReferencesWizard.pas',
   Expert.DialogHelper in '..\Source\Expert.DialogHelper.pas',
   Expert.ListViewSort in '..\Source\Expert.ListViewSort.pas',
+  Expert.UnitAvailability in '..\Source\Expert.UnitAvailability.pas',
   Expert.MoveToUnit in '..\Source\Expert.MoveToUnit.pas',
   Expert.MoveToUnitDialog in '..\Source\Expert.MoveToUnitDialog.pas',
   Expert.MoveToUnitWizard in '..\Source\Expert.MoveToUnitWizard.pas',

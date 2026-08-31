@@ -24,6 +24,14 @@ type
 ///  (whole-token, case-insensitive; dotted names compared whole).</summary>
 function UnitInUsesText(const AContent, AUnit: string): Boolean;
 
+/// <summary>True if AUnit appears in the uses clause of the given
+///  SECTION of AContent. An interface-clause entry is reachable from
+///  both sections; an implementation entry only from the
+///  implementation. Lets callers tell a stale "add unit" diagnostic
+///  (unit already reachable) from a real one.</summary>
+function UnitInUsesSection(const AContent, AUnit: string;
+  ASection: TUsesSection): Boolean;
+
 /// <summary>Cuts a trailing '//' comment off a source line
 ///  (string-literal aware). Shared helper for line-level Pascal parsing.</summary>
 function StripLineComment(const L: string): string;
@@ -246,6 +254,58 @@ begin
     InUses := False;
     for I := 0 to SL.Count - 1 do
     begin
+      L := StripLineComment(SL[I]);
+      Low := LowerCase(Trim(L));
+      if not InUses then
+      begin
+        if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
+          InUses := True
+        else
+          Continue;
+      end;
+      if TokenEquals(L, AUnit) then Exit(True);
+      if Pos(';', L) > 0 then InUses := False;
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+function UnitInUsesSection(const AContent, AUnit: string;
+  ASection: TUsesSection): Boolean;
+var
+  SL: TStringList;
+  I, ImplIdx, First, Last: Integer;
+  InUses: Boolean;
+  L, Low: string;
+begin
+  Result := False;
+  if AUnit = '' then Exit;
+  SL := TStringList.Create;
+  try
+    SL.Text := AContent;
+    ImplIdx := SL.Count;
+    for I := 0 to SL.Count - 1 do
+      if SameText(Trim(StripLineComment(SL[I])), 'implementation') then
+      begin
+        ImplIdx := I;
+        Break;
+      end;
+    if ASection = usInterface then
+    begin
+      First := 0;
+      Last := ImplIdx - 1;
+    end
+    else
+    begin
+      First := ImplIdx;
+      Last := SL.Count - 1;
+    end;
+
+    InUses := False;
+    for I := First to Last do
+    begin
+      if (I < 0) or (I >= SL.Count) then Continue;
       L := StripLineComment(SL[I]);
       Low := LowerCase(Trim(L));
       if not InUses then

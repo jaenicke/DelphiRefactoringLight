@@ -32,6 +32,8 @@ type
   strict private
     class var FShortcuts: array[TShortcutKind] of TShortCut;
     class var FListeners: TList<TMethod>;
+    /// <summary>Tick of the last dispatch per kind - see AllowAction.</summary>
+    class var FLastFired: array[TShortcutKind] of Cardinal;
     class function GetShortcut(Kind: TShortcutKind): TShortCut; static;
     class procedure SetShortcut(Kind: TShortcutKind; Value: TShortCut); static;
     class function RegistryKey: string; static;
@@ -54,6 +56,14 @@ type
     /// <summary>Fires all registered change listeners. Call after edits
     ///  so KeyBinding and ContextMenu can refresh.</summary>
     class procedure NotifyChanged; static;
+
+    /// <summary>Debounce for actions reachable through TWO dispatch paths
+    ///  for the same keystroke: the main-menu accelerator
+    ///  (TMenuItem.ShortCut, which the VCL dispatches via
+    ///  TCustomForm.IsShortCut) and our IOTAKeyboardBinding. Normally
+    ///  only one of them ever sees the key - this makes "both fired"
+    ///  harmless instead of running the action twice. Checks AND stamps.</summary>
+    class function AllowAction(Kind: TShortcutKind): Boolean; static;
 
     class procedure AddListener(AProc: TShortcutChangedProc); static;
     class procedure RemoveListener(AProc: TShortcutChangedProc); static;
@@ -253,6 +263,17 @@ begin
         // listener errors must not break the options dialog
       end;
   end;
+end;
+
+class function TExpertsShortCut.AllowAction(Kind: TShortcutKind): Boolean;
+const
+  DebounceMs = 400;
+var
+  Now_: Cardinal;
+begin
+  Now_ := GetTickCount;
+  Result := (FLastFired[Kind] = 0) or (Now_ - FLastFired[Kind] > DebounceMs);
+  if Result then FLastFired[Kind] := Now_;
 end;
 
 class function TExpertsShortCut.scRename: TShortCut;

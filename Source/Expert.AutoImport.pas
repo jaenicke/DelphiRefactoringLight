@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -154,6 +154,21 @@ function LiveFixesForLine(const AFile: string; ALine0: Integer): TArray<TQuickFi
 ///  Main thread only.</summary>
 function LiveAllFixes(const AFile: string; out AFixes: TArray<TQuickFix>): Boolean;
 
+/// <summary>True when AUnit is already usable from ASection of AContent
+///  (an interface-clause entry serves both sections, an implementation
+///  entry only the implementation). The guard that tells a STALE
+///  add-unit diagnostic - our LSP can lag one edit behind - from a real
+///  one.</summary>
+function UnitReachableFrom(const AContent, AUnit: string;
+  ASection: TUsesSection): Boolean;
+
+/// <summary>Drops every published live result. Called when the active
+///  PROJECT changes: the results are keyed by (file, content hash), so
+///  an untouched buffer would otherwise keep showing fixes resolved for
+///  the old project context (stale diagnostics survive a reopen).
+///  State only - the next poll tick hides the hint.</summary>
+procedure LiveResetResults;
+
 /// <summary>Menu entry point: modal overview of EVERY quick fix in the
 ///  active unit (line-sorted, sortable columns). Selecting one jumps to
 ///  its line and opens the regular fix popup there. Waits briefly for a
@@ -187,7 +202,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Graphics, Vcl.Dialogs,
   Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf,
+  Expert.EditorHelperIntf, Expert.UnitAvailability,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
   Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
 
@@ -242,6 +257,18 @@ begin
     Res.Free;
     Seen.Free;
   end;
+end;
+
+// Used to drop STALE add-unit diagnostics: our LSP (and Error Insight)
+// can lag one edit behind, so right after the user added the unit the
+// very same E2003 is reported again - without this guard the fix stuck
+// to the now-correct buffer state forever.
+function UnitReachableFrom(const AContent, AUnit: string;
+  ASection: TUsesSection): Boolean;
+begin
+  Result := UnitInUsesSection(AContent, AUnit, usInterface)
+    or ((ASection = usImplementation)
+        and UnitInUsesSection(AContent, AUnit, usImplementation));
 end;
 
 function ReadCurrentContent(const AFile: string; out AContent: string): Boolean;
@@ -390,6 +417,13 @@ begin
       M.GenericUse := EGenericUse;
       M.Line := D.Range.Start.Line;
       if M.Line < ImplLine then M.Section := usInterface else M.Section := usImplementation;
+      // Stale diagnostic? Every candidate already reachable -> nothing to add.
+      var Usable: TArray<TFindUnitHit> := nil;
+      for var H in Hits do
+        if not UnitReachableFrom(AContent, H.UnitName, M.Section) then
+          Usable := Usable + [H];
+      if Length(Usable) = 0 then Continue;
+      Hits := Usable;
       M.Units := Hits;
       Res.Add(M);
     end;
@@ -652,8 +686,19 @@ var
       and (D.Range.Start.Line <= High(Lines))
       and IsGenericUseAt(Lines[D.Range.Start.Line], Col0, Len);
     Hits := DedupeByUnitName(FilterHitsByGenericUse(Snap.Lookup(Ident), GenericUse));
+    var Sect := SectionFor(D.Range.Start.Line);
     if Length(Hits) > 0 then
     begin
+      // STALE-DIAGNOSTIC GUARD (same as H2443): when every candidate unit
+      // is already reachable from this section, the identifier resolves
+      // and the E2003 is a leftover from a previous buffer state - offer
+      // nothing (otherwise the fix stuck for good on an untouched buffer).
+      var Usable: TArray<TFindUnitHit> := nil;
+      for var H in Hits do
+        if not UnitReachableFrom(AContent, H.UnitName, Sect) then
+          Usable := Usable + [H];
+      if Length(Usable) = 0 then Exit;
+      Hits := Usable;
       // Display form: "TList<>" makes clear the GENERIC variant is meant.
       var Disp := Ident;
       if GenericUse then Disp := Disp + '<>';
@@ -664,7 +709,7 @@ var
       F.TokenLen := Len;
       F.Identifier := Disp;
       F.Caption := Format('Add unit for "%s"', [Disp]);
-      F.Section := SectionFor(F.Line);
+      F.Section := Sect;
       for var H in Hits do
         F.UnitNames := F.UnitNames + [H.UnitName];
       Res.Add(F);
@@ -1250,6 +1295,9 @@ end;
 
 function ApplyOne(const AFile, AUnit: string; ASection: TUsesSection): Boolean;
 begin
+  // Units the index only found via a BROWSING path are invisible to the
+  // compiler - offer to make them project-visible first.
+  if not EnsureUnitAvailable(AUnit) then Exit(False);
   Result := AddUnitToUses(AFile, AUnit, ASection);
 end;
 
@@ -2055,6 +2103,19 @@ var
 begin
   if (FList.ItemIndex < 0) or (FList.ItemIndex > High(FActions)) then Exit;
   A := FActions[FList.ItemIndex];
+  // Browsing-path-only units: offer to make them project-visible first
+  // (the availability dialog deactivates us - detach the close handler).
+  if (FFixes[A.FixIdx].Kind = qfAddUnit)
+    and (A.UnitChoice >= 0)
+    and (A.UnitChoice <= High(FFixes[A.FixIdx].UnitNames)) then
+  begin
+    OnDeactivate := nil;
+    if not EnsureUnitAvailable(FFixes[A.FixIdx].UnitNames[A.UnitChoice]) then
+    begin
+      Close;   // user cancelled - no message
+      Exit;
+    end;
+  end;
   Ok := ApplyQuickFix(FFile, FFixes[A.FixIdx], A.UnitChoice);
   if not Ok then
   begin
@@ -2969,6 +3030,22 @@ begin
   Result := (GLive <> nil) and GLive.HasFresh(AFile);
   if Result then
     AFixes := Copy(GLive.FResults);
+end;
+
+procedure LiveResetResults;
+begin
+  if GLive = nil then Exit;
+  // State only - no window operation (this can arrive from an IDE
+  // notifier). The next poll tick re-arms the analysis for the active
+  // buffer and hides the hint while there are no results.
+  GLive.FResults := nil;
+  GLive.FResFile := '';
+  GLive.FResHash := 0;
+  GLive.FResFromLsp := False;
+  GLive.FHasPending := False;
+  GLive.FFile := '';
+  GLive.FHash := 0;
+  GLive.FDirty := False;
 end;
 
 // ---------------------------------------------------------------------------

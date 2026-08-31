@@ -150,6 +150,7 @@
         <DCCReference Include="..\Source\Rename.WorkspaceEdit.pas"/>
         <DCCReference Include="..\Source\Expert.DialogHelper.pas"/>
         <DCCReference Include="..\Source\Expert.ListViewSort.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitAvailability.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

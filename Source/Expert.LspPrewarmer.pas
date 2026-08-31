@@ -92,10 +92,19 @@ var
   Ext: string;
 begin
   if FOwner = nil then Exit;
+  // Project switch: drop the live quick-fix results. They are keyed by
+  // (file, content hash), so on an UNTOUCHED buffer nothing would ever
+  // invalidate them - a stale fix survived even reopening the project.
+  if NotifyCode = ofnActiveProjectChanged then
+  begin
+    LiveResetResults;
+    Exit;
+  end;
   if NotifyCode <> ofnFileOpened then Exit;
   if FileName = '' then Exit;
   Ext := LowerCase(ExtractFileExt(FileName));
   if (Ext <> '.dproj') and (Ext <> '.dpr') then Exit;
+  LiveResetResults;   // new project context - re-analyse from scratch
   FOwner.HandleProjectOpened(FileName);
 end;
 

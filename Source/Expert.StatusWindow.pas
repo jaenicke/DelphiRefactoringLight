@@ -199,6 +199,17 @@ begin
   Row('  scan cycles', IntToStr(TUnitIndex.Instance.ScanCycle),
     'one per completed worker pass (project scope re-scans every 30 s)');
 
+  // Unresolved IDE path variables mean whole libraries are missing from
+  // the index (a DevExpress "$(DXVCL)\..." entry cost the tester every
+  // DevExpress symbol) - surface it instead of failing silently.
+  S := UnresolvedPathVars;
+  if S = '' then
+    Row('  path variables', 'all resolved', '')
+  else
+    Row('  path variables', 'UNRESOLVED: ' + S,
+      'directories behind these are NOT indexed - define them under ' +
+      'Tools > Options > IDE > Environment Variables');
+
   // ---- LSP session --------------------------------------------------------
   if not TLspManager.Instance.IsAlive then
     Row('DelphiLSP session', 'not started',

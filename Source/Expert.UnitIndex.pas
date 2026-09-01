@@ -185,12 +185,32 @@ function FindDeclarationLine(const AContent, AIdent: string): Integer;
 function FindMemberDeclarationLine(const AContent, ATypeName,
   AMemberName: string): Integer;
 
+/// <summary>Expands IDE path variables - $(BDS), $(BDSCOMMONDIR), and
+///  above all USER-DEFINED ones like $(DXVCL) (Tools > Options >
+///  Environment Variables, stored under the IDE registry key). Values may
+///  reference further variables, so expansion repeats (bounded).
+///  AVars supplies the user-defined values; pass nil to read them from
+///  the registry. Anything still unresolved is left in place - callers
+///  skip such directories.</summary>
+function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings): string;
+
+/// <summary>Path variables that could NOT be resolved during the last
+///  library-path scan, e.g. "$(DXVCL)" - directories behind them are not
+///  indexed. Shown in the status window (this silently cost DevExpress
+///  users their whole source index).</summary>
+function UnresolvedPathVars: string;
+
 /// <summary>The COMPILE-relevant directories: the IDE Library "Search
 ///  Path" (browsing paths deliberately EXCLUDED - the compiler never
 ///  looks there), the active project's DCC_UnitSearchPath entries, and
 ///  the project directory itself. Used to detect units the index found
 ///  via browsing paths only, which the compiler cannot reach.</summary>
 function GatherCompileSearchDirs: TArray<string>;
+
+/// <summary>All directories the INDEX scans for the global scope: the
+///  IDE Library path PLUS the Browsing path (browsing sources are what
+///  let navigation work without putting them on the compiler's path).</summary>
+function GatherGlobalLibraryDirs(const ABdsRoot: string): TArray<string>;
 
 implementation
 
@@ -203,7 +223,7 @@ const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
   MaxFileBytes  = 4 * 1024 * 1024;
   RefreshIntervalMs = 30000;  // background re-scan period
-  CacheMagic    = 'RLUIDX06';   // 06: parameter names no longer leak into the index
+  CacheMagic    = 'RLUIDX07';   // 07: IDE path variables ($(DXVCL)) expand
   // Snapshot map entries are unit indexes with this flag bit set for
   // GENERIC declarations (MaxFiles stays far below the bit).
   GenericBit    = $40000000;
@@ -697,6 +717,133 @@ begin
   if Result = '' then Result := TryHive(HKEY_LOCAL_MACHINE);
 end;
 
+var
+  GUnresolvedVars: string;
+  GUnresolvedLock: TObject = nil;
+
+function UnresolvedPathVars: string;
+begin
+  Result := GUnresolvedVars;
+end;
+
+procedure NoteUnresolved(const AVar: string);
+begin
+  if Pos(AVar, GUnresolvedVars) > 0 then Exit;
+  if GUnresolvedVars = '' then GUnresolvedVars := AVar
+  else GUnresolvedVars := GUnresolvedVars + ', ' + AVar;
+end;
+
+// Reads the IDE's user-defined environment variables (Tools > Options >
+// Environment Variables) - this is where $(DXVCL) & friends live.
+procedure ReadIdeEnvVars(ADest: TStrings);
+var
+  Reg: TRegistry;
+  Names: TStringList;
+  VerKey: string;
+begin
+  if ADest = nil then Exit;
+  Reg := TRegistry.Create(KEY_READ);
+  Names := TStringList.Create;
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    VerKey := '';
+    if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
+    begin
+      Reg.GetKeyNames(Names);
+      var BestNum: Double := -1;
+      var FS := TFormatSettings.Invariant;
+      for var V in Names do
+      begin
+        var Nn: Double;
+        if TryStrToFloat(V, Nn, FS) and (Nn > BestNum) then
+        begin
+          BestNum := Nn;
+          VerKey := V;
+        end;
+      end;
+      Reg.CloseKey;
+    end;
+    if VerKey = '' then Exit;
+    Names.Clear;
+    if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS\' + VerKey +
+      '\Environment Variables') then
+    begin
+      Reg.GetValueNames(Names);
+      for var N in Names do
+        try
+          ADest.Values[N] := Reg.ReadString(N);
+        except
+        end;
+      Reg.CloseKey;
+    end;
+  finally
+    Names.Free;
+    Reg.Free;
+  end;
+end;
+
+function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings): string;
+const
+  MaxDepth = 8;
+var
+  Owned: TStringList;
+  Vars: TStrings;
+  Depth, P, Q: Integer;
+  Name, Value: string;
+begin
+  Result := S;
+  if Pos('$(', Result) = 0 then Exit;
+
+  Owned := nil;
+  try
+    Vars := AVars;
+    if Vars = nil then
+    begin
+      Owned := TStringList.Create;
+      ReadIdeEnvVars(Owned);
+      Vars := Owned;
+    end;
+
+    // A variable value can itself contain variables - repeat, bounded.
+    for Depth := 1 to MaxDepth do
+    begin
+      P := Pos('$(', Result);
+      if P = 0 then Break;
+      Q := P;
+      while (Q <= Length(Result)) and (Result[Q] <> ')') do Inc(Q);
+      if Q > Length(Result) then Break;              // unterminated
+      Name := Copy(Result, P + 2, Q - P - 2);
+      if Name = '' then Break;
+
+      Value := '';
+      if SameText(Name, 'BDS') then Value := ABdsRoot
+      else if SameText(Name, 'BDSLIB') then
+        Value := IncludeTrailingPathDelimiter(ABdsRoot) + 'lib'
+      else if SameText(Name, 'BDSINCLUDE') then
+        Value := IncludeTrailingPathDelimiter(ABdsRoot) + 'include'
+      else if SameText(Name, 'Platform') then Value := 'Win32'
+      else if SameText(Name, 'Config') then Value := 'Release'
+      else
+      begin
+        // User-defined IDE variable first, then the process environment
+        // (the IDE exports several of its own, e.g. BDSCOMMONDIR).
+        Value := Vars.Values[Name];
+        if Value = '' then Value := GetEnvironmentVariable(Name);
+      end;
+
+      if Value = '' then
+      begin
+        // Unresolvable - report it and stop (the caller drops the dir).
+        NoteUnresolved('$(' + Name + ')');
+        Break;
+      end;
+      Result := Copy(Result, 1, P - 1) + Value + Copy(Result, Q + 1, MaxInt);
+    end;
+  finally
+    Owned.Free;
+  end;
+end;
+
 function GatherIdeLibraryDirsEx(const ABdsRoot: string;
   AIncludeBrowsing: Boolean): TArray<string>;
 
@@ -714,23 +861,19 @@ function GatherIdeLibraryDirsEx(const ABdsRoot: string;
     end;
   end;
 
-  function Expand(const S: string): string;
-  begin
-    Result := S;
-    Result := StringReplace(Result, '$(BDSLIB)', IncludeTrailingPathDelimiter(ABdsRoot) + 'lib', [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(BDS)', ABdsRoot, [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(Platform)', 'Win32', [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(Config)', 'Release', [rfReplaceAll, rfIgnoreCase]);
-  end;
-
 var
   Raw, Dir, VerKey: string;
   Dirs: TList<string>;
+  EnvVars: TStringList;
 begin
   Result := nil;
   if ABdsRoot = '' then Exit;
+  GUnresolvedVars := '';
   Dirs := TList<string>.Create;
+  EnvVars := TStringList.Create;
   try
+    // Read the user-defined IDE variables ONCE for the whole scan.
+    ReadIdeEnvVars(EnvVars);
     var Reg := TRegistry.Create(KEY_READ);
     VerKey := '';
     try
@@ -763,13 +906,15 @@ begin
     for Raw in Raws do
       for Dir in Raw.Split([';'], TStringSplitOptions.ExcludeEmpty) do
       begin
-        var D := Expand(Trim(Dir));
-        if Pos('$(', D) > 0 then Continue;
+        var D := ExpandIdeVars(Trim(Dir), ABdsRoot, EnvVars);
+        if Pos('$(', D) > 0 then Continue;   // still unresolved - see
+                                             // UnresolvedPathVars
         D := ExcludeTrailingPathDelimiter(D);
         if TDirectory.Exists(D) and not Dirs.Contains(D) then Dirs.Add(D);
       end;
     Result := Dirs.ToArray;
   finally
+    EnvVars.Free;
     Dirs.Free;
   end;
 end;
@@ -785,15 +930,19 @@ function GatherDprojSearchDirs: TArray<string>;
 var
   Dproj, Content, Inner, DprojDir, Ent, D: string;
   Dirs: TList<string>;
+  EnvVars: TStringList;
   P1, P2: Integer;
 begin
   Result := nil;
+  if Editor = nil then Exit;
   Dproj := Editor.GetCurrentProjectDproj;
   if (Dproj = '') or not TFile.Exists(Dproj) then Exit;
   DprojDir := ExtractFilePath(Dproj);
   try Content := TFile.ReadAllText(Dproj); except Exit; end;
   Dirs := TList<string>.Create;
+  EnvVars := TStringList.Create;
   try
+    ReadIdeEnvVars(EnvVars);
     P1 := Pos('<DCC_UnitSearchPath>', Content);
     while P1 > 0 do
     begin
@@ -803,7 +952,14 @@ begin
       for Ent in Inner.Split([';'], TStringSplitOptions.ExcludeEmpty) do
       begin
         var E := Trim(Ent);
-        if (E = '') or E.StartsWith('$(') then Continue;
+        if E = '' then Continue;
+        // Project search paths carry the same IDE variables as the
+        // library path ($(DXVCL) and friends) - expand before use.
+        if Pos('$(', E) > 0 then
+        begin
+          E := ExpandIdeVars(E, FindBdsRoot, EnvVars);
+          if Pos('$(', E) > 0 then Continue;   // still unresolved
+        end;
         if TPath.IsRelativePath(E) then D := TPath.GetFullPath(TPath.Combine(DprojDir, E)) else D := E;
         D := ExcludeTrailingPathDelimiter(D);
         if TDirectory.Exists(D) and not Dirs.Contains(D) then Dirs.Add(D);
@@ -812,6 +968,7 @@ begin
     end;
     Result := Dirs.ToArray;
   finally
+    EnvVars.Free;
     Dirs.Free;
   end;
 end;

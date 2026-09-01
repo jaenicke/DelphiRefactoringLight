@@ -102,6 +102,8 @@ contains
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.StructureErrors in '..\Source\Expert.StructureErrors.pas',
   Expert.QuickFixMarkers in '..\Source\Expert.QuickFixMarkers.pas',
+  Expert.MessagesReader in '..\Source\Expert.MessagesReader.pas',
+  Expert.StatusWindow in '..\Source\Expert.StatusWindow.pas',
   Expert.FindOriginalSymbolWizard in '..\Source\Expert.FindOriginalSymbolWizard.pas',
   Expert.UsesCleanup in '..\Source\Expert.UsesCleanup.pas';
 

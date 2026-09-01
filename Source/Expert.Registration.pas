@@ -22,7 +22,7 @@ uses
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
-  Expert.StructureErrors, Expert.QuickFixMarkers;
+  Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow;
 
 type
   TShortcutChangeHook = class
@@ -84,6 +84,10 @@ begin
   // Add the options page (Tools > Options > Third Party > Refactoring Light)
   RegisterOptionsPage;
 
+  // Dockable status window. Registering here (inside Register) is what
+  // lets the IDE restore it from a saved desktop layout.
+  RegisterStatusWindow;
+
   // Unit rename watcher: offers rename when a unit is renamed in the IDE
   // (File > Save As etc.).
   UnitRenameWatcherInstance := TUnitRenameWatcher.Create;
@@ -119,6 +123,9 @@ end;
 initialization
 
 finalization
+  // Before anything else: hand the dockable form back to the IDE - it
+  // must not outlive the BPL.
+  UnregisterStatusWindow;
   UninstallQuickFixMarkers;
   UninstallStructureErrorSource;
   StopAutoImportLive;

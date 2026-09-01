@@ -51,6 +51,83 @@ begin
   end;
 end;
 
+// Current text of AFile - live editor buffer first, disk as fallback.
+function ReadBuffer(const AFile: string; out AContent: string): Boolean;
+begin
+  AContent := '';
+  Result := False;
+  if Editor = nil then Exit;
+  if Editor.ReadEditorContent(AFile, AContent) then Exit(True);
+  try
+    AContent := TFile.ReadAllText(AFile);
+    Result := AContent <> '';
+  except
+    Result := False;
+  end;
+end;
+
+// Qualifier of a dotted use site: for "TMyClass.MyClassProc" with the
+// caret on the member this returns 'TMyClass'. '' when the identifier is
+// not dot-qualified. ACol0 is the 0-based column of the identifier.
+function QualifierBefore(const ALine: string; ACol0: Integer): string;
+var
+  I, EndP: Integer;
+begin
+  Result := '';
+  I := ACol0;                      // 1-based index of the char BEFORE it
+  while (I >= 1) and (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
+  if (I < 1) or (I > Length(ALine)) or (ALine[I] <> '.') then Exit;
+  Dec(I);
+  while (I >= 1) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
+  EndP := I;
+  while (I >= 1) and CharInSet(ALine[I],
+    ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Dec(I);
+  if EndP > I then Result := Copy(ALine, I + 1, EndP - I);
+end;
+
+// Jumps to a MEMBER declaration of a dot-qualified use site. Class
+// members (class procedure/function/property and their instance
+// counterparts) are not in the identifier index - the index only holds
+// top-level interface declarations - so resolve the QUALIFIER as a type
+// and then walk that type's body. This is the case DelphiLSP most often
+// cannot answer ("TMyClass.MyClassProc").
+function TryQualifiedFallback(const AQualifier, AMember: string): Boolean;
+var
+  Hits: TArray<TFindUnitHit>;
+  Content: string;
+  Line, Col: Integer;
+  Seen: TArray<string>;
+
+  function AlreadyTried(const APath: string): Boolean;
+  begin
+    Result := False;
+    for var S in Seen do
+      if SameText(S, APath) then Exit(True);
+  end;
+
+begin
+  Result := False;
+  if (AQualifier = '') or (AMember = '') then Exit;
+  Hits := TUnitIndex.Instance.Lookup(AQualifier);
+  for var H in Hits do
+  begin
+    if (H.Path = '') or AlreadyTried(H.Path) then Continue;
+    Seen := Seen + [H.Path];
+    if not ReadBuffer(H.Path, Content) then Continue;
+    Line := FindMemberDeclarationLine(Content, AQualifier, AMember);
+    if Line < 0 then Continue;      // this unit declares the type but not
+                                    // the member - try the next candidate
+    var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+    Col := 0;
+    if Line <= High(Lines) then
+    begin
+      Col := FindWholeWord(Lines[Line], AMember);
+      if Col < 0 then Col := 0;
+    end;
+    Exit(Editor.GotoLocation(H.Path, Line, Col, Length(AMember)));
+  end;
+end;
+
 // Index-based fallback for a symbol the LSP could not resolve. True when
 // it handled the request (jumped, or opened the chooser).
 function TryIndexFallback(const AIdent: string): Boolean;
@@ -158,9 +235,29 @@ begin
   begin
     // FALLBACK: DelphiLSP frequently answers nothing for a symbol whose
     // unit is not (yet) open - hover and the identifier index do know it.
-    // Use the index: one candidate -> jump straight to its declaration,
-    // several -> hand over to the Find-Unit dialog (same search the user
-    // would run manually).
+    //
+    // DOT-QUALIFIED first ("TMyClass.MyClassProc"): resolving the member
+    // through its type is both the case the LSP fails at most often AND
+    // the safer answer - a plain lookup of the member name alone could
+    // land on an unrelated global routine of the same name.
+    var Content: string;
+    if ReadBuffer(Ctx.FileName, Content) then
+    begin
+      var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+      var L0 := Ctx.Line - 1;
+      if (L0 >= 0) and (L0 <= High(Lines)) then
+      begin
+        var C0 := FindWholeWord(Lines[L0], Ctx.WordAtCursor);
+        if C0 >= 0 then
+        begin
+          var Qual := QualifierBefore(Lines[L0], C0);
+          if (Qual <> '') and TryQualifiedFallback(Qual, Ctx.WordAtCursor) then Exit;
+        end;
+      end;
+    end;
+
+    // Unqualified: one declaring unit -> jump straight to its
+    // declaration, several -> hand over to the Find-Unit dialog.
     if TryIndexFallback(Ctx.WordAtCursor) then Exit;
     ShowThemedMessage(Format('No declaration found for "%s".'#13#10 +
       'The identifier index does not know it either.', [Ctx.WordAtCursor]));

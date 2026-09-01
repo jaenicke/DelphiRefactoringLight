@@ -132,6 +132,7 @@ type
     procedure OnFindOriginal(Sender: TObject);
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
+    procedure OnShowStatus(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
     procedure OnRemoveWithProjectWide(Sender: TObject);
     procedure OnRemoveWithCurrentUnit(Sender: TObject);
@@ -189,6 +190,10 @@ type
     procedure TryInstall;
   public
     destructor Destroy; override;
+    /// <summary>Which editor-menu path is active: 'INTAEditorLocalMenu'
+    ///  (official), 'OnPopup hook' (legacy fallback) or 'not installed'.
+    ///  For the status window.</summary>
+    function MenuStatus: string;
     procedure Install;
     procedure Uninstall;
     /// <summary>Re-applies the shortcuts from Expert.Shortcuts to all
@@ -211,7 +216,7 @@ uses
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
-  Expert.InterfaceGuidDialog, Expert.CircularRefsDialog,
+  Expert.InterfaceGuidDialog, Expert.CircularRefsDialog, Expert.StatusWindow,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup;
 
@@ -237,6 +242,7 @@ const
 
   // Our category in the editor local menu (INTAEditorLocalMenu).
   LocalMenuCategory = 'RefactoringLight';
+  REQ_ALWAYS  = 5;   // no context at all (status window)
   REQ_LIVEFIX = 3;   // like REQ_EDITOR, but additionally reflects the live
                      // auto-import check: disabled when the checker KNOWS
                      // there is nothing to fix; annotated with the count
@@ -442,6 +448,8 @@ begin
 
   Sep(Root);
   Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
+  // Always available - it reports WHY something is not working.
+  Plain(Root, 'Status window...',         OnShowStatus,           REQ_ALWAYS);
 
   Result := Root;
 end;
@@ -733,6 +741,7 @@ begin
         if Result and LiveFreshInfo(Editor.GetActiveFileName, LiveCount) then
           Result := LiveCount > 0;
       end;
+    REQ_ALWAYS: Result := True;
     REQ_LIVEALL:
       begin
         // File-wide overview: annotate with the TOTAL fix count.
@@ -1265,6 +1274,17 @@ begin
   FHooked := False;
 end;
 
+function TContextMenuInstaller.MenuStatus: string;
+begin
+  if FLocalMenuOk then Result := 'INTAEditorLocalMenu (official)'
+  else if FHooked then Result := 'OnPopup hook (fallback)'
+  else Result := 'not installed';
+  if Length(FMainMenuAdded) > 0 then
+    Result := Result + ' + main menu'
+  else
+    Result := Result + ', NO main menu';
+end;
+
 procedure TContextMenuInstaller.Install;
 begin
   if FHooked or FLocalMenuOk then Exit; // already installed
@@ -1443,6 +1463,11 @@ procedure TContextMenuInstaller.OnExtractMethod(Sender: TObject);
 begin
   if ExtractMethodInstance <> nil then
     ExtractMethodInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);
+begin
+  ShowStatusWindow;
 end;
 
 procedure TContextMenuInstaller.OnCompletion(Sender: TObject);

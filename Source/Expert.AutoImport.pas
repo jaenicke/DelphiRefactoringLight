@@ -43,7 +43,7 @@ uses
 type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
     qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
-    qfAddReintroduce, qfImplStub, qfClassStub);
+    qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken);
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -90,6 +90,14 @@ function E2003IdentFromDiag(const ALines: TArray<string>;
 /// <summary>True when the identifier at ACol0/ALen (0-based col) is
 ///  followed by '<' - a generic instantiation ("TList<Integer>").</summary>
 function IsGenericUseAt(const ALine: string; ACol0, ALen: Integer): Boolean;
+
+/// <summary>True when AIdent is visibly DECLARED somewhere in AContent -
+///  as a parameter, local/global variable or field ('X: Typ', or
+///  'var/const/out X'). An E2003 "undeclared identifier" for such an
+///  identifier is an Error-Insight false positive (frequent around
+///  anonymous-method parameters) or a stale diagnostic: neither
+///  "add unit" nor "did you mean" makes sense then.</summary>
+function IdentDeclaredInFile(const AContent, AIdent: string): Boolean;
 
 /// <summary>Drops candidate units whose declaration FORM cannot satisfy
 ///  the use form: "TList<...>" is never System.Classes' non-generic TList,
@@ -168,6 +176,14 @@ function UnitReachableFrom(const AContent, AUnit: string;
 ///  the old project context (stale diagnostics survive a reopen).
 ///  State only - the next poll tick hides the hint.</summary>
 procedure LiveResetResults;
+
+/// <summary>Snapshot of the live checker for the status window: the
+///  watched buffer, whether an analysis/resolution is in flight, how many
+///  fixes the last completed analysis produced and which source answered
+///  (our LSP session = incl. hints, or the Structure view = errors only).
+///  Reads UI-thread state only - call it from a timer tick.</summary>
+procedure LiveStatusInfo(out AFile: string; out AAnalysing, AResolving,
+  AFromLsp, AFresh: Boolean; out AFixCount: Integer);
 
 /// <summary>Menu entry point: modal overview of EVERY quick fix in the
 ///  active unit (line-sorted, sortable columns). Selecting one jumps to
@@ -404,6 +420,7 @@ begin
       var ECol0, ELen: Integer;
       var Ident := E2003IdentFromDiag(Lines, D, ECol0, ELen);
       if Ident = '' then Continue;
+      if IdentDeclaredInFile(AContent, Ident) then Continue;   // EI false positive
       if Seen.ContainsKey(UpperCase(Ident)) then Continue;
       Seen.Add(UpperCase(Ident), True);
 
@@ -546,6 +563,51 @@ begin
         Exit(False);
 end;
 
+function IdentDeclaredInFile(const AContent, AIdent: string): Boolean;
+var
+  Lines: TArray<string>;
+  Raw, L, U, UIdent: string;
+  P, AfterIdx, K: Integer;
+begin
+  Result := False;
+  if (AContent = '') or (AIdent = '') then Exit;
+  UIdent := UpperCase(AIdent);
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  for Raw in Lines do
+  begin
+    L := Trim(Raw);
+    if (L = '') or L.StartsWith('//') then Continue;
+    P := Pos('//', L);
+    if P > 0 then L := TrimRight(Copy(L, 1, P - 1));
+    U := UpperCase(L);
+    P := Pos(UIdent, U);
+    while P > 0 do
+    begin
+      AfterIdx := P + Length(UIdent);
+      // whole word?
+      if ((P = 1) or not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_']))
+        and ((AfterIdx > Length(U)) or not CharInSet(U[AfterIdx], ['A'..'Z', '0'..'9', '_'])) then
+      begin
+        // 'X : Typ' (not 'X :=') - parameter, var, field.
+        K := AfterIdx;
+        while (K <= Length(U)) and CharInSet(U[K], [' ', #9]) do Inc(K);
+        if (K <= Length(U)) and (U[K] = ':')
+          and ((K = Length(U)) or (U[K + 1] <> '=')) then
+          Exit(True);
+        // 'var X' / 'const X' / 'out X' immediately before (covers
+        // 'for var X in ...' and untyped inline vars).
+        K := P - 1;
+        while (K >= 1) and CharInSet(U[K], [' ', #9]) do Dec(K);
+        for var W in ['VAR', 'CONST', 'OUT'] do
+          if (K >= Length(W)) and (Copy(U, K - Length(W) + 1, Length(W)) = W)
+            and ((K - Length(W) = 0) or not CharInSet(U[K - Length(W)], ['A'..'Z', '0'..'9', '_'])) then
+            Exit(True);
+      end;
+      P := PosEx(UIdent, U, P + 1);
+    end;
+  end;
+end;
+
 function IsGenericUseAt(const ALine: string; ACol0, ALen: Integer): Boolean;
 var
   P: Integer;
@@ -630,6 +692,29 @@ begin
     end;
     Inc(P);
   end;
+  // The reported name is NOT on the diagnosed line. DelphiLSP / Error
+  // Insight lag one edit behind: when the user deletes the offending
+  // line, the old E2003 gets re-published for the NEW buffer - keyed to
+  // the new hash it then sticks for good ("the fix stays although I
+  // removed the line"). A diagnostic whose identifier no longer occurs
+  // ANYWHERE in the content cannot be acted on - treat it as stale.
+  for var LI := 0 to High(ALines) do
+  begin
+    P := 1;
+    while P <= Length(ALines[LI]) - ALen + 1 do
+    begin
+      P := PosEx(UpperCase(Result), UpperCase(ALines[LI]), P);
+      if P = 0 then Break;
+      if ((P = 1) or not CharInSet(ALines[LI][P - 1], ['A'..'Z', 'a'..'z', '0'..'9', '_']))
+         and ((P + ALen > Length(ALines[LI]))
+           or not CharInSet(ALines[LI][P + ALen], ['A'..'Z', 'a'..'z', '0'..'9', '_'])) then
+        Exit;   // still used somewhere - keep the fix (anchor stays rough)
+      Inc(P);
+    end;
+  end;
+  Result := '';
+  ACol0 := 0;
+  ALen := 0;
 end;
 
 function ResolveQuickFixes(const AContent: string;
@@ -672,6 +757,10 @@ var
     // token there would be 'Integer' (or a type parameter T).
     Ident := E2003IdentFromDiag(Lines, D, Col0, Len);
     if Ident = '' then Exit;
+    // Error-Insight false positive / lag: the identifier IS declared in
+    // this very file (typical: an anonymous-method parameter) - neither
+    // add-unit nor did-you-mean applies.
+    if IdentDeclaredInFile(AContent, Ident) then Exit;
     // Semantic dedup: both diagnostic sources report one E2003 per
     // OCCURRENCE, so the same identifier twice on a line would otherwise
     // produce identical fixes. One fix per (identifier, line).
@@ -948,6 +1037,68 @@ var
     Res.Add(F);
   end;
 
+  // E2029 "Declaration/Statement expected but identifier 'k' found": a
+  // stray token typed outside any block - remove it. Language-independent
+  // trigger: exactly ONE quoted part in the message (the ';'-expected
+  // variant quotes TWO and is handled by AddInsertSemi), and that part is
+  // a bare identifier verifiably present on the diagnosed line.
+  procedure AddRemoveStray(const D: TLspErrorDiag);
+  var
+    L0, C0, QCnt, I, P, AfterIdx, FoundCol, Occurrences: Integer;
+    Tok, S, U, UTok: string;
+    F: TQuickFix;
+  begin
+    QCnt := 0;
+    for I := 1 to Length(D.Message) do
+      if D.Message[I] = '''' then Inc(QCnt);
+    if QCnt <> 2 then Exit;
+    Tok := FirstQuoted(D.Message);
+    if not IsBareIdent(Tok) then Exit;
+
+    L0 := D.Range.Start.Line;
+    C0 := D.Range.Start.Character;
+    if (L0 < 0) or (L0 > High(Lines)) then Exit;
+    S := StripLineComment(Lines[L0]);
+    U := UpperCase(S);
+    UTok := UpperCase(Tok);
+
+    // Whole-word occurrences on the line; the diag column picks one,
+    // otherwise it must be unambiguous.
+    FoundCol := -1;
+    Occurrences := 0;
+    P := Pos(UTok, U);
+    while P > 0 do
+    begin
+      AfterIdx := P + Length(UTok);
+      if ((P = 1) or not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_']))
+        and ((AfterIdx > Length(U)) or not CharInSet(U[AfterIdx], ['A'..'Z', '0'..'9', '_'])) then
+      begin
+        Inc(Occurrences);
+        if (C0 >= P - 1) and (C0 < AfterIdx - 1) then FoundCol := P - 1
+        else if FoundCol < 0 then FoundCol := P - 1;
+      end;
+      P := PosEx(UTok, U, P + 1);
+    end;
+    if Occurrences = 0 then Exit;
+    if (Occurrences > 1)
+      and not ((C0 >= 0) and (FoundCol >= 0) and (C0 >= FoundCol)
+               and (C0 < FoundCol + Length(Tok))) then Exit;   // ambiguous
+
+    if Seen.ContainsKey('RT|' + IntToStr(L0) + '|' + UTok) then Exit;
+    Seen.Add('RT|' + IntToStr(L0) + '|' + UTok, True);
+
+    F := Default(TQuickFix);
+    F.Kind := qfRemoveToken;
+    F.Line := L0;
+    F.Col := FoundCol;
+    F.TokenLen := Length(Tok);
+    F.Identifier := Tok;
+    // Apply-time validation: the applier requires the line's EXACT text.
+    F.NewText := Lines[L0];
+    F.Caption := Format('Remove stray "%s"', [Tok]);
+    Res.Add(F);
+  end;
+
   // W1036 "Variable 'X' might not have been initialized": initialize it
   // with Default(<type>) right after the enclosing routine's 'begin'.
   procedure AddW1036(const D: TLspErrorDiag);
@@ -1215,6 +1366,7 @@ begin
       // localized message); E2066 is always the missing-semicolon case.
       else if (SameText(D.Code, 'E2029') and (FirstQuoted(D.Message) = ';'))
         or SameText(D.Code, 'E2066') then AddInsertSemi(D)
+      else if SameText(D.Code, 'E2029') then AddRemoveStray(D)
       else if SameText(D.Code, 'W1036') then AddW1036(D)
       else if SameText(D.Code, 'H2077') then AddH2077(D)
       else if SameText(D.Code, 'W1010') then AddW1010(D)
@@ -1774,6 +1926,36 @@ end;
 // H2077 fix: deletes the dead assignment line - only when the line still
 // contains the EXACT statement the fix was resolved for (AExpected), so a
 // stale/shifted buffer can never lose a live assignment.
+// E2029 stray-token fix: removes the token (plus the whitespace run
+// before it) from its line; a line left empty is deleted entirely.
+// AExpected = the line's text at resolve time - anything else means the
+// buffer changed and the fix is stale.
+function RemoveStrayToken(const AFile, AExpected, AToken: string;
+  ALine0, ACol0: Integer): Boolean;
+var
+  Content, L, NewL: string;
+  Lines: TArray<string>;
+  StartP, EndP: Integer;
+begin
+  Result := False;
+  if (Editor = nil) or (AToken = '') or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  L := Lines[ALine0];
+  if L <> AExpected then Exit;                            // buffer changed
+  StartP := ACol0 + 1;                                    // 1-based
+  if (StartP < 1) or (StartP + Length(AToken) - 1 > Length(L)) then Exit;
+  if not SameText(Copy(L, StartP, Length(AToken)), AToken) then Exit;
+  EndP := StartP + Length(AToken) - 1;
+  // Swallow the whitespace run before the token.
+  while (StartP > 1) and CharInSet(L[StartP - 1], [' ', #9]) do Dec(StartP);
+  NewL := Copy(L, 1, StartP - 1) + Copy(L, EndP + 1, MaxInt);
+  if Trim(NewL) = '' then
+    Result := Editor.DeleteLineAt(AFile, ALine0 + 1)
+  else
+    Result := Editor.ReplaceLineAt(AFile, ALine0 + 1, NewL);
+end;
+
 function RemoveDeadAssignment(const AFile, AExpected: string; ALine0: Integer): Boolean;
 var
   Content: string;
@@ -1861,6 +2043,9 @@ begin
       Result := CreateImplStub(AFile, AFix.Line);
     qfClassStub:
       Result := CreateClassStub(AFile, AFix.Identifier, AFix.Line);
+    qfRemoveToken:
+      Result := RemoveStrayToken(AFile, AFix.NewText, AFix.Identifier,
+        AFix.Line, AFix.Col);
   end;
 end;
 
@@ -2063,7 +2248,7 @@ begin
             FList.Items.Add(A.Caption);
           end;
         qfInsertSemi, qfInitVar, qfRemoveAssign, qfAddReintroduce,
-        qfImplStub, qfClassStub:
+        qfImplStub, qfClassStub, qfRemoveToken:
           begin
             // These carry an action-ready caption from the resolver.
             A.Caption := FFixes[I].Caption;
@@ -3007,6 +3192,27 @@ function LiveResolveBusy: Boolean;
 begin
   Result := (GLive <> nil)
     and (GLive.FResolving or GLive.FHasPending or GLive.FAnalysing);
+end;
+
+procedure LiveStatusInfo(out AFile: string; out AAnalysing, AResolving,
+  AFromLsp, AFresh: Boolean; out AFixCount: Integer);
+begin
+  AFile := '';
+  AAnalysing := False;
+  AResolving := False;
+  AFromLsp := False;
+  AFresh := False;
+  AFixCount := 0;
+  if GLive = nil then Exit;
+  AFile := GLive.FFile;
+  AAnalysing := GLive.FAnalysing;
+  AResolving := GLive.FResolving;
+  AFromLsp := GLive.FResFromLsp;
+  // "Fresh" = the published results belong to the buffer state we are
+  // currently watching (same file AND same content hash).
+  AFresh := (GLive.FResFile <> '') and SameText(GLive.FResFile, GLive.FFile)
+    and (GLive.FResHash = GLive.FHash);
+  AFixCount := Length(GLive.FResults);
 end;
 
 procedure LiveRefreshAfterCompile;

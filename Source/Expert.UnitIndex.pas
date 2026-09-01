@@ -175,6 +175,16 @@ function ParseUnit(const AFile: string; out AUnitName: string;
 ///  symbol when the LSP has no definition for it (index fallback).</summary>
 function FindDeclarationLine(const AContent, AIdent: string): Integer;
 
+/// <summary>0-based line of AMemberName's declaration INSIDE the body of
+///  type ATypeName, or -1. Class members (class procedure / class
+///  function / class property, and their instance counterparts) are NOT
+///  in the identifier index - the parser skips class bodies - so a
+///  qualified use like "TMyClass.MyClassProc" needs this second step:
+///  locate the type, then walk its body. Nested records are tracked, so
+///  a member of an inner record does not end the search early.</summary>
+function FindMemberDeclarationLine(const AContent, ATypeName,
+  AMemberName: string): Integer;
+
 /// <summary>The COMPILE-relevant directories: the IDE Library "Search
 ///  Path" (browsing paths deliberately EXCLUDED - the compiler never
 ///  looks there), the active project's DCC_UnitSearchPath entries, and
@@ -193,7 +203,7 @@ const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
   MaxFileBytes  = 4 * 1024 * 1024;
   RefreshIntervalMs = 30000;  // background re-scan period
-  CacheMagic    = 'RLUIDX05';   // 05: '<' marker on generic declarations
+  CacheMagic    = 'RLUIDX06';   // 06: parameter names no longer leak into the index
   // Snapshot map entries are unit indexes with this flag bit set for
   // GENERIC declarations (MaxFiles stays far below the bit).
   GenericBit    = $40000000;
@@ -348,10 +358,19 @@ var
   Raw: string;
   Lines: TArray<string>;
   Idents: TList<string>;
-  I, Block, PendingEnds, ImplIdx: Integer;
+  I, Block, PendingEnds, ImplIdx, InParams: Integer;
   Started, InEnum: Boolean;
   Sect: TSect;
   Code, Up, Tr, TrU: string;
+
+  // '(' minus ')' in an already comment/string-cleaned line.
+  function ParenBalance(const S: string): Integer;
+  begin
+    Result := 0;
+    for var K := 1 to Length(S) do
+      if S[K] = '(' then Inc(Result)
+      else if S[K] = ')' then Dec(Result);
+  end;
 
   procedure AddEnumMembers(const S: string);
   begin
@@ -380,7 +399,7 @@ begin
   Idents := TList<string>.Create;
   try
     Block := 0; PendingEnds := 0; Started := False; Sect := secNone;
-    InEnum := False; ImplIdx := -1;
+    InEnum := False; ImplIdx := -1; InParams := 0;
     for I := 0 to High(Lines) do
     begin
       Code := CleanLine(Lines[I], Block);
@@ -445,6 +464,18 @@ begin
         Continue;
       end;
 
+      // Parameter list (or const-array value) continuing from a previous
+      // line. Its identifiers are PARAMETER NAMES, not declarations - a
+      // wrapped header 'procedure Foo(const AValue: X;' / '  const
+      // AParams: Y);' made the next line flip Sect to secConst and
+      // indexed 'AParams' ("Add unit for AParams" on a parameter!).
+      if InParams > 0 then
+      begin
+        InParams := InParams + ParenBalance(Tr);
+        if InParams < 0 then InParams := 0;
+        Continue;
+      end;
+
       // Section switches.
       if StartsWithWord(TrU, 'TYPE') then
       begin
@@ -493,6 +524,9 @@ begin
           else
             Idents.Add(Nm);
         end;
+        // Wrapped parameter list: skip until the parens balance again.
+        InParams := ParenBalance(Tr);
+        if InParams < 0 then InParams := 0;
         Continue;
       end;
 
@@ -585,6 +619,16 @@ begin
             var Cp := Pos(':', Tr);
             if Cp > 0 then AddNameList(Copy(Tr, 1, Cp - 1), Idents);
           end;
+      end;
+
+      // Any section line that leaves a '(' open continues on the next
+      // line with NON-declarations: 'TNotify = procedure(const ASender:'
+      // (parameter names) or 'C: TArr = (' (const values). Enums keep
+      // their own richer state (InEnum collects the members).
+      if not InEnum then
+      begin
+        var Bal := ParenBalance(Tr);
+        if Bal > 0 then InParams := Bal;
       end;
     end;
 
@@ -858,6 +902,138 @@ begin
     end;
   end;
   Result := BestLine;
+end;
+
+function FindMemberDeclarationLine(const AContent, ATypeName,
+  AMemberName: string): Integer;
+var
+  Lines: TArray<string>;
+  I, Depth, Best, Score, BestScore: Integer;
+  L, U, UMember, Rest: string;
+  InBody: Boolean;
+
+  // Whole-word position of AWord in AUpper (1-based), else 0.
+  function WordPos(const AUpper, AWord: string): Integer;
+  var
+    Q, AfterIdx: Integer;
+  begin
+    Result := 0;
+    Q := Pos(AWord, AUpper);
+    while Q > 0 do
+    begin
+      AfterIdx := Q + Length(AWord);
+      if ((Q = 1) or not IsIdentChar(AUpper[Q - 1]))
+        and ((AfterIdx > Length(AUpper)) or not IsIdentChar(AUpper[AfterIdx])) then
+        Exit(Q);
+      Q := PosEx(AWord, AUpper, Q + 1);
+    end;
+  end;
+
+  // Leading identifier of S ('' when it does not start with one).
+  function FirstIdent(const S: string): string;
+  var
+    Q: Integer;
+  begin
+    Q := 1;
+    while (Q <= Length(S)) and IsIdentChar(S[Q]) do Inc(Q);
+    Result := Copy(S, 1, Q - 1);
+  end;
+
+  // Strips a line comment and trims - the cheap cleanup used below.
+  function Clean(const S: string): string;
+  var
+    P: Integer;
+  begin
+    Result := Trim(S);
+    if Result.StartsWith('//') then Exit('');
+    P := Pos('//', Result);
+    if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
+  end;
+
+begin
+  Result := -1;
+  if (AContent = '') or not IsIdent(ATypeName) or not IsIdent(AMemberName) then Exit;
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  UMember := UpperCase(AMemberName);
+
+  InBody := False;
+  Depth := 0;
+  Best := -1;
+  BestScore := 0;
+  for I := 0 to High(Lines) do
+  begin
+    L := Clean(Lines[I]);
+    if L = '' then Continue;
+    U := UpperCase(L);
+
+    if not InBody then
+    begin
+      // "TMyClass = class(...)" / "= record" / "= interface" - but NOT a
+      // forward declaration ("TMyClass = class;"), which has no body.
+      // A nested declaration carries the section keyword on the same
+      // line ("type TInner = record").
+      if StartsWithWord(U, 'TYPE') then
+      begin
+        L := TrimLeft(Copy(L, 5, MaxInt));
+        U := UpperCase(L);
+      end;
+      if WordPos(U, UpperCase(ATypeName)) <> 1 then Continue;
+      Rest := TrimLeft(Copy(L, Length(ATypeName) + 1, MaxInt));
+      // generic declaration: skip the parameter list
+      if Rest.StartsWith('<') and (Pos('>', Rest) > 0) then
+        Rest := TrimLeft(Copy(Rest, Pos('>', Rest) + 1, MaxInt));
+      if not Rest.StartsWith('=') then Continue;
+      Rest := UpperCase(TrimLeft(Copy(Rest, 2, MaxInt)));
+      if Rest.StartsWith('PACKED ') then Rest := TrimLeft(Copy(Rest, 8, MaxInt));
+      if not (StartsWithWord(Rest, 'CLASS') or StartsWithWord(Rest, 'RECORD')
+        or StartsWithWord(Rest, 'OBJECT') or StartsWithWord(Rest, 'INTERFACE')
+        or StartsWithWord(Rest, 'DISPINTERFACE')) then Continue;
+      if Rest.EndsWith(';') and (CountWord(Rest, 'END') = 0) then Continue;  // forward
+      InBody := True;
+      Depth := 1;
+      Continue;
+    end;
+
+    // Inside the body: track nesting. Only RECORD opens a further level
+    // here - counting CLASS would misfire on "class procedure".
+    Depth := Depth + CountWord(StripAngleSpans(U), 'RECORD')
+             - CountWord(StripAngleSpans(U), 'END');
+    if Depth <= 0 then Break;
+
+    // Member declaration forms. The declared NAME is the first
+    // identifier after the keyword - searching the whole line would
+    // match an accessor mention ("property Total ... read FSize").
+    Score := 0;
+    Rest := U;
+    if StartsWithWord(Rest, 'CLASS') then
+      Rest := TrimLeft(Copy(Rest, 6, MaxInt));   // 'class procedure/var/...'
+    if StartsWithWord(Rest, 'PROCEDURE') or StartsWithWord(Rest, 'FUNCTION')
+      or StartsWithWord(Rest, 'PROPERTY') or StartsWithWord(Rest, 'CONSTRUCTOR')
+      or StartsWithWord(Rest, 'DESTRUCTOR') then
+    begin
+      Rest := TrimLeft(Copy(Rest, Pos(' ', Rest) + 1, MaxInt));
+      if SameText(FirstIdent(Rest), AMemberName) then Score := 3;
+    end
+    else
+    begin
+      if StartsWithWord(Rest, 'VAR') then
+        Rest := TrimLeft(Copy(Rest, 4, MaxInt));      // 'class var FCount:'
+      if SameText(FirstIdent(Rest), AMemberName) then
+      begin
+        // A field/class var declaration is "Name[, Name2] : Type".
+        Rest := TrimLeft(Copy(Rest, Length(AMemberName) + 1, MaxInt));
+        if Rest.StartsWith(':') or Rest.StartsWith(',') then Score := 2;
+      end;
+    end;
+
+    if Score > BestScore then
+    begin
+      BestScore := Score;
+      Best := I;
+      if Score = 3 then Break;   // exact declaration form - done
+    end;
+  end;
+  Result := Best;
 end;
 
 function GatherCompileSearchDirs: TArray<string>;

@@ -76,7 +76,7 @@ implementation
 uses
   System.SysUtils, System.IOUtils, Winapi.Windows,
   Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
-  Expert.UnitIndex, Expert.AutoImport;
+  Expert.UnitIndex, Expert.AutoImport, Expert.MessagesReader;
 
 { TPrewarmIdeNotifier }
 
@@ -133,7 +133,12 @@ begin
   // checker so one LSP analysis of the active buffer picks them up.
   // Both outcomes matter: hints appear on success, errors on failure.
   if not IsCodeInsight then
+  begin
     LiveRefreshAfterCompile;
+    // DIAGNOSTIC (temporary): probe the Messages-window read paths and
+    // dump the findings to %TEMP%\RefactoringLight-messages.log.
+    DumpMessagesWindow;
+  end;
 end;
 
 { TLspPrewarmer }

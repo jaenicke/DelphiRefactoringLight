@@ -185,6 +185,35 @@ procedure LiveResetResults;
 procedure LiveStatusInfo(out AFile: string; out AAnalysing, AResolving,
   AFromLsp, AFresh: Boolean; out AFixCount: Integer);
 
+/// <summary>False when a ';' can never be missing at the END of ALine:
+///  the line closes with a block opener (begin/then/else/do/of/try/...),
+///  an operator or a separator. A missing semicolon always follows a
+///  STATEMENT. Guards against a stale diagnostic - after the offending
+///  line is deleted the source still reports the old position for a
+///  while, and the fix would then offer to insert ';' after 'begin'.</summary>
+function CanTakeSemicolon(const ALine: string): Boolean;
+
+/// <summary>True for diagnostic codes a quick-fix provider handles.
+///  Everything else can never produce a fix (E2250 & co).</summary>
+function IsHandledDiagCode(const ACode: string): Boolean;
+
+/// <summary>Pipeline counters of the last completed resolution for the
+///  status window: how many diagnostics the resolver SAW, how many of
+///  them carry a code we have a provider for, and where they came from.
+///  Turns a bare "0 fixes" into an answer to WHY.</summary>
+procedure LiveDiagStats(out ASeen, AHandled: Integer; out ACodes: string);
+
+/// <summary>One line per diagnostics source describing its LAST pass -
+///  how many diagnostics it saw, how many fixes came out and whether the
+///  result was published or dropped. This is what tells "the source never
+///  ran" apart from "it ran and its result was discarded".</summary>
+procedure LiveSourceStats(out AStructure, ALsp: string);
+
+/// <summary>Class name of the popup that currently keeps the hint
+///  hidden ('' when none) - the status window names it, so a wrong
+///  suppression can be identified instead of guessed at.</summary>
+function LiveHintBlocker: string;
+
 /// <summary>Menu entry point: modal overview of EVERY quick fix in the
 ///  active unit (line-sorted, sortable columns). Selecting one jumps to
 ///  its line and opens the regular fix popup there. Waits briefly for a
@@ -1019,6 +1048,12 @@ var
     while (InsCol >= 1) and (Prefix[InsCol] = ' ') do Dec(InsCol);
     if InsCol < 1 then Exit;
     if CharInSet(Prefix[InsCol], [';', ',']) then Exit;   // stale / odd spot
+    // STALE-DIAGNOSTIC GUARD (tester: the fix survived deleting the line
+    // it referred to). Error Insight / the compiler keep reporting the
+    // old position for a moment; the line we would append to has shifted
+    // and is now something like 'begin'. A ';' never follows a block
+    // opener - so this cannot be a real missing semicolon.
+    if not CanTakeSemicolon(Copy(Prefix, 1, InsCol)) then Exit;
 
     if Seen.ContainsKey('S|' + IntToStr(InsLine)) then Exit;
     Seen.Add('S|' + IntToStr(InsLine), True);
@@ -2393,6 +2428,33 @@ begin
   Result := True;
 end;
 
+// Anchor for a hint of AHeight pixels ABOVE the caret line. Code
+// completion (the IDE's and ours) drops DOWN from the caret, so anything
+// placed there covers its first entry - above the line nothing else
+// appears. False when there is no room (caret on the first visible
+// line); the caller then falls back to the position below.
+function CaretAbovePos(AHeight: Integer; out APt: TPoint): Boolean;
+var
+  H: HWND;
+  P: TPoint;
+  R, WndR: TRect;
+  Top: Integer;
+begin
+  Result := False;
+  if not FocusedEditorWindow(H) then Exit;
+  if not GetCaretPos(P) then Exit;
+  if not GetClientRect(H, R) then Exit;
+  if not PtInRect(R, P) then Exit;
+  ClientToScreen(H, P);            // P.Y = top of the caret line
+  Top := P.Y - AHeight - 2;
+  // Stay inside the editor window - otherwise the hint would float over
+  // the tab bar or the toolbar.
+  if not GetWindowRect(H, WndR) then Exit;
+  if (Top < WndR.Top) or (Top < Screen.WorkAreaRect.Top) then Exit;
+  APt := TPoint.Create(P.X, Top);
+  Result := True;
+end;
+
 // ---------------------------------------------------------------------------
 //  Batch dialog
 // ---------------------------------------------------------------------------
@@ -2700,6 +2762,12 @@ type
     FHash: Integer;
     FDirty: Boolean;
     FDirtyTick: Cardinal;
+    FDirtyIdleMs: Cardinal;   // idle threshold for the pending state
+    FSwitched: Boolean;       // the active buffer changed on this tick
+    // Popup that currently keeps the hint hidden (see UpdateHint).
+    FBlockWnd: HWND;
+    FBlockSince: Cardinal;
+    FBlockCls: string;
     FAnalysing: Boolean;
     // Last resolved quick fixes (UI thread only). TWO sources feed them:
     // the Structure view (fast, ERRORS only) and our own LSP session
@@ -2711,6 +2779,13 @@ type
     FResHash: Integer;
     FResults: TArray<TQuickFix>;
     FResFromLsp: Boolean;
+    // Pipeline counters of the last resolution (status window only).
+    FDiagSeen: Integer;
+    FDiagHandled: Integer;
+    FDiagCodes: string;
+    // Per-source outcome of the last pass (status window).
+    FSrcStructure: string;
+    FSrcLsp: string;
     // External payload waiting for background resolution (fuzzy index
     // scans are too slow for the notifier's main-thread context).
     FPendFile: string;
@@ -2759,6 +2834,86 @@ const
   LiveTickMs  = 400;   // poll interval (also the max hint-update latency,
                        // since ONLY the tick may touch the hint window)
   LiveIdleMs  = 1500;  // buffer must be stable this long before analysing
+  // Switching to another buffer is not typing - the content is already
+  // stable, so the file the user is LOOKING AT gets analysed almost at
+  // once instead of waiting out the typing pause.
+  LiveSwitchIdleMs = 200;
+  // How long one and the same window may suppress the hint before we
+  // conclude it is not a transient completion list.
+  HintBlockMaxMs = 4000;
+
+function CanTakeSemicolon(const ALine: string): Boolean;
+const
+  // Keywords a statement never ends with - a ';' behind them is invalid.
+  Openers: array[0..17] of string = (
+    'BEGIN', 'THEN', 'ELSE', 'DO', 'OF', 'TRY', 'REPEAT', 'EXCEPT',
+    'FINALLY', 'VAR', 'CONST', 'TYPE', 'TO', 'DOWNTO', 'IN', 'AND',
+    'OR', 'NOT');
+var
+  S, LastWord: string;
+  I: Integer;
+begin
+  Result := False;
+  S := TrimRight(StripLineComment(ALine));
+  if S = '' then Exit;
+  // Trailing operator / separator: the statement continues on the next
+  // line, so nothing is missing HERE.
+  if CharInSet(S[Length(S)],
+    ['+', '-', '*', '/', '=', '<', '>', ',', '(', '[', ':', '.', '@', '^']) then
+    Exit;
+  // Last word.
+  I := Length(S);
+  while (I >= 1) and CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Dec(I);
+  LastWord := UpperCase(Copy(S, I + 1, MaxInt));
+  for var K in Openers do
+    if LastWord = K then Exit;
+  Result := True;
+end;
+
+function IsHandledDiagCode(const ACode: string): Boolean;
+const
+  Handled: array[0..11] of string = (
+    'E2003', 'F2613', 'F2063', 'E2037', 'H2443', 'H2164',
+    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065');
+begin
+  Result := False;
+  for var C in Handled do
+    if SameText(C, ACode) then Exit(True);
+end;
+
+// Fills the counters from a diagnostic payload (worker context - plain
+// state, no UI).
+procedure NoteDiagStats(const ADiags: TArray<TLspErrorDiag>;
+  out ASeen, AHandled: Integer; out ACodes: string);
+var
+  Seen: TStringList;
+begin
+  ASeen := Length(ADiags);
+  AHandled := 0;
+  ACodes := '';
+  Seen := TStringList.Create;
+  try
+    Seen.Duplicates := dupIgnore;
+    Seen.Sorted := True;
+    for var D in ADiags do
+    begin
+      if IsHandledDiagCode(D.Code) then Inc(AHandled);
+      if D.Code <> '' then Seen.Add(D.Code);
+    end;
+    for var I := 0 to Seen.Count - 1 do
+    begin
+      if I >= 8 then
+      begin
+        ACodes := ACodes + ', ...';
+        Break;
+      end;
+      if ACodes <> '' then ACodes := ACodes + ', ';
+      ACodes := ACodes + Seen[I];
+    end;
+  finally
+    Seen.Free;
+  end;
+end;
 
 constructor TAutoImportLive.Create;
 begin
@@ -2819,6 +2974,7 @@ begin
 
   if not SameText(F, FFile) then
   begin
+    FSwitched := True;
     FFile := F;
     FHash := 0;
     FDirty := False;   // hash below re-arms
@@ -2838,8 +2994,12 @@ begin
     FHash := H;
     FDirty := True;
     FDirtyTick := Tick;
+    // Typing needs the full pause; a buffer SWITCH does not.
+    if FSwitched then FDirtyIdleMs := LiveSwitchIdleMs
+    else FDirtyIdleMs := LiveIdleMs;
     if FHint <> nil then FHint.HideHint;   // results are stale now
   end;
+  FSwitched := False;
 
   if FCompileRefreshPending and (not FAnalysing)
     and (TLspManager.Instance.PeekClient <> nil) then
@@ -2849,7 +3009,7 @@ begin
     FCompileRefreshPending := False;
     StartAnalysis(F, Content, H);
   end
-  else if FDirty and (not FAnalysing) and (Tick - FDirtyTick >= LiveIdleMs) then
+  else if FDirty and (not FAnalysing) and (Tick - FDirtyTick >= FDirtyIdleMs) then
     // One LSP pass per buffer state, ALWAYS - even when the Structure
     // view answered it: that source carries only errors, the hint fixes
     // (H2443/H2164) exist solely in our own session's diagnostics. The
@@ -2897,7 +3057,18 @@ begin
   // re-running the resolver (incl. the O(IdentCount) fuzzy scan) for a
   // byte-identical buffer would just burn a core. This also protects an
   // LSP-published result (with hint fixes) from being re-queued.
-  if SameText(AFile, FResFile) and (NewHash = FResHash) then
+  //
+  // ONE EXCEPTION, and it cost the tester every fix (status window:
+  // "Structure source: 16 diag" while "from Structure: 0 diag -> 0 fix"):
+  // when the published result is EMPTY and the incoming payload actually
+  // carries diagnostics, this state can still be improved. Our own LSP
+  // pass often finishes FIRST with nothing at all (it can be alive and
+  // silent for a file), claims the state with an empty result - and the
+  // Structure payload with the real errors was then dropped right here,
+  // before it was ever resolved. Nothing re-analyses an unchanged buffer,
+  // so that was final.
+  if SameText(AFile, FResFile) and (NewHash = FResHash)
+    and not ((Length(FResults) = 0) and (Length(ADiags) > 0)) then
   begin
     FFile := AFile;
     FHash := NewHash;
@@ -2913,6 +3084,7 @@ begin
   begin
     FDirty := True;
     FDirtyTick := GetTickCount;
+    FDirtyIdleMs := LiveIdleMs;
   end;
   FFile := AFile;
   FHash := NewHash;
@@ -2948,9 +3120,13 @@ begin
       procedure
       var
         R: TArray<TQuickFix>;
+        SSeen, SHandled: Integer;
+        SCodes: string;
       begin
         try
+          SSeen := 0; SHandled := 0; SCodes := '';
           try
+            NoteDiagStats(RDiags, SSeen, SHandled, SCodes);
             R := ResolveQuickFixes(RContent, RDiags);
           except
             R := nil;
@@ -2960,13 +3136,44 @@ begin
             begin
               if GLive = nil then Exit;
               GLive.FResolving := False;
+              GLive.FDiagSeen := SSeen;
+              GLive.FDiagHandled := SHandled;
+              GLive.FDiagCodes := SCodes;
               // Accept only when the buffer has not changed since - and
-              // never downgrade an LSP result (errors + hints) for the
-              // same state to this errors-only structure result.
-              if SameText(RFile, GLive.FFile) and (RHash = GLive.FHash)
-                and not (GLive.FResFromLsp and SameText(RFile, GLive.FResFile)
-                         and (RHash = GLive.FResHash)) then
+              // normally never downgrade an LSP result (errors + hints)
+              // for the same state to this errors-only structure result.
+              //
+              // BUT an EMPTY LSP result must not block us (tester: the
+              // Structure view listed E2003/E2066 while the live checker
+              // said "0 fix(es)"). Our LSP session can be alive and still
+              // answer nothing for a file; its empty result would then
+              // mask the errors the IDE visibly shows, forever - the
+              // buffer state is unchanged, so nothing ever re-analyses.
+              var LspHasResult := GLive.FResFromLsp
+                and SameText(RFile, GLive.FResFile)
+                and (RHash = GLive.FResHash)
+                and (Length(GLive.FResults) > 0);
+              // An empty result must never replace fixes we already
+              // have for the same state (a Structure rebuild fires again
+              // while its tree is still being repopulated).
+              if (Length(R) = 0) and (Length(GLive.FResults) > 0)
+                and SameText(RFile, GLive.FResFile)
+                and (RHash = GLive.FResHash) then
+                GLive.FSrcStructure := Format(
+                  '%d diag -> 0 fix, ignored: empty, keeping %d fix(es)',
+                  [SSeen, Length(GLive.FResults)])
+              else if not (SameText(RFile, GLive.FFile) and (RHash = GLive.FHash)) then
+                GLive.FSrcStructure := Format(
+                  '%d diag -> %d fix, DROPPED: buffer changed while resolving',
+                  [SSeen, Length(R)])
+              else if LspHasResult then
+                GLive.FSrcStructure := Format(
+                  '%d diag -> %d fix, DROPPED: LSP result wins for this state',
+                  [SSeen, Length(R)])
+              else
               begin
+                GLive.FSrcStructure := Format('%d diag -> %d fix, published',
+                  [SSeen, Length(R)]);
                 GLive.FResFile := RFile;
                 GLive.FResHash := RHash;
                 GLive.FResults := R;
@@ -2989,7 +3196,7 @@ procedure TAutoImportLive.StartAnalysis(const AFile, AContent: string; AHash: In
 var
   Client: TLspClient;
   Params, TextDocObj: TJSONObject;
-  Before, ReqId: Integer;
+  Before, BeforeVer, ReqId: Integer;
 begin
   // NEVER cold-start the LSP from the background poller - only piggyback
   // on a client the prewarmer / a wizard has already brought up.
@@ -2997,10 +3204,14 @@ begin
   if Client = nil then
   begin
     FDirtyTick := GetTickCount;   // retry after another idle period
+    FDirtyIdleMs := LiveIdleMs;
     Exit;
   end;
 
   Before := Client.GetDiagnosticsCount;
+  // Snapshot of THIS file's push counter - the worker waits for it to
+  // change, so a push for any other file can no longer end the wait.
+  BeforeVer := Client.GetFileDiagnosticsVersion(AFile);
   try
     // Push the CURRENT buffer (RefreshDocument reads the live editor
     // content) and fire an async documentSymbol to force the analysis.
@@ -3023,21 +3234,31 @@ begin
       procedure
       var
         R: TArray<TQuickFix>;
-        I: Integer;
+        I, DSeen, DHandled: Integer;
+        DCodes: string;
       begin
         try
           R := nil;
+          DSeen := 0; DHandled := 0; DCodes := '';
           try
             try Client.WaitForResponse(ReqId, 20000).Free; except end;
-            for I := 1 to 40 do
+            // Wait for the push that belongs to THIS file. Waiting on the
+            // session-wide counter meant any push for any other file
+            // ended the wait, and we then read a stale (usually empty)
+            // result for the file we actually care about - the busier the
+            // session, the more often. Poll fast at first: the answer for
+            // the active buffer usually comes within a few hundred ms.
+            for I := 1 to 60 do
             begin
-              if GLiveShutdown or (Client.GetDiagnosticsCount > Before) then Break;
-              Sleep(150);
+              if GLiveShutdown then Break;
+              if Client.GetFileDiagnosticsVersion(AFile) > BeforeVer then Break;
+              if I <= 20 then Sleep(50) else Sleep(150);
             end;
             if not GLiveShutdown then
             begin
-              Sleep(300);   // let this file's push settle
-              R := ResolveQuickFixes(AContent, Client.GetErrorDiagnostics(AFile));
+              var Diags := Client.GetErrorDiagnostics(AFile);
+              NoteDiagStats(Diags, DSeen, DHandled, DCodes);
+              R := ResolveQuickFixes(AContent, Diags);
             end;
           except
             R := nil;
@@ -3046,7 +3267,12 @@ begin
             procedure
             begin
               if GLive <> nil then
+              begin
+                GLive.FDiagSeen := DSeen;
+                GLive.FDiagHandled := DHandled;
+                GLive.FDiagCodes := DCodes;
                 GLive.AnalysisDone(AFile, AHash, R);
+              end;
             end);
         finally
           TInterlocked.Decrement(GLiveWorkers);
@@ -3066,10 +3292,29 @@ begin
   // The next poll tick shows/hides the hint.
   FAnalysing := False;
   // Only accept results that still match the current buffer. LSP results
-  // are the SUPERSET (errors + hints) - they replace whatever the
+  // are normally the SUPERSET (errors + hints) and replace whatever the
   // Structure view published for this state.
+  FSrcLsp := Format('%d diag -> %d fix', [FDiagSeen, Length(AResults)]);
+  if not (SameText(AFile, FFile) and (AHash = FHash)) then
+    FSrcLsp := FSrcLsp + ', DROPPED: buffer changed while analysing';
   if SameText(AFile, FFile) and (AHash = FHash) then
   begin
+    // EXCEPTION (tester, status window showed "0 diagnostic push(es)"
+    // while the Structure view listed E2003/E2066): our LSP session can
+    // be alive yet never deliver a single diagnostic - on a large
+    // project whose configuration it cannot fully resolve. Its EMPTY
+    // result would then permanently mask the structure result, and the
+    // user gets no fixes at all although the IDE shows the errors. An
+    // empty LSP answer never overrides a non-empty one for the SAME
+    // buffer state (same content hash = the errors are demonstrably
+    // still there).
+    if (Length(AResults) = 0) and (Length(FResults) > 0)
+      and SameText(FResFile, AFile) and (FResHash = AHash) then
+    begin
+      FSrcLsp := FSrcLsp + ', ignored: empty, keeping the other source';
+      Exit;
+    end;
+    FSrcLsp := FSrcLsp + ', published';
     FResFile := AFile;
     FResHash := AHash;
     FResults := AResults;
@@ -3077,11 +3322,99 @@ begin
   end;
 end;
 
+// --- yielding to other popups ----------------------------------------------
+//
+// The hint sits AT THE CARET and is a WS_EX_NOACTIVATE window, so when the
+// code completion list opens at the same spot it ends up on top of it and
+// covers the FIRST entry (tester report).
+//
+// The test is deliberately NOT a window-class name: the IDE's completion
+// list, our own completion popup and whatever a third-party plugin shows
+// would each need their own name, and those names change between IDE
+// versions. What they all have in common is being a VISIBLE, top-level
+// WS_POPUP window of this thread that overlaps the caret area - that is
+// what we look for. Our own windows are excluded by name (VCL registers
+// the window class under the form's class name).
+
+type
+  PPopupProbe = ^TPopupProbe;
+  TPopupProbe = record
+    Exclude: HWND;
+    Area: TRect;
+    Found: Boolean;
+    Wnd: HWND;
+    Cls: string;
+  end;
+
+function PopupProbeProc(AWnd: HWND; AParam: LPARAM): BOOL; stdcall;
+const
+  // ONLY the hint itself. Our own completion popup and the quick-fix
+  // popup must NOT be excluded - the tester reported the hint covering
+  // the first entry of OUR completion list too, so we yield to those
+  // exactly like we yield to the IDE's.
+  OurClasses: array[0..0] of string = ('TAutoImportHint');
+var
+  P: PPopupProbe;
+  R, Tmp: TRect;
+  Buf: array[0..63] of Char;
+  Nm: string;
+begin
+  Result := True;   // keep enumerating
+  P := PPopupProbe(AParam);
+  if (AWnd = P.Exclude) or not IsWindowVisible(AWnd) then Exit;
+  // Only POPUPs: the IDE main window and docked panes are not, and they
+  // would otherwise match everything.
+  if (GetWindowLong(AWnd, GWL_STYLE) and WS_POPUP) = 0 then Exit;
+  if not GetWindowRect(AWnd, R) then Exit;
+  if (R.Right <= R.Left) or (R.Bottom <= R.Top) then Exit;
+  if not IntersectRect(Tmp, R, P.Area) then Exit;
+  if GetClassName(AWnd, Buf, Length(Buf)) > 0 then
+  begin
+    Nm := Buf;
+    for var C in OurClasses do
+      if SameText(Nm, C) then Exit;
+  end;
+  P.Found := True;
+  P.Wnd := AWnd;
+  GetClassName(AWnd, Buf, Length(Buf));
+  P.Cls := Buf;
+  Result := False;   // found one - stop
+end;
+
+// Returns the blocking window (0 = none) plus its class, so the status
+// window can name it.
+function ForeignPopupAt(const AArea: TRect; AExclude: HWND;
+  out ACls: string): HWND;
+var
+  Probe: TPopupProbe;
+begin
+  Result := 0;
+  ACls := '';
+  Probe.Exclude := AExclude;
+  Probe.Area := AArea;
+  Probe.Found := False;
+  Probe.Wnd := 0;
+  Probe.Cls := '';
+  try
+    EnumThreadWindows(GetCurrentThreadId, @PopupProbeProc, LPARAM(@Probe));
+  except
+    Probe.Found := False;
+  end;
+  if Probe.Found then
+  begin
+    Result := Probe.Wnd;
+    ACls := Probe.Cls;
+  end;
+end;
+
 procedure TAutoImportLive.UpdateHint;
 var
-  Pt: TPoint;
+  Pt, Target: TPoint;
   Fixes: TArray<TQuickFix>;
   Text: string;
+  HintWnd, Blocker: HWND;
+  BlockCls: string;
+  Area: TRect;
 begin
   // Bound to the ERROR LINE: shown only while the caret is on a line with
   // at least one quick fix (and that line is scrolled into view -
@@ -3097,8 +3430,51 @@ begin
       Text := Fixes[0].Caption
     else
       Text := Format('%d quick fixes', [Length(Fixes)]);
-    FHint.SetInfo(Text);
-    FHint.ShowNoActivateAt(Pt);
+    FHint.SetInfo(Text);   // sizes the window - needed for the anchor
+
+    // PRIMARY position: ABOVE the caret line. Code completion (the IDE's
+    // and ours) drops DOWN from the caret, so up there nothing else
+    // appears - which is the robust answer to "the hint covers the first
+    // entry of the list", far better than trying to detect that list.
+    // Only when there is no room above (caret on the first visible line)
+    // do we fall back to the old spot below the caret.
+    if not CaretAbovePos(FHint.Height, Target) then
+      Target := Pt;
+
+    // Safety net for the fallback case (and for a list the IDE flips
+    // upwards near the bottom of the screen): if something else already
+    // occupies our target rect, stay hidden.
+    HintWnd := 0;
+    if FHint.HandleAllocated then HintWnd := FHint.Handle;
+    Area := TRect.Create(Target.X, Target.Y,
+      Target.X + FHint.Width, Target.Y + FHint.Height);
+    Blocker := ForeignPopupAt(Area, HintWnd, BlockCls);
+    if Blocker <> 0 then
+    begin
+      // SELF-HEALING: a completion list is TRANSIENT. A window that keeps
+      // matching for seconds is something else (a floating tool window,
+      // or a list the IDE only hides logically) and must not disable the
+      // hint for good - after HintBlockMaxMs the same window is ignored.
+      if Blocker <> FBlockWnd then
+      begin
+        FBlockWnd := Blocker;
+        FBlockSince := GetTickCount;
+        FBlockCls := BlockCls;
+      end;
+      if GetTickCount - FBlockSince < HintBlockMaxMs then
+      begin
+        FHint.HideHint;
+        Exit;   // the next tick brings it back once the list is gone
+      end;
+      FBlockCls := BlockCls + ' (ignored: persistent)';
+    end
+    else
+    begin
+      FBlockWnd := 0;
+      FBlockCls := '';
+    end;
+
+    FHint.ShowNoActivateAt(Target);
   end
   else if FHint <> nil then
     FHint.HideHint;
@@ -3186,6 +3562,32 @@ begin
   if CaretScreenPos(Pt) then Popup.ShowAt(Pt)
   else Popup.ShowAt(Mouse.CursorPos);
   Result := True;
+end;
+
+function LiveHintBlocker: string;
+begin
+  Result := '';
+  if GLive <> nil then Result := GLive.FBlockCls;
+end;
+
+procedure LiveSourceStats(out AStructure, ALsp: string);
+begin
+  AStructure := '';
+  ALsp := '';
+  if GLive = nil then Exit;
+  AStructure := GLive.FSrcStructure;
+  ALsp := GLive.FSrcLsp;
+end;
+
+procedure LiveDiagStats(out ASeen, AHandled: Integer; out ACodes: string);
+begin
+  ASeen := 0;
+  AHandled := 0;
+  ACodes := '';
+  if GLive = nil then Exit;
+  ASeen := GLive.FDiagSeen;
+  AHandled := GLive.FDiagHandled;
+  ACodes := GLive.FDiagCodes;
 end;
 
 function LiveResolveBusy: Boolean;

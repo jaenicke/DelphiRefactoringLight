@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -32,6 +32,14 @@ interface
 
 procedure InstallStructureErrorSource;
 procedure UninstallStructureErrorSource;
+
+/// <summary>What this source is doing, for the status window: is the
+///  notifier installed, how often has the IDE called it, and what did the
+///  LAST call do (nodes walked, diagnostics parsed, or the reason it
+///  bailed out). "0 fix(es) although the Structure view shows errors" is
+///  otherwise impossible to tell apart from "never fired".</summary>
+procedure StructureSourceStats(out AInstalled: Boolean;
+  out AFires, ANodes, ADiags: Integer; out AReason: string);
 
 implementation
 
@@ -158,6 +166,23 @@ begin
   Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
 end;
 
+var
+  GFires: Integer;      // StructureChanged calls seen
+  GLastNodes: Integer;  // nodes walked in the last call
+  GLastDiags: Integer;  // diagnostics parsed in the last call
+  GLastReason: string;  // why the last call did not report
+  GStructInstalled: Boolean;
+
+procedure StructureSourceStats(out AInstalled: Boolean;
+  out AFires, ANodes, ADiags: Integer; out AReason: string);
+begin
+  AInstalled := GStructInstalled;
+  AFires := GFires;
+  ANodes := GLastNodes;
+  ADiags := GLastDiags;
+  AReason := GLastReason;
+end;
+
 procedure TStructureErrorNotifier.StructureChanged(const Context: IOTAStructureContext);
 var
   FileName, Content: string;
@@ -172,6 +197,7 @@ var
     D: TLspErrorDiag;
   begin
     if (ANode = nil) or (ADepth > 3) then Exit;
+    Inc(GLastNodes);
     if ParseErrorCaption(ANode.Caption, Code, ErrLine, ErrCol) then
     begin
       // Forward EVERY parsed entry (E2003, F2613, E2037, hints, ...) -
@@ -203,25 +229,56 @@ var
   I: Integer;
 begin
   try
-    if (Context = nil) or (Editor = nil) then Exit;
+    Inc(GFires);
+    GLastNodes := 0;
+    GLastDiags := 0;
+    GLastReason := '';
+    if (Context = nil) or (Editor = nil) then
+    begin
+      GLastReason := 'no context / no editor helper';
+      Exit;
+    end;
     // Only the source-code structure carries the error nodes; designer /
     // other contexts must not count as an "answer" for the live checker.
-    if not SameText(Context.StructureType, SourceCodeStructureType) then Exit;
+    if not SameText(Context.StructureType, SourceCodeStructureType) then
+    begin
+      GLastReason := 'not a source-code structure (' + Context.StructureType + ')';
+      Exit;
+    end;
 
     FileName := Editor.GetActiveFileName;
-    if (FileName = '') or not SameText(ExtractFileExt(FileName), '.pas') then Exit;
-    if not Editor.ReadEditorContent(FileName, Content) then Exit;
+    if FileName = '' then
+    begin
+      GLastReason := 'no active file';
+      Exit;
+    end;
+    if not SameText(ExtractFileExt(FileName), '.pas') then
+    begin
+      GLastReason := 'active file is not a .pas (' + ExtractFileExt(FileName) + ')';
+      Exit;
+    end;
+    if not Editor.ReadEditorContent(FileName, Content) then
+    begin
+      GLastReason := 'buffer not readable';
+      Exit;
+    end;
     Lines := SplitLines(Content);
 
     DiagCount := 0;
     for I := 0 to Context.RootNodeCount - 1 do
       CollectFrom(Context.GetRootStructureNode(I), 0);
     SetLength(Diags, DiagCount);
+    GLastDiags := DiagCount;
+    if DiagCount = 0 then
+      GLastReason := Format('%d node(s), none parsed as an error caption',
+        [GLastNodes]);
 
     // Empty is a valid answer ("no errors") - it hides the hint and keeps
     // the LSP fallback from re-analysing this buffer state.
     LiveReportErrorDiags(FileName, Content, Diags);
   except
+    on E: Exception do
+      GLastReason := E.ClassName + ': ' + E.Message;
     // Never let anything escape into the IDE's notifier dispatch.
   end;
 end;
@@ -293,6 +350,7 @@ begin
   if GNotifierIndex >= 0 then Exit;
   if Supports(BorlandIDEServices, IOTAStructureView, SV) then
     GNotifierIndex := SV.AddNotifier(TStructureErrorNotifier.Create);
+  GStructInstalled := GNotifierIndex >= 0;
 end;
 
 procedure TRetryHelper.Tick(Sender: TObject);

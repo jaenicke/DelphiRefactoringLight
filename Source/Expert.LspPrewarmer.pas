@@ -47,6 +47,9 @@ type
     procedure BeforeCompile(const Project: IOTAProject; IsCodeInsight: Boolean;
       var Cancel: Boolean); overload;
     procedure AfterCompile(Succeeded: Boolean; IsCodeInsight: Boolean); overload;
+    /// <summary>Feeds the Messages window's compiler output into the live
+    ///  quick-fix pipeline (third diagnostics source).</summary>
+    procedure FeedCompilerMessages;
   end;
 
   TLspPrewarmer = class
@@ -74,7 +77,7 @@ var
 implementation
 
 uses
-  System.SysUtils, System.IOUtils, Winapi.Windows,
+  System.SysUtils, System.IOUtils, Winapi.Windows, Lsp.Protocol,
   Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
   Expert.UnitIndex, Expert.AutoImport, Expert.MessagesReader;
 
@@ -135,9 +138,41 @@ begin
   if not IsCodeInsight then
   begin
     LiveRefreshAfterCompile;
-    // DIAGNOSTIC (temporary): probe the Messages-window read paths and
-    // dump the findings to %TEMP%\RefactoringLight-messages.log.
+    // THIRD diagnostics source: the compiler output in the Messages
+    // window. It is the only one left when Error Insight / the IDE's LSP
+    // have stopped answering - exactly the state the tester was in
+    // (Structure view empty, our LSP silent, dcc32 errors on screen).
+    FeedCompilerMessages;
+    // Keep the probe log fresh: it documents what the reader sees and is
+    // how we adapt if a future IDE renames a symbol.
     DumpMessagesWindow;
+  end;
+end;
+
+// Reads the compiler messages for the ACTIVE buffer and hands them to the
+// live quick-fix pipeline (same entry point the Structure view uses).
+procedure TPrewarmIdeNotifier.FeedCompilerMessages;
+var
+  FileName, Content: string;
+  Diags: TArray<TLspErrorDiag>;
+begin
+  try
+    if Editor = nil then Exit;
+    // Cheap getter - never GetCurrentContext here (it moves the caret).
+    FileName := Editor.GetActiveFileName;
+    if FileName = '' then Exit;
+    Diags := ReadCompilerDiagnosticsFor(FileName);
+    if Length(Diags) = 0 then Exit;
+    if not Editor.ReadEditorContent(FileName, Content) then
+      try
+        Content := TFile.ReadAllText(FileName);
+      except
+        Exit;
+      end;
+    if Content = '' then Exit;
+    LiveReportErrorDiags(FileName, Content, Diags);
+  except
+    // a diagnostics source must never disturb a build
   end;
 end;
 

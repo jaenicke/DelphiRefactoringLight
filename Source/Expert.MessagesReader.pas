@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -7,32 +7,450 @@
  *)
 unit Expert.MessagesReader;
 
-// DIAGNOSTIC PROBE (IDE-only, not in the standalone build): explores the
-// candidate paths for READING the IDE's Messages window after a compile.
-// ToolsAPI's IOTAMessageServices is write-only, but three real paths
-// exist (binary recon of coreide370.bpl):
-//   1. IOTAModuleErrors.GetErrors - documented, per-module Error-Insight
-//      diagnostics (severity 1/2/3), LSP-era behavior unverified.
-//   2. coreide370.bpl EXPORTS its whole message model: unit Msglines
-//      (global LineBufferList -> TLineBuffer -> TLine.GetLineText) and
-//      TMessageViewForm.GetSaveStrings(TStrings, group, idx) - the
-//      "Save Messages" text dump.
-//   3. RTTI / published-method tables on the TMessageViewForm instance
-//      (one shared VCL instance - Screen.Forms sees the form).
-// This unit only DUMPS what each path yields on the running IDE into
-// %TEMP%\RefactoringLight-messages.log so the real reader can be built
-// on verified ground. Called from TPrewarmIdeNotifier.AfterCompile.
+// READS the IDE's Messages window (IDE-only) - the compiler output of the
+// last build, which is the ONLY diagnostics source that still works when
+// Error Insight / the IDE's LSP have given up (verified on the tester's
+// machine: Structure view empty, IOTAModuleErrors -> 0 entries, while the
+// Messages window listed E2003/E2066/E2250 for the very same file).
+//
+// WHY THIS WAY (recon + the %TEMP%\RefactoringLight-messages.log probe):
+//   * IOTAMessageServices is write-only - it can add messages, never read.
+//   * IOTAModuleErrors.GetErrors is the documented read path but mirrors
+//     Error Insight, so it is empty in exactly the situation we care about.
+//   * coreide370.bpl EXPORTS its whole message model (unit Msglines). The
+//     probe confirmed on this install:
+//        @Msglines@LineBufferList            (global variable)
+//        TLineBufferList.GetCount / GetItem
+//        TLineBuffer.GetCount / GetLines / GetGroupName
+//        TLine.GetLineText / GetFileName
+//        TFileMessageLine.GetLine / GetColumn
+//
+// RTTI was the first choice (it would keep virtual dispatch correct), but
+// the IDE packages ship WITHOUT usable method RTTI for these classes -
+// measured on the tester's install: "TLineBufferList has no usable RTTI
+// (GetCount)". So the calls go through the EXPORTED ADDRESSES instead,
+// with RTTI still tried first in case a future IDE does expose it.
+//
+// Calling convention: the Borland "$qqr" suffix is register/__fastcall.
+//   function GetCount: Integer            -> function(Self): Integer
+//   function GetLines(I: Integer): TLine  -> function(Self; I): Pointer
+//   function GetLineText: string          -> the string result is a HIDDEN
+//     var parameter appended after Self:  procedure(Self; var Res: string)
+// Virtual overrides: an exported address is one class's implementation, so
+// the right symbol is chosen from the object's ClassName chain
+// (TCompilerMsgLine overrides GetLineText).
+//
+// Every step fails soft: no symbol -> no messages, never an exception into
+// the IDE, and the reason is reported through MessagesReaderProblem.
 
 interface
 
-/// <summary>Writes the diagnostic dump. Never raises.</summary>
+uses
+  Lsp.Protocol;
+
+/// <summary>Compiler messages of the last build that belong to AFile,
+///  converted to diagnostics (code, message, 0-based line/col).</summary>
+function ReadCompilerDiagnosticsFor(const AFile: string): TArray<TLspErrorDiag>;
+
+/// <summary>Total number of message lines currently in the Messages
+///  window (0 when the model could not be reached) - status window.</summary>
+function CompilerMessageCount: Integer;
+
+/// <summary>Why the reader is not working, '' when it is.</summary>
+function MessagesReaderProblem: string;
+
+/// <summary>Diagnostic dump of all three read paths to
+///  %TEMP%\RefactoringLight-messages.log.</summary>
 procedure DumpMessagesWindow;
 
 implementation
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Rtti,
+  System.Character, System.Generics.Collections,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, ToolsAPI;
+
+const
+  CoreIdeDll = 'coreide370.bpl';
+  LineBufferListExport = '@Msglines@LineBufferList';
+
+var
+  GProblem: string;
+
+function MessagesReaderProblem: string;
+begin
+  Result := GProblem;
+end;
+
+// The global TLineBufferList instance, or nil.
+function LineBufferList: TObject;
+var
+  H: HMODULE;
+  P: Pointer;
+begin
+  Result := nil;
+  H := GetModuleHandle(CoreIdeDll);
+  if H = 0 then
+  begin
+    GProblem := CoreIdeDll + ' not loaded';
+    Exit;
+  end;
+  P := GetProcAddress(H, LineBufferListExport);
+  if P = nil then
+  begin
+    GProblem := 'export ' + LineBufferListExport + ' not found';
+    Exit;
+  end;
+  // Exported VARIABLE: the address points at the object reference.
+  Result := TObject(PPointer(P)^);
+  if Result = nil then GProblem := 'message model not initialised';
+end;
+
+// --- tiny RTTI helpers (fail soft, never raise) -----------------------------
+
+function CallInt(AObj: TObject; const AMethod: string; out AValue: Integer;
+  const AArgs: array of TValue): Boolean;
+var
+  Ctx: TRttiContext;
+  T: TRttiType;
+  M: TRttiMethod;
+begin
+  Result := False;
+  AValue := 0;
+  if AObj = nil then Exit;
+  try
+    T := Ctx.GetType(AObj.ClassType);
+    if T = nil then Exit;
+    M := T.GetMethod(AMethod);
+    if M = nil then Exit;
+    AValue := M.Invoke(AObj, AArgs).AsInteger;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+function CallObj(AObj: TObject; const AMethod: string; AIndex: Integer): TObject;
+var
+  Ctx: TRttiContext;
+  T: TRttiType;
+  M: TRttiMethod;
+  V: TValue;
+begin
+  Result := nil;
+  if AObj = nil then Exit;
+  try
+    T := Ctx.GetType(AObj.ClassType);
+    if T = nil then Exit;
+    M := T.GetMethod(AMethod);
+    if M = nil then Exit;
+    if AIndex >= 0 then V := M.Invoke(AObj, [AIndex])
+    else V := M.Invoke(AObj, []);
+    if V.IsObject then Result := V.AsObject;
+  except
+    Result := nil;
+  end;
+end;
+
+function CallStr(AObj: TObject; const AMethod: string): string;
+var
+  Ctx: TRttiContext;
+  T: TRttiType;
+  M: TRttiMethod;
+begin
+  Result := '';
+  if AObj = nil then Exit;
+  try
+    T := Ctx.GetType(AObj.ClassType);
+    if T = nil then Exit;
+    M := T.GetMethod(AMethod);
+    if M = nil then Exit;
+    Result := M.Invoke(AObj, []).AsString;
+  except
+    Result := '';
+  end;
+end;
+
+// --- calls through the exported (mangled) addresses -------------------------
+
+type
+  TIntGetter = function(Self: Pointer): Integer; register;
+  TItemGetter = function(Self: Pointer; AIndex: Integer): Pointer; register;
+  TStrGetter = procedure(Self: Pointer; var ARes: string); register;
+
+function Sym(const AName: string): Pointer;
+var
+  H: HMODULE;
+begin
+  Result := nil;
+  H := GetModuleHandle(CoreIdeDll);
+  if H <> 0 then Result := GetProcAddress(H, PChar(AName));
+end;
+
+// True when AObj's class or any ancestor is named AName - we cannot
+// 'is'-cast to a class that lives in an IDE-internal package.
+function ClassIsOrDescends(AObj: TObject; const AName: string): Boolean;
+var
+  C: TClass;
+begin
+  Result := False;
+  if AObj = nil then Exit;
+  C := AObj.ClassType;
+  while C <> nil do
+  begin
+    if SameText(C.ClassName, AName) then Exit(True);
+    C := C.ClassParent;
+  end;
+end;
+
+function ExpInt(AObj: TObject; const ASym: string; out AValue: Integer): Boolean;
+var
+  P: Pointer;
+begin
+  Result := False;
+  AValue := 0;
+  P := Sym(ASym);
+  if (P = nil) or (AObj = nil) then Exit;
+  try
+    AValue := TIntGetter(P)(AObj);
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+function ExpItem(AObj: TObject; const ASym: string; AIndex: Integer): TObject;
+var
+  P: Pointer;
+begin
+  Result := nil;
+  P := Sym(ASym);
+  if (P = nil) or (AObj = nil) then Exit;
+  try
+    Result := TObject(TItemGetter(P)(AObj, AIndex));
+  except
+    Result := nil;
+  end;
+end;
+
+function ExpStr(AObj: TObject; const ASym: string): string;
+var
+  P: Pointer;
+begin
+  Result := '';
+  P := Sym(ASym);
+  if (P = nil) or (AObj = nil) then Exit;
+  try
+    TStrGetter(P)(AObj, Result);
+  except
+    Result := '';
+  end;
+end;
+
+// --- one accessor per fact, RTTI first, exported address as fallback -------
+
+const
+  SymListCount = '@Msglines@TLineBufferList@GetCount$qqrv';
+  SymListItem  = '@Msglines@TLineBufferList@GetItem$qqri';
+  SymBufCount  = '@Msglines@TLineBuffer@GetCount$qqrv';
+  SymBufLines  = '@Msglines@TLineBuffer@GetLines$qqri';
+  SymLineText  = '@Msglinesintf@TLine@GetLineText$qqrv';
+  SymMsgText   = '@Msglines@TCompilerMsgLine@GetLineText$qqrv';
+  SymLineFile  = '@Msglinesintf@TLine@GetFileName$qqrv';
+  SymMsgFile   = '@Msglines@TFileMessageLine@GetFileName$qqrv';
+  SymMsgLine   = '@Msglines@TFileMessageLine@GetLine$qqrv';
+  SymMsgCol    = '@Msglines@TFileMessageLine@GetColumn$qqrv';
+
+function GetIntOf(AObj: TObject; const AMethod, ASym: string;
+  out AValue: Integer): Boolean;
+begin
+  Result := CallInt(AObj, AMethod, AValue, []);
+  if not Result then Result := ExpInt(AObj, ASym, AValue);
+end;
+
+function GetObjOf(AObj: TObject; const AMethod, ASym: string;
+  AIndex: Integer): TObject;
+begin
+  Result := CallObj(AObj, AMethod, AIndex);
+  if Result = nil then Result := ExpItem(AObj, ASym, AIndex);
+end;
+
+function LineText(AObj: TObject): string;
+begin
+  Result := CallStr(AObj, 'GetLineText');
+  if Result <> '' then Exit;
+  // Pick the implementation that belongs to this object's class.
+  if ClassIsOrDescends(AObj, 'TCompilerMsgLine') then
+    Result := ExpStr(AObj, SymMsgText);
+  if Result = '' then Result := ExpStr(AObj, SymLineText);
+end;
+
+function LineFile(AObj: TObject): string;
+begin
+  Result := CallStr(AObj, 'GetFileName');
+  if Result <> '' then Exit;
+  if ClassIsOrDescends(AObj, 'TFileMessageLine') then
+    Result := ExpStr(AObj, SymMsgFile);
+  if Result = '' then Result := ExpStr(AObj, SymLineFile);
+end;
+
+// --- message text parsing ---------------------------------------------------
+
+// Compiler codes are language independent: a letter class (E/W/H/F) plus
+// four digits, e.g. "E2003" in
+//   [dcc32 Fehler] FrmPPFrame.pas(3721): E2003 Undeklarierter Bezeichner...
+function ExtractCode(const AText: string): string;
+var
+  I, J: Integer;
+  Digits: Boolean;
+begin
+  Result := '';
+  for I := 1 to Length(AText) do
+  begin
+    if not CharInSet(AText[I], ['E', 'W', 'H', 'F']) then Continue;
+    // must start a token
+    if (I > 1) and AText[I - 1].IsLetterOrDigit then Continue;
+    if I + 4 > Length(AText) then Break;
+    Digits := True;
+    for J := I + 1 to I + 4 do
+      if not AText[J].IsDigit then
+      begin
+        Digits := False;
+        Break;
+      end;
+    if not Digits then Continue;
+    // and must END there ("E20031" is not a code)
+    if (I + 5 <= Length(AText)) and AText[I + 5].IsDigit then Continue;
+    Exit(Copy(AText, I, 5));
+  end;
+end;
+
+// "...FrmPPFrame.pas(3721): E2003 ..." -> 3721. 0 when absent. Used only
+// as a fallback: TFileMessageLine.GetLine is the authoritative source.
+function ExtractLineNo(const AText: string): Integer;
+var
+  P, Q: Integer;
+begin
+  Result := 0;
+  P := Pos('(', AText);
+  while P > 0 do
+  begin
+    Q := P + 1;
+    while (Q <= Length(AText)) and AText[Q].IsDigit do Inc(Q);
+    if (Q > P + 1) and (Q <= Length(AText)) and (AText[Q] = ')') then
+      Exit(StrToIntDef(Copy(AText, P + 1, Q - P - 1), 0));
+    P := Pos('(', AText, P + 1);
+  end;
+end;
+
+// --- the walk ---------------------------------------------------------------
+
+type
+  TLineVisitor = reference to procedure(ALine: TObject);
+
+// Walks every message line of every tab. Returns the number visited.
+function WalkMessageLines(const AVisit: TLineVisitor): Integer;
+var
+  List, Buf, Ln: TObject;
+  Bufs, Lines, I, J: Integer;
+begin
+  Result := 0;
+  GProblem := '';
+  List := LineBufferList;
+  if List = nil then Exit;
+
+  if not GetIntOf(List, 'GetCount', SymListCount, Bufs) then
+  begin
+    GProblem := 'neither RTTI nor the export ' + SymListCount + ' works';
+    Exit;
+  end;
+  for I := 0 to Bufs - 1 do
+  begin
+    Buf := GetObjOf(List, 'GetItem', SymListItem, I);
+    if Buf = nil then Continue;
+    if not GetIntOf(Buf, 'GetCount', SymBufCount, Lines) then Continue;
+    for J := 0 to Lines - 1 do
+    begin
+      Ln := GetObjOf(Buf, 'GetLines', SymBufLines, J);
+      if Ln = nil then Continue;
+      Inc(Result);
+      if Assigned(AVisit) then AVisit(Ln);
+    end;
+  end;
+end;
+
+function CompilerMessageCount: Integer;
+begin
+  try
+    Result := WalkMessageLines(nil);
+  except
+    Result := 0;
+  end;
+end;
+
+function ReadCompilerDiagnosticsFor(const AFile: string): TArray<TLspErrorDiag>;
+var
+  Res: TList<TLspErrorDiag>;
+  Base: string;
+begin
+  Result := nil;
+  if AFile = '' then Exit;
+  Base := ExtractFileName(AFile);
+  Res := TList<TLspErrorDiag>.Create;
+  try
+    try
+      WalkMessageLines(
+        procedure(ALine: TObject)
+        var
+          D: TLspErrorDiag;
+          Text, FileName, Code: string;
+          LineNo, ColNo: Integer;
+        begin
+          Text := LineText(ALine);
+          if Text = '' then Exit;
+          Code := ExtractCode(Text);
+          if Code = '' then Exit;             // not a compiler message
+
+          // TFileMessageLine knows file/line/column exactly; plain lines
+          // only carry the text (then parse it).
+          FileName := LineFile(ALine);
+          if not GetIntOf(ALine, 'GetLine', SymMsgLine, LineNo) then LineNo := 0;
+          if not GetIntOf(ALine, 'GetColumn', SymMsgCol, ColNo) then ColNo := 0;
+          if LineNo <= 0 then LineNo := ExtractLineNo(Text);
+          if LineNo <= 0 then Exit;
+
+          // Belongs to the file we were asked about?
+          if FileName <> '' then
+          begin
+            if not SameText(FileName, AFile)
+              and not SameText(ExtractFileName(FileName), Base) then Exit;
+          end
+          else if Pos(LowerCase(Base), LowerCase(Text)) = 0 then
+            Exit;
+
+          D := Default(TLspErrorDiag);
+          D.Code := Code;
+          D.Message := Text;
+          D.Severity := 1;
+          D.Range.Start.Line := LineNo - 1;            // 0-based
+          if ColNo > 0 then D.Range.Start.Character := ColNo - 1
+          else D.Range.Start.Character := 0;
+          D.Range.End_ := D.Range.Start;
+          Res.Add(D);
+        end);
+    except
+      // never disturb the IDE
+    end;
+    Result := Res.ToArray;
+  finally
+    Res.Free;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+//  Diagnostic dump (kept: it is how this reader was built, and it tells us
+//  what changed if a future IDE version renames something)
+// ---------------------------------------------------------------------------
 
 const
   MaxDumpLines = 600;
@@ -45,10 +463,6 @@ begin
   if (GLog <> nil) and (GLog.Count < MaxDumpLines) then
     GLog.Add(S);
 end;
-
-// ---------------------------------------------------------------------------
-// Path 1: IOTAModuleErrors on the current module (documented ToolsAPI).
-// ---------------------------------------------------------------------------
 
 procedure DumpModuleErrors;
 var
@@ -80,10 +494,32 @@ begin
   end;
 end;
 
-// ---------------------------------------------------------------------------
-// Path 2 groundwork: which Msglines/MsgView symbols does coreide REALLY
-// export on this installation? (exact mangled names for the next step)
-// ---------------------------------------------------------------------------
+procedure DumpMessagesModel;
+var
+  N: Integer;
+begin
+  Log('--- Msglines model (the reader) ---');
+  try
+    N := 0;
+    WalkMessageLines(
+      procedure(ALine: TObject)
+      var
+        Text: string;
+        LineNo: Integer;
+      begin
+        Inc(N);
+        if N > 40 then Exit;
+        Text := LineText(ALine);
+        if not GetIntOf(ALine, 'GetLine', SymMsgLine, LineNo) then LineNo := -1;
+        Log(Format('  %s | line=%d | file=%s | %s',
+          [ALine.ClassName, LineNo, LineFile(ALine), Text]));
+      end);
+    Log(Format('total message lines: %d', [N]));
+    if GProblem <> '' then Log('PROBLEM: ' + GProblem);
+  except
+    on E: Exception do Log('EX: ' + E.ClassName + ': ' + E.Message);
+  end;
+end;
 
 procedure DumpCoreIdeExports;
 var
@@ -97,10 +533,10 @@ var
   Nm: AnsiString;
   U: string;
 begin
-  Log('--- coreide370.bpl exports (Msglines / MsgView / SaveStrings) ---');
+  Log('--- coreide exports (Msglines / MsgView) ---');
   try
-    Base := GetModuleHandle('coreide370.bpl');
-    if Base = 0 then begin Log('coreide370.bpl not loaded?!'); Exit; end;
+    Base := GetModuleHandle(CoreIdeDll);
+    if Base = 0 then begin Log(CoreIdeDll + ' not loaded?!'); Exit; end;
     Dos := PImageDosHeader(Base);
     Nt := PImageNtHeaders(PByte(Base) + Dos._lfanew);
     ExpRva := Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
@@ -113,8 +549,7 @@ begin
     begin
       Nm := PAnsiChar(PByte(Base) + PCardinal(PByte(Names) + I * 4)^);
       U := UpperCase(string(Nm));
-      if (Pos('MSGLINES', U) > 0) or (Pos('MSGVIEW', U) > 0)
-        or (Pos('SAVESTRINGS', U) > 0) or (Pos('LINEBUFFER', U) > 0) then
+      if (Pos('MSGLINES', U) > 0) or (Pos('MSGVIEW', U) > 0) then
       begin
         Log('  ' + string(Nm));
         Inc(Hits);
@@ -127,60 +562,6 @@ begin
   end;
 end;
 
-// ---------------------------------------------------------------------------
-// Path 3 groundwork: the TMessageViewForm instance + what RTTI exposes.
-// ---------------------------------------------------------------------------
-
-procedure DumpMessageViewForm;
-var
-  F: TForm;
-  Found: TForm;
-  Ctx: TRttiContext;
-  T: TRttiType;
-  N: Integer;
-begin
-  Log('--- TMessageViewForm via Screen.Forms + RTTI ---');
-  try
-    Found := nil;
-    for var I := 0 to Screen.FormCount - 1 do
-    begin
-      F := Screen.Forms[I];
-      if F.ClassName = 'TMessageViewForm' then begin Found := F; Break; end;
-    end;
-    if Found = nil then begin Log('TMessageViewForm not among Screen.Forms'); Exit; end;
-    Log('form found: ' + Found.Name);
-
-    // Which controls live on it (the draw tree we expect)?
-    for var I := 0 to Found.ComponentCount - 1 do
-    begin
-      if I >= 40 then begin Log('  ...'); Break; end;
-      Log('  comp: ' + Found.Components[I].ClassName + ' "' + Found.Components[I].Name + '"');
-    end;
-
-    // Published probes (MethodAddress needs only the published table).
-    for var M in ['EditSelectAllClick', 'EditCopyItemClick', 'mvSaveMessagesItemClick'] do
-      Log(Format('  published %s: %p', [M, Found.MethodAddress(M)]));
-
-    // Extended RTTI: is GetSaveStrings invokable?
-    T := Ctx.GetType(Found.ClassType);
-    if T = nil then begin Log('no RTTI type'); Exit; end;
-    N := 0;
-    for var Meth in T.GetMethods do
-    begin
-      if not SameText(Meth.Parent.Name, 'TMessageViewForm') then Continue;
-      Inc(N);
-      if N <= 60 then
-        Log(Format('  rtti method: %s (%s, %d params, invokable=%s)',
-          [Meth.Name, TRttiEnumerationType.GetName(Meth.Visibility),
-           Length(Meth.GetParameters),
-           BoolToStr(Meth.HasExtendedInfo, True)]));
-    end;
-    Log(Format('%d own RTTI methods', [N]));
-  except
-    on E: Exception do Log('EX: ' + E.ClassName + ': ' + E.Message);
-  end;
-end;
-
 procedure DumpMessagesWindow;
 begin
   try
@@ -188,9 +569,10 @@ begin
     try
       Log('RefactoringLight messages probe  ' + DateTimeToStr(Now));
       DumpModuleErrors;
+      DumpMessagesModel;
       DumpCoreIdeExports;
-      DumpMessageViewForm;
-      GLog.SaveToFile(TPath.Combine(TPath.GetTempPath, 'RefactoringLight-messages.log'));
+      GLog.SaveToFile(TPath.Combine(TPath.GetTempPath,
+        'RefactoringLight-messages.log'));
     finally
       FreeAndNil(GLog);
     end;

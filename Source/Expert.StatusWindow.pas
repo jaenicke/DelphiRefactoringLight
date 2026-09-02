@@ -41,7 +41,7 @@ uses
   ToolsAPI, DesignIntf,   // DesignIntf: TEditState / TEditAction
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager,
   Expert.AutoImport, Expert.ContextMenu, Expert.IdeThemes, Expert.DialogHelper,
-  Lsp.Client;
+  Expert.MessagesReader, Expert.StructureErrors, Lsp.Client;
 
 // TCustomFrame.Create does InitInheritedComponent(Self, TFrame) for every
 // descendant and RAISES EResNotFound when the class has no DFM resource -
@@ -185,9 +185,12 @@ end;
 procedure TStatusFrame.Collect;
 var
   Client: TLspClient;
-  LiveFile, S, Detail: string;
+  LiveFile, S, Detail, DiagCodes: string;
   Analysing, Resolving, FromLsp, Fresh: Boolean;
-  FixCount, DiagCount: Integer;
+  FixCount, DiagCount, DiagFiles, DiagSeen, DiagHandled: Integer;
+  StrFires, StrNodes, StrDiags: Integer;
+  StrInstalled: Boolean;
+  StrReason, SrcStructure, SrcLsp: string;
 begin
   // FIXED row set: every branch below fills the same rows in the same
   // order, so Apply never has to restructure the list.
@@ -217,14 +220,23 @@ begin
   else
   begin
     DiagCount := 0;
+    DiagFiles := 0;
     Client := TLspManager.Instance.PeekClient;
     if Client <> nil then
       try
         DiagCount := Client.GetDiagnosticsCount;
+        DiagFiles := Client.GetDiagnosticFileCount;
       except
       end;
-    Row('DelphiLSP session', 'running',
-      Format('%d diagnostic push(es) received', [DiagCount]));
+    if DiagCount = 0 then
+      Row('DelphiLSP session', 'running, no diagnostics',
+        'our session has never pushed one - hints (H2443, ...) are ' +
+        'unavailable; errors come from the Structure view / the compiler')
+    else
+      Row('DelphiLSP session', 'running',
+        Format('%d push(es) received, diagnostics held for %d file(s) ' +
+          '(ALL files, not just this one)',
+          [DiagCount, DiagFiles]));
   end;
   if TLspManager.Instance.ProjectIndexed then S := 'yes' else S := 'no';
   Row('  project indexed', S, 'the LSP has seen this project once');
@@ -253,6 +265,60 @@ begin
       Row('  diagnostics from', 'Structure view',
         'errors only - hints follow after the LSP pass or a compile');
   end;
+
+  // What the LAST resolution actually worked on - turns a bare
+  // "0 fix(es)" into an answer to why (no diagnostics at all? codes we
+  // have no provider for? or providers that declined?).
+  LiveDiagStats(DiagSeen, DiagHandled, DiagCodes);
+  if DiagSeen = 0 then
+    Row('  last resolution', 'no diagnostics FOR THIS FILE',
+      'the session-wide push counter above says nothing about this ' +
+      'buffer - no source delivered a diagnostic for it')
+  else
+    Row('  last resolution',
+      Format('%d diag, %d fixable', [DiagSeen, DiagHandled]),
+      'codes: ' + DiagCodes);
+
+  // Which window (if any) currently keeps the fix hint hidden.
+  S := LiveHintBlocker;
+  if S = '' then
+    Row('  hint', 'free', 'nothing covers the caret area')
+  else
+    Row('  hint', 'yielding to ' + S,
+      'the hint stays hidden while another popup sits at the caret');
+
+  LiveSourceStats(SrcStructure, SrcLsp);
+  if SrcLsp = '' then
+    Row('  from LSP pass', 'never completed', '')
+  else
+    Row('  from LSP pass', SrcLsp, 'last analysis of our own LSP session');
+  if SrcStructure = '' then
+    Row('  from Structure', 'never resolved', '')
+  else
+    Row('  from Structure', SrcStructure, 'last payload of the Structure view');
+
+  // ---- Structure view (second diagnostics source) ------------------------
+  StructureSourceStats(StrInstalled, StrFires, StrNodes, StrDiags, StrReason);
+  if not StrInstalled then
+    Row('Structure source', 'NOT installed',
+      'IOTAStructureView notifier could not be registered')
+  else if StrFires = 0 then
+    Row('Structure source', 'installed, never fired',
+      'the IDE has not reported a structure change yet')
+  else if StrReason <> '' then
+    Row('Structure source', Format('%d fire(s), last: nothing', [StrFires]),
+      StrReason)
+  else
+    Row('Structure source', Format('%d fire(s), last: %d diag', [StrFires, StrDiags]),
+      Format('%d node(s) walked', [StrNodes]));
+
+  // ---- compiler output (third diagnostics source) ------------------------
+  S := MessagesReaderProblem;
+  if S <> '' then
+    Row('Compiler messages', 'unavailable', S)
+  else
+    Row('Compiler messages', Format('%d line(s) readable', [CompilerMessageCount]),
+      'read from the Messages window after each compile');
 
   // ---- Messages-window read probe ----------------------------------------
   S := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-messages.log');

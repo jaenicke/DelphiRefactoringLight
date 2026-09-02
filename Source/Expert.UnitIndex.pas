@@ -727,7 +727,15 @@ begin
 end;
 
 procedure NoteUnresolved(const AVar: string);
+const
+  // MSBuild PROJECT properties, not IDE path variables: a dproj entry
+  // like "myDir;$(DCC_UnitSearchPath)" simply appends the inherited
+  // value. Nothing is missing - do not alarm the user about them.
+  Benign: array[0..5] of string = ('$(DCC_', '$(ProjectDir)', '$(ProjectPath)',
+    '$(OutputDir)', '$(Configuration)', '$(MSBuild');
 begin
+  for var B in Benign do
+    if StartsText(B, AVar) then Exit;
   if Pos(AVar, GUnresolvedVars) > 0 then Exit;
   if GUnresolvedVars = '' then GUnresolvedVars := AVar
   else GUnresolvedVars := GUnresolvedVars + ', ' + AVar;

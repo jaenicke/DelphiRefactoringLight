@@ -68,6 +68,8 @@ type
     FErrorDiags: TObjectDictionary<string, TList<TLspErrorDiag>>;
     FInactiveRangesLock: TCriticalSection;
     FDiagnosticsCount: Integer;
+    // Pushes per file (see GetFileDiagnosticsVersion).
+    FFileDiagVersion: TDictionary<string, Integer>;
     /// <summary>Set of uppercase file paths that have received at least
     ///  one publishDiagnostics notification.</summary>
     FFilesWithDiagnostics: TDictionary<string, Boolean>;
@@ -170,6 +172,16 @@ type
     ///  the server actually pushes diagnostics. 0 == controller-mode
     ///  may not be active or the server hasn't analysed yet.</summary>
     function GetDiagnosticsCount: Integer;
+    /// <summary>How many FILES we currently hold error diagnostics for -
+    ///  the push counter alone cannot tell "123 pushes, but none for the
+    ///  file you are looking at" (status window).</summary>
+    function GetDiagnosticFileCount: Integer;
+    /// <summary>How many diagnostic pushes arrived FOR THIS FILE. The
+    ///  session-wide counter cannot answer "did the file I am waiting for
+    ///  get its answer yet" - waiting on it made us read a stale (usually
+    ///  empty) result whenever the push that arrived belonged to another
+    ///  file.</summary>
+    function GetFileDiagnosticsVersion(const AFilePath: string): Integer;
 
     /// <summary>Total inactive ranges across all known files.</summary>
     function GetInactiveRangesTotal: Integer;
@@ -278,6 +290,7 @@ begin
   FErrorDiags := TObjectDictionary<string, TList<TLspErrorDiag>>.Create([doOwnsValues]);
   FInactiveRangesLock := TCriticalSection.Create;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
+  FFileDiagVersion := TDictionary<string, Integer>.Create;
   FProcessHandle := INVALID_HANDLE_VALUE;
   FStdinWrite := INVALID_HANDLE_VALUE;
   FStdoutRead := INVALID_HANDLE_VALUE;
@@ -316,6 +329,7 @@ begin
   FErrorDiags.Free;
   FInactiveRangesLock.Free;
   FFilesWithDiagnostics.Free;
+  FFileDiagVersion.Free;
   inherited;
 end;
 
@@ -1185,6 +1199,11 @@ begin
   FInactiveRangesLock.Enter;
   try
     FFilesWithDiagnostics.AddOrSetValue(UpKey, True);
+    // Bump this file's version so a waiter can tell ITS answer apart
+    // from a push for some other file.
+    var Ver: Integer;
+    if not FFileDiagVersion.TryGetValue(UpKey, Ver) then Ver := 0;
+    FFileDiagVersion.AddOrSetValue(UpKey, Ver + 1);
     if FInactiveRanges.TryGetValue(UpKey, List) then List.Clear
     else begin List := TList<TLspRange>.Create; FInactiveRanges.Add(UpKey, List); end;
     if FErrorDiags.TryGetValue(UpKey, ErrList) then ErrList.Clear
@@ -1235,6 +1254,31 @@ begin
         ErrList.Add(ED);
       end;
     end;
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.GetFileDiagnosticsVersion(const AFilePath: string): Integer;
+var
+  UpKey: string;
+begin
+  Result := 0;
+  if AFilePath = '' then Exit;
+  UpKey := AnsiUpperCase(ExpandFileName(AFilePath));
+  FInactiveRangesLock.Enter;
+  try
+    FFileDiagVersion.TryGetValue(UpKey, Result);
+  finally
+    FInactiveRangesLock.Leave;
+  end;
+end;
+
+function TLspClient.GetDiagnosticFileCount: Integer;
+begin
+  FInactiveRangesLock.Enter;
+  try
+    Result := FErrorDiags.Count;
   finally
     FInactiveRangesLock.Leave;
   end;

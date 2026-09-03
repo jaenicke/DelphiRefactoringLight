@@ -211,6 +211,37 @@ begin
     OwnerType := TImplementationFinder.FindContainingType(
       FContext.FileName, FContext.Line - 1);
 
+  // The cursor may sit on the TYPE NAME itself ('ITest = interface').
+  // Then the question is not "which class implements this METHOD" but
+  // "which classes implement this TYPE" - searching for a method named
+  // ITest inside ITest can only ever find nothing.
+  if SameText(OwnerType, FContext.WordAtCursor) then
+  begin
+    FDialog.SetStatus(Format('Searching classes that implement %s...',
+      [FContext.WordAtCursor]));
+    Items := TImplementationFinder.FindTypeImplementations(
+      ProjFiles, FContext.WordAtCursor,
+      procedure(ACurrent, ATotal: Integer)
+      begin
+        FDialog.SetProgress(ACurrent, ATotal);
+        if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
+        begin
+          FDialog.SetStatus(Format('Scanning project (%d/%d)...',
+            [ACurrent, ATotal]));
+          Application.ProcessMessages;
+        end;
+      end);
+    FDialog.SetItems(Items);
+    FDialog.SetProgress(0, 0);
+    if System.Length(Items) = 0 then
+      FDialog.SetStatus(Format('No class implements or descends from %s.',
+        [FContext.WordAtCursor]))
+    else
+      FDialog.SetStatus(Format('%d class(es) implement %s.',
+        [System.Length(Items), FContext.WordAtCursor]));
+    Exit;
+  end;
+
   if OwnerType <> '' then
     FDialog.SetStatus(Format('Searching implementations of %s.%s in %d file(s)...',
       [OwnerType, FContext.WordAtCursor, System.Length(ProjFiles)]))
@@ -230,6 +261,25 @@ begin
         Application.ProcessMessages;
       end;
     end);
+
+  // A wrong owner type filters EVERY candidate away. Rather than
+  // reporting nothing, fall back to the unfiltered scan and label the
+  // result as unverified.
+  if (System.Length(Items) = 0) and (OwnerType <> '') then
+  begin
+    var Unverified := TImplementationFinder.FindByProjectScan(
+      ProjFiles, FContext.WordAtCursor, '', nil);
+    if System.Length(Unverified) > 0 then
+    begin
+      FDialog.SetItems(Unverified);
+      FDialog.SetProgress(0, 0);
+      FDialog.SetStatus(Format(
+        'No implementation verified for %s - showing %d candidate(s) ' +
+        'named "%s" (unverified).',
+        [OwnerType, System.Length(Unverified), FContext.WordAtCursor]));
+      Exit;
+    end;
+  end;
 
   // A PROPERTY has no implementation line of its own - fall back to its
   // declarations plus the implementations of its read/write accessors.

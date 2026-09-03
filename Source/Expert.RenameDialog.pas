@@ -14,6 +14,15 @@ uses
   Expert.IdentifierCheck;
 
 type
+  /// <summary>How far a rename reaches. Mirrors the choices "Remove with"
+  ///  offers, because the same question applies: a rename does not always
+  ///  belong to the whole project.</summary>
+  TRenameScope = (
+    rscProject,        // every project source file (the previous behaviour)
+    rscCurrentUnit,    // only the unit the caret is in
+    rscCurrentMethod,  // only the routine around the caret
+    rscSelectedUnits); // a hand-picked set
+
   /// <summary>A single entry for the rename preview list.</summary>
   TRenamePreviewItem = record
     FilePath: string;
@@ -41,6 +50,10 @@ type
     FBtnPreview: TButton;
     FBtnRename: TButton;
     FBtnCancel: TButton;
+    FCmbScope: TComboBox;
+    FLblScope: TLabel;
+    FBtnPickUnits: TButton;
+    FSelectedUnits: TArray<string>;
     FBusy: Boolean;          // a scan is running inside the click handler
     FScanCancelled: Boolean; // user pressed Stop / tried to close
     FProgressBar: TProgressBar;
@@ -58,6 +71,8 @@ type
     FCurrentFileText: string;
     FIndex: TProjectTextIndex;
     procedure DoFormShow(Sender: TObject);
+    procedure DoScopeChange(Sender: TObject);
+    procedure DoPickUnitsClick(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
     procedure DoBtnStopClick(Sender: TObject);
     procedure DoCloseQuery(Sender: TObject; var CanClose: Boolean);
@@ -100,6 +115,13 @@ type
     ///  turns Cancel into a STOP button. The scan runs inside the Preview
     ///  button's click handler, so the modal message loop is blocked -
     ///  SetStatus/SetProgress pump it, and the scan polls ScanCancelled.</summary>
+    /// <summary>Scope the user picked (and, for rscSelectedUnits, the
+    ///  files). Read by the wizard when Preview runs.</summary>
+    function Scope: TRenameScope;
+    function SelectedUnits: TArray<string>;
+    /// <summary>Unit-rename mode has no scopes - renaming a unit is
+    ///  inherently project-wide.</summary>
+    procedure HideScopeSelector;
     procedure SetBusy(ABusy: Boolean);
     /// <summary>True when the user asked to stop the running scan.</summary>
     function ScanCancelled: Boolean;
@@ -109,7 +131,7 @@ implementation
 
 uses
   System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes,
-  Expert.ListViewSort;
+  Expert.ListViewSort, Expert.EditorHelperIntf, Expert.WithRefactorDialog;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -130,7 +152,7 @@ begin
   FPanelTop := TPanel.Create(Self);
   FPanelTop.Parent := Self;
   FPanelTop.Align := alTop;
-  FPanelTop.Height := 160;
+  FPanelTop.Height := 196;
   FPanelTop.BevelOuter := bvNone;
 
   FOldName := AOldName;
@@ -186,16 +208,50 @@ begin
   FChkBackup := TCheckBox.Create(Self);
   FChkBackup.Parent := FPanelTop;
   FChkBackup.Left := 12;
-  FChkBackup.Top := 128;
+  FChkBackup.Top := 164;
   FChkBackup.Width := 200;
   FChkBackup.Caption := 'Create backup';
   FChkBackup.Checked := True;
+
+  // ---- scope -------------------------------------------------------------
+  // A rename is not always project-wide: renaming a local variable or a
+  // private helper only concerns one routine or one unit. Same choices
+  // "Remove with" offers, picked BEFORE Preview so the scan itself is
+  // already limited (and therefore much faster).
+  FLblScope := TLabel.Create(Self);
+  FLblScope.Parent := FPanelTop;
+  FLblScope.Left := 12;
+  FLblScope.Top := 126;
+  FLblScope.Caption := 'Scope:';
+
+  FCmbScope := TComboBox.Create(Self);
+  FCmbScope.Parent := FPanelTop;
+  FCmbScope.Left := 60;
+  FCmbScope.Top := 122;
+  FCmbScope.Width := 220;
+  FCmbScope.Style := csDropDownList;
+  FCmbScope.Items.Add('In whole project');
+  FCmbScope.Items.Add('In current unit');
+  FCmbScope.Items.Add('In current method');
+  FCmbScope.Items.Add('In selected units...');
+  FCmbScope.ItemIndex := 0;
+  FCmbScope.OnChange := DoScopeChange;
+
+  FBtnPickUnits := TButton.Create(Self);
+  FBtnPickUnits.Parent := FPanelTop;
+  FBtnPickUnits.Left := 288;
+  FBtnPickUnits.Top := 121;
+  FBtnPickUnits.Width := 90;
+  FBtnPickUnits.Height := 25;
+  FBtnPickUnits.Caption := 'Select...';
+  FBtnPickUnits.Visible := False;
+  FBtnPickUnits.OnClick := DoPickUnitsClick;
 
   FBtnCancel := TButton.Create(Self);
   FBtnCancel.Parent := FPanelTop;
   FBtnCancel.Width := 90;
   FBtnCancel.Height := 28;
-  FBtnCancel.Top := 124;
+  FBtnCancel.Top := 160;
   FBtnCancel.Anchors := [akTop, akRight];
   FBtnCancel.Left := ClientWidth - FBtnCancel.Width - 12;
   FBtnCancel.Caption := 'Cancel';
@@ -206,7 +262,7 @@ begin
   FBtnRename.Parent := FPanelTop;
   FBtnRename.Width := 96;
   FBtnRename.Height := 28;
-  FBtnRename.Top := 124;
+  FBtnRename.Top := 160;
   FBtnRename.Anchors := [akTop, akRight];
   FBtnRename.Left := FBtnCancel.Left - FBtnRename.Width - 6;
   FBtnRename.Caption := 'Rename';
@@ -218,7 +274,7 @@ begin
   FBtnPreview.Parent := FPanelTop;
   FBtnPreview.Width := 90;
   FBtnPreview.Height := 28;
-  FBtnPreview.Top := 124;
+  FBtnPreview.Top := 160;
   FBtnPreview.Anchors := [akTop, akRight];
   FBtnPreview.Left := FBtnRename.Left - FBtnPreview.Width - 6;
   FBtnPreview.Caption := 'Preview';
@@ -506,6 +562,64 @@ begin
   FBtnRename.Enabled := AEnabled;
 end;
 
+function TRenameDialog.Scope: TRenameScope;
+begin
+  if FCmbScope = nil then Exit(rscProject);
+  case FCmbScope.ItemIndex of
+    1: Result := rscCurrentUnit;
+    2: Result := rscCurrentMethod;
+    3: Result := rscSelectedUnits;
+  else
+    Result := rscProject;
+  end;
+end;
+
+function TRenameDialog.SelectedUnits: TArray<string>;
+begin
+  Result := FSelectedUnits;
+end;
+
+procedure TRenameDialog.HideScopeSelector;
+begin
+  FLblScope.Visible := False;
+  FCmbScope.Visible := False;
+  FBtnPickUnits.Visible := False;
+end;
+
+procedure TRenameDialog.DoScopeChange(Sender: TObject);
+begin
+  FBtnPickUnits.Visible := Scope = rscSelectedUnits;
+  // A scope change invalidates the previous preview.
+  SetPreviewItems(nil);
+  EnableRename(False);
+  if Scope = rscSelectedUnits then
+  begin
+    if Length(FSelectedUnits) = 0 then
+      SetStatus('Pick the units, then press Preview.')
+    else
+      SetStatus(Format('%d unit(s) selected - press Preview.',
+        [Length(FSelectedUnits)]));
+  end
+  else
+    SetStatus('Press Preview to see the changes.');
+end;
+
+procedure TRenameDialog.DoPickUnitsClick(Sender: TObject);
+var
+  All, Sel: TArray<string>;
+begin
+  if Editor = nil then Exit;
+  All := Editor.GetProjectSourceFiles;
+  if Length(All) = 0 then
+  begin
+    ShowThemedMessage('No project source files found.');
+    Exit;
+  end;
+  if not TWithRefactorDialog.PickFiles(Self, All, Sel) then Exit;
+  FSelectedUnits := Sel;
+  DoScopeChange(nil);
+end;
+
 procedure TRenameDialog.SetBusy(ABusy: Boolean);
 begin
   FBusy := ABusy;
@@ -514,6 +628,8 @@ begin
   if ABusy then
     FBtnRename.Enabled := False;
   FEdtNewName.Enabled := not ABusy;
+  FCmbScope.Enabled := not ABusy;
+  FBtnPickUnits.Enabled := not ABusy;
   // During the scan Cancel must NOT close the dialog: the scan runs
   // inside the Preview click handler, so closing here would free the
   // form under running code. It stops the scan instead.

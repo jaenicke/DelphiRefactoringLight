@@ -64,6 +64,14 @@ type
     class function FindPropertyImplementations(const AProjectFiles: TArray<string>;
       const APropName: string; AProgress: TImplementationScanProgress): TFindReferenceItems;
 
+    /// <summary>Implementations of a TYPE: every class in the project
+    ///  that implements the interface ATypeName or descends from the class
+    ///  ATypeName - the answer when the cursor sits on the type NAME
+    ///  ('ITest = interface') instead of on one of its methods. Result
+    ///  rows point at the class declarations.</summary>
+    class function FindTypeImplementations(const AProjectFiles: TArray<string>;
+      const ATypeName: string; AProgress: TImplementationScanProgress): TFindReferenceItems;
+
     class function FindByProjectScan(const AProjectFiles: TArray<string>; const AIdentifier: string;
       const AExpectedOwnerType: string; AProgress: TImplementationScanProgress = nil): TFindReferenceItems;
 
@@ -72,6 +80,24 @@ type
     ///  den Typ-Namen. Damit findet man den Container-Typ in dem eine
     ///  Methode deklariert ist. Liefert '' wenn nichts gefunden.</summary>
     class function FindContainingType(const AFilePath: string; AStartLine: Integer): string;
+
+    /// <summary>Same, but on already-read lines - pure and testable.
+    ///  IMPORTANT over a naive backward scan: it verifies that AStartLine
+    ///  really is INSIDE the type it finds. A line in the implementation
+    ///  section, inside a routine body, or after the closing 'end;' of the
+    ///  preceding type yields '' instead of the nearest header above it -
+    ///  a wrong owner type filters away EVERY implementation later on.
+    ///  When AStartLine is itself a method implementation header
+    ///  ('procedure TFoo.Bar;'), its qualifier is the answer.</summary>
+    class function FindContainingTypeInLines(const ALines: TArray<string>;
+      AStartLine: Integer): string; static;
+
+    /// <summary>Owner type of a method IMPLEMENTATION header:
+    ///  'procedure TFoo.Bar;' -> 'TFoo', 'function TFoo&lt;T&gt;.Get: T' ->
+    ///  'TFoo', 'procedure TOuter.TInner.Baz;' -> 'TInner' (the qualifier
+    ///  directly before the method name, which is what the scan compares
+    ///  against). '' when the line is not such a header.</summary>
+    class function OwnerTypeFromImplLine(const ALine: string): string; static;
 
     /// <summary>Prueft rekursiv ob die Klasse AClassName den Typ
     ///  ATargetType implementiert oder von ihm erbt. Parst hierzu die
@@ -329,11 +355,115 @@ end;
 
 { TImplementationFinder }
 
+class function TImplementationFinder.OwnerTypeFromImplLine(
+  const ALine: string): string;
+var
+  L, U, Rest, Name: string;
+  P, I, Depth: Integer;
+  Parts: TArray<string>;
+begin
+  Result := '';
+  L := Trim(ALine);
+  P := Pos('//', L);
+  if P > 0 then L := TrimRight(Copy(L, 1, P - 1));
+  if L = '' then Exit;
+  U := UpperCase(L);
+  if StartsStr('CLASS ', U) then
+  begin
+    L := TrimLeft(Copy(L, Length('CLASS ') + 1, MaxInt));
+    U := UpperCase(L);
+  end;
+  if not (StartsStr('PROCEDURE ', U) or StartsStr('FUNCTION ', U)
+    or StartsStr('CONSTRUCTOR ', U) or StartsStr('DESTRUCTOR ', U)
+    or StartsStr('OPERATOR ', U)) then Exit;
+
+  P := Pos(' ', L);
+  Rest := TrimLeft(Copy(L, P + 1, MaxInt));
+
+  // Qualified name up to '(' / ':' / ';'; generic arguments are skipped
+  // so 'TFoo<T>.Get' still splits at the right dot.
+  Name := '';
+  Depth := 0;
+  I := 1;
+  while I <= Length(Rest) do
+  begin
+    if Rest[I] = '<' then
+      Inc(Depth)
+    else if Rest[I] = '>' then
+      Dec(Depth)
+    else if Depth = 0 then
+    begin
+      if CharInSet(Rest[I], ['(', ':', ';', ' ', #9, '=']) then Break;
+      Name := Name + Rest[I];
+    end;
+    Inc(I);
+  end;
+
+  Parts := Name.Split(['.']);
+  if Length(Parts) >= 2 then
+    Result := Trim(Parts[High(Parts) - 1]);
+end;
+
+class function TImplementationFinder.FindContainingTypeInLines(
+  const ALines: TArray<string>; AStartLine: Integer): string;
+var
+  I: Integer;
+  L, U, TypeName: string;
+
+  function Clean(const S: string): string;
+  var
+    P: Integer;
+  begin
+    Result := Trim(S);
+    if StartsStr('//', Result) then Exit('');
+    P := Pos('//', Result);
+    if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
+  end;
+
+begin
+  Result := '';
+  if Length(ALines) = 0 then Exit;
+  if AStartLine < 0 then AStartLine := 0;
+  if AStartLine > High(ALines) then AStartLine := High(ALines);
+
+  // The line itself may already BE the implementation header - that is
+  // where DelphiLSP likes to land when asked for a method's definition.
+  Result := OwnerTypeFromImplLine(ALines[AStartLine]);
+  if Result <> '' then Exit;
+
+  for I := AStartLine downto 0 do
+  begin
+    L := Clean(ALines[I]);
+    if L = '' then Continue;
+    U := UpperCase(L);
+
+    if I < AStartLine then
+    begin
+      // Everything below is a boundary the search must not cross. Being
+      // conservative here is deliberate: an empty result means "search
+      // unfiltered", a WRONG type means "find nothing at all".
+      // Reaching a method implementation header means the start line
+      // sits INSIDE that method - its qualifier is the containing type.
+      TypeName := OwnerTypeFromImplLine(L);
+      if TypeName <> '' then Exit(TypeName);
+      if (U = 'IMPLEMENTATION') or (U = 'END;') or (U = 'END') then
+        Exit('');
+    end;
+
+    TypeName := TImplFinderHelper.ExtractTypeHeaderName(L);
+    if TypeName <> '' then
+    begin
+      // 'TFoo = class;' / 'TFoo = class(TBase);' is a FORWARD declaration
+      // - it has no body, so nothing can be inside it.
+      if EndsStr(';', L) then Exit('');
+      Exit(TypeName);
+    end;
+  end;
+end;
+
 class function TImplementationFinder.FindContainingType(const AFilePath: string; AStartLine: Integer): string;
 var
   Lines: TArray<string>;
-  I: Integer;
-  TypeName: string;
 begin
   Result := '';
   try
@@ -341,16 +471,7 @@ begin
   except
     Exit;
   end;
-
-  if AStartLine < 0 then AStartLine := 0;
-  if AStartLine > High(Lines) then AStartLine := High(Lines);
-
-  for I := AStartLine downto 0 do
-  begin
-    TypeName := TImplFinderHelper.ExtractTypeHeaderName(Lines[I]);
-    if TypeName <> '' then
-      Exit(TypeName);
-  end;
+  Result := FindContainingTypeInLines(Lines, AStartLine);
 end;
 
 class function TImplementationFinder.ClassImplementsType(const AProjectFiles: TArray<string>;
@@ -493,6 +614,107 @@ begin
   finally
     Accessors.Free;
     ResultList.Free;
+  end;
+end;
+
+class function TImplementationFinder.FindTypeImplementations(
+  const AProjectFiles: TArray<string>; const ATypeName: string;
+  AProgress: TImplementationScanProgress): TFindReferenceItems;
+type
+  TDeclInfo = record
+    FilePath: string;
+    Line, Col: Integer;
+    Preview: string;
+    Parents: TArray<string>;
+  end;
+var
+  Decls: TDictionary<string, TDeclInfo>;   // UPPER(name) -> declaration
+  Order: TList<string>;                    // stable output order
+  ResultList: TList<TFindReferenceItem>;
+  Item: TFindReferenceItem;
+  Info: TDeclInfo;
+  Lines: TArray<string>;
+  RawContent, TypeName: string;
+  LineIdx, P: Integer;
+
+  // Walks the parent chain in memory - no further file reads.
+  function Descends(const AName: string; ADepth: Integer): Boolean;
+  var
+    D: TDeclInfo;
+  begin
+    Result := False;
+    if (AName = '') or (ADepth > 32) then Exit;
+    if SameText(AName, ATypeName) then Exit(True);
+    if not Decls.TryGetValue(UpperCase(AName), D) then Exit;
+    for var Par in D.Parents do
+      if SameText(Par, ATypeName) or Descends(Par, ADepth + 1) then
+        Exit(True);
+  end;
+
+begin
+  Result := nil;
+  if (ATypeName = '') or (System.Length(AProjectFiles) = 0) then Exit;
+
+  Decls := TDictionary<string, TDeclInfo>.Create;
+  Order := TList<string>.Create;
+  ResultList := TList<TFindReferenceItem>.Create;
+  try
+    // Pass 1: collect EVERY class/interface declaration with its parents.
+    for var FileIdx := 0 to High(AProjectFiles) do
+    begin
+      if Assigned(AProgress) then
+        AProgress(FileIdx + 1, System.Length(AProjectFiles));
+      try
+        RawContent := ReadDelphiFile(AProjectFiles[FileIdx]);
+        if Pos('CLASS', UpperCase(RawContent)) = 0 then Continue;
+        Lines := ReadDelphiFileLines(AProjectFiles[FileIdx]);
+      except
+        Continue;
+      end;
+
+      for LineIdx := 0 to High(Lines) do
+      begin
+        TypeName := TImplFinderHelper.ExtractTypeHeaderName(Lines[LineIdx]);
+        if TypeName = '' then Continue;
+        // A forward declaration carries no parents - never let it shadow
+        // the real one.
+        if EndsStr(';', Trim(Lines[LineIdx]))
+          and Decls.ContainsKey(UpperCase(TypeName)) then Continue;
+
+        Info := Default(TDeclInfo);
+        Info.FilePath := AProjectFiles[FileIdx];
+        Info.Line := LineIdx;
+        P := Pos(UpperCase(TypeName), UpperCase(Lines[LineIdx]));
+        if P < 1 then P := 1;
+        Info.Col := P - 1;
+        Info.Preview := Trim(Lines[LineIdx]);
+        Info.Parents := TImplFinderHelper.ExtractClassParents(Lines, LineIdx);
+
+        if not Decls.ContainsKey(UpperCase(TypeName)) then
+          Order.Add(UpperCase(TypeName));
+        Decls.AddOrSetValue(UpperCase(TypeName), Info);
+      end;
+    end;
+
+    // Pass 2: keep the ones that reach ATypeName (excluding itself).
+    for var Key in Order do
+    begin
+      Info := Decls[Key];
+      if SameText(Key, ATypeName) then Continue;
+      if not Descends(Key, 0) then Continue;
+      Item.FilePath := Info.FilePath;
+      Item.Line := Info.Line;
+      Item.Col := Info.Col;
+      Item.Length := System.Length(Key);
+      Item.Preview := Info.Preview;
+      ResultList.Add(Item);
+    end;
+
+    Result := ResultList.ToArray;
+  finally
+    ResultList.Free;
+    Order.Free;
+    Decls.Free;
   end;
 end;
 

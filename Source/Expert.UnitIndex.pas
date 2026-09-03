@@ -175,6 +175,15 @@ function ParseUnit(const AFile: string; out AUnitName: string;
 ///  symbol when the LSP has no definition for it (index fallback).</summary>
 function FindDeclarationLine(const AContent, AIdent: string): Integer;
 
+/// <summary>0-based line range of the routine that CONTAINS ALine0 -
+///  from its header (procedure/function/constructor/destructor, including
+///  a qualified or generic one) to its final "end;". False when the line
+///  is not inside a routine body. Used by the rename scope "in current
+///  method". Nested routines resolve to the INNERMOST one containing the
+///  line.</summary>
+function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
+  out AFirst, ALast: Integer): Boolean;
+
 /// <summary>0-based line of AMemberName's declaration INSIDE the body of
 ///  type ATypeName, or -1. Class members (class procedure / class
 ///  function / class property, and their instance counterparts) are NOT
@@ -1067,6 +1076,87 @@ begin
     end;
   end;
   Result := BestLine;
+end;
+
+function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
+  out AFirst, ALast: Integer): Boolean;
+var
+  Lines: TArray<string>;
+  I, Depth, HdrLine: Integer;
+  L, U: string;
+
+  function Clean(const S: string): string;
+  var
+    P: Integer;
+  begin
+    Result := Trim(S);
+    if Result.StartsWith('//') then Exit('');
+    P := Pos('//', Result);
+    if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
+  end;
+
+  function IsHeader(const AUpper: string): Boolean;
+  begin
+    Result := StartsWithWord(AUpper, 'PROCEDURE')
+      or StartsWithWord(AUpper, 'FUNCTION')
+      or StartsWithWord(AUpper, 'CONSTRUCTOR')
+      or StartsWithWord(AUpper, 'DESTRUCTOR')
+      or StartsWithWord(AUpper, 'CLASS PROCEDURE')
+      or StartsWithWord(AUpper, 'CLASS FUNCTION')
+      or StartsWithWord(AUpper, 'OPERATOR');
+  end;
+
+begin
+  Result := False;
+  AFirst := -1;
+  ALast := -1;
+  if AContent = '' then Exit;
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+
+  // Nearest header at or above the line. A FORWARD declaration (header
+  // ending in ';' with no body) is skipped by the body walk below.
+  HdrLine := -1;
+  for I := ALine0 downto 0 do
+  begin
+    L := Clean(Lines[I]);
+    if L = '' then Continue;
+    if IsHeader(UpperCase(L)) then
+    begin
+      HdrLine := I;
+      Break;
+    end;
+  end;
+  if HdrLine < 0 then Exit;
+
+  // Walk from the header to its final "end;".
+  Depth := 0;
+  for I := HdrLine to High(Lines) do
+  begin
+    L := Clean(Lines[I]);
+    if L = '' then Continue;
+    U := UpperCase(L);
+    if StartsWithWord(U, 'BEGIN') or StartsWithWord(U, 'TRY')
+      or StartsWithWord(U, 'CASE') then
+      Inc(Depth)
+    else if (Depth > 0) and ((U = 'END;') or (U = 'END')) then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        // The line must actually lie inside what we walked.
+        if (ALine0 >= HdrLine) and (ALine0 <= I) then
+        begin
+          AFirst := HdrLine;
+          ALast := I;
+          Result := True;
+        end;
+        Exit;
+      end;
+    end
+    else if (Depth = 0) and (I > HdrLine) and IsHeader(U) then
+      Exit;   // next routine started - the first one had no body
+  end;
 end;
 
 function FindMemberDeclarationLine(const AContent, ATypeName,

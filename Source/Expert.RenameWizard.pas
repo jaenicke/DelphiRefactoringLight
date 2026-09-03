@@ -14,7 +14,8 @@ uses
   System.Generics.Collections, System.Generics.Defaults, Vcl.Forms, Vcl.Dialogs,
   {$IFNDEF STANDALONE_BUILD} ToolsAPI, {$ENDIF}
   Expert.EditorHelperIntf,
-  Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog, Lsp.Uri, Lsp.Protocol,
+  Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
+  Expert.UnitIndex, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding;
 
 type
@@ -322,9 +323,11 @@ begin
       Inc(TotalEdits, Length(FE.Edits));
 
     FDialog.SetPreviewItems(PreviewItems);
+
     FDialog.SetDetailsText(FDiagLog);
     FDialog.EnableRename(True);
-    FDialog.SetStatus(Format('Done: %d change(s) in %d file(s).', [TotalEdits, Length(FEdit.FileEdits)]));
+    FDialog.SetStatus(Format('Done: %d change(s) in %d file(s).',
+      [TotalEdits, Length(FEdit.FileEdits)]));
   except
     on E: Exception do
     begin
@@ -381,6 +384,7 @@ var
   ProjFiles: TArray<string>;
   Candidates, ImplCandidates: TArray<TRenameCandidate>;
   Client: TLspClient;
+  ScopeFirst, ScopeLast: Integer;   // "current method" line window (0-based)
 begin
   NewName := FDialog.GetNewName;
   if NewName = '' then
@@ -423,13 +427,77 @@ begin
       'Position: ' + IntToStr(FContext.Line) + ':' + IntToStr(FContext.Column) + sLineBreak +
       'delphilsp.json: ' + DelphiLspJson + sLineBreak + sLineBreak;
 
-    // Get project files from the IDE
-    ProjFiles := Editor.GetProjectSourceFiles;
+    // ---- SCOPE ---------------------------------------------------------
+    // The dialog decides how far the rename reaches. Limiting the FILE
+    // SET here also makes the scan itself much faster, because every
+    // later phase (text scan, implementation scan, LSP verification)
+    // works on it.
+    ScopeFirst := -1;
+    ScopeLast := -1;
+    case FDialog.Scope of
+      rscCurrentUnit:
+        begin
+          ProjFiles := [FContext.FileName];
+          FDialog.SetStatus('Scope: current unit.');
+        end;
+      rscCurrentMethod:
+        begin
+          ProjFiles := [FContext.FileName];
+          var MethContent: string;
+          if not Editor.ReadEditorContent(FContext.FileName, MethContent) then
+            MethContent := '';
+          if not FindEnclosingRoutineRange(MethContent, FContext.Line - 1,
+            ScopeFirst, ScopeLast) then
+          begin
+            MessageDlg('The caret is not inside a method body - ' +
+              'choose another scope.', mtWarning, [mbOK], 0);
+            FDialog.SetBusy(False);
+            Exit;
+          end;
+          FDialog.SetStatus(Format('Scope: current method (lines %d-%d).',
+            [ScopeFirst + 1, ScopeLast + 1]));
+        end;
+      rscSelectedUnits:
+        begin
+          ProjFiles := FDialog.SelectedUnits;
+          if Length(ProjFiles) = 0 then
+          begin
+            MessageDlg('No units selected - press "Select..." first.',
+              mtWarning, [mbOK], 0);
+            FDialog.SetBusy(False);
+            Exit;
+          end;
+          // The declaration lives where the caret is - keep that file in
+          // scope, otherwise the rename could never touch it.
+          var HaveCur := False;
+          for var PF in ProjFiles do
+            if SameText(PF, FContext.FileName) then HaveCur := True;
+          if not HaveCur then ProjFiles := ProjFiles + [FContext.FileName];
+          FDialog.SetStatus(Format('Scope: %d selected unit(s).',
+            [Length(ProjFiles)]));
+        end;
+    else
+      // Get project files from the IDE
+      ProjFiles := Editor.GetProjectSourceFiles;
+    end;
     FDiagLog := FDiagLog + 'Project files: ' + IntToStr(Length(ProjFiles)) + sLineBreak + sLineBreak;
 
     // Phase 1: text search over project files
     FDialog.SetStatus('Phase 1: text search...');
     Candidates := FindCandidates(FContext.WordAtCursor, ProjFiles);
+    // "In current method": drop everything outside the routine's lines.
+    if ScopeFirst >= 0 then
+    begin
+      var InScope: TArray<TRenameCandidate> := nil;
+      for var C in Candidates do
+        if (C.Line >= ScopeFirst) and (C.Line <= ScopeLast) then
+          InScope := InScope + [C];
+      FDiagLog := FDiagLog + Format(
+        'Scope filter (method lines %d-%d): %d of %d candidate(s) kept' +
+        sLineBreak, [ScopeFirst + 1, ScopeLast + 1, Length(InScope),
+        Length(Candidates)]);
+      Candidates := InScope;
+    end;
     FDiagLog := FDiagLog + 'Text candidates: ' + IntToStr(Length(Candidates)) + sLineBreak + sLineBreak;
 
     if Length(Candidates) = 0 then
@@ -588,9 +656,28 @@ begin
       Inc(TotalEdits, Length(FE.Edits));
 
     FDialog.SetPreviewItems(PreviewItems);
-    FDialog.SetDetailsText(FDiagLog);
+    // A LIMITED scope can leave the declaration out - the result would
+    // not compile. The preview must say that plainly; it is still a
+    // legitimate choice (renaming a local variable, or a staged rename).
+    var ScopeWarn := '';
+    if (FDialog.Scope <> rscProject) and (DefFilePath <> '') then
+    begin
+      var DeclCovered := False;
+      for var FE in FEdit.FileEdits do
+        if SameText(FE.FilePath, DefFilePath) then
+          for var Ed in FE.Edits do
+            if (ScopeFirst < 0)
+              or ((Ed.Range.Start.Line >= ScopeFirst)
+                  and (Ed.Range.Start.Line <= ScopeLast)) then
+              DeclCovered := True;
+      if not DeclCovered then
+        ScopeWarn := '  WARNING: the declaration is OUTSIDE the selected ' +
+          'scope and stays unchanged.';
+    end;
+    FDialog.SetDetailsText(TrimLeft(ScopeWarn) + sLineBreak + sLineBreak + FDiagLog);
     FDialog.EnableRename(True);
-    FDialog.SetStatus(Format('Done: %d change(s) in %d file(s).', [TotalEdits, Length(FEdit.FileEdits)]));
+    FDialog.SetStatus(Format('Done: %d change(s) in %d file(s).%s',
+      [TotalEdits, Length(FEdit.FileEdits), ScopeWarn]));
   except
     on E: Exception do
     begin

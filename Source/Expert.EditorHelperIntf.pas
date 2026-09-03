@@ -60,6 +60,11 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
+    /// <summary>Source files currently OPEN in the editor. Cheap (a
+    ///  handful of modules) and the only place where UNSAVED changes
+    ///  live - a caller that scans the project from disk must check
+    ///  these buffers separately or it works on stale text.</summary>
+    function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
     function FindDelphiLspJson: string;

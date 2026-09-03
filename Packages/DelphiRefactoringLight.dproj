@@ -158,6 +158,7 @@
         <DCCReference Include="..\Source\Expert.CircularRefsDialog.pas"/>
         <DCCReference Include="..\Source\Expert.UsesEditor.pas"/>
         <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitUsageProbe.pas"/>
         <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.AutoImport.pas"/>
         <DCCReference Include="..\Source\Expert.StructureErrors.pas"/>

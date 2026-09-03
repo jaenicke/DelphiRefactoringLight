@@ -102,6 +102,7 @@
         <DCCReference Include="Standalone.MainForm.pas"/>
         <DCCReference Include="Standalone.EditorHelper.pas"/>
         <DCCReference Include="..\Source\Expert.EditorHelperIntf.pas"/>
+        <DCCReference Include="..\Source\Expert.UnitUsageProbe.pas"/>
         <DCCReference Include="..\Source\Delphi.FileEncoding.pas"/>
         <DCCReference Include="..\Source\Expert.SemanticReplace.pas"/>
         <DCCReference Include="..\Source\Expert.SemanticReplaceDialogs.pas"/>

@@ -15,7 +15,7 @@ uses
   {$IFNDEF STANDALONE_BUILD} ToolsAPI, {$ENDIF}
   Expert.EditorHelperIntf,
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
-  Expert.UnitIndex, Lsp.Uri, Lsp.Protocol,
+  Expert.UnitIndex, Expert.UnitUsageProbe, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding;
 
 type
@@ -151,6 +151,17 @@ procedure TLspRenameWizard.ExecuteForUnit(const AOldUnitName, ANewUnitName: stri
 begin
   if (AOldUnitName = '') or (ANewUnitName = '') or
      SameText(AOldUnitName, ANewUnitName) then Exit;
+
+  // A unit NOBODY references has nothing to rename - the dialog would
+  // only be in the way of a plain "Save as...". The probe answers from
+  // raw bytes, in parallel, within a time budget; open editor buffers
+  // are read live so unsaved references still count. uurUnknown (budget
+  // spent, unreadable file) keeps the old behaviour - the dialog opens.
+  var HitFile := '';
+  var ProbeMs := 0;
+  if ProbeUnitUsage(Editor.GetProjectSourceFiles, AOldUnitName,
+    DefaultUnitUsageBudgetMs, HitFile, ProbeMs) = uurUnused then
+    Exit;
 
   FUnitRenameMode := True;
   try

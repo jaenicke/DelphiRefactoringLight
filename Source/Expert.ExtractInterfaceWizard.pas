@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -468,6 +468,9 @@ var
 {$ENDIF}
 begin
 {$IFNDEF STANDALONE_BUILD}
+  // Never OpenModule a path that is not there: the IDE then tries to
+  // CREATE the file and puts up a modal error box.
+  if not TFile.Exists(AFile) then Exit;
   if Supports(BorlandIDEServices, IOTAModuleServices, MS) then
     MS.OpenModule(AFile);
 {$ELSE}

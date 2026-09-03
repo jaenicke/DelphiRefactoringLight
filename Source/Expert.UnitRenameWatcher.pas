@@ -30,7 +30,7 @@ unit Expert.UnitRenameWatcher;
 interface
 
 uses
-  System.Classes, System.Generics.Collections, ToolsAPI;
+  System.Classes, System.Generics.Collections, Vcl.ExtCtrls, ToolsAPI;
 
 type
   TUnitRenameWatcher = class;
@@ -74,6 +74,11 @@ type
       FIdeNotifier: IOTAIDENotifier;
       FIdeNotifierIndex: Integer;
       FAttached: TList<TAttachedEntry>;
+      // Pending rename, handed to a plain WM_TIMER tick (see DoDeferTick).
+      FPendingOld: string;
+      FPendingNew: string;
+      FDeferTimer: TTimer;
+    procedure DoDeferTick(Sender: TObject);
     procedure AttachToAllOpenModules;
     function IsAttachedTo(const AFileName: string): Boolean;
   public
@@ -161,13 +166,32 @@ begin
   inherited Create;
   FAttached := TList<TAttachedEntry>.Create;
   FIdeNotifierIndex := -1;
+  FDeferTimer := TTimer.Create(nil);
+  FDeferTimer.Enabled := False;
+  FDeferTimer.Interval := 400;
+  FDeferTimer.OnTimer := DoDeferTick;
 end;
 
 destructor TUnitRenameWatcher.Destroy;
 begin
   Uninstall;
+  FDeferTimer.Free;
   FAttached.Free;
   inherited;
+end;
+
+procedure TUnitRenameWatcher.DoDeferTick(Sender: TObject);
+var
+  OldUnit, NewUnit: string;
+begin
+  FDeferTimer.Enabled := False;
+  OldUnit := FPendingOld;
+  NewUnit := FPendingNew;
+  FPendingOld := '';
+  FPendingNew := '';
+  if (OldUnit = '') or (NewUnit = '') then Exit;
+  if WizardInstance <> nil then
+    WizardInstance.ExecuteForUnit(OldUnit, NewUnit);
 end;
 
 procedure TUnitRenameWatcher.Install;
@@ -333,14 +357,19 @@ begin
   if SameText(OldUnit, NewUnit) or (OldUnit = '') or (NewUnit = '') then
     Exit;
 
-  // Queue to the main message loop so we run after the IDE has finished
-  // its rename processing.
-  TThread.ForceQueue(nil,
-    procedure
-    begin
-      if WizardInstance <> nil then
-        WizardInstance.ExecuteForUnit(OldUnit, NewUnit);
-    end);
+  // HARD RULE (learned the expensive way): a TThread.Queue/ForceQueue proc
+  // runs inside CheckSynchronize, which the IDE also pumps DURING its own
+  // rename transaction - opening a MODAL dialog from there lands in the
+  // middle of that transaction. Observed result: the IDE renamed the file
+  // and rewrote the .dpr text, but its PROJECT MODEL kept the old unit,
+  // so the next save tried to write the vanished Unit544.pas and failed
+  // with "Datei ... kann nicht erstellt werden".
+  // A plain WM_TIMER tick runs when the IDE is back in its message loop
+  // and the rename is completely finished.
+  FPendingOld := OldUnit;
+  FPendingNew := NewUnit;
+  FDeferTimer.Enabled := False;
+  FDeferTimer.Enabled := True;
 end;
 
 end.

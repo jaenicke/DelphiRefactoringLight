@@ -30,6 +30,7 @@ uses
   Expert.CircularRefsDialog in '..\Source\Expert.CircularRefsDialog.pas',
   Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
+  Expert.UnitUsageProbe in '..\Source\Expert.UnitUsageProbe.pas',
   Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.FindOriginalSymbolWizard in '..\Source\Expert.FindOriginalSymbolWizard.pas',

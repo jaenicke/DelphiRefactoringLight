@@ -100,6 +100,8 @@ type
     property GetSelectionFunc: TGetSelectionFunc read FGetSelection write FGetSelection;
     property OnExternalChange: TProc<string> read FOnExternalChange write FOnExternalChange;
     function TryGetBuffer(const AFile: string; out AContent: string): Boolean;
+    /// <summary>Paths of the currently open (possibly unsaved) buffers.</summary>
+    function OpenBufferFiles: TArray<string>;
   end;
 
   TStandaloneEditorHelper = class(TInterfacedObject, IEditorHelper)
@@ -115,6 +117,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
+    function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
     function FindDelphiLspJson: string;
@@ -264,6 +267,11 @@ begin
     FOnExternalChange(AFile);
 end;
 
+function TStandaloneProjectState.OpenBufferFiles: TArray<string>;
+begin
+  Result := FOpenBuffers.Keys.ToArray;
+end;
+
 function TStandaloneProjectState.TryGetBuffer(const AFile: string;
   out AContent: string): Boolean;
 begin
@@ -358,6 +366,11 @@ end;
 function TStandaloneEditorHelper.GetProjectSourceFiles: TArray<string>;
 begin
   Result := FState.SourceFiles;
+end;
+
+function TStandaloneEditorHelper.GetOpenSourceFiles: TArray<string>;
+begin
+  Result := FState.OpenBufferFiles;
 end;
 
 function TStandaloneEditorHelper.BuildSearchPathFromProject(

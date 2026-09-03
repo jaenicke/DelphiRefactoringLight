@@ -31,6 +31,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
+    function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
     function FindDelphiLspJson: string;
@@ -343,6 +344,27 @@ begin
     ActionServices.ReloadFile(''{ leer = aktuelle Datei });
 end;
 
+// OpenModule on a path that does not exist makes the IDE try to CREATE
+// the file; it fails with a MODAL box ("Datei ... kann nicht erstellt
+// werden. Das System kann die angegebene Datei nicht finden."), which
+// also blocks the IDE until someone clicks OK. A caller reaches that
+// state whenever it works from a stale file list - a unit index built
+// before a rename, a project model that still names the old file. A
+// missing file is simply "no module" here; every call site already
+// handles nil.
+function OpenModuleSafe(const AModuleServices: IOTAModuleServices;
+  const AFilePath: string): IOTAModule;
+begin
+  Result := nil;
+  if (AModuleServices = nil) or (AFilePath = '') then Exit;
+  if not TFile.Exists(AFilePath) then Exit;
+  try
+    Result := AModuleServices.OpenModule(AFilePath);
+  except
+    Result := nil;
+  end;
+end;
+
 procedure TIDEEditorHelper.SaveAllFiles;
 var
   ModuleServices: IOTAModuleServices;
@@ -386,7 +408,7 @@ begin
   // Modul oeffnen falls noetig
   Module := ModuleServices.FindModule(AFilePath);
   if Module = nil then
-    Module := ModuleServices.OpenModule(AFilePath);
+    Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then
     Exit;
 
@@ -461,7 +483,7 @@ begin
   // Modul in der IDE oeffnen (falls nicht schon offen)
   Module := ModuleServices.FindModule(AFilePath);
   if Module = nil then
-    Module := ModuleServices.OpenModule(AFilePath);
+    Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then
     Exit;
 
@@ -534,7 +556,7 @@ begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
-  if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
+  if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
   // Pick the editor whose FileName matches the REQUESTED file. The
@@ -679,7 +701,7 @@ begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
-  if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
+  if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
   // Pick the editor whose FileName matches the REQUESTED file. The
@@ -766,7 +788,7 @@ begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
-  if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
+  if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
   // Pick the editor whose FileName matches the REQUESTED file. The
@@ -804,7 +826,7 @@ begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
-  if Module = nil then Module := ModuleServices.OpenModule(AFilePath);
+  if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
   // Pick the editor whose FileName matches the REQUESTED file. The
@@ -844,6 +866,33 @@ begin
   AContent := '';
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
+  if Module = nil then
+  begin
+    // FindModule matches the MODULE name, and a project module is named
+    // after its .dproj - so the .dpr, which is where the IDE rewrites the
+    // uses clause on "Save as", is never found by path. Fall back to
+    // scanning the open modules' own file editors.
+    for I := 0 to ModuleServices.ModuleCount - 1 do
+    begin
+      var M := ModuleServices.Modules[I];
+      if M = nil then Continue;
+      try
+        for var K := 0 to M.GetModuleFileCount - 1 do
+        begin
+          var Ed: IOTASourceEditor;
+          if Supports(M.GetModuleFileEditor(K), IOTASourceEditor, Ed) then
+            if SameText(ExpandFileName(Ed.FileName), ExpandFileName(AFilePath)) then
+            begin
+              Module := M;
+              Break;
+            end;
+        end;
+      except
+        Continue;
+      end;
+      if Module <> nil then Break;
+    end;
+  end;
   if Module = nil then Exit;
 
   // Pick the editor whose FileName matches the REQUESTED file. The
@@ -901,6 +950,48 @@ begin
   end;
 
   Result := '';
+end;
+
+function TIDEEditorHelper.GetOpenSourceFiles: TArray<string>;
+var
+  ModuleServices: IOTAModuleServices;
+  FileList: TList<string>;
+  FileName, Ext: string;
+  I: Integer;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
+    Exit;
+  FileList := TList<string>.Create;
+  try
+    for I := 0 to ModuleServices.ModuleCount - 1 do
+    begin
+      var Module := ModuleServices.Modules[I];
+      if Module = nil then Continue;
+      // The module's OWN name is not enough: a project module is called
+      // Foo.dproj while the file holding the uses clause is Foo.dpr.
+      // Enumerate the module's file editors instead.
+      try
+        for var K := 0 to Module.GetModuleFileCount - 1 do
+        begin
+          var Ed := Module.GetModuleFileEditor(K);
+          if Ed = nil then Continue;
+          FileName := Ed.FileName;
+          if FileName = '' then Continue;
+          Ext := LowerCase(ExtractFileExt(FileName));
+          if (Ext = '.pas') or (Ext = '.dpr') or (Ext = '.dpk') or (Ext = '.inc') then
+            if not FileList.Contains(FileName) then
+              FileList.Add(FileName);
+        end;
+      except
+        // A module can be mid-construction - skip it rather than fail.
+        Continue;
+      end;
+    end;
+    Result := FileList.ToArray;
+  finally
+    FileList.Free;
+  end;
 end;
 
 function TIDEEditorHelper.GetProjectSourceFiles: TArray<string>;

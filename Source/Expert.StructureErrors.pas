@@ -275,7 +275,7 @@ begin
 
     // Empty is a valid answer ("no errors") - it hides the hint and keeps
     // the LSP fallback from re-analysing this buffer state.
-    LiveReportErrorDiags(FileName, Content, Diags);
+    LiveReportErrorDiags(FileName, Content, Diags, SrcStructure);
   except
     on E: Exception do
       GLastReason := E.ClassName + ': ' + E.Message;

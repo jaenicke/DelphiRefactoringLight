@@ -29,7 +29,7 @@ type
   private
     FLogger: TDIHLogger;
     FResolver: TDIHPlaceholderResolver;
-    function GetExpertsKey: string;
+    function GetExpertsKey(APlatform: TDIHPlatform): string;
     function ResolveExpertName(const AEntry: TDIHExpertEntry): string;
   public
     constructor Create(ALogger: TDIHLogger; AResolver: TDIHPlaceholderResolver);
@@ -50,7 +50,14 @@ end;
 
 function TDIHPackageManager.GetKnownPackagesKey(APlatform: TDIHPlatform): string;
 begin
+  // The 64-bit IDE (bin64\bds.exe) keeps its design-time packages in a
+  // PARALLEL registry branch with an " x64" suffix - registering a Win64
+  // BPL under the 32-bit key would load it into the 32-bit IDE, where it
+  // cannot load at all. Same scheme for "Known IDE Packages x64",
+  // "Experts x64" and "Environment Variables x64".
   Result := FResolver.Resolve('{#BDS}') + '\Known Packages';
+  if APlatform = dpWin64 then
+    Result := Result + ' x64';
 end;
 
 procedure TDIHPackageManager.RegisterPackages(const APackages: TArray<TDIHPackageEntry>;
@@ -134,10 +141,13 @@ begin
   FResolver := AResolver;
 end;
 
-function TDIHExpertManager.GetExpertsKey: string;
+function TDIHExpertManager.GetExpertsKey(APlatform: TDIHPlatform): string;
 begin
-  // Experts werden global pro IDE-Version registriert (plattform-unabhaengig).
+  // Experts are registered per IDE VERSION - but the 64-bit IDE reads its
+  // own branch ("Experts x64"), just like it does for known packages.
   Result := FResolver.Resolve('{#BDS}') + '\Experts';
+  if APlatform = dpWin64 then
+    Result := Result + ' x64';
 end;
 
 function TDIHExpertManager.ResolveExpertName(const AEntry: TDIHExpertEntry): string;
@@ -163,7 +173,7 @@ begin
   Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
   try
     Reg.RootKey := HKEY_CURRENT_USER;
-    RegKey := GetExpertsKey;
+    RegKey := GetExpertsKey(APlatform);
 
     if not Reg.OpenKey(RegKey, True) then
     begin
@@ -200,7 +210,7 @@ begin
   Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
   try
     Reg.RootKey := HKEY_CURRENT_USER;
-    RegKey := GetExpertsKey;
+    RegKey := GetExpertsKey(APlatform);
 
     if not Reg.OpenKey(RegKey, False) then
       Exit;

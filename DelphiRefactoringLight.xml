@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <dih>
+	<!-- Win32 = 32-bit IDE (bin/bds.exe), Win64 = 64-bit IDE (bin64/bds.exe).
+	     Each gets its own build, its own BPL directory (Bpl vs Bpl/Win64)
+	     and its own registry branch ("Known Packages" vs "... x64"). -->
 	<entry id="global" description="Globale Suchpfade fuer Delphi Refactoring Light">
 		<paths>
-			<search platforms="Win32">
+			<search platforms="Win32,Win64">
 				<path recursive="False">{#DcuTargetDir}</path>
 			</search>
 		</paths>
@@ -10,15 +13,19 @@
 
 	<entry id="DelphiRefactoringLight" description="Delphi Refactoring Light - Rename / Find References / Extract Method via DelphiLSP">
 		<paths>
-			<browsing platforms="Win32">
+			<browsing platforms="Win32,Win64">
 				<entry recursive="False">Source</entry>
 			</browsing>
 		</paths>
-		<build platforms="Win32">
+		<build platforms="Win32,Win64">
 			<project>Packages\DelphiRefactoringLight.dproj</project>
 		</build>
-		<packages platforms="Win32">
-			<package description="Delphi Refactoring Light (Design-Time)">$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight370.bpl</package>
+		<!-- {#LibSuffix} matches {$LIBSUFFIX AUTO} in the .dpk ("370"), and
+		     {#BplTargetDir} already resolves to Bpl or Bpl\Win64. Naming the
+		     built file this way keeps "what was built" and "what gets
+		     registered" identical on both platforms. -->
+		<packages platforms="Win32,Win64">
+			<package description="Delphi Refactoring Light (Design-Time)">{#BplTargetDir}\DelphiRefactoringLight{#LibSuffix}.bpl</package>
 		</packages>
 	</entry>
 </dih>

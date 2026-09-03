@@ -70,9 +70,40 @@ uses
   System.Character, System.Generics.Collections,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, ToolsAPI;
 
+// The two IDEs mangle their exports COMPLETELY differently (measured on
+// the 64-bit IDE, which reported "export @Msglines@LineBufferList not
+// found"): the 32-bit packages use the classic Borland scheme, the 64-bit
+// ones the Itanium C++ ABI. Names below were read out of the shipped
+// binaries (bin\coreide370.bpl / bin64\coreide370.bpl).
+{$IFDEF WIN64}
+const
+  CoreIdeDll = 'coreide370.bpl';
+  LineBufferListExport = '_ZN8Msglines14LineBufferListE';
+  SymListCount = '_ZN8Msglines15TLineBufferList8GetCountEv';
+  SymListItem  = '_ZN8Msglines15TLineBufferList7GetItemEi';
+  SymBufCount  = '_ZN8Msglines11TLineBuffer8GetCountEv';
+  SymBufLines  = '_ZN8Msglines11TLineBuffer8GetLinesEi';
+  SymLineText  = '_ZN12Msglinesintf5TLine11GetLineTextEv';
+  SymMsgText   = '_ZN8Msglines16TCompilerMsgLine11GetLineTextEv';
+  SymLineFile  = '_ZN12Msglinesintf5TLine11GetFileNameEv';
+  SymMsgFile   = '_ZN8Msglines16TFileMessageLine11GetFileNameEv';
+  SymMsgLine   = '_ZN8Msglines16TFileMessageLine7GetLineEv';
+  SymMsgCol    = '_ZN8Msglines16TFileMessageLine9GetColumnEv';
+{$ELSE}
 const
   CoreIdeDll = 'coreide370.bpl';
   LineBufferListExport = '@Msglines@LineBufferList';
+  SymListCount = '@Msglines@TLineBufferList@GetCount$qqrv';
+  SymListItem  = '@Msglines@TLineBufferList@GetItem$qqri';
+  SymBufCount  = '@Msglines@TLineBuffer@GetCount$qqrv';
+  SymBufLines  = '@Msglines@TLineBuffer@GetLines$qqri';
+  SymLineText  = '@Msglinesintf@TLine@GetLineText$qqrv';
+  SymMsgText   = '@Msglines@TCompilerMsgLine@GetLineText$qqrv';
+  SymLineFile  = '@Msglinesintf@TLine@GetFileName$qqrv';
+  SymMsgFile   = '@Msglines@TFileMessageLine@GetFileName$qqrv';
+  SymMsgLine   = '@Msglines@TFileMessageLine@GetLine$qqrv';
+  SymMsgCol    = '@Msglines@TFileMessageLine@GetColumn$qqrv';
+{$ENDIF}
 
 var
   GProblem: string;
@@ -248,18 +279,6 @@ begin
 end;
 
 // --- one accessor per fact, RTTI first, exported address as fallback -------
-
-const
-  SymListCount = '@Msglines@TLineBufferList@GetCount$qqrv';
-  SymListItem  = '@Msglines@TLineBufferList@GetItem$qqri';
-  SymBufCount  = '@Msglines@TLineBuffer@GetCount$qqrv';
-  SymBufLines  = '@Msglines@TLineBuffer@GetLines$qqri';
-  SymLineText  = '@Msglinesintf@TLine@GetLineText$qqrv';
-  SymMsgText   = '@Msglines@TCompilerMsgLine@GetLineText$qqrv';
-  SymLineFile  = '@Msglinesintf@TLine@GetFileName$qqrv';
-  SymMsgFile   = '@Msglines@TFileMessageLine@GetFileName$qqrv';
-  SymMsgLine   = '@Msglines@TFileMessageLine@GetLine$qqrv';
-  SymMsgCol    = '@Msglines@TFileMessageLine@GetColumn$qqrv';
 
 function GetIntOf(AObj: TObject; const AMethod, ASym: string;
   out AValue: Integer): Boolean;

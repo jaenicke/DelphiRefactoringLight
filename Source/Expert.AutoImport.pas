@@ -43,7 +43,8 @@ uses
 type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
     qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
-    qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken);
+    qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken,
+    qfRemovePrivate);
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -130,6 +131,16 @@ procedure StopAutoImportLive;
 ///  keep the entry enabled and let the on-demand path decide).</summary>
 function LiveFreshInfo(const AFile: string; out ACount: Integer): Boolean;
 
+/// <summary>Tags for the diagnostics sources. WHICH source produced the
+///  current result decides what an empty payload means: from the SAME
+///  source it is a retraction ("re-evaluated, the error is gone") and the
+///  fixes go away at once; from a DIFFERENT one it is just silence and
+///  the existing fixes stay.</summary>
+const
+  SrcLsp = 'lsp';
+  SrcStructure = 'structure';
+  SrcCompiler = 'compiler';
+
 /// <summary>Feeds the live checker with error diagnostics obtained from an
 ///  EXTERNAL source - in the IDE that is the Structure view, which mirrors
 ///  Delphi's own Error Insight (see Expert.StructureErrors). AContent must
@@ -138,7 +149,7 @@ function LiveFreshInfo(const AFile: string; out ACount: Integer): Boolean;
 ///  adds the hint fixes) still runs for the same buffer state and replaces
 ///  them as the superset. Main thread only.</summary>
 procedure LiveReportErrorDiags(const AFile, AContent: string;
-  const ADiags: TArray<TLspErrorDiag>);
+  const ADiags: TArray<TLspErrorDiag>; const ASource: string = SrcStructure);
 
 /// <summary>Opens the quick-fix chooser popup for the fixes on the CARET
 ///  line, taken from the FRESH live results of AFile. False when there is
@@ -185,6 +196,55 @@ procedure LiveResetResults;
 procedure LiveStatusInfo(out AFile: string; out AAnalysing, AResolving,
   AFromLsp, AFresh: Boolean; out AFixCount: Integer);
 
+type
+  /// <summary>Record describing one private member that H2219 flagged and
+  ///  that we could remove: where it is declared, where it is implemented
+  ///  and whether that implementation actually does anything.</summary>
+  TPrivateMember = record
+    Name: string;
+    TypeName: string;
+    DeclLine: Integer;        // 0-based, the declaration inside the class
+    DeclText: string;         // exact text - stale check at apply time
+    ImplFirst: Integer;       // 0-based, header line ( -1 = none: a field )
+    ImplLast: Integer;        // 0-based, its final "end;"
+    BodyEmpty: Boolean;       // no statements between begin and end
+    BodyLines: Integer;       // statements the user would lose
+  end;
+
+/// <summary>Locates the private member AName of the type enclosing
+///  ADeclLine plus its implementation. False when it cannot be removed
+///  safely - a virtual/override/abstract/message method, an overload, a
+///  name used elsewhere in the unit, or an implementation that cannot be
+///  delimited. Pure and testable; the caller decides about the body.</summary>
+function FindRemovablePrivate(const AContent: string; ADeclLine0: Integer;
+  const AName: string; out AInfo: TPrivateMember): Boolean;
+
+/// <summary>Content with AInfo's declaration AND implementation removed.</summary>
+function RemovePrivateMemberText(const AContent: string;
+  const AInfo: TPrivateMember): string;
+
+type
+  /// <summary>Asked before a non-empty body is deleted. Unassigned means
+  ///  "no UI available" - the fix then REFUSES rather than deleting code
+  ///  silently (that is also what keeps the console tests non-modal).</summary>
+  TRemoveConfirmFunc = reference to function(const AInfo: TPrivateMember): Boolean;
+
+var
+  /// <summary>Set by the IDE / standalone startup to a themed dialog.</summary>
+  RemovePrivateConfirm: TRemoveConfirmFunc = nil;
+
+/// <summary>Why the LAST ResolveQuickFixes call did not turn a
+///  diagnostic into a fix ('' when it did). Thread-local, so the worker
+///  that ran the resolution reads its OWN reason right after the call.
+///  "1 diag, 1 fixable -> 0 fix" is otherwise a dead end.</summary>
+function LastResolveNote: string;
+
+/// <summary>Bare member name out of an H2219 message. The compiler
+///  quotes what it knows - "Test", "Test&lt;T&gt;" for a generic method, or the
+///  qualified "TForm4.Test" - so the type prefix and the generic
+///  parameter list are cut off. '' when nothing usable remains.</summary>
+function H2219NameFromMessage(const AMessage: string): string;
+
 /// <summary>False when a ';' can never be missing at the END of ALine:
 ///  the line closes with a block opener (begin/then/else/do/of/try/...),
 ///  an operator or a separator. A missing semicolon always follows a
@@ -202,6 +262,10 @@ function IsHandledDiagCode(const ACode: string): Boolean;
 ///  them carry a code we have a provider for, and where they came from.
 ///  Turns a bare "0 fixes" into an answer to WHY.</summary>
 procedure LiveDiagStats(out ASeen, AHandled: Integer; out ACodes: string);
+
+/// <summary>Why the last resolution turned a FIXABLE diagnostic into no
+///  fix at all ('' when it did produce one). See LastResolveNote.</summary>
+function LiveDeclineNote: string;
 
 /// <summary>One line per diagnostics source describing its LAST pass -
 ///  how many diagnostics it saw, how many fixes came out and whether the
@@ -746,6 +810,26 @@ begin
   ALen := 0;
 end;
 
+threadvar
+  GResolveNote: string;
+
+function LastResolveNote: string;
+begin
+  Result := GResolveNote;
+end;
+
+// Records why a diagnostic produced no fix (status window).
+procedure Decline(const ACode, AIdent, AWhy: string);
+var
+  S: string;
+begin
+  S := ACode;
+  if AIdent <> '' then S := S + ' "' + AIdent + '"';
+  S := S + ': ' + AWhy;
+  if GResolveNote = '' then GResolveNote := S
+  else if Length(GResolveNote) < 300 then GResolveNote := GResolveNote + '; ' + S;
+end;
+
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
 var
@@ -785,18 +869,30 @@ var
     // 'TList<>' but the range points at/into the type arguments, so the
     // token there would be 'Integer' (or a type parameter T).
     Ident := E2003IdentFromDiag(Lines, D, Col0, Len);
-    if Ident = '' then Exit;
+    if Ident = '' then
+    begin
+      Decline('E2003', '', 'identifier not found in the buffer (stale diagnostic)');
+      Exit;
+    end;
     // Error-Insight false positive / lag: the identifier IS declared in
     // this very file (typical: an anonymous-method parameter) - neither
     // add-unit nor did-you-mean applies.
-    if IdentDeclaredInFile(AContent, Ident) then Exit;
+    if IdentDeclaredInFile(AContent, Ident) then
+    begin
+      Decline('E2003', Ident, 'declared in this file - Error Insight false positive');
+      Exit;
+    end;
     // Semantic dedup: both diagnostic sources report one E2003 per
     // OCCURRENCE, so the same identifier twice on a line would otherwise
     // produce identical fixes. One fix per (identifier, line).
     if Seen.ContainsKey('I|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident)) then Exit;
     Seen.Add('I|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Ident), True);
 
-    if Snap = nil then Exit;
+    if Snap = nil then
+    begin
+      Decline('E2003', Ident, 'identifier index not ready yet');
+      Exit;
+    end;
     // "TList<Integer>" must not offer System.Classes' non-generic TList
     // (and a bare "TList" not the generic one). Filter BEFORE the unit
     // dedupe so per-declaration genericity flags are still intact.
@@ -815,7 +911,12 @@ var
       for var H in Hits do
         if not UnitReachableFrom(AContent, H.UnitName, Sect) then
           Usable := Usable + [H];
-      if Length(Usable) = 0 then Exit;
+      if Length(Usable) = 0 then
+      begin
+        Decline('E2003', Ident,
+          'every candidate unit is already reachable (stale diagnostic)');
+        Exit;
+      end;
       Hits := Usable;
       // Display form: "TList<>" makes clear the GENERIC variant is meant.
       var Disp := Ident;
@@ -835,13 +936,20 @@ var
     end;
 
     // Unknown everywhere -> "did you mean" via fuzzy index scan.
-    if Length(Ident) < 4 then Exit;
+    if Length(Ident) < 4 then
+    begin
+      Decline('E2003', Ident, 'no unit declares it, too short for a "did you mean"');
+      Exit;
+    end;
     if not FuzzyCache.TryGetValue(UpperCase(Ident), Cands) then
     begin
       if Length(Ident) <= 5 then MaxDist := 1 else MaxDist := 2;
       Cands := Snap.FuzzyIdentifiers(Ident, MaxDist, 3);
       FuzzyCache.Add(UpperCase(Ident), Cands);
     end;
+    if Length(Cands) = 0 then
+      Decline('E2003', Ident,
+        'no unit declares it and no similar identifier exists - nothing to offer');
     for var C in Cands do
     begin
       F := Default(TQuickFix);
@@ -1039,21 +1147,38 @@ var
     begin
       I := L0 - 1;
       while (I >= 0) and (Trim(StripLineComment(Lines[I])) = '') do Dec(I);
-      if I < 0 then Exit;
+      if I < 0 then
+      begin
+        Decline(D.Code, '', 'nothing before the reported position');
+        Exit;
+      end;
       InsLine := I;
       S := StripLineComment(Lines[I]);
       Prefix := S;
     end;
     InsCol := Length(Prefix);
     while (InsCol >= 1) and (Prefix[InsCol] = ' ') do Dec(InsCol);
-    if InsCol < 1 then Exit;
-    if CharInSet(Prefix[InsCol], [';', ',']) then Exit;   // stale / odd spot
+    if InsCol < 1 then
+    begin
+      Decline(D.Code, '', 'insertion line is empty');
+      Exit;
+    end;
+    if CharInSet(Prefix[InsCol], [';', ',']) then
+    begin
+      Decline(D.Code, '', 'the line already ends with ; or , (stale)');
+      Exit;   // stale / odd spot
+    end;
     // STALE-DIAGNOSTIC GUARD (tester: the fix survived deleting the line
     // it referred to). Error Insight / the compiler keep reporting the
     // old position for a moment; the line we would append to has shifted
     // and is now something like 'begin'. A ';' never follows a block
     // opener - so this cannot be a real missing semicolon.
-    if not CanTakeSemicolon(Copy(Prefix, 1, InsCol)) then Exit;
+    if not CanTakeSemicolon(Copy(Prefix, 1, InsCol)) then
+    begin
+      Decline(D.Code, '',
+        'a ";" cannot follow "' + Trim(Copy(Prefix, 1, InsCol)) + '" (stale)');
+      Exit;
+    end;
 
     if Seen.ContainsKey('S|' + IntToStr(InsLine)) then Exit;
     Seen.Add('S|' + IntToStr(InsLine), True);
@@ -1131,6 +1256,53 @@ var
     // Apply-time validation: the applier requires the line's EXACT text.
     F.NewText := Lines[L0];
     F.Caption := Format('Remove stray "%s"', [Tok]);
+    Res.Add(F);
+  end;
+
+  // H2219 "Private symbol 'X' declared but never used": remove it -
+  // declaration AND implementation, or nothing at all.
+  procedure AddH2219(const D: TLspErrorDiag);
+  var
+    Ident: string;
+    Info: TPrivateMember;
+    F: TQuickFix;
+    Col0: Integer;
+  begin
+    Ident := H2219NameFromMessage(D.Message);
+    if Ident = '' then
+    begin
+      Decline('H2219', FirstQuoted(D.Message),
+        'no usable member name in the message');
+      Exit;
+    end;
+    if not FindRemovablePrivate(AContent, D.Range.Start.Line, Ident, Info) then
+    begin
+      Decline('H2219', Ident,
+        'not safely removable (contract directive, overload, still ' +
+        'referenced, or the implementation cannot be delimited)');
+      Exit;
+    end;
+    if Seen.ContainsKey('P|' + IntToStr(Info.DeclLine)) then Exit;
+    Seen.Add('P|' + IntToStr(Info.DeclLine), True);
+
+    F := Default(TQuickFix);
+    F.Kind := qfRemovePrivate;
+    F.Line := Info.DeclLine;
+    F.Identifier := Ident;
+    F.OldUnit := Info.TypeName;
+    F.NewText := Info.DeclText;
+    Col0 := Pos(UpperCase(Ident), UpperCase(Info.DeclText)) - 1;
+    if Col0 < 0 then Col0 := 0;
+    F.Col := Col0;
+    F.TokenLen := Length(Ident);
+    if Info.ImplFirst < 0 then
+      F.Caption := Format('Remove unused private "%s"', [Ident])
+    else if Info.BodyEmpty then
+      F.Caption := Format('Remove unused private "%s" (declaration + empty implementation)',
+        [Ident])
+    else
+      F.Caption := Format('Remove unused private "%s" (declaration + implementation, %d statement(s))',
+        [Ident, Info.BodyLines]);
     Res.Add(F);
   end;
 
@@ -1377,6 +1549,7 @@ begin
   ImplLine := ImplementationLineOf(Lines);
   Snap := TUnitIndex.Instance.Snapshot;
 
+  GResolveNote := '';
   Res := TList<TQuickFix>.Create;
   Seen := TDictionary<string, Boolean>.Create;
   FuzzyCache := TDictionary<string, TArray<TFindUnitHit>>.Create;
@@ -1397,6 +1570,7 @@ begin
       else if SameText(D.Code, 'E2037') then AddE2037(D)
       else if SameText(D.Code, 'H2443') then AddH2443(D)
       else if SameText(D.Code, 'H2164') then AddH2164(D)
+      else if SameText(D.Code, 'H2219') then AddH2219(D)
       // E2029 only when the EXPECTED token is ';' (first quoted part of the
       // localized message); E2066 is always the missing-semicolon case.
       else if (SameText(D.Code, 'E2029') and (FirstQuoted(D.Message) = ';'))
@@ -2036,6 +2210,221 @@ begin
     Copy(L, 1, SemiP) + ' reintroduce;' + Copy(L, SemiP + 1, MaxInt));
 end;
 
+// ---------------------------------------------------------------------------
+//  H2219 "private symbol declared but never used"
+// ---------------------------------------------------------------------------
+//
+// Unlike H2164 (an unused LOCAL variable, which exists at exactly one
+// place), a private member lives at TWO: the declaration inside the class
+// and the implementation further down. Removing only one of them breaks
+// the build, so the fix always removes both - and refuses whenever it
+// cannot prove that this is safe.
+
+function FindRemovablePrivate(const AContent: string; ADeclLine0: Integer;
+  const AName: string; out AInfo: TPrivateMember): Boolean;
+var
+  Lines: TArray<string>;
+  I, Depth, NameCount, ImplIdx: Integer;
+  L, U, UName, Rest: string;
+
+  function Clean(const S: string): string;
+  var
+    P: Integer;
+  begin
+    Result := Trim(S);
+    P := Pos('//', Result);
+    if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
+  end;
+
+  // AUpper starts with the keyword AWord as a whole word.
+  function StartsKw(const AUpper, AWord: string): Boolean;
+  begin
+    Result := AUpper.StartsWith(AWord)
+      and ((Length(AUpper) = Length(AWord))
+           or not CharInSet(AUpper[Length(AWord) + 1], ['A'..'Z', '0'..'9', '_']));
+  end;
+
+  // Whole-word occurrence of the member name.
+  function HasName(const S: string): Boolean;
+  var
+    P, After: Integer;
+    Up: string;
+  begin
+    Result := False;
+    Up := UpperCase(S);
+    P := Pos(UName, Up);
+    while P > 0 do
+    begin
+      After := P + Length(UName);
+      if ((P = 1) or not CharInSet(Up[P - 1], ['A'..'Z', '0'..'9', '_']))
+        and ((After > Length(Up)) or not CharInSet(Up[After], ['A'..'Z', '0'..'9', '_'])) then
+        Exit(True);
+      P := PosEx(UName, Up, P + 1);
+    end;
+  end;
+
+begin
+  Result := False;
+  AInfo := Default(TPrivateMember);
+  if (AContent = '') or not IsBareIdent(AName) then Exit;
+  Lines := SplitContentLines(AContent);
+  if (ADeclLine0 < 0) or (ADeclLine0 > High(Lines)) then Exit;
+  UName := UpperCase(AName);
+
+  L := Clean(Lines[ADeclLine0]);
+  U := UpperCase(L);
+  if not HasName(L) then Exit;              // diagnostic no longer fits
+
+  // Directives that mean the member is part of a contract - never remove.
+  for var Bad in ['VIRTUAL', 'OVERRIDE', 'ABSTRACT', 'DYNAMIC', 'MESSAGE',
+                  'OVERLOAD', 'DEFAULT', 'STORED', 'READ', 'WRITE'] do
+    if Pos(Bad, U) > 0 then Exit;
+
+  AInfo.Name := AName;
+  AInfo.DeclLine := ADeclLine0;
+  AInfo.DeclText := Lines[ADeclLine0];
+  AInfo.TypeName := EnclosingContainerName(Lines, ADeclLine0);
+  if AInfo.TypeName = '' then Exit;         // not inside a type body
+
+  // The name must appear EXACTLY twice in the unit: the declaration and
+  // the implementation header (or once for a field). Anything else means
+  // it is referenced somewhere and H2219 is not what we think it is.
+  NameCount := 0;
+  for I := 0 to High(Lines) do
+    if HasName(Clean(Lines[I])) then Inc(NameCount);
+  if NameCount > 2 then Exit;
+
+  // Implementation header: "procedure TType.Name" (also class/function/
+  // constructor, and a generic "TType<T>.Name").
+  ImplIdx := -1;
+  for I := ADeclLine0 + 1 to High(Lines) do
+  begin
+    L := Clean(Lines[I]);
+    if L = '' then Continue;
+    U := UpperCase(L);
+    if not (StartsKw(U, 'PROCEDURE') or StartsKw(U, 'FUNCTION')
+      or StartsKw(U, 'CLASS PROCEDURE') or StartsKw(U, 'CLASS FUNCTION')
+      or StartsKw(U, 'CONSTRUCTOR') or StartsKw(U, 'DESTRUCTOR')) then
+      Continue;
+    if HasName(L) and (Pos('.', L) > 0) then
+    begin
+      ImplIdx := I;
+      Break;
+    end;
+  end;
+
+  if ImplIdx < 0 then
+  begin
+    // A FIELD (or a const): declaration only, nothing else to remove.
+    AInfo.ImplFirst := -1;
+    AInfo.ImplLast := -1;
+    AInfo.BodyEmpty := True;
+    Exit(True);
+  end;
+
+  AInfo.ImplFirst := ImplIdx;
+
+  // Walk to the routine's final "end;" - begin/case/try open a level,
+  // "end" closes one. A local routine would nest, which the counter
+  // handles as well.
+  Depth := 0;
+  AInfo.BodyLines := 0;
+  for I := ImplIdx to High(Lines) do
+  begin
+    L := Clean(Lines[I]);
+    if L = '' then Continue;
+    U := UpperCase(L);
+    if StartsKw(U, 'BEGIN') or StartsKw(U, 'TRY')
+      or StartsKw(U, 'CASE') then
+      Inc(Depth)
+    else if (I > ImplIdx) and (Depth > 0) and (U = 'END;') then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        AInfo.ImplLast := I;
+        AInfo.BodyEmpty := AInfo.BodyLines = 0;
+        Exit(True);
+      end;
+    end
+    else if Depth > 0 then
+    begin
+      // A statement inside the body - that is what the user would lose.
+      if not (StartsKw(U, 'END') or StartsKw(U, 'ELSE')
+        or StartsKw(U, 'EXCEPT') or StartsKw(U, 'FINALLY')
+        or L.StartsWith('{') or L.StartsWith('(*')) then
+        Inc(AInfo.BodyLines);
+    end
+    else if (I > ImplIdx) and (StartsKw(U, 'PROCEDURE')
+      or StartsKw(U, 'FUNCTION')) then
+      Break;   // ran into the next routine without finding our end
+  end;
+  // No delimitable body -> refuse rather than guess.
+  Result := False;
+end;
+
+function RemovePrivateMemberText(const AContent: string;
+  const AInfo: TPrivateMember): string;
+var
+  Lines: TArray<string>;
+  SL: TStringList;
+  I: Integer;
+begin
+  Result := AContent;
+  Lines := SplitContentLines(AContent);
+  if (AInfo.DeclLine < 0) or (AInfo.DeclLine > High(Lines)) then Exit;
+  SL := TStringList.Create;
+  try
+    for I := 0 to High(Lines) do
+    begin
+      if I = AInfo.DeclLine then Continue;
+      if (AInfo.ImplFirst >= 0) and (I >= AInfo.ImplFirst)
+        and (I <= AInfo.ImplLast) then Continue;
+      // A blank line directly after the removed implementation would
+      // otherwise pile up.
+      if (AInfo.ImplLast >= 0) and (I = AInfo.ImplLast + 1)
+        and (Trim(Lines[I]) = '') then Continue;
+      SL.Add(Lines[I]);
+    end;
+    Result := SL.Text;
+  finally
+    SL.Free;
+  end;
+end;
+
+// Applier: re-validates against the CURRENT buffer, asks before deleting a
+// non-empty body, then writes both removals in one minimal edit.
+function RemoveUnusedPrivate(const AFile: string;
+  const AInfo: TPrivateMember): Boolean;
+var
+  Content: string;
+  Fresh: TPrivateMember;
+  SL: TStringList;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  // Re-locate in the CURRENT content: the buffer may have shifted since
+  // the fix was resolved.
+  if not FindRemovablePrivate(Content, AInfo.DeclLine, AInfo.Name, Fresh) then Exit;
+  if Fresh.DeclText <> AInfo.DeclText then Exit;   // stale
+
+  if not Fresh.BodyEmpty then
+  begin
+    // EXPLICIT warning with a way out - deleting a method that still does
+    // something must never happen behind the user's back.
+    if not Assigned(RemovePrivateConfirm) then Exit;
+    if not RemovePrivateConfirm(Fresh) then Exit;
+  end;
+
+  SL := TStringList.Create;
+  try
+    SL.Text := RemovePrivateMemberText(Content, Fresh);
+    Result := ApplyLinesMinimal(AFile, SL, Content);
+  finally
+    SL.Free;
+  end;
+end;
+
 // Executes one quick fix. AUnitChoice picks the candidate unit for
 // qfAddUnit (index into UnitNames).
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
@@ -2081,6 +2470,15 @@ begin
     qfRemoveToken:
       Result := RemoveStrayToken(AFile, AFix.NewText, AFix.Identifier,
         AFix.Line, AFix.Col);
+    qfRemovePrivate:
+      begin
+        var Info := Default(TPrivateMember);
+        Info.Name := AFix.Identifier;
+        Info.TypeName := AFix.OldUnit;
+        Info.DeclLine := AFix.Line;
+        Info.DeclText := AFix.NewText;
+        Result := RemoveUnusedPrivate(AFile, Info);
+      end;
   end;
 end;
 
@@ -2283,7 +2681,7 @@ begin
             FList.Items.Add(A.Caption);
           end;
         qfInsertSemi, qfInitVar, qfRemoveAssign, qfAddReintroduce,
-        qfImplStub, qfClassStub, qfRemoveToken:
+        qfImplStub, qfClassStub, qfRemoveToken, qfRemovePrivate:
           begin
             // These carry an action-ready caption from the resolver.
             A.Caption := FFixes[I].Caption;
@@ -2680,9 +3078,15 @@ type
   private
     FLbl: TLabel;
     FOnFix: TProc;
+    FBorderColor: TColor;
     procedure DoClick(Sender: TObject);
   protected
     procedure CreateParams(var Params: TCreateParams); override;
+    /// <summary>Draws the 1 px frame. The label leaves that pixel free
+    ///  via Padding, so the hint reads as a panel ON the editor instead
+    ///  of blending into it (tester: "no border, almost the same
+    ///  colour").</summary>
+    procedure Paint; override;
   public
     constructor CreateHint;
     procedure SetInfo(const AText: string);
@@ -2698,20 +3102,35 @@ constructor TAutoImportHint.CreateHint;
 begin
   inherited CreateNew(nil);
   BorderStyle := bsNone;
-  Color := GetThemedColor(clInfoBk);
+  var BackCol, TextCol: TColor;
+  ComputeHintColors(GetThemedColor(clInfoBk), GetThemedColor(clInfoText),
+    BackCol, FBorderColor, TextCol);
+  Color := BackCol;
   Height := 24;
   Width := 160;
   Cursor := crHandPoint;
   OnClick := DoClick;
+  // One pixel all round stays unpainted by the label - that is the frame.
+  Padding.SetBounds(1, 1, 1, 1);
 
   FLbl := TLabel.Create(Self);
   FLbl.Parent := Self;
   FLbl.Align := alClient;
   FLbl.Alignment := taCenter;
   FLbl.Layout := tlCenter;
-  FLbl.Font.Color := GetThemedColor(clInfoText);
+  FLbl.Transparent := True;
+  FLbl.Font.Color := TextCol;
   FLbl.Cursor := crHandPoint;
   FLbl.OnClick := DoClick;
+end;
+
+procedure TAutoImportHint.Paint;
+begin
+  inherited;
+  Canvas.Brush.Style := bsClear;
+  Canvas.Pen.Color := FBorderColor;
+  Canvas.Pen.Width := 1;
+  Canvas.Rectangle(0, 0, ClientWidth, ClientHeight);
 end;
 
 procedure TAutoImportHint.CreateParams(var Params: TCreateParams);
@@ -2726,7 +3145,9 @@ end;
 procedure TAutoImportHint.SetInfo(const AText: string);
 begin
   FLbl.Caption := #$1F4A1' ' + AText;
-  Width := Max(120, Canvas.TextWidth(FLbl.Caption) + 24);
+  Canvas.Font := FLbl.Font;
+  Width := Max(120, Canvas.TextWidth(FLbl.Caption) + 26);
+  Invalidate;   // the frame must follow the new width
 end;
 
 procedure TAutoImportHint.ShowNoActivateAt(const APt: TPoint);
@@ -2764,6 +3185,8 @@ type
     FDirtyTick: Cardinal;
     FDirtyIdleMs: Cardinal;   // idle threshold for the pending state
     FSwitched: Boolean;       // the active buffer changed on this tick
+    FTickNo: Integer;         // fast ticks since start (heavy work every N)
+    FHintDirty: Boolean;      // results changed - refresh the hint at once
     // Popup that currently keeps the hint hidden (see UpdateHint).
     FBlockWnd: HWND;
     FBlockSince: Cardinal;
@@ -2779,10 +3202,17 @@ type
     FResHash: Integer;
     FResults: TArray<TQuickFix>;
     FResFromLsp: Boolean;
+    // WHICH source produced FResults (SrcLsp / SrcStructure / SrcCompiler).
+    // An empty payload from THAT source is a retraction and clears the
+    // fixes at once; from any other source it is just silence.
+    FResSource: string;
+    FResDiagSig: Integer;   // fingerprint of the payload behind FResults
     // Pipeline counters of the last resolution (status window only).
     FDiagSeen: Integer;
     FDiagHandled: Integer;
     FDiagCodes: string;
+    FDiagNote: string;   // why a fixable diagnostic produced no fix
+    FDiagSig: Integer;   // fingerprint of the payload the LSP pass resolved
     // Per-source outcome of the last pass (status window).
     FSrcStructure: string;
     FSrcLsp: string;
@@ -2792,6 +3222,8 @@ type
     FPendContent: string;
     FPendDiags: TArray<TLspErrorDiag>;
     FPendHash: Integer;
+    FPendSource: string;
+    FPendSig: Integer;
     FHasPending: Boolean;
     FResolving: Boolean;
     // One-shot: run the LSP analysis on the next tick even though the
@@ -2802,7 +3234,7 @@ type
     FLastPaintFile: string;
     FLastPaintHash: Integer;
     procedure ApplyExternalDiags(const AFile, AContent: string;
-      const ADiags: TArray<TLspErrorDiag>);
+      const ADiags: TArray<TLspErrorDiag>; const ASource: string);
     procedure StartPendingResolve;
     procedure DoTick(Sender: TObject);
     procedure StartAnalysis(const AFile, AContent: string; AHash: Integer);
@@ -2831,6 +3263,14 @@ var
   GLiveShutdown: Boolean = False;
 
 const
+  // The tick does TWO things of very different cost: reading the buffer
+  // and hashing it (heavy - a 4000-line unit on every tick would be
+  // wasteful), and updating the hint from already published results plus
+  // the caret position (cheap). They get different cadences: the hint
+  // follows the caret and a freshly published result within one FAST
+  // tick, the buffer is only re-read every HeavyEvery-th one.
+  LiveFastTickMs = 120;
+  LiveHeavyEvery = 4;   // -> ~480 ms for the buffer read / hashing
   LiveTickMs  = 400;   // poll interval (also the max hint-update latency,
                        // since ONLY the tick may touch the hint window)
   LiveIdleMs  = 1500;  // buffer must be stable this long before analysing
@@ -2841,6 +3281,21 @@ const
   // How long one and the same window may suppress the hint before we
   // conclude it is not a transient completion list.
   HintBlockMaxMs = 4000;
+
+function H2219NameFromMessage(const AMessage: string): string;
+var
+  P: Integer;
+begin
+  Result := FirstQuoted(AMessage);
+  // Generic method: "Test<T>" - the arity marker is not part of the name.
+  P := Pos('<', Result);
+  if P > 0 then Result := Copy(Result, 1, P - 1);
+  // Qualified: "TForm4.Test" - keep the member.
+  P := LastDelimiter('.', Result);
+  if P > 0 then Result := Copy(Result, P + 1, MaxInt);
+  Result := Trim(Result);
+  if not IsBareIdent(Result) then Result := '';
+end;
 
 function CanTakeSemicolon(const ALine: string): Boolean;
 const
@@ -2870,11 +3325,28 @@ begin
   Result := True;
 end;
 
+// Fingerprint of a diagnostic payload (codes + positions). Two payloads
+// with the same fingerprint would resolve to the same fixes, so re-running
+// the resolver for them is pure waste - but a payload that CHANGED must be
+// resolved even when the buffer did not, because the source just
+// re-evaluated it (typical: Error Insight catches up after a fix was
+// applied and no longer reports the error).
+function DiagSignature(const ADiags: TArray<TLspErrorDiag>): Integer;
+var
+  S: string;
+begin
+  S := '';
+  for var D in ADiags do
+    S := S + D.Code + '|' + IntToStr(D.Range.Start.Line) + ':' +
+         IntToStr(D.Range.Start.Character) + ';';
+  Result := THashBobJenkins.GetHashValue(S);
+end;
+
 function IsHandledDiagCode(const ACode: string): Boolean;
 const
-  Handled: array[0..11] of string = (
+  Handled: array[0..12] of string = (
     'E2003', 'F2613', 'F2063', 'E2037', 'H2443', 'H2164',
-    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065');
+    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065', 'H2219');
 begin
   Result := False;
   for var C in Handled do
@@ -2919,7 +3391,7 @@ constructor TAutoImportLive.Create;
 begin
   inherited;
   FTimer := TTimer.Create(nil);
-  FTimer.Interval := LiveTickMs;
+  FTimer.Interval := LiveFastTickMs;
   FTimer.OnTimer := DoTick;
   FTimer.Enabled := True;
 end;
@@ -2971,6 +3443,19 @@ begin
     if FHint <> nil then FHint.HideHint;
     Exit;
   end;
+
+  Inc(FTickNo);
+  // CHEAP PATH: nothing to re-read - just keep the hint in sync with the
+  // caret and with results that arrived since the last tick. Skipping the
+  // heavy part here is what makes a published fix appear within ~120 ms
+  // instead of waiting out the poll interval.
+  if (FTickNo mod LiveHeavyEvery <> 0) and SameText(F, FFile)
+    and not FHintDirty then
+  begin
+    UpdateHint;
+    Exit;
+  end;
+  FHintDirty := False;
 
   if not SameText(F, FFile) then
   begin
@@ -3034,9 +3519,9 @@ begin
 end;
 
 procedure TAutoImportLive.ApplyExternalDiags(const AFile, AContent: string;
-  const ADiags: TArray<TLspErrorDiag>);
+  const ADiags: TArray<TLspErrorDiag>; const ASource: string);
 var
-  NewHash: Integer;
+  NewHash, Sig: Integer;
 begin
   if AFile = '' then Exit;
   // STATE ONLY - no window operations. This runs inside the IDE's
@@ -3067,7 +3552,14 @@ begin
   // Structure payload with the real errors was then dropped right here,
   // before it was ever resolved. Nothing re-analyses an unchanged buffer,
   // so that was final.
+  // ... but ONLY when the payload is also unchanged. A source that
+  // re-evaluates the SAME buffer and now reports FEWER diagnostics (the
+  // user applied a fix, Error Insight caught up) must get through - with
+  // the old test its result was dropped here and the obsolete fix stayed
+  // on screen for good (tester: "added the unit, the autofix stayed").
+  Sig := DiagSignature(ADiags);
   if SameText(AFile, FResFile) and (NewHash = FResHash)
+    and (Sig = FResDiagSig)
     and not ((Length(FResults) = 0) and (Length(ADiags) > 0)) then
   begin
     FFile := AFile;
@@ -3093,6 +3585,8 @@ begin
   FPendContent := AContent;
   FPendDiags := ADiags;
   FPendHash := FHash;
+  FPendSource := ASource;
+  FPendSig := Sig;
   FHasPending := True;
   if not FResolving then
     StartPendingResolve;
@@ -3102,7 +3596,8 @@ procedure TAutoImportLive.StartPendingResolve;
 var
   RFile, RContent: string;
   RDiags: TArray<TLspErrorDiag>;
-  RHash: Integer;
+  RHash, RSig: Integer;
+  RSource: string;
 begin
   if not FHasPending or GLiveShutdown then Exit;
   FHasPending := False;
@@ -3111,6 +3606,8 @@ begin
   RContent := FPendContent;
   RDiags := FPendDiags;
   RHash := FPendHash;
+  RSource := FPendSource;
+  RSig := FPendSig;
 
   // Exception-safe start: if thread creation fails, FResolving must not
   // wedge True (that would silence the whole live feature until restart).
@@ -3121,13 +3618,14 @@ begin
       var
         R: TArray<TQuickFix>;
         SSeen, SHandled: Integer;
-        SCodes: string;
+        SCodes, SNote: string;
       begin
         try
-          SSeen := 0; SHandled := 0; SCodes := '';
+          SSeen := 0; SHandled := 0; SCodes := ''; SNote := '';
           try
             NoteDiagStats(RDiags, SSeen, SHandled, SCodes);
             R := ResolveQuickFixes(RContent, RDiags);
+            SNote := LastResolveNote;
           except
             R := nil;
           end;
@@ -3139,6 +3637,7 @@ begin
               GLive.FDiagSeen := SSeen;
               GLive.FDiagHandled := SHandled;
               GLive.FDiagCodes := SCodes;
+              GLive.FDiagNote := SNote;
               // Accept only when the buffer has not changed since - and
               // normally never downgrade an LSP result (errors + hints)
               // for the same state to this errors-only structure result.
@@ -3153,15 +3652,19 @@ begin
                 and SameText(RFile, GLive.FResFile)
                 and (RHash = GLive.FResHash)
                 and (Length(GLive.FResults) > 0);
-              // An empty result must never replace fixes we already
-              // have for the same state (a Structure rebuild fires again
-              // while its tree is still being repopulated).
+              // An empty result from ANOTHER source is just silence and
+              // must not wipe what we have (a Structure rebuild fires
+              // again while its tree is repopulating; our LSP can be mute
+              // for a file). From the SAME source it is a RETRACTION -
+              // that source re-evaluated this exact buffer state and the
+              // error is gone, so the fixes go immediately.
               if (Length(R) = 0) and (Length(GLive.FResults) > 0)
                 and SameText(RFile, GLive.FResFile)
-                and (RHash = GLive.FResHash) then
+                and (RHash = GLive.FResHash)
+                and not SameText(GLive.FResSource, RSource) then
                 GLive.FSrcStructure := Format(
-                  '%d diag -> 0 fix, ignored: empty, keeping %d fix(es)',
-                  [SSeen, Length(GLive.FResults)])
+                  '%d diag -> 0 fix, ignored: empty, keeping %d fix(es) from %s',
+                  [SSeen, Length(GLive.FResults), GLive.FResSource])
               else if not (SameText(RFile, GLive.FFile) and (RHash = GLive.FHash)) then
                 GLive.FSrcStructure := Format(
                   '%d diag -> %d fix, DROPPED: buffer changed while resolving',
@@ -3172,12 +3675,18 @@ begin
                   [SSeen, Length(R)])
               else
               begin
-                GLive.FSrcStructure := Format('%d diag -> %d fix, published',
-                  [SSeen, Length(R)]);
+                GLive.FSrcStructure := Format('%d diag -> %d fix, published (%s)',
+                  [SSeen, Length(R), RSource]);
+                if SNote <> '' then
+                  GLive.FSrcStructure := GLive.FSrcStructure +
+                    ' | declined: ' + SNote;
                 GLive.FResFile := RFile;
                 GLive.FResHash := RHash;
                 GLive.FResults := R;
                 GLive.FResFromLsp := False;
+                GLive.FResSource := RSource;
+                GLive.FResDiagSig := RSig;
+                GLive.FHintDirty := True;
               end;
               // A newer payload may have arrived while we were resolving.
               GLive.StartPendingResolve;
@@ -3234,12 +3743,12 @@ begin
       procedure
       var
         R: TArray<TQuickFix>;
-        I, DSeen, DHandled: Integer;
-        DCodes: string;
+        I, DSeen, DHandled, DSig: Integer;
+        DCodes, DNote: string;
       begin
         try
           R := nil;
-          DSeen := 0; DHandled := 0; DCodes := '';
+          DSeen := 0; DHandled := 0; DCodes := ''; DNote := ''; DSig := 0;
           try
             try Client.WaitForResponse(ReqId, 20000).Free; except end;
             // Wait for the push that belongs to THIS file. Waiting on the
@@ -3258,7 +3767,9 @@ begin
             begin
               var Diags := Client.GetErrorDiagnostics(AFile);
               NoteDiagStats(Diags, DSeen, DHandled, DCodes);
+              DSig := DiagSignature(Diags);
               R := ResolveQuickFixes(AContent, Diags);
+              DNote := LastResolveNote;   // same thread - our own reason
             end;
           except
             R := nil;
@@ -3271,6 +3782,8 @@ begin
                 GLive.FDiagSeen := DSeen;
                 GLive.FDiagHandled := DHandled;
                 GLive.FDiagCodes := DCodes;
+                GLive.FDiagNote := DNote;
+                GLive.FDiagSig := DSig;
                 GLive.AnalysisDone(AFile, AHash, R);
               end;
             end);
@@ -3308,17 +3821,24 @@ begin
     // empty LSP answer never overrides a non-empty one for the SAME
     // buffer state (same content hash = the errors are demonstrably
     // still there).
+    // Same rule as for the external sources: an empty LSP answer only
+    // retracts what the LSP itself published.
     if (Length(AResults) = 0) and (Length(FResults) > 0)
-      and SameText(FResFile, AFile) and (FResHash = AHash) then
+      and SameText(FResFile, AFile) and (FResHash = AHash)
+      and not SameText(FResSource, SrcLsp) then
     begin
-      FSrcLsp := FSrcLsp + ', ignored: empty, keeping the other source';
+      FSrcLsp := FSrcLsp + ', ignored: empty, keeping ' + FResSource;
       Exit;
     end;
     FSrcLsp := FSrcLsp + ', published';
+    if FDiagNote <> '' then FSrcLsp := FSrcLsp + ' | declined: ' + FDiagNote;
     FResFile := AFile;
     FResHash := AHash;
     FResults := AResults;
     FResFromLsp := True;
+    FResSource := SrcLsp;
+    FResDiagSig := FDiagSig;
+    FHintDirty := True;
   end;
 end;
 
@@ -3544,10 +4064,10 @@ begin
 end;
 
 procedure LiveReportErrorDiags(const AFile, AContent: string;
-  const ADiags: TArray<TLspErrorDiag>);
+  const ADiags: TArray<TLspErrorDiag>; const ASource: string);
 begin
   if GLive <> nil then
-    GLive.ApplyExternalDiags(AFile, AContent, ADiags);
+    GLive.ApplyExternalDiags(AFile, AContent, ADiags, ASource);
 end;
 
 function LiveShowFixAtCaret(const AFile: string): Boolean;
@@ -3588,6 +4108,12 @@ begin
   ASeen := GLive.FDiagSeen;
   AHandled := GLive.FDiagHandled;
   ACodes := GLive.FDiagCodes;
+end;
+
+function LiveDeclineNote: string;
+begin
+  Result := '';
+  if GLive <> nil then Result := GLive.FDiagNote;
 end;
 
 function LiveResolveBusy: Boolean;
@@ -3647,6 +4173,8 @@ begin
   // notifier). The next poll tick re-arms the analysis for the active
   // buffer and hides the hint while there are no results.
   GLive.FResults := nil;
+  GLive.FResSource := '';
+  GLive.FResDiagSig := 0;
   GLive.FResFile := '';
   GLive.FResHash := 0;
   GLive.FResFromLsp := False;

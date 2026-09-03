@@ -24,7 +24,7 @@ echo  Delphi Refactoring Light - Uninstall (BDS %BDSVER%)
 echo ============================================
 echo.
 
-"%DELINST%" %BDSVER% -config "%CONFIG%" -platforms Win32 -configs Release -action uninstall -verbose log %USEBDS%
+"%DELINST%" %BDSVER% -config "%CONFIG%" -platforms Win32,Win64 -configs Release -action uninstall -verbose log %USEBDS%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

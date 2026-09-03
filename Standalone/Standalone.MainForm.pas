@@ -280,7 +280,7 @@ implementation
 
 uses
   Winapi.Windows, System.DateUtils,
-  Lsp.Client,
+  Lsp.Client, Expert.DialogHelper,
   Expert.SemanticReplaceWizard,
   Expert.RenameWizard,
   Expert.FindReferencesWizard,
@@ -355,6 +355,9 @@ begin
 
   // Live auto-import indicator (idles until an LSP client is up).
   StartAutoImportLive;
+  // Warning dialog the "remove unused private member" fix asks
+  // before it deletes a non-empty body.
+  InstallRemovePrivateConfirm;
 
   UpdateStatusBar;
 end;

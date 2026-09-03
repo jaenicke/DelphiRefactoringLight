@@ -83,10 +83,22 @@ function CreateCheckProgress(const ACaption: string; AOwner: TComponent;
 ///  IDE theming service would restyle every plugin's ShowMessage.</summary>
 procedure ShowThemedMessage(const AMsg: string);
 
+/// <summary>Themed confirmation with an explicit DEFAULT of "no": used
+///  before a fix DELETES code the user may still want (an unused private
+///  method whose body is not empty). ACaption labels the confirming
+///  button, so it says what will happen instead of a bare "OK".</summary>
+function AskThemedConfirm(const AMsg, AConfirmCaption: string): Boolean;
+
+/// <summary>Installs the confirmation the "remove unused private member"
+///  fix asks before it deletes a NON-EMPTY body. Call once at startup -
+///  without it that fix refuses to delete anything.</summary>
+procedure InstallRemovePrivateConfirm;
+
 implementation
 
 uses
-  System.SysUtils, Winapi.Windows, Vcl.Graphics, Expert.IdeThemes
+  System.SysUtils, Winapi.Windows, Vcl.Graphics, Expert.IdeThemes,
+  Expert.AutoImport
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 
 {$IFNDEF STANDALONE_BUILD}
@@ -244,6 +256,86 @@ begin
     EnableThemes(Dlg);
     PrepareDialog(Dlg, nil);
     Dlg.ShowModal;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+procedure InstallRemovePrivateConfirm;
+begin
+  RemovePrivateConfirm :=
+    function(const AInfo: TPrivateMember): Boolean
+    var
+      Msg: string;
+    begin
+      Msg := Format('The private method "%s.%s" is reported as never used.'#13#10#13#10 +
+        'Its implementation is NOT empty - removing it deletes %d statement(s) ' +
+        'together with the declaration.'#13#10#13#10 +
+        'The compiler cannot see uses through RTTI, a DFM event binding or an ' +
+        'interface, so please make sure the method is really dead.',
+        [AInfo.TypeName, AInfo.Name, AInfo.BodyLines]);
+      Result := AskThemedConfirm(Msg, 'Remove anyway');
+    end;
+end;
+
+function AskThemedConfirm(const AMsg, AConfirmCaption: string): Boolean;
+const
+  MaxTextWidth = 520;
+var
+  Dlg: TThemedToolForm;
+  Lbl: TLabel;
+  BtnOk, BtnCancel: TButton;
+  Measure: Vcl.Graphics.TBitmap;
+  R: TRect;
+  BtnW: Integer;
+begin
+  Dlg := TThemedToolForm.CreateNew(nil);
+  try
+    Dlg.BorderStyle := bsDialog;
+    Dlg.Caption := 'Refactoring Light';
+    Dlg.Position := poScreenCenter;
+
+    Measure := Vcl.Graphics.TBitmap.Create;
+    try
+      Measure.Canvas.Font := Dlg.Font;
+      R := Rect(0, 0, MaxTextWidth, 0);
+      DrawText(Measure.Canvas.Handle, PChar(AMsg), Length(AMsg), R,
+        DT_CALCRECT or DT_WORDBREAK or DT_NOPREFIX);
+    finally
+      Measure.Free;
+    end;
+    if R.Right < 320 then R.Right := 320;
+
+    Lbl := TLabel.Create(Dlg);
+    Lbl.Parent := Dlg;
+    Lbl.AutoSize := False;
+    Lbl.WordWrap := True;
+    Lbl.ShowAccelChar := False;
+    Lbl.SetBounds(16, 16, R.Right, R.Bottom);
+    Lbl.Caption := AMsg;
+
+    BtnW := 130;
+    BtnCancel := TButton.Create(Dlg);
+    BtnCancel.Parent := Dlg;
+    BtnCancel.Caption := 'Cancel';
+    // Cancel is the DEFAULT: deleting code must be a deliberate choice.
+    BtnCancel.Default := True;
+    BtnCancel.Cancel := True;
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.SetBounds(16 + R.Right - 90, R.Bottom + 28, 90, 26);
+
+    BtnOk := TButton.Create(Dlg);
+    BtnOk.Parent := Dlg;
+    BtnOk.Caption := AConfirmCaption;
+    BtnOk.ModalResult := mrOk;
+    BtnOk.SetBounds(BtnCancel.Left - BtnW - 8, R.Bottom + 28, BtnW, 26);
+
+    Dlg.ClientWidth := R.Right + 32;
+    Dlg.ClientHeight := BtnCancel.Top + BtnCancel.Height + 12;
+
+    EnableThemes(Dlg);
+    PrepareDialog(Dlg, nil);
+    Result := Dlg.ShowModal = mrOk;
   finally
     Dlg.Free;
   end;

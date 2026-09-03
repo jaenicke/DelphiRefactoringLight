@@ -170,7 +170,7 @@ begin
         Exit;
       end;
     if Content = '' then Exit;
-    LiveReportErrorDiags(FileName, Content, Diags);
+    LiveReportErrorDiags(FileName, Content, Diags, SrcCompiler);
   except
     // a diagnostics source must never disturb a build
   end;

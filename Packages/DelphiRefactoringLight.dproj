@@ -5,11 +5,11 @@
         <Base>True</Base>
         <Config Condition="'$(Config)'==''">Debug</Config>
         <ProjectName Condition="'$(ProjectName)'==''">DelphiRefactoringLight</ProjectName>
-        <TargetedPlatforms>1</TargetedPlatforms>
+        <TargetedPlatforms>3</TargetedPlatforms>
         <AppType>Package</AppType>
         <FrameworkType>VCL</FrameworkType>
         <ProjectVersion>20.4</ProjectVersion>
-        <Platform Condition="'$(Platform)'==''">Win32</Platform>
+        <Platform Condition="'$(Platform)'==''">Win64</Platform>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
         <Base>true</Base>
@@ -104,6 +104,7 @@
         <DCCReference Include="..\Source\Lsp.Client.pas"/>
         <DCCReference Include="..\Source\Rename.WorkspaceEdit.pas"/>
         <DCCReference Include="..\Source\Delphi.FileEncoding.pas"/>
+        <DCCReference Include="..\Source\Expert.IdeThemes.pas"/>
         <DCCReference Include="..\Source\Expert.LspManager.pas"/>
         <DCCReference Include="..\Source\Expert.IdeCodeInsight.pas"/>
         <DCCReference Include="..\Source\Expert.CompletionPopup.pas"/>
@@ -188,7 +189,7 @@
             </Delphi.Personality>
             <Platforms>
                 <Platform value="Win32">True</Platform>
-                <Platform value="Win64">False</Platform>
+                <Platform value="Win64">True</Platform>
                 <Platform value="Win64x">False</Platform>
             </Platforms>
         </BorlandProject>

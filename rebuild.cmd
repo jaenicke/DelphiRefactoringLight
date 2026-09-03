@@ -24,7 +24,7 @@ echo  Delphi Refactoring Light - Build Only (BDS %BDSVER%)
 echo ============================================
 echo.
 
-"%DELINST%" %BDSVER% -config "%CONFIG%" -platforms Win32 -configs Release -entries DelphiRefactoringLight -action build -verbose log %USEBDS%
+"%DELINST%" %BDSVER% -config "%CONFIG%" -platforms Win32,Win64 -configs Release -entries DelphiRefactoringLight -action build -verbose log %USEBDS%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

@@ -382,8 +382,28 @@ install.cmd
 The script:
 1. builds the helper tool `delinst.exe` from the `dih\` sub-folder,
 2. reads `DelphiRefactoringLight.xml`,
-3. builds `Packages\DelphiRefactoringLight.dproj` (Win32 / Release), and
-4. registers the resulting BPL in the IDE's `Known Packages` (`HKCU\Software\Embarcadero\BDS\37.0\Known Packages`, value `$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight.bpl`).
+3. builds `Packages\DelphiRefactoringLight.dproj` **for both IDEs** (Win32 and Win64, Release), and
+4. registers each BPL in the matching registry branch.
+
+### 32-bit and 64-bit IDE
+
+RAD Studio 12+ ships two IDEs - `bin\bds.exe` (32-bit) and `bin64\bds.exe`
+(64-bit) - and they do **not** share their package registration. The
+installer therefore handles both in one run:
+
+| IDE | Platform | BPL | Registry branch |
+|-----|----------|-----|-----------------|
+| `bin\bds.exe` | Win32 | `$(BDSCOMMONDIR)\Bpl\DelphiRefactoringLight370.bpl` | `...\37.0\Known Packages` |
+| `bin64\bds.exe` | Win64 | `$(BDSCOMMONDIR)\Bpl\Win64\DelphiRefactoringLight370.bpl` | `...\37.0\Known Packages x64` |
+
+A design-time package built for Win32 cannot be loaded by the 64-bit IDE
+and vice versa, so registering one BPL in both branches does not work -
+each IDE needs its own build.
+
+The `370` suffix comes from `{$LIBSUFFIX AUTO}` in the `.dpk` (the product
+version without the dot). Removing that directive makes the build produce
+`DelphiRefactoringLight.bpl` while the registration still points at the
+suffixed name - the package then has to be installed by hand.
 
 The `Known Packages` mechanism is the standard registration path for BPL-based wizards in Delphi: the IDE loads the package, calls its `Register` procedure, which Registers the main wizard via `RegisterPackageWizard` and the key bindings via `IOTAKeyboardServices`.
 
@@ -396,7 +416,8 @@ Further scripts:
 ### Alternative: manual install inside the IDE
 
 1. Open `Packages\DelphiRefactoringLight.dproj` in RAD Studio.
-2. Platform: `Win32`, configuration: `Release`.
+2. Platform: `Win32` for the 32-bit IDE, `Win64` for the 64-bit IDE
+   (`bin64ds.exe`); configuration: `Release`.
 3. Right-click the package in the Project Manager &rarr; **Install**.
 4. Restart the IDE.
 

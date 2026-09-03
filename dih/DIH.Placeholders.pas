@@ -59,6 +59,11 @@ begin
   ReadBDSDirsFromRegistry;
 
   FValues.AddOrSetValue('BDSVersion', FBDSVersion);
+  // {$LIBSUFFIX AUTO} appends the product version without the dot
+  // ("37.0" -> "370"), so a config can name the built BPL without
+  // hard-coding the IDE version.
+  FValues.AddOrSetValue('LibSuffix',
+    StringReplace(FBDSVersion, '.', '', [rfReplaceAll]));
   FValues.AddOrSetValue('BDSProfileName', FBDSProfile);
   FValues.AddOrSetValue('BDS', 'Software\Embarcadero\' + FBDSProfile + '\' + FBDSVersion);
 end;

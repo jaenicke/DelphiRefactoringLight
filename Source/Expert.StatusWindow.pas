@@ -279,6 +279,14 @@ begin
       Format('%d diag, %d fixable', [DiagSeen, DiagHandled]),
       'codes: ' + DiagCodes);
 
+  // A diagnostic we HAVE a provider for that still produced nothing: the
+  // provider says why (no declaring unit, stale, already reachable, ...).
+  S := LiveDeclineNote;
+  if S = '' then
+    Row('  declined', '-', '')
+  else
+    Row('  declined', 'see details', S);
+
   // Which window (if any) currently keeps the fix hint hidden.
   S := LiveHintBlocker;
   if S = '' then

@@ -22,7 +22,8 @@ uses
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
-  Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow;
+  Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow,
+  Expert.DialogHelper;
 
 type
   TShortcutChangeHook = class
@@ -108,6 +109,9 @@ begin
   // and shows a small quick-fix button at the caret when an undeclared
   // identifier has a known unit (see Expert.AutoImport).
   StartAutoImportLive;
+  // Warning dialog the "remove unused private member" fix asks
+  // before it deletes a non-empty body.
+  InstallRemovePrivateConfirm;
   // Primary diagnostics source in the IDE: the Structure view mirrors the
   // IDE's own Error Insight; its notifier feeds the live checker without
   // any LSP round-trip of our own (see Expert.StructureErrors).

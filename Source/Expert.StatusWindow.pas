@@ -68,6 +68,8 @@ type
     FRowCount: Integer;
     FProbeSeen: Boolean;   // messages log found once - stop stat()ing it
     FTicks: Integer;
+    FMsgCount: Integer;    // last compiler-message count (see Collect)
+    FMsgCountTick: Integer;
     procedure DoTick(Sender: TObject);
     procedure Row(const ACaption, AValue, ADetail: string);
     procedure Collect;
@@ -321,12 +323,29 @@ begin
       Format('%d node(s) walked', [StrNodes]));
 
   // ---- compiler output (third diagnostics source) ------------------------
+  // CompilerMessageCount walks the IDE's INTERNAL message model through
+  // raw exported method pointers - that must not run once a second. The
+  // IDE-Logger caught the price: a first-chance ACCESS_VIOLATION every
+  // few seconds from exactly this path (TTimer -> DoTick -> Collect ->
+  // WalkMessageLines). It is a diagnostic number, so a 10 s refresh is
+  // plenty; the compile path (FeedCompilerMessages) reads it for real.
   S := MessagesReaderProblem;
   if S <> '' then
     Row('Compiler messages', 'unavailable', S)
   else
-    Row('Compiler messages', Format('%d line(s) readable', [CompilerMessageCount]),
+  begin
+    if (FMsgCountTick = 0) or (FTicks - FMsgCountTick >= 10) then
+    begin
+      FMsgCountTick := FTicks;
+      try
+        FMsgCount := CompilerMessageCount;
+      except
+        FMsgCount := 0;
+      end;
+    end;
+    Row('Compiler messages', Format('%d line(s) readable', [FMsgCount]),
       'read from the Messages window after each compile');
+  end;
 
   // ---- Messages-window read probe ----------------------------------------
   S := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-messages.log');

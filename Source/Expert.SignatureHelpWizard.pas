@@ -599,6 +599,14 @@ begin
   Inc(FCallSeq);
   MySeq := FCallSeq;
 
+  // The buffer must be captured HERE, on the main thread: reading it
+  // inside the worker means ToolsAPI from a foreign thread, which races
+  // the IDE's own editing/parsing (IDE hangs). Empty = the file is not
+  // open; the worker then falls back to disk.
+  var LiveContent := '';
+  if (Editor = nil) or not Editor.ReadEditorContent(AFile, LiveContent) then
+    LiveContent := '';
+
   TThread.CreateAnonymousThread(
     procedure
     var
@@ -620,7 +628,10 @@ begin
         // session is invisible to them. Reads through the IEditorHelper,
         // so it picks up the live in-memory buffer.
         try
-          Client.RefreshDocument(AFile);
+          if LiveContent <> '' then
+            Client.RefreshDocumentWith(AFile, LiveContent)
+          else
+            Client.RefreshDocument(AFile);
         except
           // RefreshDocument failure is non-fatal - we still try the
           // query; worst case the LSP answers stale.

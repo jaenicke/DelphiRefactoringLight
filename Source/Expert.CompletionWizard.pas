@@ -308,6 +308,14 @@ begin
   Inc(FCallSeq);
   MySeq := FCallSeq;
 
+  // The buffer must be captured HERE, on the main thread: reading it
+  // inside the worker means ToolsAPI from a foreign thread, which races
+  // the IDE's own editing/parsing (IDE hangs). Empty = the file is not
+  // open; the worker then falls back to disk.
+  var LiveContent := '';
+  if (Editor = nil) or not Editor.ReadEditorContent(Context.FileName, LiveContent) then
+    LiveContent := '';
+
   TThread.CreateAnonymousThread(
     procedure
     var
@@ -321,7 +329,10 @@ begin
       try
         Client := TLspManager.Instance.GetClient(
           RootPath, Context.ProjectFile, DelphiLspJson);
-        Client.RefreshDocument(Context.FileName);
+        if LiveContent <> '' then
+          Client.RefreshDocumentWith(Context.FileName, LiveContent)
+        else
+          Client.RefreshDocument(Context.FileName);
         CompResponse := Client.GetCompletion(
           Context.FileName, Context.Line - 1, QueryCol);
         try

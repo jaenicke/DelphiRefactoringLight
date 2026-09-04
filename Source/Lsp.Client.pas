@@ -113,6 +113,12 @@ type
 
     /// <summary>Refreshes a document at the LSP (didClose + didOpen).</summary>
     procedure RefreshDocument(const AFilePath: string);
+    /// <summary>RefreshDocument with the content HANDED IN. The plain
+    ///  version reads the live editor buffer, which is ToolsAPI and
+    ///  therefore MAIN-THREAD ONLY - a background worker must capture the
+    ///  content before it starts and pass it here.</summary>
+    procedure RefreshDocumentWith(const AFilePath, AContent: string);
+    procedure OpenDocumentWith(const AFilePath, AContent: string);
 
     /// <summary>Checks whether a rename is possible at the position.</summary>
     function PrepareRename(const AFilePath: string; ALine, ACol: Integer): TLspPrepareRenameResult;
@@ -713,20 +719,32 @@ function ReadLiveContent(const AFilePath: string): string;
 var
   EditorContent: string;
 begin
-  if (Editor <> nil) and Editor.ReadEditorContent(AFilePath, EditorContent) then
+  // ToolsAPI IS MAIN-THREAD ONLY. Reading the edit buffer from a worker
+  // thread (IOTASourceEditor.CreateReader/GetText) races the IDE's own
+  // editing and parsing and is a documented way to hang the IDE - the
+  // more LSP traffic runs in parallel, the more often. Off the main
+  // thread we therefore read from DISK; a caller that needs the live
+  // buffer captures it on the main thread and uses the ...With variants.
+  if (Editor <> nil) and (TThread.CurrentThread.ThreadID = MainThreadID)
+    and Editor.ReadEditorContent(AFilePath, EditorContent) then
     Result := EditorContent
   else
     Result := Delphi.FileEncoding.ReadDelphiFile(ExpandFileName(AFilePath));
 end;
 
 procedure TLspClient.OpenDocument(const AFilePath: string);
+begin
+  OpenDocumentWith(AFilePath, ReadLiveContent(AFilePath));
+end;
+
+procedure TLspClient.OpenDocumentWith(const AFilePath, AContent: string);
 var
   Params, TextDocObj: TJSONObject;
   Content: string;
   AbsPath: string;
 begin
   AbsPath := ExpandFileName(AFilePath);
-  Content := ReadLiveContent(AFilePath);
+  Content := AContent;
 
   TextDocObj := TJSONObject.Create;
   TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
@@ -754,6 +772,11 @@ begin
 end;
 
 procedure TLspClient.RefreshDocument(const AFilePath: string);
+begin
+  RefreshDocumentWith(AFilePath, ReadLiveContent(AFilePath));
+end;
+
+procedure TLspClient.RefreshDocumentWith(const AFilePath, AContent: string);
 var
   Params, TextDocObj: TJSONObject;
   ChangesArr: TJSONArray;
@@ -763,7 +786,7 @@ var
 begin
   CloseDocument(AFilePath);
   Sleep(50);
-  OpenDocument(AFilePath);
+  OpenDocumentWith(AFilePath, AContent);
   // Im Anschluss noch ein didChange mit identischem Inhalt schicken.
   // DelphiLSP im controller-Modus beantwortet textDocument/hover sonst
   // konsistent mit -32603 "Internal server error" - die echte Delphi-
@@ -772,7 +795,7 @@ begin
   // funktioniert. Identischer Text + Version 2 ist ein No-Op
   // semantisch, aber bringt den Server in den erwarteten Zustand.
   AbsPath := ExpandFileName(AFilePath);
-  Content := ReadLiveContent(AFilePath);
+  Content := AContent;
   TextDocObj := TJSONObject.Create;
   TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
   TextDocObj.AddPair('version', TJSONNumber.Create(2));

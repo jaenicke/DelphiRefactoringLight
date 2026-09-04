@@ -3095,6 +3095,7 @@ type
     ///  plain ShowWindow (bypassing VCL's Visible), so TForm.Hide would be
     ///  a NO-OP - it must be hidden the same WinAPI way.</summary>
     procedure HideHint;
+    function IsOnScreen: Boolean;
     property OnFix: TProc read FOnFix write FOnFix;
   end;
 
@@ -3143,21 +3144,45 @@ begin
 end;
 
 procedure TAutoImportHint.SetInfo(const AText: string);
+var
+  Cap: string;
+  W: Integer;
 begin
-  FLbl.Caption := #$1F4A1' ' + AText;
+  Cap := #$1F4A1' ' + AText;
+  if Cap = FLbl.Caption then Exit;   // identical text - touch nothing
+  FLbl.Caption := Cap;
   Canvas.Font := FLbl.Font;
-  Width := Max(120, Canvas.TextWidth(FLbl.Caption) + 26);
+  W := Max(120, Canvas.TextWidth(Cap) + 26);
+  if W <> Width then Width := W;
   Invalidate;   // the frame must follow the new width
+end;
+
+function TAutoImportHint.IsOnScreen: Boolean;
+begin
+  // Shown via the WinAPI, so the VCL's Visible flag is not the truth.
+  Result := HandleAllocated and IsWindowVisible(Handle);
 end;
 
 procedure TAutoImportHint.ShowNoActivateAt(const APt: TPoint);
 var
-  R: TRect;
+  R, Cur: TRect;
+  X, Y: Integer;
 begin
   R := Screen.WorkAreaRect;
-  SetWindowPos(Handle, HWND_TOPMOST,
-    Min(APt.X, R.Right - Width - 4), Min(APt.Y, R.Bottom - Height - 4),
-    Width, Height, SWP_NOACTIVATE);
+  X := Min(APt.X, R.Right - Width - 4);
+  Y := Min(APt.Y, R.Bottom - Height - 4);
+
+  // A SetWindowPos on a TOPMOST window is NOT free: it sends
+  // WM_WINDOWPOSCHANGING/CHANGED and makes Windows redo the z-order,
+  // which other IDE plugins hook. Doing that on every poll tick kept the
+  // IDE's message loop permanently busy (see the storm note in CLAUDE.md),
+  // so it happens only when the geometry actually changes.
+  if IsWindowVisible(Handle) and GetWindowRect(Handle, Cur)
+    and (Cur.Left = X) and (Cur.Top = Y)
+    and (Cur.Width = Width) and (Cur.Height = Height) then
+    Exit;
+
+  SetWindowPos(Handle, HWND_TOPMOST, X, Y, Width, Height, SWP_NOACTIVATE);
   if not IsWindowVisible(Handle) then
     ShowWindow(Handle, SW_SHOWNOACTIVATE);
 end;
@@ -3185,6 +3210,8 @@ type
     FDirtyTick: Cardinal;
     FDirtyIdleMs: Cardinal;   // idle threshold for the pending state
     FSwitched: Boolean;       // the active buffer changed on this tick
+    FHintPt: TPoint;          // where the hint currently sits (screen)
+    FHintProbeTick: Cardinal; // tick of the last foreign-popup probe
     FTickNo: Integer;         // fast ticks since start (heavy work every N)
     FHintDirty: Boolean;      // results changed - refresh the hint at once
     // Popup that currently keeps the hint hidden (see UpdateHint).
@@ -3269,6 +3296,8 @@ const
   // the caret position (cheap). They get different cadences: the hint
   // follows the caret and a freshly published result within one FAST
   // tick, the buffer is only re-read every HeavyEvery-th one.
+  // Ticks between two foreign-popup probes while the hint just sits there.
+  LiveHintProbeEvery = 8;   // ~1 s at LiveFastTickMs
   LiveFastTickMs = 120;
   LiveHeavyEvery = 4;   // -> ~480 ms for the buffer read / hashing
   LiveTickMs  = 400;   // poll interval (also the max hint-update latency,
@@ -3704,8 +3733,7 @@ end;
 procedure TAutoImportLive.StartAnalysis(const AFile, AContent: string; AHash: Integer);
 var
   Client: TLspClient;
-  Params, TextDocObj: TJSONObject;
-  Before, BeforeVer, ReqId: Integer;
+  BeforeVer: Integer;
 begin
   // NEVER cold-start the LSP from the background poller - only piggyback
   // on a client the prewarmer / a wizard has already brought up.
@@ -3717,22 +3745,9 @@ begin
     Exit;
   end;
 
-  Before := Client.GetDiagnosticsCount;
   // Snapshot of THIS file's push counter - the worker waits for it to
   // change, so a push for any other file can no longer end the wait.
   BeforeVer := Client.GetFileDiagnosticsVersion(AFile);
-  try
-    // Push the CURRENT buffer (RefreshDocument reads the live editor
-    // content) and fire an async documentSymbol to force the analysis.
-    Client.RefreshDocument(AFile);
-    TextDocObj := TJSONObject.Create;
-    TextDocObj.AddPair('uri', TLspUri.PathToFileUri(ExpandFileName(AFile)));
-    Params := TJSONObject.Create;
-    Params.AddPair('textDocument', TextDocObj);
-    ReqId := Client.SendRequestAsync('textDocument/documentSymbol', Params);
-  except
-    Exit;   // client just died etc. - try again on a later tick
-  end;
 
   FAnalysing := True;
   FDirty := False;
@@ -3743,14 +3758,34 @@ begin
       procedure
       var
         R: TArray<TQuickFix>;
-        I, DSeen, DHandled, DSig: Integer;
+        I, DSeen, DHandled, DSig, ReqId: Integer;
         DCodes, DNote: string;
+        Params, TextDocObj: TJSONObject;
       begin
         try
           R := nil;
           DSeen := 0; DHandled := 0; DCodes := ''; DNote := ''; DSig := 0;
           try
-            try Client.WaitForResponse(ReqId, 20000).Free; except end;
+            // SENDING BELONGS ON THIS THREAD. RefreshDocument closes and
+            // re-opens the document (two full-text JSON payloads for the
+            // whole unit) and sleeps 50 ms in between - on the MAIN
+            // thread that is a visible IDE stall after every edit pause,
+            // and this runs for every idle buffer state. AContent was
+            // already captured by the poll tick, so the worker needs no
+            // ToolsAPI at all (RefreshDocumentWith, not RefreshDocument).
+            try
+              Client.RefreshDocumentWith(AFile, AContent);
+              TextDocObj := TJSONObject.Create;
+              TextDocObj.AddPair('uri', TLspUri.PathToFileUri(ExpandFileName(AFile)));
+              Params := TJSONObject.Create;
+              Params.AddPair('textDocument', TextDocObj);
+              ReqId := Client.SendRequestAsync('textDocument/documentSymbol', Params);
+            except
+              // Client just died etc. - a later tick tries again.
+              ReqId := -1;
+            end;
+            if ReqId >= 0 then
+              try Client.WaitForResponse(ReqId, 20000).Free; except end;
             // Wait for the push that belongs to THIS file. Waiting on the
             // session-wide counter meant any push for any other file
             // ended the wait, and we then read a stale (usually empty)
@@ -3964,6 +3999,19 @@ begin
     // Safety net for the fallback case (and for a list the IDE flips
     // upwards near the bottom of the screen): if something else already
     // occupies our target rect, stay hidden.
+    // STEADY STATE = DO NOTHING. The probe below enumerates every window
+    // of the IDE thread; running it (and the window ops after it) on every
+    // 120 ms tick while the caret simply rests on a line with a fix is
+    // what turned the IDE into a permanent message storm: it never ends,
+    // because nothing about the state ever changes. Re-probe only when
+    // something moved, or once a second as the safety net for a popup
+    // that opened meanwhile.
+    if FHint.IsOnScreen and (Target.X = FHintPt.X) and (Target.Y = FHintPt.Y)
+      and (FTickNo - FHintProbeTick < LiveHintProbeEvery) then
+      Exit;
+    FHintProbeTick := FTickNo;
+    FHintPt := Target;
+
     HintWnd := 0;
     if FHint.HandleAllocated then HintWnd := FHint.Handle;
     Area := TRect.Create(Target.X, Target.Y,

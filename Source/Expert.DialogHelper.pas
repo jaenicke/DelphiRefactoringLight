@@ -70,6 +70,15 @@ procedure RegisterDialogClass(AClass: TCustomFormClass);
 ///  them as well.</summary>
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 
+/// <summary>Scales a dialog whose controls were placed with HARD-CODED
+///  96-dpi coordinates (all of ours are built in code) up to the DPI the
+///  form actually runs at. GEOMETRY ONLY - fonts are left alone on
+///  purpose: at a scaled DPI the VCL already hands the form a larger
+///  font, and scaling it again would overshoot. The failure mode we are
+///  fixing is text that no longer fits its box, so the boxes are what
+///  must grow. A no-op at 96 dpi.</summary>
+procedure ScaleDialogFrom96(AForm: TForm; AAnchor: TCustomForm = nil);
+
 /// <summary>Builds, themes (EnableThemes + PrepareDialog) and SHOWS a
 ///  TCheckProgressWindow with the reference layout used by the project
 ///  checks. Owner form -> centered on it, else screen center. The
@@ -126,6 +135,67 @@ begin
 {$ENDIF}
 end;
 
+procedure ScaleControlTree(AControl: TControl; ANum, ADen: Integer);
+var
+  I: Integer;
+  W: TWinControl;
+begin
+  if AControl = nil then Exit;
+  AControl.SetBounds(
+    MulDiv(AControl.Left, ANum, ADen), MulDiv(AControl.Top, ANum, ADen),
+    MulDiv(AControl.Width, ANum, ADen), MulDiv(AControl.Height, ANum, ADen));
+  if AControl.Constraints <> nil then
+  begin
+    AControl.Constraints.MinWidth := MulDiv(AControl.Constraints.MinWidth, ANum, ADen);
+    AControl.Constraints.MinHeight := MulDiv(AControl.Constraints.MinHeight, ANum, ADen);
+    AControl.Constraints.MaxWidth := MulDiv(AControl.Constraints.MaxWidth, ANum, ADen);
+    AControl.Constraints.MaxHeight := MulDiv(AControl.Constraints.MaxHeight, ANum, ADen);
+  end;
+  if AControl is TWinControl then
+  begin
+    W := TWinControl(AControl);
+    for I := 0 to W.ControlCount - 1 do
+      ScaleControlTree(W.Controls[I], ANum, ADen);
+  end;
+end;
+
+procedure ScaleDialogFrom96(AForm: TForm; AAnchor: TCustomForm);
+var
+  Target, I: Integer;
+begin
+  if AForm = nil then Exit;
+  // Which DPI to scale TO: the monitor the dialog will appear on. Note
+  // that CurrentPPI is NOT a reliable answer here - whatever the VCL did
+  // while constructing the form, every coordinate was overwritten
+  // afterwards by our own hard-coded 96-dpi assignments, so the geometry
+  // in front of us is raw 96 either way.
+  // The dialog has no position yet, so ITS monitor is whatever happens to
+  // contain (0,0) - ask the window we anchor to (the IDE) first.
+  Target := 0;
+  if (AAnchor <> nil) and (AAnchor.Monitor <> nil) then
+    Target := AAnchor.Monitor.PixelsPerInch;
+  if (Target <= 0) and (AForm.Monitor <> nil) then
+    Target := AForm.Monitor.PixelsPerInch;
+  if Target <= 0 then Target := AForm.CurrentPPI;
+  if Target <= 0 then Target := Screen.PixelsPerInch;
+  if (Target <= 96) or (Target > 1000) then Exit;   // 100% -> nothing to do
+
+  AForm.DisableAlign;
+  try
+    for I := 0 to AForm.ControlCount - 1 do
+      ScaleControlTree(AForm.Controls[I], Target, 96);
+    AForm.ClientWidth := MulDiv(AForm.ClientWidth, Target, 96);
+    AForm.ClientHeight := MulDiv(AForm.ClientHeight, Target, 96);
+    if AForm.Constraints <> nil then
+    begin
+      AForm.Constraints.MinWidth := MulDiv(AForm.Constraints.MinWidth, Target, 96);
+      AForm.Constraints.MinHeight := MulDiv(AForm.Constraints.MinHeight, Target, 96);
+    end;
+  finally
+    AForm.EnableAlign;
+  end;
+end;
+
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 var
   Anchor: TCustomForm;
@@ -146,6 +216,10 @@ begin
     AForm.PopupMode := pmExplicit;
     AForm.PopupParent := Anchor;
   end;
+
+  // Our dialogs are built in code at 96 dpi - grow them to the real DPI
+  // before anything else looks at their geometry.
+  ScaleDialogFrom96(AForm, Anchor);
 
 {$IFNDEF STANDALONE_BUILD}
   // Apply the IDE theme to the form and all its child controls.

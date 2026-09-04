@@ -232,7 +232,20 @@ const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
   MaxFileBytes  = 4 * 1024 * 1024;
   RefreshIntervalMs = 30000;  // background re-scan period
-  CacheMagic    = 'RLUIDX07';   // 07: IDE path variables ($(DXVCL)) expand
+  // !!! BUMP THIS ON EVERY CHANGE TO ParseUnit !!!
+  // The on-disk cache is incremental (path + mtime + size), and RTL /
+  // third-party sources NEVER change - so a unit that an older, buggier
+  // parser got wrong keeps its broken identifier list FOREVER unless the
+  // magic invalidates the cache. That is not theory: the 08-30/09-01
+  // parser fixes (variant-record 'case', multi-line enums, generics,
+  // wrapped parameter lists) shipped WITHOUT a bump, and users kept
+  // seeing "TcxButton / TStringGrid unknown" - which made uses-cleanup
+  // offer units in use for REMOVAL, and left add-unit and "find original
+  // symbol" blind for those types.
+  IndexParserVersion = '08';
+  //  08: parser fixes of 08-30/09-01 (case/enums/generics/parameters)
+  //  07: IDE path variables ($(DXVCL)) expand
+  CacheMagic    = 'RLUIDX' + IndexParserVersion;
   // Snapshot map entries are unit indexes with this flag bit set for
   // GENERIC declarations (MaxFiles stays far below the bit).
   GenericBit    = $40000000;
@@ -379,6 +392,9 @@ end;
 //  The interface-section parser
 // ---------------------------------------------------------------------------
 
+// CHANGING ANYTHING IN HERE MEANS BUMPING IndexParserVersion - otherwise
+// existing caches keep the results of the old parser for every file whose
+// timestamp does not change (i.e. all of RTL/VCL and every library).
 function ParseUnit(const AFile: string; out AUnitName: string;
   out AHasInit: Boolean): TArray<string>;
 type

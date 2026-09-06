@@ -130,6 +130,13 @@ end;
 
 // Index-based fallback for a symbol the LSP could not resolve. True when
 // it handled the request (jumped, or opened the chooser).
+// Every failing branch below leaves a reason here. Without it, an index
+// that KNOWS the identifier and a file it cannot open produce the same
+// "the index does not know it either" - which sends the next report in
+// the wrong direction (that is how the TcxButton case cost a round trip).
+var
+  GIndexFallbackNote: string = '';
+
 function TryIndexFallback(const AIdent: string): Boolean;
 var
   Hits: TArray<TFindUnitHit>;
@@ -146,8 +153,19 @@ var
 
 begin
   Result := False;
+  GIndexFallbackNote := '';
+  if not TUnitIndex.Instance.Ready then
+  begin
+    GIndexFallbackNote := 'the identifier index is not ready yet ('
+      + TUnitIndex.Instance.StatusLine + ')';
+    Exit;
+  end;
   Hits := TUnitIndex.Instance.Lookup(AIdent);
-  if Length(Hits) = 0 then Exit;
+  if Length(Hits) = 0 then
+  begin
+    GIndexFallbackNote := 'no indexed unit declares it';
+    Exit;
+  end;
 
   // One declaring UNIT (the same unit can appear per declaration form) ->
   // go there directly.
@@ -163,12 +181,28 @@ begin
     Exit(True);
   end;
 
-  if (Hits[0].Path = '') or not TFile.Exists(Hits[0].Path) then Exit;
+  if Hits[0].Path = '' then
+  begin
+    GIndexFallbackNote := Format('unit %s is indexed, but without a file path',
+      [Hits[0].UnitName]);
+    Exit;
+  end;
+  if not TFile.Exists(Hits[0].Path) then
+  begin
+    GIndexFallbackNote := Format('the indexed file no longer exists: %s',
+      [Hits[0].Path]);
+    Exit;
+  end;
   if not Editor.ReadEditorContent(Hits[0].Path, Content) then
     try
       Content := TFile.ReadAllText(Hits[0].Path);
     except
-      Exit;
+      on E: Exception do
+      begin
+        GIndexFallbackNote := Format('%s cannot be read: %s',
+          [Hits[0].Path, E.Message]);
+        Exit;
+      end;
     end;
 
   DeclLine := FindDeclarationLine(Content, AIdent);
@@ -181,6 +215,15 @@ begin
     if Col < 0 then Col := 0;
   end;
   Result := Editor.GotoLocation(Hits[0].Path, DeclLine, Col, Length(AIdent));
+  if not Result then
+    GIndexFallbackNote := Format('%s could not be opened in the editor',
+      [Hits[0].Path])
+  else if DeclLine = 0 then
+    // Opened, but the declaration line was not recognised - say so instead
+    // of silently landing on line 1 and looking like nothing happened.
+    GIndexFallbackNote := Format(
+      'opened %s, but the declaration of "%s" was not recognised in it',
+      [ExtractFileName(Hits[0].Path), AIdent]);
 end;
 
 procedure FindOriginalSymbol;
@@ -259,8 +302,12 @@ begin
     // Unqualified: one declaring unit -> jump straight to its
     // declaration, several -> hand over to the Find-Unit dialog.
     if TryIndexFallback(Ctx.WordAtCursor) then Exit;
-    ShowThemedMessage(Format('No declaration found for "%s".'#13#10 +
-      'The identifier index does not know it either.', [Ctx.WordAtCursor]));
+    if GIndexFallbackNote <> '' then
+      ShowThemedMessage(Format('No declaration found for "%s".'#13#10#13#10 +
+        'Index fallback: %s.', [Ctx.WordAtCursor, GIndexFallbackNote]))
+    else
+      ShowThemedMessage(Format('No declaration found for "%s".'#13#10 +
+        'The identifier index does not know it either.', [Ctx.WordAtCursor]));
     Exit;
   end;
 

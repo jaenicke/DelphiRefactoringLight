@@ -1077,7 +1077,19 @@ begin
     else if P = 1 then
     begin
       // Line STARTS with the identifier: 'TFoo = class', 'Bar: Integer;'
-      if Rest.StartsWith('=') then Score := 3
+      if Rest.StartsWith('=') then
+      begin
+        Score := 3;
+        // ... unless it is a FORWARD declaration ('TFoo = class;'). Those
+        // stand at the top of a type block and would otherwise win purely
+        // by being FIRST - which is why "find original symbol" landed on
+        // a bodyless line for DevExpress types (their units declare almost
+        // everything forward) while types without a forward worked.
+        var After := UpperCase(TrimLeft(Copy(Rest, 2, MaxInt)));
+        if (After = 'CLASS;') or (After = 'INTERFACE;') or (After = 'OBJECT;')
+          or (After = 'RECORD;') or (After = 'DISPINTERFACE;') then
+          Score := 2;
+      end
       else if Rest.StartsWith(':') then Score := 2
       else if Rest.StartsWith('<') then Score := 3;   // generic type decl
     end;

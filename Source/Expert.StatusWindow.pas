@@ -41,6 +41,7 @@ uses
   ToolsAPI, DesignIntf,   // DesignIntf: TEditState / TEditAction
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager,
   Expert.AutoImport, Expert.ContextMenu, Expert.IdeThemes, Expert.DialogHelper,
+  Expert.BlameGutter, Expert.BlameDialogs, Expert.VcsBlame,
   Expert.MessagesReader, Expert.StructureErrors, Lsp.Client;
 
 // TCustomFrame.Create does InitInheritedComponent(Self, TFrame) for every
@@ -58,6 +59,8 @@ type
   TStatusFrame = class(TFrame)
   private
     FList: TListView;
+    FPopup: TPopupMenu;
+    FMniAdjust: TMenuItem;
     FTimer: TTimer;
     // Collected rows of the CURRENT tick. The row SET is fixed (same
     // count, same order, always) - only the cell texts change, so the
@@ -72,6 +75,9 @@ type
     FMsgCountTick: Integer;
     procedure DoTick(Sender: TObject);
     procedure Row(const ACaption, AValue, ADetail: string);
+    procedure DoListDblClick(Sender: TObject);
+    procedure DoAdjustBlameClick(Sender: TObject);
+    procedure DoPopup(Sender: TObject);
     procedure Collect;
     procedure Apply;
   public
@@ -116,6 +122,18 @@ begin
   FList.ReadOnly := True;
   FList.RowSelect := True;
   FList.GridLines := True;
+  // The blame column has to be lined up against whatever else draws in
+  // the gutter, and pixels are not something to guess in an options page:
+  // a double-click (or the context menu) on the "Live blame" row opens the
+  // live adjuster.
+  FList.OnDblClick := DoListDblClick;
+  FPopup := TPopupMenu.Create(Self);
+  FPopup.OnPopup := DoPopup;
+  FMniAdjust := TMenuItem.Create(FPopup);
+  FMniAdjust.Caption := 'Adjust live blame column...';
+  FMniAdjust.OnClick := DoAdjustBlameClick;
+  FPopup.Items.Add(FMniAdjust);
+  FList.PopupMenu := FPopup;
   FList.Columns.Add.Caption := 'Item';
   FList.Columns[0].Width := 160;
   FList.Columns.Add.Caption := 'Status';
@@ -139,6 +157,28 @@ begin
   FRows[FRowCount].Value := AValue;
   FRows[FRowCount].Detail := ADetail;
   Inc(FRowCount);
+end;
+
+function TStatusFrame_IsBlameRow(AItem: TListItem): Boolean;
+begin
+  Result := (AItem <> nil) and SameText(Trim(AItem.Caption), 'Live blame');
+end;
+
+procedure TStatusFrame.DoListDblClick(Sender: TObject);
+begin
+  if TStatusFrame_IsBlameRow(FList.Selected) then
+    AdjustBlameColumn;
+end;
+
+procedure TStatusFrame.DoAdjustBlameClick(Sender: TObject);
+begin
+  AdjustBlameColumn;
+end;
+
+procedure TStatusFrame.DoPopup(Sender: TObject);
+begin
+  // Only offer it where it means something.
+  FMniAdjust.Enabled := TStatusFrame_IsBlameRow(FList.Selected);
 end;
 
 // Writes the collected rows into the list view - and ONLY what actually
@@ -346,6 +386,14 @@ begin
     Row('Compiler messages', Format('%d line(s) readable', [FMsgCount]),
       'read from the Messages window after each compile');
   end;
+
+  // ---- live blame ---------------------------------------------------------
+  if BlameEnabled then
+    Row('Live blame', BlameGutterStatus,
+      'viewer: ' + BlameViewerName)
+  else
+    Row('Live blame', 'off',
+      'switch it on via the Refactoring Light menu (runs "git blame")');
 
   // ---- Messages-window read probe ----------------------------------------
   S := TPath.Combine(TPath.GetTempPath, 'RefactoringLight-messages.log');

@@ -46,6 +46,16 @@ type
     grpLsp: TGroupBox;
     cbxPrewarmLsp: TCheckBox;
     lblLspNote: TLabel;
+    grpBlame: TGroupBox;
+    cbxLiveBlame: TCheckBox;
+    lblBlameInfo: TLabel;
+    cbxBlameInfo: TComboBox;
+    lblBlameWidth: TLabel;
+    edtBlameWidth: TEdit;
+    lblBlameOffset: TLabel;
+    edtBlameOffset: TEdit;
+    cbxTortoise: TCheckBox;
+    lblBlameNote: TLabel;
     btnDefaults: TButton;
     procedure ShortcutEditKeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
@@ -68,7 +78,15 @@ implementation
 {$R *.dfm}
 
 uses
-  Winapi.Windows, System.Math, Vcl.Graphics, Expert.PluginSettings;
+  Winapi.Windows, System.Math, Vcl.Graphics, Expert.PluginSettings
+  {$IFNDEF STANDALONE_BUILD}, Expert.BlameGutter{$ENDIF};
+
+{$IFDEF STANDALONE_BUILD}
+procedure ApplyBlameSettings;
+begin
+  // no editor gutter outside the IDE
+end;
+{$ENDIF}
 
 { TLspOptionsFrame }
 
@@ -168,6 +186,19 @@ begin
   for K := Low(TShortcutKind) to High(TShortcutKind) do
     ApplyToEdit(K);
   cbxPrewarmLsp.Checked := TPluginSettings.PrewarmLspOnProjectOpen;
+
+  if cbxBlameInfo.Items.Count = 0 then
+  begin
+    cbxBlameInfo.Items.Add('Revision only');
+    cbxBlameInfo.Items.Add('Revision and author');
+    cbxBlameInfo.Items.Add('Revision, author and age');
+  end;
+  cbxLiveBlame.Checked := TPluginSettings.LiveBlame;
+  cbxBlameInfo.ItemIndex :=
+    EnsureRange(TPluginSettings.BlameInfo, 0, cbxBlameInfo.Items.Count - 1);
+  edtBlameWidth.Text := IntToStr(TPluginSettings.BlameColumnWidth);
+  edtBlameOffset.Text := IntToStr(TPluginSettings.BlameColumnOffset);
+  cbxTortoise.Checked := TPluginSettings.BlameUseTortoise;
 end;
 
 procedure TLspOptionsFrame.StoreToSettings;
@@ -184,6 +215,21 @@ begin
     TExpertsShortCut.Shortcuts[K] := SC;
   end;
   TPluginSettings.PrewarmLspOnProjectOpen := cbxPrewarmLsp.Checked;
+
+  TPluginSettings.BlameInfo := Max(0, cbxBlameInfo.ItemIndex);
+  // 0 is a legitimate value ("do not touch the gutter"); anything wider
+  // than half the editor would just hide code.
+  TPluginSettings.BlameColumnWidth :=
+    EnsureRange(StrToIntDef(Trim(edtBlameWidth.Text),
+      TPluginSettings.BlameColumnWidth), 0, 600);
+  TPluginSettings.BlameColumnOffset :=
+    EnsureRange(StrToIntDef(Trim(edtBlameOffset.Text),
+      TPluginSettings.BlameColumnOffset), 0, 600);
+  TPluginSettings.BlameUseTortoise := cbxTortoise.Checked;
+  // The switch takes effect immediately - the gutter width is restored
+  // when it goes off, so a stale wide gutter can never be left behind.
+  TPluginSettings.LiveBlame := cbxLiveBlame.Checked;
+  ApplyBlameSettings;
 end;
 
 procedure TLspOptionsFrame.ShortcutEditKeyDown(Sender: TObject; var Key: Word;

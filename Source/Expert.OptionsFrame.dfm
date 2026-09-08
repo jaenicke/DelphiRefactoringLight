@@ -2,7 +2,7 @@ object LspOptionsFrame: TLspOptionsFrame
   Left = 0
   Top = 0
   Width = 520
-  Height = 480
+  Height = 644
   TabOrder = 0
   object grpShortcuts: TGroupBox
     Left = 8
@@ -195,13 +195,93 @@ object LspOptionsFrame: TLspOptionsFrame
         'ocess)'
     end
   end
+  object grpBlame: TGroupBox
+    Left = 8
+    Top = 442
+    Width = 504
+    Height = 156
+    Anchors = [akLeft, akTop, akRight]
+    Caption = ' Live blame (git / svn) '
+    TabOrder = 2
+    object cbxLiveBlame: TCheckBox
+      Left = 16
+      Top = 22
+      Width = 470
+      Height = 17
+      Caption = 'Show blame information in the editor gutter'
+      TabOrder = 0
+    end
+    object lblBlameInfo: TLabel
+      Left = 34
+      Top = 48
+      Width = 60
+      Height = 15
+      Caption = 'Show:'
+    end
+    object cbxBlameInfo: TComboBox
+      Left = 160
+      Top = 44
+      Width = 200
+      Height = 23
+      Style = csDropDownList
+      TabOrder = 1
+    end
+    object lblBlameWidth: TLabel
+      Left = 34
+      Top = 76
+      Width = 60
+      Height = 15
+      Caption = 'Column width (px):'
+    end
+    object edtBlameWidth: TEdit
+      Left = 160
+      Top = 72
+      Width = 60
+      Height = 23
+      TabOrder = 2
+    end
+    object lblBlameOffset: TLabel
+      Left = 232
+      Top = 76
+      Width = 60
+      Height = 15
+      Caption = 'Offset (px):'
+    end
+    object edtBlameOffset: TEdit
+      Left = 320
+      Top = 72
+      Width = 60
+      Height = 23
+      TabOrder = 3
+    end
+    object cbxTortoise: TCheckBox
+      Left = 16
+      Top = 100
+      Width = 470
+      Height = 17
+      Caption =
+        'Use TortoiseGit / TortoiseSVN for the commit and blame views (whe' +
+        'n installed)'
+      TabOrder = 4
+    end
+    object lblBlameNote: TLabel
+      Left = 34
+      Top = 122
+      Width = 254
+      Height = 15
+      AutoSize = False
+      Caption =
+        '0 = do not widen the gutter (stripe only). Offset moves the colum' +
+        'n right - useful when another add-on already draws there.'
+    end
+  end
   object btnDefaults: TButton
     Left = 8
-    Top = 415
+    Top = 608
     Width = 145
     Height = 25
     Caption = 'Restore defaults'
-    TabOrder = 2
+    TabOrder = 3
     OnClick = btnDefaultsClick
   end
 end

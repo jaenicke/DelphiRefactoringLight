@@ -23,6 +23,7 @@ uses
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
   Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow,
+  Expert.BlameGutter, Expert.PluginSettings,
   Expert.DialogHelper;
 
 type
@@ -119,6 +120,16 @@ begin
   // Dotted-underline markers in the code editor for every fix location
   // (hints get no squiggle from the IDE itself).
   InstallQuickFixMarkers;
+  // Live blame: an age stripe in the gutter and the annotation on the
+  // caret line. Off unless the user switched it on (it runs git).
+  InstallBlameGutter;
+  // ApplyBlameSettings, NOT just SetBlameEnabled: the column width, the
+  // offset and the content level live in the settings too, and only this
+  // call pushes them into the painter. Switching on alone left the
+  // painter on its built-in defaults until something opened the options
+  // or the live adjuster - which is exactly how a tester found it ("the
+  // offset was only honoured once I went into the mini dialog").
+  ApplyBlameSettings;
 
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;
@@ -130,6 +141,7 @@ finalization
   // Before anything else: hand the dockable form back to the IDE - it
   // must not outlive the BPL.
   UnregisterStatusWindow;
+  UninstallBlameGutter;
   UninstallQuickFixMarkers;
   UninstallStructureErrorSource;
   StopAutoImportLive;

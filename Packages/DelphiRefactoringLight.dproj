@@ -54,6 +54,10 @@
         <GenPackage>true</GenPackage>
         <DCC_DcuOutput>.\DCU</DCC_DcuOutput>
         <DCC_BplOutput>.\Output</DCC_BplOutput>
+        <!-- Detailed MAP file: the IDE-Logger reports crash addresses as
+             "DelphiRefactoringLight370.bpl+$RVA", and only a map from the
+             SAME build turns those into functions and source lines. -->
+        <DCC_MapFile>3</DCC_MapFile>
         <DCC_Description>Delphi Refactoring Light - Rename / Find References / Extract Method via DelphiLSP</DCC_Description>
         <RuntimeOnlyPackage>false</RuntimeOnlyPackage>
         <DesignOnlyPackage>true</DesignOnlyPackage>
@@ -158,6 +162,9 @@
         <DCCReference Include="..\Source\Expert.CircularRefsDialog.pas"/>
         <DCCReference Include="..\Source\Expert.UsesEditor.pas"/>
         <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
+        <DCCReference Include="..\Source\Expert.VcsBlame.pas"/>
+        <DCCReference Include="..\Source\Expert.BlameGutter.pas"/>
+        <DCCReference Include="..\Source\Expert.BlameDialogs.pas"/>
         <DCCReference Include="..\Source\Expert.UnitUsageProbe.pas"/>
         <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.AutoImport.pas"/>

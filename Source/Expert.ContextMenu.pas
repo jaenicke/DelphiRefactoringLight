@@ -133,6 +133,9 @@ type
     procedure OnExtractMethod(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
+    procedure OnToggleBlame(Sender: TObject);
+    procedure OnBlameCommit(Sender: TObject);
+    procedure OnBlameList(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
     procedure OnRemoveWithProjectWide(Sender: TObject);
     procedure OnRemoveWithCurrentUnit(Sender: TObject);
@@ -217,8 +220,11 @@ uses
   Expert.MoveToUnitWizard, Expert.ExtractInterfaceWizard,
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog, Expert.StatusWindow,
+  Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup;
+
+
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -239,10 +245,18 @@ const
   // Base caption of the REQ_LIVEALL entry - annotated with the count by
   // ReqState, so both menu copies and the action list stay in sync.
   CapShowAllFixes = 'Show all quick fixes...';
+  // A plain caption - the STATE is shown as a checkmark, which both menu
+  // copies support (TMenuItem.Checked / TCustomAction.Checked). The first
+  // version wrote the action into the caption ("switch ON"), and a tester
+  // promptly read that as the current state.
+  CapLiveBlame = 'Live blame (git/svn)';
 
   // Our category in the editor local menu (INTAEditorLocalMenu).
   LocalMenuCategory = 'RefactoringLight';
   REQ_ALWAYS  = 5;   // no context at all (status window)
+  REQ_BLAME   = 6;   // always enabled AND carries a CHECKMARK (live blame)
+  REQ_BLAMEDATA = 7; // needs blame data for the caret's file
+  REQ_BLAMEVIEW = 8; // a blame view is possible (ours or Tortoise's)
   REQ_LIVEFIX = 3;   // like REQ_EDITOR, but additionally reflects the live
                      // auto-import check: disabled when the checker KNOWS
                      // there is nothing to fix; annotated with the count
@@ -448,6 +462,9 @@ begin
 
   Sep(Root);
   Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
+  Plain(Root, CapLiveBlame,               OnToggleBlame,          REQ_BLAME);
+  Plain(Root, 'Show commit of this line...', OnBlameCommit,        REQ_BLAMEDATA);
+  Plain(Root, 'Show blame for this file...', OnBlameList,          REQ_BLAMEVIEW);
   // Always available - it reports WHY something is not working.
   Plain(Root, 'Status window...',         OnShowStatus,           REQ_ALWAYS);
 
@@ -742,6 +759,9 @@ begin
           Result := LiveCount > 0;
       end;
     REQ_ALWAYS: Result := True;
+    REQ_BLAME: Result := True;
+    REQ_BLAMEDATA: Result := HasEditor and BlameAvailableForCaretFile;
+    REQ_BLAMEVIEW: Result := HasEditor and BlameViewAvailableForCaretFile;
     REQ_LIVEALL:
       begin
         // File-wide overview: annotate with the TOTAL fix count.
@@ -915,6 +935,8 @@ begin
   try
     Act.Enabled := ReqState(Req, CapShowAllFixes, Cap);
     if (Req = REQ_LIVEALL) and (Act.Caption <> Cap) then Act.Caption := Cap;
+    if (Req = REQ_BLAME) and (Act.Checked <> BlameEnabled) then
+      Act.Checked := BlameEnabled;
     // (the LIVEALL entry is never inside a group, so the base caption
     //  needs no prefix handling)
   except
@@ -972,6 +994,12 @@ begin
     end;
     try
       if Pair.Key.Enabled <> En then Pair.Key.Enabled := En;
+      if Pair.Value = REQ_BLAME then
+      begin
+        Pair.Key.AutoCheck := False;
+        if Pair.Key.Checked <> BlameEnabled then
+          Pair.Key.Checked := BlameEnabled;
+      end;
     except
     end;
   end;
@@ -1468,6 +1496,26 @@ end;
 procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);
 begin
   ShowStatusWindow;
+end;
+
+procedure TContextMenuInstaller.OnBlameCommit(Sender: TObject);
+begin
+  ShowCommitOfCaretLine;
+end;
+
+procedure TContextMenuInstaller.OnBlameList(Sender: TObject);
+begin
+  ShowBlameForCurrentFile;
+end;
+
+procedure TContextMenuInstaller.OnToggleBlame(Sender: TObject);
+begin
+  // ONE way into the painter for everybody (menu, options page, live
+  // adjuster): set the value, save it, then let ApplyBlameSettings push
+  // the COMPLETE set - on/off, width, offset, content.
+  TPluginSettings.LiveBlame := not BlameEnabled;
+  TPluginSettings.Save;
+  ApplyBlameSettings;
 end;
 
 procedure TContextMenuInstaller.OnCompletion(Sender: TObject);

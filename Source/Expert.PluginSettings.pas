@@ -27,8 +27,16 @@ type
   TPluginSettings = class
   strict private
     class var FPrewarmLspOnProjectOpen: Boolean;
+    class var FLiveBlame: Boolean;
+    class var FBlameColumnWidth: Integer;
+    class var FBlameInfo: Integer;
+    class var FBlameColumnOffset: Integer;
+    class var FBlameUseTortoise: Boolean;
     class var FLoaded: Boolean;
+    class function BaseRegistryKey: string; static;
     class function RegistryKey: string; static;
+    class function LegacyRegistryKey: string; static;
+    class procedure MigrateLegacyKey; static;
   public
     /// <summary>Reads the settings from the registry. Called automatically
     ///  by the property getters on first access; can be called manually to
@@ -44,6 +52,37 @@ type
     class property PrewarmLspOnProjectOpen: Boolean
       read FPrewarmLspOnProjectOpen write FPrewarmLspOnProjectOpen;
 
+    /// <summary>Live blame in the editor gutter. OFF by default: it runs
+    ///  "git blame" per file, and not every project is a git working
+    ///  copy.</summary>
+    class property LiveBlame: Boolean read FLiveBlame write FLiveBlame;
+
+    /// <summary>Pixels the editor gutter is WIDENED by while live blame is
+    ///  on. 0 = do not touch the gutter at all (only the age stripe and
+    ///  the caret-line annotation) - the polite setting when another
+    ///  add-on already uses that space.</summary>
+    class property BlameColumnWidth: Integer
+      read FBlameColumnWidth write FBlameColumnWidth;
+
+    /// <summary>What the gutter column shows: 0 = revision, 1 = revision +
+    ///  author, 2 = revision + author + age.</summary>
+    class property BlameInfo: Integer read FBlameInfo write FBlameInfo;
+
+    /// <summary>Pixels between the start of the gutter's data area and OUR
+    ///  column. The IDE does not arbitrate gutter space, and other add-ons
+    ///  draw there too (the bundled Parnassus Navigator puts its marks at
+    ///  the very left), so the position has to be adjustable.</summary>
+    class property BlameColumnOffset: Integer
+      read FBlameColumnOffset write FBlameColumnOffset;
+
+    /// <summary>Use TortoiseGit / TortoiseSVN for the commit and blame
+    ///  views when they are installed - their windows are richer than
+    ///  anything we would rebuild, and they are what most people here
+    ///  already know. Falls back to the built-in views when the client is
+    ///  missing or refuses to start.</summary>
+    class property BlameUseTortoise: Boolean
+      read FBlameUseTortoise write FBlameUseTortoise;
+
     class function DefaultPrewarm: Boolean; static;
   end;
 
@@ -54,7 +93,7 @@ uses
 
 { TPluginSettings }
 
-class function TPluginSettings.RegistryKey: string;
+class function TPluginSettings.BaseRegistryKey: string;
 var
   Services: IOTAServices;
   BaseKey: string;
@@ -68,7 +107,68 @@ begin
   end;
   if BaseKey = '' then
     BaseKey := 'Software\Embarcadero\BDS\37.0';
-  Result := BaseKey + '\RefactoringLight\Settings';
+  // GetBaseRegistryKey can come back with a leading slash - same
+  // normalisation TExpertsShortCut does.
+  while (BaseKey <> '') and (BaseKey[1] = '\') do
+    Delete(BaseKey, 1, 1);
+  Result := BaseKey;
+end;
+
+// ONE branch for the whole plugin. The settings used to live under
+// '...\RefactoringLight\Settings' while the shortcuts were (and are)
+// under '...\DelphiRefactoringLight\Shortcuts' - two keys for one
+// plugin, which a tester rightly called out. The PACKAGE name wins,
+// and MigrateLegacyKey moves an existing configuration over exactly
+// once, so nobody has to set their options up again.
+class function TPluginSettings.RegistryKey: string;
+begin
+  Result := BaseRegistryKey + '\DelphiRefactoringLight\Settings';
+end;
+
+class function TPluginSettings.LegacyRegistryKey: string;
+begin
+  Result := BaseRegistryKey + '\RefactoringLight\Settings';
+end;
+
+class procedure TPluginSettings.MigrateLegacyKey;
+var
+  Reg: TRegistry;
+begin
+  Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    // Only when there is nothing new yet AND something old to take over.
+    if Reg.KeyExists(RegistryKey) then Exit;
+    if not Reg.KeyExists(LegacyRegistryKey) then Exit;
+    if Reg.OpenKeyReadOnly(LegacyRegistryKey) then
+    try
+      if Reg.ValueExists('PrewarmLspOnProjectOpen') then
+        FPrewarmLspOnProjectOpen := Reg.ReadBool('PrewarmLspOnProjectOpen');
+      if Reg.ValueExists('LiveBlame') then
+        FLiveBlame := Reg.ReadBool('LiveBlame');
+      if Reg.ValueExists('BlameColumnWidth') then
+        FBlameColumnWidth := Reg.ReadInteger('BlameColumnWidth');
+      if Reg.ValueExists('BlameInfo') then
+        FBlameInfo := Reg.ReadInteger('BlameInfo');
+      if Reg.ValueExists('BlameColumnOffset') then
+        FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
+      if Reg.ValueExists('BlameUseTortoise') then
+        FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
+    finally
+      Reg.CloseKey;
+    end;
+    Save;                        // write everything to the new place
+    // Then take the old branch away: it is ours, now redundant, and
+    // leaving it invites the next 'which one is real?' question.
+    try
+      Reg.DeleteKey(LegacyRegistryKey);
+      Reg.DeleteKey(BaseRegistryKey + '\RefactoringLight');   // if empty
+    except
+      // a leftover key is harmless - never fail a load over it
+    end;
+  finally
+    Reg.Free;
+  end;
 end;
 
 class function TPluginSettings.DefaultPrewarm: Boolean;
@@ -81,7 +181,16 @@ var
   Reg: TRegistry;
 begin
   FPrewarmLspOnProjectOpen := DefaultPrewarm;
+  FLiveBlame := False;
+  FBlameColumnWidth := 150;
+  FBlameInfo := 1;
+  // 17 px: measured against the Parnassus Navigator, which ships WITH
+  // Delphi now and draws its marks at the very left of the same area.
+  FBlameColumnOffset := 17;
+  FBlameUseTortoise := True;
   FLoaded := True;
+
+  MigrateLegacyKey;
 
   Reg := TRegistry.Create(KEY_READ);
   try
@@ -90,6 +199,16 @@ begin
     try
       if Reg.ValueExists('PrewarmLspOnProjectOpen') then
         FPrewarmLspOnProjectOpen := Reg.ReadBool('PrewarmLspOnProjectOpen');
+      if Reg.ValueExists('LiveBlame') then
+        FLiveBlame := Reg.ReadBool('LiveBlame');
+      if Reg.ValueExists('BlameColumnWidth') then
+        FBlameColumnWidth := Reg.ReadInteger('BlameColumnWidth');
+      if Reg.ValueExists('BlameInfo') then
+        FBlameInfo := Reg.ReadInteger('BlameInfo');
+      if Reg.ValueExists('BlameColumnOffset') then
+        FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
+      if Reg.ValueExists('BlameUseTortoise') then
+        FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
     finally
       Reg.CloseKey;
     end;
@@ -108,6 +227,11 @@ begin
     if Reg.OpenKey(RegistryKey, True) then
     try
       Reg.WriteBool('PrewarmLspOnProjectOpen', FPrewarmLspOnProjectOpen);
+      Reg.WriteBool('LiveBlame', FLiveBlame);
+      Reg.WriteInteger('BlameColumnWidth', FBlameColumnWidth);
+      Reg.WriteInteger('BlameInfo', FBlameInfo);
+      Reg.WriteInteger('BlameColumnOffset', FBlameColumnOffset);
+      Reg.WriteBool('BlameUseTortoise', FBlameUseTortoise);
     finally
       Reg.CloseKey;
     end;

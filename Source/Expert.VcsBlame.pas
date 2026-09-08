@@ -478,21 +478,26 @@ var
   // Declared here because DetectVcs (just below) already needs the lock.
   GLock: TCriticalSection = nil;
   GVcsCache: TDictionary<string, TVcsKind> = nil;
+  GRootCache: TDictionary<string, string> = nil;
 
-function DetectVcs(const AFile: string): TVcsKind;
+// The working copy's marker directory (...\.git or ...\.svn), searched
+// upwards from the file. '' when there is none.
+function VcsMarkerDir(const AFile: string; out AKind: TVcsKind): string;
 var
-  Dir, Probe: string;
-  Kind: TVcsKind;
+  Dir, Probe, Key: string;
 begin
-  Result := vcsNone;
+  Result := '';
+  AKind := vcsNone;
   if AFile = '' then Exit;
   Dir := ExtractFileDir(AFile);
   if Dir = '' then Exit;
+  Key := LowerCase(Dir);
 
   GLock.Enter;
   try
-    if (GVcsCache <> nil) and GVcsCache.TryGetValue(LowerCase(Dir), Kind) then
-      Exit(Kind);
+    if (GVcsCache <> nil) and GVcsCache.TryGetValue(Key, AKind)
+      and (GRootCache <> nil) and GRootCache.TryGetValue(Key, Result) then
+      Exit;
   finally
     GLock.Leave;
   end;
@@ -505,12 +510,14 @@ begin
     if TDirectory.Exists(TPath.Combine(Probe, '.git'))
       or TFile.Exists(TPath.Combine(Probe, '.git')) then
     begin
-      Result := vcsGit;
+      AKind := vcsGit;
+      Result := TPath.Combine(Probe, '.git');
       Break;
     end;
     if TDirectory.Exists(TPath.Combine(Probe, '.svn')) then
     begin
-      Result := vcsSvn;
+      AKind := vcsSvn;
+      Result := TPath.Combine(Probe, '.svn');
       Break;
     end;
     var Parent := ExtractFileDir(Probe);
@@ -520,9 +527,66 @@ begin
 
   GLock.Enter;
   try
-    if GVcsCache <> nil then GVcsCache.AddOrSetValue(LowerCase(Dir), Result);
+    if GVcsCache <> nil then GVcsCache.AddOrSetValue(Key, AKind);
+    if GRootCache <> nil then GRootCache.AddOrSetValue(Key, Result);
   finally
     GLock.Leave;
+  end;
+end;
+
+function DetectVcs(const AFile: string): TVcsKind;
+begin
+  VcsMarkerDir(AFile, Result);
+end;
+
+// A fingerprint of the REPOSITORY state. A commit does not touch the
+// working file at all, so keying the cache on the file alone left the
+// gutter showing "not committed" for lines that had just been committed
+// (tester). These few files change on every commit / checkout / merge:
+//   git: index, HEAD, and the reflog (logs\HEAD)
+//   svn: the working copy database
+// Stat-ing three paths once a second is cheap; re-running blame blindly
+// would not be.
+function RepoStateStamp(const AFile: string): TDateTime;
+var
+  Marker: string;
+  Kind: TVcsKind;
+
+  procedure Newest(const APath: string);
+  var
+    S: TDateTime;
+  begin
+    try
+      if TFile.Exists(APath) then
+      begin
+        S := TFile.GetLastWriteTime(APath);
+        if S > Result then Result := S;
+      end;
+    except
+      // unreadable - just does not contribute
+    end;
+  end;
+
+begin
+  Result := 0;
+  Marker := VcsMarkerDir(AFile, Kind);
+  if Marker = '' then Exit;
+  case Kind of
+    vcsGit:
+      begin
+        // In a worktree/submodule ".git" is a FILE; then the real
+        // directory lies elsewhere and only its own mtime is available.
+        if TDirectory.Exists(Marker) then
+        begin
+          Newest(TPath.Combine(Marker, 'index'));
+          Newest(TPath.Combine(Marker, 'HEAD'));
+          Newest(TPath.Combine(Marker, 'logs' + PathDelim + 'HEAD'));
+        end
+        else
+          Newest(Marker);
+      end;
+    vcsSvn:
+      Newest(TPath.Combine(Marker, 'wc.db'));
   end;
 end;
 
@@ -618,6 +682,7 @@ type
     Lines: TBlameLines;
     Stamp: TDateTime;    // file mtime the blame belongs to
     Size: Int64;
+    Repo: TDateTime;     // repository state the blame belongs to
     Loading: Boolean;
     Failed: Boolean;
   end;
@@ -707,11 +772,12 @@ procedure RequestBlame(const AFile: string);
 var
   Key: string;
   E: TBlameEntry;
-  Stamp: TDateTime;
+  Stamp, RepoNow: TDateTime;
   Size: Int64;
 begin
   if GShutdown or (GCache = nil) or (AFile = '') then Exit;
   if not FileStamp(AFile, Stamp, Size) then Exit;
+  RepoNow := RepoStateStamp(AFile);
   Key := NormKey(AFile);
 
   GLock.Enter;
@@ -719,8 +785,11 @@ begin
     if GCache.TryGetValue(Key, E) then
     begin
       if E.Loading then Exit;
-      if (E.Stamp = Stamp) and (E.Size = Size) then Exit;   // current
-      if E.Failed and (E.Stamp = Stamp) and (E.Size = Size) then Exit;
+      // Current means: same FILE and same REPOSITORY state. A commit
+      // changes neither the file's mtime nor its size, so without the
+      // second half the view stays on the pre-commit answer for good.
+      if (E.Stamp = Stamp) and (E.Size = Size) and (E.Repo = RepoNow) then
+        Exit;
     end
     else
     begin
@@ -730,6 +799,7 @@ begin
     E.Loading := True;
     E.Stamp := Stamp;
     E.Size := Size;
+    E.Repo := RepoNow;
     E.Lines := nil;
     E.Failed := False;
   finally
@@ -1193,10 +1263,14 @@ end;
 initialization
   GLock := TCriticalSection.Create;
   GCache := TObjectDictionary<string, TBlameEntry>.Create([doOwnsValues]);
+  GVcsCache := TDictionary<string, TVcsKind>.Create;
+  GRootCache := TDictionary<string, string>.Create;
 
 finalization
   ShutdownBlame;
   FreeAndNil(GCache);
+  FreeAndNil(GVcsCache);
+  FreeAndNil(GRootCache);
   FreeAndNil(GLock);
 
 end.

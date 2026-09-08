@@ -242,7 +242,11 @@ const
   // seeing "TcxButton / TStringGrid unknown" - which made uses-cleanup
   // offer units in use for REMOVAL, and left add-unit and "find original
   // symbol" blind for those types.
-  IndexParserVersion = '08';
+  IndexParserVersion = '09';
+  //  09: wrapped parent lists ('TFoo = class(TBase,' + continuation) no
+  //      longer swallow the rest of the unit, nested class declarations
+  //      count as body openers, and a top-level type opener resyncs the
+  //      body skip - together: "no indexed unit declares TcxButton"
   //  08: parser fixes of 08-30/09-01 (case/enums/generics/parameters)
   //  07: IDE path variables ($(DXVCL)) expand
   CacheMagic    = 'RLUIDX' + IndexParserVersion;
@@ -408,6 +412,56 @@ var
   Sect: TSect;
   Code, Up, Tr, TrU: string;
 
+  // Indentation in spaces (a tab counts as two - our resync rule only
+  // needs "outermost or not").
+  function LeadingSpaces(const S: string): Integer;
+  begin
+    Result := 0;
+    for var K := 1 to Length(S) do
+      if S[K] = ' ' then Inc(Result)
+      else if S[K] = #9 then Inc(Result, 2)
+      else Break;
+  end;
+
+  // 'TFoo = class(...)' / '= interface' / '= record' / '= object', i.e. a
+  // line that OPENS a type body (already trimmed + upper-cased).
+  function LooksLikeTypeOpener(const AUpperTrimmed: string): Boolean;
+  var
+    Rhs: string;
+    P: Integer;
+  begin
+    Result := False;
+    P := Pos('=', AUpperTrimmed);
+    if P < 2 then Exit;
+    if not IsIdent(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
+    Rhs := TrimLeft(Copy(AUpperTrimmed, P + 1, MaxInt));
+    if StartsWithWord(Rhs, 'PACKED') then Rhs := TrimLeft(Copy(Rhs, 7, MaxInt));
+    if StartsWithWord(Rhs, 'CLASS') and not Rhs.StartsWith('CLASS OF') then
+      Exit(True);
+    Result := StartsWithWord(Rhs, 'INTERFACE') or StartsWithWord(Rhs, 'RECORD')
+      or StartsWithWord(Rhs, 'OBJECT') or StartsWithWord(Rhs, 'DISPINTERFACE');
+  end;
+
+  // 'TFoo = class(...)' / '= interface' / '= object' - a nested TYPE
+  // declaration that opens a body. 'record' is deliberately excluded:
+  // the caller already counts that word.
+  function ClassLikeOpener(const AUpperTrimmed: string): Boolean;
+  var
+    Rhs: string;
+    P: Integer;
+  begin
+    Result := False;
+    P := Pos('=', AUpperTrimmed);
+    if P < 2 then Exit;
+    if not IsIdent(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
+    Rhs := TrimLeft(Copy(AUpperTrimmed, P + 1, MaxInt));
+    if StartsWithWord(Rhs, 'PACKED') then Rhs := TrimLeft(Copy(Rhs, 7, MaxInt));
+    if StartsWithWord(Rhs, 'CLASS') then
+      Exit(not Rhs.StartsWith('CLASS OF'));
+    Result := StartsWithWord(Rhs, 'INTERFACE') or StartsWithWord(Rhs, 'OBJECT')
+      or StartsWithWord(Rhs, 'DISPINTERFACE');
+  end;
+
   // '(' minus ')' in an already comment/string-cleaned line.
   function ParenBalance(const S: string): Integer;
   begin
@@ -488,11 +542,36 @@ begin
       // after the class.
       if PendingEnds > 0 then
       begin
-        Up := StripAngleSpans(TrU);
-        PendingEnds := PendingEnds + CountWord(Up, 'RECORD')
-                       - CountWord(Up, 'END');
-        if PendingEnds < 0 then PendingEnds := 0;
-        Continue;
+        // RESYNC. Miscounting here is CATASTROPHIC and SILENT: the rest of
+        // the file is skipped, so a whole unit loses its declarations and
+        // nobody can tell from the outside (this bit us three times -
+        // variant records, generic constraints, and cxButtons.pas, where a
+        // tester proved it by adding a forward declaration ABOVE the drift
+        // and watching the type appear).
+        // A type declaration at the OUTERMOST indentation cannot be inside
+        // a class body - members and nested types are indented deeper - so
+        // it means the count drifted. Trust the structure, not the count.
+        if (Sect = secType) and (LeadingSpaces(Code) <= 2)
+          and LooksLikeTypeOpener(TrU) then
+          PendingEnds := 0
+        else
+        begin
+          Up := StripAngleSpans(TrU);
+          // Openers inside a body: an inline 'record' field AND a nested
+          // TYPE declaration. Only 'record' used to count, so a nested
+          // class ('TInner = class ... end;') contributed an END without
+          // an opener - the body then "ended" early, a class-level 'var'
+          // switched the section, and the next real class was parsed in
+          // the wrong branch and lost (Vcl.SysStyles lost 15 types).
+          // A method modifier ('class function') is NOT an opener: the
+          // check requires the 'Name = keyword' declaration form.
+          PendingEnds := PendingEnds + CountWord(Up, 'RECORD')
+                         - CountWord(Up, 'END');
+          if ClassLikeOpener(Up) then Inc(PendingEnds);
+          if PendingEnds < 0 then PendingEnds := 0;
+          InParams := 0;   // the body owns these lines, not a paren run
+          Continue;
+        end;
       end;
 
       // Enum members continuing from a previous line ("TTyp = (A," ...).
@@ -670,7 +749,19 @@ begin
       // line with NON-declarations: 'TNotify = procedure(const ASender:'
       // (parameter names) or 'C: TArr = (' (const values). Enums keep
       // their own richer state (InEnum collects the members).
-      if not InEnum then
+      //
+      // NOT when the line also opened a type BODY. A wrapped PARENT LIST
+      //   TFoo = class(TBase,
+      //     IOne,
+      //     ITwo)
+      // leaves a paren open too, but the following lines belong to the
+      // class body, which PendingEnds already skips - and that skip
+      // `Continue`s BEFORE the paren balance is ever updated. InParams
+      // therefore stayed armed forever and swallowed EVERY declaration
+      // after the class. That is what cost DevExpress users TcxButton
+      // (cxButtons.pas declares it with a wrapped parent list) and what
+      // left Vcl.AxCtrls with 12 of its ~29 types.
+      if (not InEnum) and (PendingEnds = 0) then
       begin
         var Bal := ParenBalance(Tr);
         if Bal > 0 then InParams := Bal;

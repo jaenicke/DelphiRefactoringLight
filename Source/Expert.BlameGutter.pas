@@ -28,9 +28,11 @@ unit Expert.BlameGutter;
     round trips beyond the context it is handed.
   * The data is fetched by a 1 s timer tick (WM_TIMER), never from a
     notifier or a queue callback.
-  * While the buffer is MODIFIED nothing is painted: the blame belongs to
-    the file on disk and its line numbers no longer match. A wrong author
-    is worse than none.
+  * While the buffer is MODIFIED the blame is REMAPPED, not hidden: the
+    lines that survived the edit keep their author, everything inside the
+    edited span shows as "not committed". The mapping is a prefix/suffix
+    comparison against the file on disk - deliberately coarse, because a
+    wrong author is worse than an honest "you touched this".
 }
 
 interface
@@ -58,6 +60,7 @@ implementation
 uses
   System.SysUtils, System.Classes, System.Math, System.DateUtils,
   System.Generics.Collections,
+  System.IOUtils, System.Hash,
   Winapi.Windows, Vcl.Graphics, Vcl.ExtCtrls, Vcl.Forms,
   ToolsAPI, ToolsAPI.Editor,
   Expert.EditorHelperIntf, Expert.VcsBlame, Expert.IdeThemes,
@@ -90,7 +93,18 @@ var
   // State the painter reads. Filled by the timer tick ONLY.
   GFile: string = '';
   GLines: TBlameLines = nil;
-  GDirty: Boolean = False;        // buffer modified -> do not paint
+  GDirty: Boolean = False;        // buffer modified (lines remapped)
+  // While the buffer is modified the blame is shown REMAPPED: the disk
+  // lines that survived keep their author, the edited span shows as
+  // uncommitted. GMapped holds that per-buffer-line copy, keyed by the
+  // content hash so it is rebuilt only when the text really changed.
+  GMapped: TBlameLines = nil;
+  GMapHash: Integer = 0;
+  GMapFile: string = '';
+  // The disk side of the comparison, cached per (file, mtime).
+  GDiskLines: TArray<string> = nil;
+  GDiskFile: string = '';
+  GDiskStamp: TDateTime = 0;
   GCaretLine: Integer = 0;        // 1-based
   GStatus: string = 'off';
   // "I see nothing in the gutter" must be answerable without guessing:
@@ -126,7 +140,9 @@ end;
 function BlameGutterStatus: string;
 begin
   if not GEnabled then Exit('off');
-  if GDirty then Exit('buffer modified - paused until saved');
+  if GDirty then
+    Exit(Format('buffer modified - %d line(s) remapped against the file on disk',
+      [Length(GMapped)]));
   if Length(GLines) = 0 then Exit(BlameStatus);
   Result := Format(
     '%d line(s) for %s | %d event(s), %d stripe(s), %d text(s) | ' +
@@ -262,12 +278,15 @@ begin
 end;
 
 function LineInfo(ALogical1Based: Integer; out AInfo: TBlameLine): Boolean;
+var
+  Src: TBlameLines;
 begin
-  Result := GEnabled and not GDirty
-    and (ALogical1Based >= 1) and (ALogical1Based <= Length(GLines));
+  if GDirty then Src := GMapped else Src := GLines;
+  Result := GEnabled and (ALogical1Based >= 1)
+    and (ALogical1Based <= Length(Src));
   if Result then
   begin
-    AInfo := GLines[ALogical1Based - 1];
+    AInfo := Src[ALogical1Based - 1];
     // NOT "has a hash": a line that is not committed yet HAS no revision
     // in svn (git gives it an all-zero hash instead, which is why this
     // only showed up on the svn side - those lines stayed blank). The
@@ -611,6 +630,65 @@ begin
   end;
 end;
 
+// Builds GMapped for the current buffer content. Returns True when it
+// actually changed something (the caller only repaints then).
+function RebuildMapping(const AFile: string): Boolean;
+var
+  Content, DiskText: string;
+  Hash, I, Src: Integer;
+  DiskStamp: TDateTime;
+  BufLines, DiskLines: TArray<string>;
+  Map: TArray<Integer>;
+  Res: TBlameLines;
+begin
+  Result := False;
+  if not Editor.ReadEditorContent(AFile, Content) then Exit;
+  Hash := THashBobJenkins.GetHashValue(Content);
+  if (Hash = GMapHash) and SameText(AFile, GMapFile) then Exit;
+
+  // The file on disk does NOT change while the buffer is dirty, so read
+  // and split it once per (file, mtime) instead of on every keystroke
+  // pause.
+  try
+    DiskStamp := TFile.GetLastWriteTime(AFile);
+    if (GDiskLines = nil) or not SameText(AFile, GDiskFile)
+      or (DiskStamp <> GDiskStamp) then
+    begin
+      DiskText := TFile.ReadAllText(AFile);
+      GDiskLines := DiskText.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+      GDiskFile := AFile;
+      GDiskStamp := DiskStamp;
+    end;
+  except
+    Exit;
+  end;
+
+  BufLines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  DiskLines := GDiskLines;
+  Map := MapBufferToDiskLines(DiskLines, BufLines);
+
+  SetLength(Res, Length(Map));
+  for I := 0 to High(Map) do
+  begin
+    Src := Map[I];
+    if (Src >= 1) and (Src <= Length(GLines)) then
+      Res[I] := GLines[Src - 1]
+    else
+    begin
+      // Edited or brand new: same shape as a VCS "not committed yet"
+      // line, so the painter and the dialogs need no special case.
+      Res[I] := Default(TBlameLine);
+      Res[I].Kind := DetectVcs(AFile);
+      Res[I].Hash := '';
+    end;
+  end;
+
+  GMapped := Res;
+  GMapHash := Hash;
+  GMapFile := AFile;
+  Result := True;
+end;
+
 type
   TBlameTicker = class
     procedure Tick(Sender: TObject);
@@ -670,6 +748,21 @@ begin
     if Dirty <> GDirty then
     begin
       GDirty := Dirty;
+      Changed := True;
+    end;
+
+    // A modified buffer no longer matches the blame line for line - but
+    // most of it still does. Remap instead of going dark: what survived
+    // keeps its author, the edited span becomes "not committed".
+    if GDirty and (Length(GLines) > 0) then
+    begin
+      if RebuildMapping(F) then Changed := True;
+    end
+    else if not GDirty and (Length(GMapped) > 0) then
+    begin
+      GMapped := nil;
+      GMapHash := 0;
+      GMapFile := '';
       Changed := True;
     end;
 

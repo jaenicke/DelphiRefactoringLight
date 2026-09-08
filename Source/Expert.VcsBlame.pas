@@ -97,6 +97,13 @@ function DetectVcs(const AFile: string): TVcsKind;
 ///  enough for an editor annotation. Pure.</summary>
 function HumanAge(const AWhen, ANow: TDateTime): string;
 
+/// <summary>For every line of the EDITOR BUFFER, the line it came from
+///  in the file on disk (1-based), or 0 when it is new or edited. Lets
+///  the blame stay visible while typing instead of pausing: unchanged
+///  lines keep their author, the edited span shows as "not committed".
+///  Pure and tested.</summary>
+function MapBufferToDiskLines(const ADisk, ABuf: TArray<string>): TArray<Integer>;
+
 /// <summary>Blame for AFile if it is loaded AND still matches the file on
 ///  disk. Never blocks: a miss just means "not (yet) available".</summary>
 function BlameForFile(const AFile: string; out ALines: TBlameLines): Boolean;
@@ -729,6 +736,43 @@ begin
   if GLock = nil then Exit('not initialised');
   GLock.Enter;
   try Result := GStatus; finally GLock.Leave; end;
+end;
+
+function MapBufferToDiskLines(const ADisk, ABuf: TArray<string>): TArray<Integer>;
+var
+  N, M, Pre, Suf, I: Integer;
+begin
+  N := Length(ADisk);
+  M := Length(ABuf);
+  SetLength(Result, M);
+  if M = 0 then Exit;
+  if N = 0 then
+  begin
+    for I := 0 to M - 1 do Result[I] := 0;
+    Exit;
+  end;
+
+  // Common prefix and common suffix. Deliberately NOT a full diff: a
+  // wrong author is worse than none, so everything between the first and
+  // the last difference counts as EDITED. For the usual case - typing in
+  // one place - that is exact, and for scattered edits it errs towards
+  // "you touched this", never towards someone else's name.
+  Pre := 0;
+  while (Pre < N) and (Pre < M) and (ADisk[Pre] = ABuf[Pre]) do
+    Inc(Pre);
+
+  Suf := 0;
+  while (Suf < N - Pre) and (Suf < M - Pre)
+    and (ADisk[N - 1 - Suf] = ABuf[M - 1 - Suf]) do
+    Inc(Suf);
+
+  for I := 0 to M - 1 do
+    if I < Pre then
+      Result[I] := I + 1                      // unchanged head
+    else if I >= M - Suf then
+      Result[I] := N - (M - I) + 1            // unchanged tail, shifted
+    else
+      Result[I] := 0;                         // inside the edited span
 end;
 
 function BlameForFile(const AFile: string; out ALines: TBlameLines): Boolean;

@@ -259,9 +259,7 @@ object LspOptionsFrame: TLspOptionsFrame
       Top = 100
       Width = 470
       Height = 17
-      Caption =
-        'Use TortoiseGit / TortoiseSVN for the commit and blame views (whe' +
-        'n installed)'
+      Caption = 'Use TortoiseGit / TortoiseSVN when installed'
       TabOrder = 4
     end
     object lblBlameNote: TLabel
@@ -271,8 +269,8 @@ object LspOptionsFrame: TLspOptionsFrame
       Height = 15
       AutoSize = False
       Caption =
-        '0 = do not widen the gutter (stripe only). Offset moves the colum' +
-        'n right - useful when another add-on already draws there.'
+        'Width 0 = stripe only (the gutter is not widened); the offset mo' +
+        'ves the column right, past another add-on.'
     end
   end
   object btnDefaults: TButton

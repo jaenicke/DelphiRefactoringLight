@@ -128,45 +128,122 @@ end;
 // off). Re-derive the column from the REAL label widths at runtime.
 procedure TLspOptionsFrame.AdjustLayout;
 var
-  I, MaxRight, EditLeft: Integer;
+  I, MaxRight, EditLeft, LineH, Gap, Row: Integer;
   C: TControl;
-begin
-  MaxRight := 0;
-  for I := 0 to grpShortcuts.ControlCount - 1 do
+
+  // Right edge of the widest label in AParent, ignoring the note labels
+  // (those are wrapped to the full width and would win every time).
+  function LabelColumn(AParent: TWinControl;
+    const AIgnore: array of TControl): Integer;
+  var
+    K, N: Integer;
+    Ctl: TControl;
+    Skip: Boolean;
   begin
-    C := grpShortcuts.Controls[I];
-    if (C is TLabel) and (C <> lblHint) then
-      if C.Left + C.Width > MaxRight then
-        MaxRight := C.Left + C.Width;
+    Result := 0;
+    for K := 0 to AParent.ControlCount - 1 do
+    begin
+      Ctl := AParent.Controls[K];
+      if not (Ctl is TLabel) then Continue;
+      Skip := False;
+      for N := Low(AIgnore) to High(AIgnore) do
+        if Ctl = AIgnore[N] then Skip := True;
+      if Skip then Continue;
+      if Ctl.Left + Ctl.Width > Result then Result := Ctl.Left + Ctl.Width;
+    end;
   end;
-  EditLeft := MaxRight + 12;
+
+begin
+  // The options host restyles the page with its own (larger) font AFTER
+  // the frame is streamed, so nothing may rely on the designed 96-dpi
+  // coordinates. Everything below is laid out as a VERTICAL FLOW: each
+  // section is positioned after the previous one and sized from its own
+  // children. That is also what a tester's screenshot forced - the
+  // "Restore defaults" button was placed after grpLsp while grpBlame
+  // still sat at its designed position, so the button landed INSIDE it.
+  LineH := Abs(lblHint.Font.Height) + 4;
+  Gap := 12;
+
+  // ---- shortcuts: derive the edit column from the real label widths ----
+  MaxRight := LabelColumn(grpShortcuts, [lblHint]);
+  EditLeft := MaxRight + Gap;
   for I := 0 to grpShortcuts.ControlCount - 1 do
   begin
     C := grpShortcuts.Controls[I];
     if C is TEdit then
     begin
       C.Left := EditLeft;
-      // Keep the edit inside the group when the column moved far right.
-      if EditLeft + C.Width > grpShortcuts.ClientWidth - 12 then
-        C.Width := Max(80, grpShortcuts.ClientWidth - 12 - EditLeft);
+      if EditLeft + C.Width > grpShortcuts.ClientWidth - Gap then
+        C.Width := Max(80, grpShortcuts.ClientWidth - Gap - EditLeft);
     end;
   end;
-  // Long texts: wrap within the group width instead of clipping at the
-  // designed 96-dpi widths, and grow the groups to fit the wrapped lines.
-  var LineH := Abs(lblHint.Font.Height) + 4;
   lblHint.AutoSize := False;
   lblHint.WordWrap := True;
-  lblHint.Width := grpShortcuts.ClientWidth - lblHint.Left - 12;
+  lblHint.Width := grpShortcuts.ClientWidth - lblHint.Left - Gap;
   lblHint.Height := 2 * LineH;
   grpShortcuts.Height := lblHint.Top + lblHint.Height + 14;
 
-  grpLsp.Top := grpShortcuts.Top + grpShortcuts.Height + 12;
-  cbxPrewarmLsp.Width := grpLsp.ClientWidth - cbxPrewarmLsp.Left - 12;
-  lblLspNote.Width := grpLsp.ClientWidth - lblLspNote.Left - 12;
+  // ---- LSP -------------------------------------------------------------
+  grpLsp.Top := grpShortcuts.Top + grpShortcuts.Height + Gap;
+  cbxPrewarmLsp.Width := grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap;
+  lblLspNote.AutoSize := False;
+  lblLspNote.WordWrap := True;
+  lblLspNote.Width := grpLsp.ClientWidth - lblLspNote.Left - Gap;
   lblLspNote.Height := 2 * LineH;
-  grpLsp.Height := lblLspNote.Top + lblLspNote.Height + 12;
+  grpLsp.Height := lblLspNote.Top + lblLspNote.Height + Gap;
 
-  btnDefaults.Top := grpLsp.Top + grpLsp.Height + 10;
+  // ---- live blame ------------------------------------------------------
+  grpBlame.Top := grpLsp.Top + grpLsp.Height + Gap;
+
+  Row := 22;
+  cbxLiveBlame.SetBounds(16, Row, grpBlame.ClientWidth - 16 - Gap,
+    cbxLiveBlame.Height);
+
+  // One label column for "Show:" and "Column width (px):".
+  Row := Row + cbxLiveBlame.Height + 10;
+  // lblBlameOffset is EXCLUDED on purpose: it is placed to the RIGHT of
+  // the width edit further down, so counting it here would push the
+  // column right - and AdjustLayout runs more than once (LoadFromSettings
+  // and CM_FONTCHANGED), so it would grow on every call. That feedback
+  // was visible in the render test: the combo box wandered off the group.
+  EditLeft := LabelColumn(grpBlame, [lblBlameNote, lblBlameOffset]) + Gap;
+  // Never let the label column eat the whole group either.
+  EditLeft := EnsureRange(EditLeft, 100, grpBlame.ClientWidth div 2);
+  lblBlameInfo.Top := Row + 4;
+  cbxBlameInfo.SetBounds(EditLeft, Row,
+    Min(240, grpBlame.ClientWidth - EditLeft - Gap), cbxBlameInfo.Height);
+
+  Row := Row + cbxBlameInfo.Height + 10;
+  lblBlameWidth.Top := Row + 4;
+  edtBlameWidth.SetBounds(EditLeft, Row, 70, edtBlameWidth.Height);
+  lblBlameOffset.Left := edtBlameWidth.Left + edtBlameWidth.Width + 16;
+  lblBlameOffset.Top := Row + 4;
+  edtBlameOffset.SetBounds(
+    lblBlameOffset.Left + lblBlameOffset.Width + 8, Row, 70,
+    edtBlameOffset.Height);
+
+  Row := Row + edtBlameWidth.Height + 10;
+  cbxTortoise.SetBounds(16, Row, grpBlame.ClientWidth - 16 - Gap,
+    cbxTortoise.Height);
+
+  Row := Row + cbxTortoise.Height + 6;
+  lblBlameNote.AutoSize := False;
+  lblBlameNote.WordWrap := True;
+  lblBlameNote.SetBounds(34, Row, grpBlame.ClientWidth - 34 - Gap, 2 * LineH);
+  grpBlame.Height := lblBlameNote.Top + lblBlameNote.Height + Gap;
+
+  // ---- and only THEN the button ---------------------------------------
+  btnDefaults.Top := grpBlame.Top + grpBlame.Height + 10;
+
+  // THE FRAME'S OWN HEIGHT must follow the content. The options host
+  // scrolls its page by that height, so a frame that stays at its
+  // designed size simply cuts off whatever the flow pushed below it -
+  // which is what a tester saw: the last note line half visible with the
+  // scrollbar already at the end. Constraints.MinHeight carries it even
+  // when the host aligns the frame.
+  var Bottom := btnDefaults.Top + btnDefaults.Height + 16;
+  Constraints.MinHeight := Bottom;
+  if Height < Bottom then Height := Bottom;
 end;
 
 procedure TLspOptionsFrame.CMFontChanged(var Message: TMessage);

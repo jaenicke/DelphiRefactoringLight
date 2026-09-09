@@ -122,6 +122,14 @@ type
     FAdjTo: TArray<TList<Integer>>;
     FAdjIntf: TArray<TList<Boolean>>;
     FAdjLine: TArray<TList<Integer>>;
+    // The COMPLETE project graph (every uses edge, cycle or not), same
+    // packed layout. FindPath needs it: the question "which path leads
+    // from UnitB back to UnitA" is asked about an edge A -> B that does
+    // NOT exist yet - so A and B usually sit in different components and
+    // not one of the edges involved is in FAdjTo.
+    FAllTo: TArray<TList<Integer>>;
+    FAllIntf: TArray<TList<Boolean>>;
+    FAllLine: TArray<TList<Integer>>;
     FEdges: TArray<TCycleEdge>;
     FCompToGroup: TDictionary<Integer, Integer>;
     function ComponentGirth(const AMembers: TArray<Integer>): Integer;
@@ -147,9 +155,31 @@ type
     ///  size, edge count), ordered by group number.</summary>
     function GroupInfos: TArray<TCycleGroupInfo>;
     /// <summary>Enumerates simple cycles (each once, rooted at its
-    ///  smallest node). Stops after AMax cycles; ATruncated then True.
-    ///  The count of simple cycles can be exponential, hence the cap.</summary>
-    function EnumerateCycles(AMax: Integer; out ATruncated: Boolean): TArray<TCyclePath>;
+    ///  smallest node). AMax &lt;= 0 = no count limit; ABudgetMs &gt; 0 caps
+    ///  the wall-clock time. ATruncated says whether either cap bit.
+    ///  The count of simple cycles can be exponential, hence the caps.</summary>
+    function EnumerateCycles(AMax: Integer; out ATruncated: Boolean;
+      ABudgetMs: Integer = 0): TArray<TCyclePath>;
+    /// <summary>Every simple cycle that passes through AUnit, rooted at
+    ///  it (so each is listed once, starting and ending there). Same
+    ///  caps as EnumerateCycles. Empty when the unit is in no cycle.
+    ///  This is the "show me the cycles UnitA is part of" query - far
+    ///  cheaper and far shorter than the project-wide enumeration.</summary>
+    function EnumerateCyclesThrough(const AUnit: string; AMax: Integer;
+      out ATruncated: Boolean; ABudgetMs: Integer = 0): TArray<TCyclePath>;
+    /// <summary>Shortest dependency path AFrom -&gt; ... -&gt; ATo over the
+    ///  FULL project graph (not only cycle edges); [] when none exists.
+    ///  AFrom = ATo asks for the shortest cycle through that unit.
+    ///  AInterfaceOnly restricts the walk to interface-section uses,
+    ///  which is exactly the relation the compiler rejects with F2047 -
+    ///  so "path from B back to A, interface only" answers "why can I
+    ///  not put B into A's interface uses?".</summary>
+    function FindPath(const AFrom, ATo: string;
+      AInterfaceOnly: Boolean): TArray<TCycleHop>;
+    /// <summary>All project unit names, alphabetically - for pickers.</summary>
+    function UnitNames: TArray<string>;
+    /// <summary>True when AUnit is one of the analysed project units.</summary>
+    function KnowsUnit(const AUnit: string): Boolean;
     /// <summary>Dependencies ranked (desc) by how many units they free
     ///  from cycles when removed - the biggest levers. Exact, no
     ///  enumeration.</summary>
@@ -174,7 +204,7 @@ type
 implementation
 
 uses
-  System.IOUtils, System.StrUtils, System.Generics.Defaults,
+  System.IOUtils, System.StrUtils, System.Math, System.Generics.Defaults,
   Expert.EditorHelperIntf, Delphi.FileEncoding;
 
 function ReadFileContent(const AFile: string; out AContent: string): Boolean;
@@ -384,6 +414,12 @@ begin
     FAdjTo[I].Free;
     FAdjIntf[I].Free;
     FAdjLine[I].Free;
+  end;
+  for I := 0 to High(FAllTo) do
+  begin
+    FAllTo[I].Free;
+    FAllIntf[I].Free;
+    FAllLine[I].Free;
   end;
   FCompToGroup.Free;
   FNameToIdx.Free;
@@ -757,19 +793,233 @@ begin
   end;
 end;
 
+function TUsesCycleResult.UnitNames: TArray<string>;
+begin
+  Result := Copy(FNames, 0, Length(FNames));
+  TArray.Sort<string>(Result, TComparer<string>.Construct(
+    function(const A, B: string): Integer
+    begin
+      Result := CompareText(A, B);
+    end));
+end;
+
+function TUsesCycleResult.KnowsUnit(const AUnit: string): Boolean;
+begin
+  Result := FNameToIdx.ContainsKey(UpperCase(Trim(AUnit)));
+end;
+
+function TUsesCycleResult.FindPath(const AFrom, ATo: string;
+  AInterfaceOnly: Boolean): TArray<TCycleHop>;
+// Plain BFS over the FULL graph, so the answer is a SHORTEST path -
+// which is what makes it readable: the F2047 the compiler reported has
+// one concrete chain behind it, and the shortest one is the one a human
+// can act on. Parent/ParentEdge reconstruct both the nodes and the exact
+// uses entry (section + line) used to get there.
+var
+  FromIdx, ToIdx, Cur, K, W: Integer;
+  Parent, ParentEdge: TArray<Integer>;
+  Queue: TQueue<Integer>;
+  Nodes: TList<Integer>;
+  Hops: TList<TCycleHop>;
+  Found: Boolean;
+  H: TCycleHop;
+begin
+  Result := nil;
+  if not FNameToIdx.TryGetValue(UpperCase(Trim(AFrom)), FromIdx) then Exit;
+  if not FNameToIdx.TryGetValue(UpperCase(Trim(ATo)), ToIdx) then Exit;
+  if Length(FAllTo) = 0 then Exit;
+
+  SetLength(Parent, Length(FNames));
+  SetLength(ParentEdge, Length(FNames));
+  for K := 0 to High(Parent) do begin Parent[K] := -2; ParentEdge[K] := -1; end;
+
+  Queue := TQueue<Integer>.Create;
+  Nodes := TList<Integer>.Create;
+  Hops := TList<TCycleHop>.Create;
+  try
+    Parent[FromIdx] := -1;
+    Queue.Enqueue(FromIdx);
+    Found := False;
+    while (Queue.Count > 0) and not Found do
+    begin
+      Cur := Queue.Dequeue;
+      for K := 0 to FAllTo[Cur].Count - 1 do
+      begin
+        if AInterfaceOnly and not FAllIntf[Cur][K] then Continue;
+        W := FAllTo[Cur][K];
+        // Checked on the EDGE, not when dequeuing, so AFrom = ATo asks
+        // for the shortest cycle through that unit instead of returning
+        // the empty path.
+        if W = ToIdx then
+        begin
+          Parent[W] := Cur;
+          ParentEdge[W] := K;
+          Found := True;
+          Break;
+        end;
+        if Parent[W] = -2 then
+        begin
+          Parent[W] := Cur;
+          ParentEdge[W] := K;
+          Queue.Enqueue(W);
+        end;
+      end;
+    end;
+    if not Found then Exit;
+
+    // Walk back To -> From, then emit forward.
+    Cur := ToIdx;
+    Nodes.Add(Cur);
+    Cur := Parent[Cur];
+    while Cur >= 0 do
+    begin
+      Nodes.Add(Cur);
+      if Cur = FromIdx then Break;
+      Cur := Parent[Cur];
+    end;
+
+    for K := Nodes.Count - 1 downto 1 do
+    begin
+      var U := Nodes[K];
+      var V := Nodes[K - 1];
+      var EdgeIdx := ParentEdge[V];
+      H.FromUnit := FNames[U];
+      H.FromFile := FFiles[U];
+      H.ToUnit := FNames[V];
+      if EdgeIdx >= 0 then
+      begin
+        H.InInterface := FAllIntf[U][EdgeIdx];
+        H.Line := FAllLine[U][EdgeIdx];
+      end
+      else
+      begin
+        H.InInterface := False;
+        H.Line := 0;
+      end;
+      Hops.Add(H);
+    end;
+    Result := Hops.ToArray;
+  finally
+    Hops.Free;
+    Nodes.Free;
+    Queue.Free;
+  end;
+end;
+
+function TUsesCycleResult.EnumerateCyclesThrough(const AUnit: string;
+  AMax: Integer; out ATruncated: Boolean; ABudgetMs: Integer): TArray<TCyclePath>;
+// Every simple cycle through ONE unit. Rooted at that unit, so each
+// cycle appears exactly once and always reads "AUnit -> ... -> AUnit".
+// Runs over the cycle-internal adjacency: a cycle through AUnit lies
+// entirely inside its own strongly connected component by definition.
+var
+  Cycles: TList<TCyclePath>;
+  Path: TList<Integer>;
+  OnPath: TArray<Boolean>;
+  Start: Integer;
+  Stop: Boolean;
+  Deadline: UInt64;
+  Steps: Integer;
+
+  function Expired: Boolean;
+  begin
+    Inc(Steps);
+    Result := False;
+    if (ABudgetMs <= 0) or (Steps and $FFF <> 0) then Exit;
+    if TThread.GetTickCount64 >= Deadline then
+    begin
+      Result := True;
+      Stop := True;
+      ATruncated := True;
+    end;
+  end;
+
+  procedure DFS(V: Integer);
+  var K, W, J: Integer;
+  begin
+    if Stop or Expired then Exit;
+    for K := 0 to FAdjTo[V].Count - 1 do
+    begin
+      W := FAdjTo[V][K];
+      if W = Start then
+      begin
+        if Path.Count >= 2 then
+        begin
+          var CP: TCyclePath;
+          SetLength(CP.Units, Path.Count);
+          for J := 0 to Path.Count - 1 do CP.Units[J] := FNames[Path[J]];
+          Cycles.Add(CP);
+          if (AMax > 0) and (Cycles.Count >= AMax) then
+          begin
+            Stop := True; ATruncated := True; Exit;
+          end;
+        end;
+      end
+      else if not OnPath[W] then
+      begin
+        OnPath[W] := True; Path.Add(W);
+        DFS(W);
+        Path.Delete(Path.Count - 1); OnPath[W] := False;
+        if Stop then Exit;
+      end;
+    end;
+  end;
+
+begin
+  ATruncated := False;
+  Stop := False;
+  Steps := 0;
+  Result := nil;
+  Deadline := TThread.GetTickCount64 + UInt64(Max(0, ABudgetMs));
+  if not FNameToIdx.TryGetValue(UpperCase(Trim(AUnit)), Start) then Exit;
+  if Length(FAdjTo) = 0 then Exit;
+
+  Cycles := TList<TCyclePath>.Create;
+  Path := TList<Integer>.Create;
+  SetLength(OnPath, Length(FNames));
+  try
+    Path.Add(Start);
+    OnPath[Start] := True;
+    DFS(Start);
+    Result := Cycles.ToArray;
+  finally
+    Path.Free;
+    Cycles.Free;
+  end;
+end;
+
 function TUsesCycleResult.EnumerateCycles(AMax: Integer;
-  out ATruncated: Boolean): TArray<TCyclePath>;
+  out ATruncated: Boolean; ABudgetMs: Integer): TArray<TCyclePath>;
 var
   Cycles: TList<TCyclePath>;
   Path: TList<Integer>;
   OnPath: TArray<Boolean>;
   Start, N, I: Integer;
   Stop: Boolean;
+  Deadline: UInt64;
+  Steps: Integer;
+
+  // Lifting the count cap must not turn into "the IDE never comes back":
+  // the number of simple cycles is exponential in the worst case, so an
+  // uncapped run needs the TIME budget as its safety net. Checked every
+  // few thousand DFS steps - GetTickCount64 per step would dominate.
+  function Expired: Boolean;
+  begin
+    Inc(Steps);
+    Result := False;
+    if (ABudgetMs <= 0) or (Steps and $FFF <> 0) then Exit;
+    if TThread.GetTickCount64 >= Deadline then
+    begin
+      Result := True;
+      Stop := True;
+      ATruncated := True;
+    end;
+  end;
 
   procedure DFS(V: Integer);
   var K, W, J: Integer;
   begin
-    if Stop then Exit;
+    if Stop or Expired then Exit;
     for K := 0 to FAdjTo[V].Count - 1 do
     begin
       W := FAdjTo[V][K];
@@ -782,7 +1032,7 @@ var
           SetLength(CP.Units, Path.Count);
           for J := 0 to Path.Count - 1 do CP.Units[J] := FNames[Path[J]];
           Cycles.Add(CP);
-          if Cycles.Count >= AMax then
+          if (AMax > 0) and (Cycles.Count >= AMax) then
           begin
             Stop := True; ATruncated := True; Exit;
           end;
@@ -801,6 +1051,8 @@ var
 begin
   ATruncated := False;
   Stop := False;
+  Steps := 0;
+  Deadline := TThread.GetTickCount64 + UInt64(Max(0, ABudgetMs));
   N := Length(FNames);
   Cycles := TList<TCyclePath>.Create;
   Path := TList<Integer>.Create;
@@ -952,11 +1204,27 @@ begin
     SetLength(R.FAdjTo, N);
     SetLength(R.FAdjIntf, N);
     SetLength(R.FAdjLine, N);
+    SetLength(R.FAllTo, N);
+    SetLength(R.FAllIntf, N);
+    SetLength(R.FAllLine, N);
     for I := 0 to N - 1 do
     begin
       R.FAdjTo[I] := TList<Integer>.Create;
       R.FAdjIntf[I] := TList<Boolean>.Create;
       R.FAdjLine[I] := TList<Integer>.Create;
+      R.FAllTo[I] := TList<Integer>.Create;
+      R.FAllIntf[I] := TList<Boolean>.Create;
+      R.FAllLine[I] := TList<Integer>.Create;
+    end;
+
+    // The full graph - every project uses edge, whether it lies in a
+    // cycle or not. Point-to-point path queries run on this one.
+    for I := 0 to RawEdges.Count - 1 do
+    begin
+      var FE := RawEdges[I];
+      R.FAllTo[FE.FromIdx].Add(FE.ToIdx);
+      R.FAllIntf[FE.FromIdx].Add(FE.InInterface);
+      R.FAllLine[FE.FromIdx].Add(FE.Line);
     end;
 
     // ---- emit edges inside multi-node components ----

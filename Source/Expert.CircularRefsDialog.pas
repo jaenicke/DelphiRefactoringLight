@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -27,9 +27,24 @@ unit Expert.CircularRefsDialog;
 //   The top rows are the highest-impact single edges to break. Columns:
 //   Units freed, Unit, uses, Section, Group.
 //
-// "All cycles": a plain-text, complete enumeration of every simple cycle
-//   (UnitA -> UnitB -> ... -> UnitA), like the original plugin offers -
-//   truncated with a note if the total is too large to list in full.
+// "Path analysis": the point-to-point query. Pick two units and get the
+//   shortest dependency chain between them, over the FULL project graph -
+//   not only over edges that already lie in a cycle. That distinction is
+//   the whole point: when the compiler says
+//     UnitA.pas(20): F2047 Circular unit reference to 'UnitB'
+//   the edge UnitA -> UnitB is the one being ADDED, so it does not exist
+//   in the analysed sources and neither unit need be in any cycle yet.
+//   What the user needs is the path that already runs from UnitB back to
+//   UnitA - enter B and A, tick "interface uses only" (that is the
+//   relation F2047 checks) and the intermediate stations are listed.
+//   Entering the same unit twice asks for the shortest cycle through it.
+//
+// "All cycles": a plain-text enumeration of every simple cycle
+//   (UnitA -> UnitB -> ... -> UnitA). The count limit is editable (0 =
+//   no limit, guarded by a time budget), the list can be filtered to the
+//   cycles through ONE unit, and the complete result can be exported to
+//   a file - a big legacy project easily has more cycles than any list
+//   can usefully show.
 //
 // "Hotspots": units ranked by how many cycle edges touch them
 //   (Connections). The units at the top are involved in the most cycles
@@ -42,16 +57,29 @@ unit Expert.CircularRefsDialog;
 
 interface
 
+uses
+  Vcl.Forms, Expert.UsesGraph;
+
 procedure CheckCircularReferences;
+
+/// <summary>Builds the viewer for an already computed analysis; the
+///  dialog then OWNS AResult and frees it when it closes.
+///  APrefillTarget seeds the "to unit" field of the path query.
+///  Separated from CheckCircularReferences so the layout can be
+///  rendered headless in a test - the tabs are built in code, and a
+///  screenshot is the only way to see what the user sees.</summary>
+function CreateCircularRefsDialog(AResult: TUsesCycleResult;
+  const APrefillTarget: string = ''): TForm;
 
 implementation
 
 uses
   System.SysUtils, System.Classes, System.UITypes, System.IOUtils, System.StrUtils,
+  System.Types, System.Math, System.DateUtils,
   System.Generics.Defaults, System.Generics.Collections,
-  Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
+  Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
-  Expert.EditorHelperIntf, Expert.UsesGraph, Expert.DialogHelper,
+  Expert.EditorHelperIntf, Expert.DialogHelper,
   Expert.IdeThemes, Expert.ListViewSort;
 
 type
@@ -62,6 +90,9 @@ type
     FGroups: TArray<TCycleGroupInfo>;
     FLevers: TArray<TEdgeLever>;
     FCurPath: TArray<TCycleHop>;
+    FQueryPath: TArray<TCycleHop>;
+    FAllCycles: TArray<TCyclePath>;
+    FAllTruncated: Boolean;
     FEdgeSortCol: Integer;    // -1 = unsorted (FEdgeList is virtual)
     FEdgeSortAsc: Boolean;
 
@@ -70,6 +101,7 @@ type
     FTabGroups: TTabSheet;
     FTabLevers: TTabSheet;
     FTabAll: TTabSheet;
+    FTabPath: TTabSheet;
     FTabHot: TTabSheet;
     FTabHelp: TTabSheet;
     FHelpMemo: TMemo;       // static help text
@@ -78,7 +110,17 @@ type
     FPathLbl: TLabel;
     FGroupList: TListView;  // filled once
     FLeverList: TListView;  // filled once
-    FAllMemo: TMemo;        // filled once (text dump)
+    FAllMemo: TMemo;        // text dump, refilled on demand
+    FAllFilter: TComboBox;  // '' = whole project, else one unit
+    FAllLimit: TEdit;       // 0 = no count limit
+    FAllStatus: TLabel;
+    FBtnAllRefresh: TButton;
+    FBtnAllExport: TButton;
+    FCbFrom: TComboBox;
+    FCbTo: TComboBox;
+    FChkIntfOnly: TCheckBox;
+    FQueryList: TListView;
+    FQueryLbl: TLabel;
     FHotList: TListView;    // filled once
     FLblSummary: TLabel;
     FBtnClose: TButton;
@@ -89,6 +131,18 @@ type
     procedure FillGroups;
     procedure FillLevers;
     procedure FillAllCycles;
+    procedure BuildPathTab;
+    procedure BuildAllCyclesTab;
+    procedure ShowQueryPath(const AHops: TArray<TCycleHop>; const ACaption: string);
+    procedure DoFindPathClick(Sender: TObject);
+    procedure DoSwapClick(Sender: TObject);
+    procedure DoCyclesThroughClick(Sender: TObject);
+    procedure DoQueryDraw(Sender: TCustomListView; Item: TListItem;
+      State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure DoQueryDblClick(Sender: TObject);
+    procedure DoAllRefreshClick(Sender: TObject);
+    procedure DoAllExportClick(Sender: TObject);
+    function CycleReport(AForFile: Boolean): string;
     procedure DoGroupDblClick(Sender: TObject);
     procedure DoLeverDblClick(Sender: TObject);
     procedure DoEdgeColumnClick(Sender: TObject; Column: TListColumn);
@@ -110,10 +164,22 @@ type
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
   public
     constructor CreateDialog(AOwner: TComponent; AResult: TUsesCycleResult);
+    /// <summary>Opens the dialog on the Path analysis tab, pre-filled -
+    ///  the entry point for "the compiler just told me A -> B is
+    ///  circular".</summary>
+    procedure StartWithPathQuery(const AFrom, ATo: string);
   end;
 
 const
   clOrange = TColor($00008CFF);
+  /// <summary>Default cap for the cycle enumeration. Editable in the
+  ///  dialog (0 = no limit) - a big legacy project can have far more
+  ///  than this, which is exactly what a tester reported.</summary>
+  DefaultCycleLimit = 20000;
+  /// <summary>Wall-clock guard for an uncapped enumeration. The number
+  ///  of simple cycles is exponential in the worst case, so "no limit"
+  ///  needs a way back.</summary>
+  CycleBudgetMs = 20000;
 
 constructor TCircularRefsDialog.CreateDialog(AOwner: TComponent;
   AResult: TUsesCycleResult);
@@ -152,11 +218,19 @@ begin
     if E.Group > Groups then Groups := E.Group;
     if E.InInterface then Inc(IntfEdges);
   end;
-  FLblSummary.Caption := Format(
-    '%d cycle group(s), %d edge(s), %d via interface uses.  ' +
-    'Cycles tab: select an edge to see how it closes. Groups tab: shortest/longest cycle lengths. ' +
-    'Hotspots tab: the most entangled units.',
-    [Groups, Length(FResult.Edges), IntfEdges]);
+  if Length(FResult.Edges) = 0 then
+    FLblSummary.Caption :=
+      'No circular unit references in this project.  The Path analysis tab ' +
+      'still works: it answers "which chain leads from unit X to unit Y?" ' +
+      'over the whole uses graph, cycle or not.'
+  else
+    FLblSummary.Caption := Format(
+      '%d cycle group(s), %d edge(s), %d via interface uses.  ' +
+      'Cycles tab: select an edge to see how it closes. Path analysis tab: the chain between two units. ' +
+      'Hotspots tab: the most entangled units.',
+      [Groups, Length(FResult.Edges), IntfEdges]);
+  if Length(FResult.Edges) = 0 then
+    FPages.ActivePage := FTabPath;
 
   EnableThemes(Self);
   PrepareDialog(Self, AOwner);
@@ -195,6 +269,10 @@ begin
   FTabAll := TTabSheet.Create(FPages);
   FTabAll.PageControl := FPages;
   FTabAll.Caption := 'All cycles';
+
+  FTabPath := TTabSheet.Create(FPages);
+  FTabPath.PageControl := FPages;
+  FTabPath.Caption := 'Path analysis';
 
   FTabHot := TTabSheet.Create(FPages);
   FTabHot.PageControl := FPages;
@@ -303,15 +381,11 @@ begin
   Col := FLeverList.Columns.Add; Col.Caption := 'Section';     Col.Width := 110;
   Col := FLeverList.Columns.Add; Col.Caption := 'Group';       Col.Width := 70;
 
-  // ---- All cycles tab (text dump) ----
-  FAllMemo := TMemo.Create(Self);
-  FAllMemo.Parent := FTabAll;
-  FAllMemo.Align := alClient;
-  FAllMemo.ReadOnly := True;
-  FAllMemo.ScrollBars := ssBoth;
-  FAllMemo.WordWrap := False;
-  FAllMemo.Font.Name := 'Consolas';
-  FAllMemo.Font.Size := 9;
+  // ---- All cycles tab ----
+  BuildAllCyclesTab;
+
+  // ---- Path analysis tab ----
+  BuildPathTab;
 
   // ---- Hotspots tab ----
   FHotList := TListView.Create(Self);
@@ -363,9 +437,25 @@ begin
     'many cycles at once, so this counts freed UNITS, not cycles.' + sLineBreak +
     sLineBreak +
     'All cycles' + sLineBreak +
-    'A plain-text, complete enumeration of every simple cycle ' +
-    '(UnitA -> UnitB -> ... -> UnitA). If the total is too large to list ' +
-    'in full it is truncated with a note.' + sLineBreak +
+    'A plain-text enumeration of every simple cycle ' +
+    '(UnitA -> UnitB -> ... -> UnitA). "Max" caps the number of cycles; ' +
+    'set it to 0 for no limit (a time budget then stops a runaway ' +
+    'enumeration - the number of simple cycles grows exponentially). ' +
+    '"Only cycles containing" restricts the enumeration to the cycles ' +
+    'that pass through one unit, which is usually the question you ' +
+    'actually have. "Export to file" writes the complete result, ' +
+    'however long it is.' + sLineBreak +
+    sLineBreak +
+    'Path analysis' + sLineBreak +
+    'The point-to-point query, and the answer to a compiler error like ' +
+    '"UnitA.pas(20): F2047 Circular unit reference to UnitB". ' +
+    'That edge UnitA -> UnitB is the one you are trying to ADD, so it is ' +
+    'not in the sources and the other tabs cannot show it. Enter UnitB ' +
+    'as "from" and UnitA as "to", tick "interface uses only" (that is ' +
+    'the relation the compiler rejects) and you get the shortest chain ' +
+    'UnitB -> ... -> UnitA that already exists - every intermediate ' +
+    'station listed, double-click to jump to the uses entry. Entering ' +
+    'the same unit twice gives the shortest cycle through it.' + sLineBreak +
     sLineBreak +
     'Hotspots' + sLineBreak +
     'Units ranked by how many cycle edges touch them (Connections). The ' +
@@ -469,27 +559,365 @@ begin
   end;
 end;
 
-procedure TCircularRefsDialog.FillAllCycles;
-const
-  MaxCycles = 20000;
+procedure TCircularRefsDialog.BuildAllCyclesTab;
 var
-  Cycles: TArray<TCyclePath>;
-  Truncated: Boolean;
+  Bar: TPanel;
+  L: TLabel;
+begin
+  Bar := TPanel.Create(Self);
+  Bar.Parent := FTabAll;
+  Bar.Align := alTop;
+  Bar.Height := 62;
+  Bar.BevelOuter := bvNone;
+
+  L := TLabel.Create(Self);
+  L.Parent := Bar;
+  L.SetBounds(6, 10, 130, 16);
+  L.Caption := 'Only cycles containing:';
+
+  FAllFilter := TComboBox.Create(Self);
+  FAllFilter.Parent := Bar;
+  FAllFilter.SetBounds(142, 6, 240, 24);
+  FAllFilter.Style := csDropDown;      // typing is faster than scrolling
+  FAllFilter.AutoComplete := True;
+  FAllFilter.Sorted := False;
+  FAllFilter.Items.Add('');            // '' = the whole project
+  for var UName in FResult.UnitNames do
+    FAllFilter.Items.Add(UName);
+  FAllFilter.ItemIndex := 0;
+
+  L := TLabel.Create(Self);
+  L.Parent := Bar;
+  L.SetBounds(398, 10, 130, 16);
+  L.Caption := 'Max (0 = no limit):';
+
+  FAllLimit := TEdit.Create(Self);
+  FAllLimit.Parent := Bar;
+  FAllLimit.SetBounds(514, 6, 70, 24);
+  FAllLimit.Text := IntToStr(DefaultCycleLimit);
+
+  FBtnAllRefresh := TButton.Create(Self);
+  FBtnAllRefresh.Parent := Bar;
+  FBtnAllRefresh.SetBounds(596, 5, 90, 26);
+  FBtnAllRefresh.Caption := 'Re&fresh';
+  FBtnAllRefresh.OnClick := DoAllRefreshClick;
+
+  FBtnAllExport := TButton.Create(Self);
+  FBtnAllExport.Parent := Bar;
+  FBtnAllExport.SetBounds(694, 5, 130, 26);
+  FBtnAllExport.Caption := '&Export to file...';
+  FBtnAllExport.OnClick := DoAllExportClick;
+
+  FAllStatus := TLabel.Create(Self);
+  FAllStatus.Parent := Bar;
+  FAllStatus.SetBounds(6, 38, 800, 16);
+
+  FAllMemo := TMemo.Create(Self);
+  FAllMemo.Parent := FTabAll;
+  FAllMemo.Align := alClient;
+  FAllMemo.ReadOnly := True;
+  FAllMemo.ScrollBars := ssBoth;
+  FAllMemo.WordWrap := False;
+  FAllMemo.Font.Name := 'Consolas';
+  FAllMemo.Font.Size := 9;
+end;
+
+procedure TCircularRefsDialog.BuildPathTab;
+var
+  Bar: TPanel;
+  L: TLabel;
+  Info: TLabel;
+  Btn: TButton;
+  Col: TListColumn;
+  Names: TArray<string>;
+begin
+  Info := TLabel.Create(Self);
+  Info.Parent := FTabPath;
+  Info.Align := alTop;
+  Info.AlignWithMargins := True;
+  Info.Margins.SetBounds(6, 6, 6, 2);
+  // VCL pitfall: AutoSize + WordWrap + alTop wraps against the DEFAULT
+  // width and produces an invisible giant. Fixed height, no AutoSize.
+  Info.AutoSize := False;
+  Info.WordWrap := True;
+  Info.Height := 48;
+  Info.Caption :=
+    'The shortest dependency chain between two units, over the whole uses ' +
+    'graph - the edge does not have to be part of a cycle. After ' +
+    '"F2047 Circular unit reference to UnitB" in UnitA: enter UnitB -> ' +
+    'UnitA with "interface uses only" ticked to see the chain that ' +
+    'already leads back. Same unit twice = the shortest cycle through it.';
+
+  Bar := TPanel.Create(Self);
+  Bar.Parent := FTabPath;
+  Bar.Align := alTop;
+  Bar.Height := 104;
+  Bar.BevelOuter := bvNone;
+
+  Names := FResult.UnitNames;
+
+  L := TLabel.Create(Self);
+  L.Parent := Bar;
+  L.SetBounds(6, 11, 70, 16);
+  L.Caption := 'From unit:';
+
+  FCbFrom := TComboBox.Create(Self);
+  FCbFrom.Parent := Bar;
+  FCbFrom.SetBounds(80, 7, 240, 24);
+  FCbFrom.Style := csDropDown;
+  FCbFrom.AutoComplete := True;
+  for var UName in Names do
+    FCbFrom.Items.Add(UName);
+
+  L := TLabel.Create(Self);
+  L.Parent := Bar;
+  L.SetBounds(334, 11, 60, 16);
+  L.Caption := 'to unit:';
+
+  FCbTo := TComboBox.Create(Self);
+  FCbTo.Parent := Bar;
+  FCbTo.SetBounds(392, 7, 240, 24);
+  FCbTo.Style := csDropDown;
+  FCbTo.AutoComplete := True;
+  for var UName in Names do
+    FCbTo.Items.Add(UName);
+
+  Btn := TButton.Create(Self);
+  Btn.Parent := Bar;
+  Btn.SetBounds(642, 6, 90, 26);
+  Btn.Caption := '&Swap';
+  Btn.OnClick := DoSwapClick;
+
+  FChkIntfOnly := TCheckBox.Create(Self);
+  FChkIntfOnly.Parent := Bar;
+  FChkIntfOnly.SetBounds(80, 40, 420, 20);
+  FChkIntfOnly.Caption := 'interface uses only (the relation F2047 rejects)';
+  FChkIntfOnly.Checked := True;
+
+  Btn := TButton.Create(Self);
+  Btn.Parent := Bar;
+  Btn.SetBounds(80, 66, 110, 26);
+  Btn.Caption := 'Find &path';
+  Btn.Default := True;
+  Btn.OnClick := DoFindPathClick;
+
+  Btn := TButton.Create(Self);
+  Btn.Parent := Bar;
+  Btn.SetBounds(200, 66, 230, 26);
+  Btn.Caption := 'All &cycles through the first unit';
+  Btn.OnClick := DoCyclesThroughClick;
+
+  FQueryLbl := TLabel.Create(Self);
+  FQueryLbl.Parent := FTabPath;
+  // alTop stacks by the CURRENT Top, and a freshly created control sits
+  // at 0 - which put the status line ABOVE the input row. Push it down
+  // so it lands where it belongs: directly over the result list.
+  FQueryLbl.Top := Bar.Top + Bar.Height + 1;
+  FQueryLbl.Align := alTop;
+  FQueryLbl.AlignWithMargins := True;
+  FQueryLbl.Margins.SetBounds(6, 4, 6, 4);
+  FQueryLbl.Caption := 'No query run yet.';
+
+  FQueryList := TListView.Create(Self);
+  FQueryList.Parent := FTabPath;
+  FQueryList.Align := alClient;
+  FQueryList.ViewStyle := vsReport;
+  FQueryList.ReadOnly := True;
+  FQueryList.RowSelect := True;
+  FQueryList.OnCustomDrawItem := DoQueryDraw;
+  FQueryList.OnDblClick := DoQueryDblClick;
+  Col := FQueryList.Columns.Add; Col.Caption := 'Step';    Col.Width := 50;
+  Col := FQueryList.Columns.Add; Col.Caption := 'Unit';    Col.Width := 250;
+  Col := FQueryList.Columns.Add; Col.Caption := 'Section'; Col.Width := 110;
+  Col := FQueryList.Columns.Add; Col.Caption := 'uses';    Col.Width := 250;
+  Col := FQueryList.Columns.Add; Col.Caption := 'Line';    Col.Width := 60;
+end;
+
+procedure TCircularRefsDialog.ShowQueryPath(const AHops: TArray<TCycleHop>;
+  const ACaption: string);
+var
+  Hop: TCycleHop;
+  LI: TListItem;
+  Step: Integer;
+begin
+  FQueryPath := AHops;
+  FQueryLbl.Caption := ACaption;
+  FQueryList.Items.BeginUpdate;
+  try
+    FQueryList.Items.Clear;
+    Step := 1;
+    for Hop in FQueryPath do
+    begin
+      LI := FQueryList.Items.Add;
+      LI.Caption := IntToStr(Step);
+      LI.SubItems.Add(Hop.FromUnit);
+      if Hop.InInterface then LI.SubItems.Add('interface')
+      else LI.SubItems.Add('implementation');
+      LI.SubItems.Add(Hop.ToUnit);
+      LI.SubItems.Add(IntToStr(Hop.Line));
+      Inc(Step);
+    end;
+  finally
+    FQueryList.Items.EndUpdate;
+  end;
+end;
+
+procedure TCircularRefsDialog.DoFindPathClick(Sender: TObject);
+var
+  FromU, ToU: string;
+  Hops: TArray<TCycleHop>;
+  Sect: string;
+begin
+  FromU := Trim(FCbFrom.Text);
+  ToU := Trim(FCbTo.Text);
+  if (FromU = '') or (ToU = '') then
+  begin
+    ShowThemedMessage('Please name both units.');
+    Exit;
+  end;
+  // Naming a unit the analysis never saw is the most likely mistake
+  // (a library unit, a typo) - say which one, not just "no path".
+  if not FResult.KnowsUnit(FromU) then
+  begin
+    ShowThemedMessage(Format('%s is not one of the analysed project units.', [FromU]));
+    Exit;
+  end;
+  if not FResult.KnowsUnit(ToU) then
+  begin
+    ShowThemedMessage(Format('%s is not one of the analysed project units.', [ToU]));
+    Exit;
+  end;
+
+  if FChkIntfOnly.Checked then Sect := 'interface uses only'
+  else Sect := 'interface + implementation uses';
+  Hops := FResult.FindPath(FromU, ToU, FChkIntfOnly.Checked);
+  if Length(Hops) = 0 then
+  begin
+    ShowQueryPath(nil, Format(
+      'No path %s -> %s (%s). ' +
+      'With "interface uses only" ticked this means the compiler would ' +
+      'NOT reject %s in the interface uses of %s.',
+      [FromU, ToU, Sect, FromU, ToU]));
+    Exit;
+  end;
+  if SameText(FromU, ToU) then
+    ShowQueryPath(Hops, Format('Shortest cycle through %s: %d hop(s), %s.',
+      [FromU, Length(Hops), Sect]))
+  else
+    ShowQueryPath(Hops, Format(
+      'Shortest path %s -> %s: %d hop(s), %s. ' +
+      'Adding %s to the %s uses of %s would close this ring.',
+      [FromU, ToU, Length(Hops), Sect, FromU,
+       System.StrUtils.IfThen(FChkIntfOnly.Checked, 'interface', ''), ToU]));
+end;
+
+procedure TCircularRefsDialog.DoSwapClick(Sender: TObject);
+var
+  S: string;
+begin
+  S := FCbFrom.Text;
+  FCbFrom.Text := FCbTo.Text;
+  FCbTo.Text := S;
+end;
+
+procedure TCircularRefsDialog.DoCyclesThroughClick(Sender: TObject);
+var
+  U: string;
+begin
+  U := Trim(FCbFrom.Text);
+  if U = '' then
+  begin
+    ShowThemedMessage('Please name a unit in the "From unit" field.');
+    Exit;
+  end;
+  if not FResult.KnowsUnit(U) then
+  begin
+    ShowThemedMessage(Format('%s is not one of the analysed project units.', [U]));
+    Exit;
+  end;
+  FAllFilter.Text := U;
+  FPages.ActivePage := FTabAll;
+  FillAllCycles;
+end;
+
+procedure TCircularRefsDialog.DoQueryDraw(Sender: TCustomListView;
+  Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+begin
+  DefaultDraw := True;
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
+  if (Item.Index >= 0) and (Item.Index < Length(FQueryPath)) then
+    if FQueryPath[Item.Index].InInterface then
+      Sender.Canvas.Font.Color := clRed
+    else
+      Sender.Canvas.Font.Color := clOrange;
+end;
+
+procedure TCircularRefsDialog.DoQueryDblClick(Sender: TObject);
+var
+  Idx: Integer;
+begin
+  if FQueryList.Selected = nil then Exit;
+  Idx := FQueryList.Selected.Index;
+  if (Idx < 0) or (Idx >= Length(FQueryPath)) then Exit;
+  if FQueryPath[Idx].Line <= 0 then Exit;
+  var Col := UnitColumn(FQueryPath[Idx].FromFile, FQueryPath[Idx].Line,
+    FQueryPath[Idx].ToUnit);
+  Editor.GotoLocation(FQueryPath[Idx].FromFile, FQueryPath[Idx].Line - 1, Col,
+    Length(FQueryPath[Idx].ToUnit));
+end;
+
+procedure TCircularRefsDialog.StartWithPathQuery(const AFrom, ATo: string);
+begin
+  FCbFrom.Text := AFrom;
+  FCbTo.Text := ATo;
+  // Only jump to the tab (and answer) when both ends are actually known.
+  // Called with just the caret's unit as the target, this merely
+  // pre-fills the field the user would otherwise type first.
+  if FResult.KnowsUnit(AFrom) and FResult.KnowsUnit(ATo) then
+  begin
+    FPages.ActivePage := FTabPath;
+    DoFindPathClick(nil);
+  end;
+end;
+
+procedure TCircularRefsDialog.DoAllRefreshClick(Sender: TObject);
+begin
+  FillAllCycles;
+end;
+
+function TCircularRefsDialog.CycleReport(AForFile: Boolean): string;
+// The memo and the export share one renderer; only the amount differs.
+// A memo with a million lines is unusable (and slow to fill), so the
+// display is cut at MaxMemoCycles while the file always gets everything
+// that was enumerated - that is what "export the full result" means.
+const
+  MaxMemoCycles = 20000;
+var
   SB: TStringBuilder;
   CP: TCyclePath;
-  I: Integer;
+  I, Shown, Limit: Integer;
 begin
-  Cycles := FResult.EnumerateCycles(MaxCycles, Truncated);
   SB := TStringBuilder.Create;
   try
-    if Truncated then
-      SB.AppendLine(Format('Showing the first %d simple cycles (more exist - ' +
-        'the total is too large to enumerate fully).', [Length(Cycles)]))
+    if AForFile then Limit := Length(FAllCycles)
+    else Limit := Min(MaxMemoCycles, Length(FAllCycles));
+
+    if Trim(FAllFilter.Text) <> '' then
+      SB.AppendLine(Format('Cycles through %s: %d', [Trim(FAllFilter.Text),
+        Length(FAllCycles)]))
     else
-      SB.AppendLine(Format('%d simple cycle(s), complete list:', [Length(Cycles)]));
+      SB.AppendLine(Format('Simple cycles in the project: %d', [Length(FAllCycles)]));
+    if FAllTruncated then
+      SB.AppendLine('INCOMPLETE - the enumeration hit the limit; more cycles exist.');
+    if Limit < Length(FAllCycles) then
+      SB.AppendLine(Format('Listing the first %d here - use "Export to file" ' +
+        'for the complete list.', [Limit]));
     SB.AppendLine;
-    for CP in Cycles do
+
+    Shown := 0;
+    for CP in FAllCycles do
     begin
+      if Shown >= Limit then Break;
       for I := 0 to High(CP.Units) do
       begin
         SB.Append(CP.Units[I]);
@@ -498,10 +926,83 @@ begin
       SB.Append(CP.Units[0]);   // close the ring
       SB.Append('   (').Append(Length(CP.Units)).Append(' units)');
       SB.AppendLine;
+      Inc(Shown);
     end;
-    FAllMemo.Text := SB.ToString;
+    Result := SB.ToString;
   finally
     SB.Free;
+  end;
+end;
+
+procedure TCircularRefsDialog.FillAllCycles;
+var
+  Filter: string;
+  Limit: Integer;
+  Started: TDateTime;
+begin
+  Filter := Trim(FAllFilter.Text);
+  if (Filter <> '') and not FResult.KnowsUnit(Filter) then
+  begin
+    ShowThemedMessage(Format('%s is not one of the analysed project units.', [Filter]));
+    Exit;
+  end;
+  if not TryStrToInt(Trim(FAllLimit.Text), Limit) or (Limit < 0) then
+    Limit := DefaultCycleLimit;
+
+  Screen.Cursor := crHourGlass;
+  Started := Now;
+  try
+    if Filter <> '' then
+      FAllCycles := FResult.EnumerateCyclesThrough(Filter, Limit, FAllTruncated,
+        CycleBudgetMs)
+    else
+      FAllCycles := FResult.EnumerateCycles(Limit, FAllTruncated, CycleBudgetMs);
+  finally
+    Screen.Cursor := crDefault;
+  end;
+
+  FAllMemo.Text := CycleReport(False);
+  FAllStatus.Caption := Format('%d cycle(s)%s, %.1f s.  %s',
+    [Length(FAllCycles),
+     System.StrUtils.IfThen(FAllTruncated, ' (limit reached - more exist)', ''),
+     MilliSecondsBetween(Now, Started) / 1000,
+     System.StrUtils.IfThen(FAllTruncated,
+       'Raise "Max" (0 = no limit) or filter by a unit for the complete picture.',
+       'Complete.')]);
+end;
+
+procedure TCircularRefsDialog.DoAllExportClick(Sender: TObject);
+var
+  Dlg: TSaveDialog;
+  Base: string;
+begin
+  if Length(FAllCycles) = 0 then
+  begin
+    ShowThemedMessage('Nothing to export - run the enumeration first.');
+    Exit;
+  end;
+  Dlg := TSaveDialog.Create(nil);
+  try
+    Dlg.Filter := 'Text file (*.txt)|*.txt|All files (*.*)|*.*';
+    Dlg.DefaultExt := 'txt';
+    Base := Trim(FAllFilter.Text);
+    if Base <> '' then Dlg.FileName := 'cycles-' + Base + '.txt'
+    else Dlg.FileName := 'cycles.txt';
+    Dlg.Options := Dlg.Options + [ofOverwritePrompt, ofPathMustExist];
+    if not Dlg.Execute(Handle) then Exit;
+    try
+      TFile.WriteAllText(Dlg.FileName, CycleReport(True), TEncoding.UTF8);
+    except
+      on E: Exception do
+      begin
+        ShowThemedMessage('Could not write the file: ' + E.Message);
+        Exit;
+      end;
+    end;
+    FAllStatus.Caption := Format('%d cycle(s) written to %s',
+      [Length(FAllCycles), Dlg.FileName]);
+  finally
+    Dlg.Free;
   end;
 end;
 
@@ -734,7 +1235,9 @@ end;
 
 procedure TCircularRefsDialog.DoGotoClick(Sender: TObject);
 begin
-  if FPages.ActivePage = FTabHot then
+  if FPages.ActivePage = FTabPath then
+    DoQueryDblClick(nil)
+  else if FPages.ActivePage = FTabHot then
     DoHotDblClick(nil)
   else if FPages.ActivePage = FTabLevers then
     DoLeverDblClick(nil)
@@ -757,11 +1260,21 @@ begin
   Action := caFree;
 end;
 
+function CreateCircularRefsDialog(AResult: TUsesCycleResult;
+  const APrefillTarget: string): TForm;
+var
+  Dlg: TCircularRefsDialog;
+begin
+  Dlg := TCircularRefsDialog.CreateDialog(Application.MainForm, AResult);
+  Dlg.StartWithPathQuery('', APrefillTarget);
+  Result := Dlg;
+end;
+
 procedure CheckCircularReferences;
 var
   Files: TArray<string>;
   Res: TUsesCycleResult;
-  Dlg: TCircularRefsDialog;
+  Dlg: TForm;
   ProgressForm: TCheckProgressWindow;
 begin
   Files := Editor.GetProjectSourceFiles;
@@ -788,13 +1301,15 @@ begin
     ProgressForm.Free;
   end;
 
-  if Length(Res.Edges) = 0 then
-  begin
-    Res.Free;
-    ShowThemedMessage('No circular unit references found.');
-    Exit;
-  end;
-  Dlg := TCircularRefsDialog.CreateDialog(Application.MainForm, Res);
+  // NOT an early exit any more when nothing is circular: the path
+  // analysis answers "which chain leads from X to Y" for a project with
+  // no cycle at all - and that is precisely the situation after the
+  // compiler refused the edge you wanted to add.
+  // The unit in the editor is almost always the one the compiler
+  // complained about, i.e. the TARGET of the path query ("...back to
+  // UnitA"), so pre-fill it and leave the source to the user.
+  Dlg := CreateCircularRefsDialog(Res,
+    ChangeFileExt(ExtractFileName(Editor.GetActiveFileName), ''));
   Dlg.Show;
 end;
 

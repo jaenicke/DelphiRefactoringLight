@@ -35,6 +35,7 @@ procedure ShowStatusWindow;
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.SysUtils, System.Classes, System.IniFiles, System.IOUtils,
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
@@ -73,6 +74,8 @@ type
     FTicks: Integer;
     FMsgCount: Integer;    // last compiler-message count (see Collect)
     FMsgCountTick: Integer;
+    FResSample: TResourceSample;   // refreshed every 5th tick (VA walk)
+    FResValid: Boolean;
     procedure DoTick(Sender: TObject);
     procedure Row(const ACaption, AValue, ADetail: string);
     procedure DoListDblClick(Sender: TObject);
@@ -237,6 +240,33 @@ begin
   // FIXED row set: every branch below fills the same rows in the same
   // order, so Apply never has to restructure the list.
   FRowCount := 0;
+
+  // ---- process resources --------------------------------------------------
+  // First, because it is what the next "out of memory" report needs:
+  // EPNGOutMemory means CreateDIBSection failed - out of GDI objects, or a
+  // 32-bit address space too fragmented to map the bitmap.
+  if not FResValid or (FTicks mod 5 = 0) then
+  begin
+    FResSample := SampleResources(True);
+    FResValid := True;
+  end;
+  Row('Process resources',
+    Format('GDI %d, USER %d, private %d MB',
+      [FResSample.GdiObjects, FResSample.UserObjects, FResSample.PrivateMB]),
+    Format('peaks: GDI %d, USER %d - Windows allows 10,000 of each per ' +
+      'process; trend log: %%TEMP%%\RefactoringLight-resources.log',
+      [FResSample.GdiPeak, FResSample.UserPeak]));
+  if FResSample.LargestFreeMB >= 0 then
+    Row('  address space (32-bit)',
+      Format('%d MB free, largest block %d MB',
+        [FResSample.FreeTotalMB, FResSample.LargestFreeMB]),
+      'large allocations (bitmaps, big arrays) fail once the largest ' +
+      'block gets small - the IDE then reports "out of memory"')
+  else
+    Row('  address space', '64-bit process', 'not a limiting factor');
+  Row('  GDI balance of this plugin', GdiBalanceText,
+    'objects our own ticks / paint handlers created and did not release ' +
+    'since the IDE started - a number that keeps growing is a leak there');
 
   // ---- identifier index ---------------------------------------------------
   if TUnitIndex.Instance.Ready then S := 'ready' else S := 'building...';
@@ -429,6 +459,9 @@ end;
 
 procedure TStatusFrame.DoTick(Sender: TObject);
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsStatusTick);
   // Window/state refresh only from a plain WM_TIMER tick (deadlock rule).
   if not Visible then Exit;
   Inc(FTicks);

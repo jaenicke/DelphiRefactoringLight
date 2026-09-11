@@ -164,6 +164,9 @@
         <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
         <DCCReference Include="..\Source\Expert.VcsBlame.pas"/>
         <DCCReference Include="..\Source\Expert.BlameGutter.pas"/>
+        <DCCReference Include="..\Source\Expert.ResourceMonitor.pas"/>
+        <DCCReference Include="..\Source\Expert.ScopeFiles.pas"/>
+        <DCCReference Include="..\Source\Expert.DfmRename.pas"/>
         <DCCReference Include="..\Source\Expert.BlameDialogs.pas"/>
         <DCCReference Include="..\Source\Expert.UnitUsageProbe.pas"/>
         <DCCReference Include="..\Source\Expert.FindUnitDialog.pas"/>

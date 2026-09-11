@@ -44,6 +44,7 @@ procedure StructureSourceStats(out AInstalled: Boolean;
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.SysUtils, System.Classes, System.Character,
   Vcl.ExtCtrls,
   ToolsAPI, StructureViewAPI,
@@ -228,6 +229,9 @@ var
 var
   I: Integer;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsStructure);
   try
     Inc(GFires);
     GLastNodes := 0;

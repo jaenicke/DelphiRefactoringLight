@@ -11,7 +11,7 @@ interface
 
 uses
   System.SysUtils, System.IOUtils, System.Types, System.Classes, System.Generics.Collections, Xml.XMLDoc, Xml.XMLIntf, ToolsAPI, DCCStrs,
-  Expert.EditorHelperIntf, Delphi.FileEncoding;
+  DesignIntf, Expert.EditorHelperIntf, Delphi.FileEncoding;
 
 type
   // Re-export TEditorContext from the interface unit so existing
@@ -54,6 +54,9 @@ type
     function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
+    function IsFormInDesigner(const APasFile: string): Boolean;
+    function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
+      AIsMethod: Boolean; out AMessage: string): Boolean;
     function GotoLocation(const AFilePath: string;
       ALine, ACol: Integer; AHighlightLen: Integer = 0): Boolean;
     function AddFileToActiveProject(const AFilePath: string): Boolean;
@@ -520,11 +523,56 @@ begin
       Inc(LineNum);
     Inc(I);
   end;
-  // I zeigt jetzt auf den Anfang von Zeile ALine
-  var LinearPos := I + ACol; // Spalte addieren (0-basiert, Bytes)
+  // I zeigt jetzt auf den Anfang von Zeile ALine.
+  // ACol counts CHARACTERS (UTF-16 code units, the LSP convention), the
+  // buffer is UTF-8 - adding ACol as a byte offset put every edit behind a
+  // non-ASCII character on the same line ('Größe: ' + Button1.Caption) at
+  // the wrong place. Walk the line's code points instead.
+  var LinearPos := I;
+  var CharsLeft := ACol;
+  while (CharsLeft > 0) and (LinearPos < BytesRead) and (Buf[LinearPos] <> 10) do
+  begin
+    var B := Buf[LinearPos];
+    if B < $80 then begin Inc(LinearPos); Dec(CharsLeft); end
+    else if B >= $F0 then begin Inc(LinearPos, 4); Dec(CharsLeft, 2); end  // surrogate pair
+    else if B >= $E0 then begin Inc(LinearPos, 3); Dec(CharsLeft); end
+    else if B >= $C0 then begin Inc(LinearPos, 2); Dec(CharsLeft); end
+    else begin Inc(LinearPos); end;   // stray continuation byte
+  end;
+  if CharsLeft > 0 then
+    LinearPos := LinearPos + CharsLeft;   // beyond the line end: old behaviour
 
   // Laenge des alten Textes in UTF-8 Bytes
   OldTextLen := Length(UTF8Encode(AOldText));
+
+  // VERIFY before writing. This used to delete OldTextLen bytes blindly -
+  // correct only as long as nothing else touched the buffer since the
+  // preview. The form designer does exactly that during a component or
+  // event-handler rename (it renames the declaration itself), and a blind
+  // delete would then cut into the NEW name and the text after it.
+  // Already the new text -> done; not the old text -> refuse.
+  if (LinearPos >= 0) and (AOldText <> '') then
+  begin
+    var NewLen := Length(UTF8Encode(ANewText));
+    var Raw: RawByteString;
+    if (ANewText <> '') and not SameText(ANewText, AOldText)
+      and (LinearPos + NewLen <= BytesRead) then
+    begin
+      SetLength(Raw, NewLen);
+      Move(Buf[LinearPos], Raw[1], NewLen);
+      SetCodePage(Raw, CP_UTF8, False);
+      if string(Raw) = ANewText then
+        Exit(True);
+    end;
+    if LinearPos + OldTextLen > BytesRead then
+      Exit(False);
+    SetLength(Raw, OldTextLen);
+    Move(Buf[LinearPos], Raw[1], OldTextLen);
+    SetCodePage(Raw, CP_UTF8, False);
+    if not SameText(StringReplace(string(Raw), #13, '', [rfReplaceAll]),
+      StringReplace(AOldText, #13, '', [rfReplaceAll])) then
+      Exit(False);
+  end;
 
   // UndoableWriter: CopyTo(Start), DeleteTo(Ende), Insert(NeuText)
   Writer := SourceEditor.CreateUndoableWriter;
@@ -742,6 +790,100 @@ begin
     Writer := nil;
   end;
   Result := True;
+end;
+
+function FindFormEditorOf(const APasFile: string): IOTAFormEditor;
+var
+  ModuleServices: IOTAModuleServices;
+  Module: IOTAModule;
+  I: Integer;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
+  Module := ModuleServices.FindModule(APasFile);
+  if Module = nil then Exit;
+  try
+    for I := 0 to Module.GetModuleFileCount - 1 do
+      if Supports(Module.GetModuleFileEditor(I), IOTAFormEditor, Result) then
+        Exit;
+  except
+    // a module can be mid-construction
+  end;
+  Result := nil;
+end;
+
+function TIDEEditorHelper.IsFormInDesigner(const APasFile: string): Boolean;
+begin
+  Result := FindFormEditorOf(APasFile) <> nil;
+end;
+
+function TIDEEditorHelper.RenameInFormDesigner(const APasFile, AOldName,
+  ANewName: string; AIsMethod: Boolean; out AMessage: string): Boolean;
+var
+  FormEditor: IOTAFormEditor;
+  NtaForm: INTAFormEditor;
+  Designer: IDesigner;
+  Comp: IOTAComponent;
+  NtaComp: INTAComponent;
+begin
+  Result := False;
+  AMessage := '';
+  FormEditor := FindFormEditorOf(APasFile);
+  if FormEditor = nil then
+  begin
+    AMessage := 'form is not open in the designer';
+    Exit;
+  end;
+  try
+    if AIsMethod then
+    begin
+      // IDesigner.RenameMethod is what the Object Inspector's event tab
+      // uses: it renames declaration + implementation in the source AND
+      // every event binding of the designed form.
+      if Supports(FormEditor, INTAFormEditor, NtaForm) then
+        Designer := NtaForm.FormDesigner;
+      if Designer = nil then
+      begin
+        AMessage := 'no form designer available';
+        Exit;
+      end;
+      if not Designer.MethodExists(AOldName) then
+      begin
+        AMessage := Format('the designer does not know a method %s', [AOldName]);
+        Exit;
+      end;
+      Designer.RenameMethod(AOldName, ANewName);
+      Result := True;
+    end
+    else
+    begin
+      Comp := FormEditor.FindComponent(AOldName);
+      if Comp = nil then
+      begin
+        AMessage := Format('no component %s in the designer', [AOldName]);
+        Exit;
+      end;
+      if not Supports(Comp, INTAComponent, NtaComp)
+        or (NtaComp.GetComponent = nil) then
+      begin
+        AMessage := 'component not accessible';
+        Exit;
+      end;
+      // Setting Name on a designed component runs the designer's
+      // ValidateRename: the field in the source follows, and every
+      // reference of other components (live pointers) is written with
+      // the new name on the next save.
+      NtaComp.GetComponent.Name := ANewName;
+      FormEditor.MarkModified;
+      Result := True;
+    end;
+  except
+    on E: Exception do
+    begin
+      AMessage := E.Message;
+      Result := False;
+    end;
+  end;
 end;
 
 procedure TIDEEditorHelper.NotifyClassStructureChanged(const AFilePath: string);

@@ -32,6 +32,8 @@ type
     class var FBlameInfo: Integer;
     class var FBlameColumnOffset: Integer;
     class var FBlameUseTortoise: Boolean;
+    class var FScopeIncludeOpenUnits: Boolean;
+    class var FScopeIncludeUsedUnits: Boolean;
     class var FLoaded: Boolean;
     class function BaseRegistryKey: string; static;
     class function RegistryKey: string; static;
@@ -83,28 +85,48 @@ type
     class property BlameUseTortoise: Boolean
       read FBlameUseTortoise write FBlameUseTortoise;
 
+    /// <summary>Project-wide scans (rename, find references, find
+    ///  implementations, find unit references) also look at units that
+    ///  are OPEN in the editor but not part of the project. The caret's
+    ///  own unit is always included, regardless of this switch.</summary>
+    class property ScopeIncludeOpenUnits: Boolean
+      read FScopeIncludeOpenUnits write FScopeIncludeOpenUnits;
+    /// <summary>... and units reachable through uses clauses (resolved via
+    ///  the identifier index, never below the RAD Studio installation).
+    ///  Off by default: with large libraries this can be thousands of
+    ///  files.</summary>
+    class property ScopeIncludeUsedUnits: Boolean
+      read FScopeIncludeUsedUnits write FScopeIncludeUsedUnits;
+
     class function DefaultPrewarm: Boolean; static;
   end;
 
 implementation
 
 uses
-  System.SysUtils, System.Win.Registry, Winapi.Windows, ToolsAPI;
+  System.SysUtils, System.Win.Registry, Winapi.Windows
+  {$IFNDEF STANDALONE_BUILD}, ToolsAPI{$ENDIF};
 
 { TPluginSettings }
 
 class function TPluginSettings.BaseRegistryKey: string;
 var
+  {$IFNDEF STANDALONE_BUILD}
   Services: IOTAServices;
+  {$ENDIF}
   BaseKey: string;
 begin
   BaseKey := '';
+  // The standalone exe has no IDE services and reads the same branch the
+  // IDE plugin uses, so both share one configuration.
+  {$IFNDEF STANDALONE_BUILD}
   if Supports(BorlandIDEServices, IOTAServices, Services) then
   try
     BaseKey := Services.GetBaseRegistryKey;
   except
     BaseKey := '';
   end;
+  {$ENDIF}
   if BaseKey = '' then
     BaseKey := 'Software\Embarcadero\BDS\37.0';
   // GetBaseRegistryKey can come back with a leading slash - same
@@ -188,6 +210,8 @@ begin
   // Delphi now and draws its marks at the very left of the same area.
   FBlameColumnOffset := 17;
   FBlameUseTortoise := True;
+  FScopeIncludeOpenUnits := True;
+  FScopeIncludeUsedUnits := False;
   FLoaded := True;
 
   MigrateLegacyKey;
@@ -209,6 +233,10 @@ begin
         FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
       if Reg.ValueExists('BlameUseTortoise') then
         FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
+      if Reg.ValueExists('ScopeIncludeOpenUnits') then
+        FScopeIncludeOpenUnits := Reg.ReadBool('ScopeIncludeOpenUnits');
+      if Reg.ValueExists('ScopeIncludeUsedUnits') then
+        FScopeIncludeUsedUnits := Reg.ReadBool('ScopeIncludeUsedUnits');
     finally
       Reg.CloseKey;
     end;
@@ -232,6 +260,8 @@ begin
       Reg.WriteInteger('BlameInfo', FBlameInfo);
       Reg.WriteInteger('BlameColumnOffset', FBlameColumnOffset);
       Reg.WriteBool('BlameUseTortoise', FBlameUseTortoise);
+      Reg.WriteBool('ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
+      Reg.WriteBool('ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
     finally
       Reg.CloseKey;
     end;

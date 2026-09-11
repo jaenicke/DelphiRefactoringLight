@@ -210,6 +210,7 @@ var
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.SysUtils, System.UITypes, System.IOUtils, System.StrUtils,
   System.Actions, Winapi.Windows, ToolsAPI,
   Vcl.Forms, Vcl.Controls,
@@ -929,6 +930,9 @@ var
   Cap: string;
   Act: TCustomAction;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsMenuUpdate, 16);
   if not (Sender is TCustomAction) then Exit;
   Act := TCustomAction(Sender);
   if (FActReq = nil) or not FActReq.TryGetValue(Act, Req) then Exit;
@@ -1345,6 +1349,9 @@ procedure TContextMenuInstaller.OnSyncTimer(Sender: TObject);
 var
   Current: TNotifyEvent;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsMenuUpdate);
   // Re-assert our main-menu entry - the IDE may rebuild the Refactor
   // menu contextually and drop our submenu.
   try InstallIntoMainMenu; except end;

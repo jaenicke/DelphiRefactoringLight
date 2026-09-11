@@ -11,11 +11,13 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.StrUtils,
-  System.Generics.Collections, System.Generics.Defaults, Vcl.Forms, Vcl.Dialogs,
+  System.Generics.Collections, System.Generics.Defaults, System.RegularExpressions,
+  Vcl.Forms, Vcl.Dialogs,
   {$IFNDEF STANDALONE_BUILD} ToolsAPI, {$ENDIF}
   Expert.EditorHelperIntf,
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
-  Expert.UnitIndex, Expert.UnitUsageProbe, Lsp.Uri, Lsp.Protocol,
+  Expert.UnitIndex, Expert.UnitUsageProbe, Expert.ScopeFiles, Expert.DfmRename,
+  Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding;
 
 type
@@ -26,9 +28,23 @@ type
     OldText: string;
   end;
 
+  /// <summary>Form-file occurrences of the renamed symbol in ONE .dfm/.fmx.</summary>
+  TRenameFormPlan = record
+    FormFile: string;
+    PasFile: string;
+    Hits: TArray<TDfmHit>;
+  end;
+
   TLspRenameWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
   private
     FDialog: TRenameDialog;
+    // Form files (see CollectFormEdits). The LSP knows nothing about them,
+    // so they are planned separately and applied BEFORE the source edits:
+    // an open form is renamed through its designer, which also renames the
+    // declaration in the source.
+    FFormPlans: TArray<TRenameFormPlan>;
+    FFormTarget: TDfmTargetKind;
+    FFormDeclFile: string;
     FContext: TEditorContext;
     FEdit: TLspWorkspaceEdit;
     FDiagLog: string;
@@ -36,6 +52,11 @@ type
     ///  (triggered by the IDE module notifier). In that mode the preview
     ///  skips LSP verification and just does a text-based scan.</summary>
     FUnitRenameMode: Boolean;
+    procedure CollectFormEdits(const AFiles: TArray<string>;
+      const ADefFile: string; ADefLine: Integer; const AOwnerType,
+      AOldName, ANewName: string);
+    function FormHitKindAt(const AFile: string; ALine, ACol: Integer;
+      out AKind: string): Boolean;
     procedure DoPreview(Sender: TObject);
     procedure DoPreviewForIdentifier;
     procedure DoPreviewForUnit;
@@ -192,13 +213,51 @@ begin
 
   var AppliedCount := 0;
   var FailedCount := 0;
+  var FormNotes := '';
   var AffectedFiles := TList<string>.Create;
+  var FormFilesHandled := TList<string>.Create;
   try
+    // ---- 1. forms open in the DESIGNER --------------------------------
+    // The designer owns such a form; its .dfm on disk is rewritten from
+    // memory on the next save. The declaring form is renamed THROUGH the
+    // designer (the Object Inspector path), which also renames the
+    // declaration in the source - so this runs before the source edits,
+    // and ApplyEditViaEditor recognises the already-renamed positions.
+    for var Plan in FFormPlans do
+    begin
+      if not Editor.IsFormInDesigner(Plan.PasFile) then Continue;
+      FormFilesHandled.Add(Plan.FormFile);
+      if (FFormTarget in [dtField, dtMethod])
+        and SameText(ExpandFileName(Plan.PasFile), ExpandFileName(FFormDeclFile)) then
+      begin
+        var Msg: string;
+        if Editor.RenameInFormDesigner(Plan.PasFile, FContext.WordAtCursor,
+          FEdit.FileEdits[0].Edits[0].NewText, FFormTarget = dtMethod, Msg) then
+          Inc(AppliedCount, Length(Plan.Hits))
+        else
+        begin
+          Inc(FailedCount, Length(Plan.Hits));
+          FormNotes := FormNotes + sLineBreak + ExtractFileName(Plan.FormFile) +
+            ': the form designer refused - ' + Msg;
+        end;
+      end
+      else
+        FormNotes := FormNotes + sLineBreak + ExtractFileName(Plan.FormFile) +
+          ': open in the form designer and not the declaring form - not ' +
+          'changed by the rename (an inherited form normally follows its ' +
+          'ancestor; please check, or close it and rename again)';
+    end;
+
+    // ---- 3. (below) form files NOT in a designer: edited as text ------
     // Apply via IDE editor API (undoable!)
     // Per file, sort edits line-descending so earlier edits do not
     // shift later edits' positions.
     for var FE in FEdit.FileEdits do
     begin
+      // form files are handled in steps 1 and 3
+      if SameText(ExtractFileExt(FE.FilePath), '.dfm')
+        or SameText(ExtractFileExt(FE.FilePath), '.fmx') then
+        Continue;
       var SortedEdits := Copy(FE.Edits);
       TArray.Sort<TLspTextEdit>(SortedEdits,
         TComparer<TLspTextEdit>.Construct(
@@ -222,6 +281,36 @@ begin
         AffectedFiles.Add(FE.FilePath);
     end;
 
+    // ---- 3. form files that are not in a designer ----------------------
+    for var Plan in FFormPlans do
+    begin
+      if FormFilesHandled.Contains(Plan.FormFile) then Continue;
+      try
+        var Enc := TDelphiFileEncoding.Detect(Plan.FormFile);
+        var Old := TDelphiFileEncoding.ReadAll(Plan.FormFile);
+        var Skipped: Integer;
+        var NewName := '';
+        for var FE in FEdit.FileEdits do
+          if Length(FE.Edits) > 0 then begin NewName := FE.Edits[0].NewText; Break; end;
+        var Changed := ApplyDfmHits(Old, FContext.WordAtCursor, NewName,
+          Plan.Hits, Skipped);
+        var Buf: string;
+        if Editor.ReadEditorContent(Plan.FormFile, Buf) then
+          Editor.ReplaceFileContent(Plan.FormFile, Changed)   // standalone tab
+        else
+          TDelphiFileEncoding.WriteAll(Plan.FormFile, Changed, Enc);
+        Inc(AppliedCount, Length(Plan.Hits) - Skipped);
+        Inc(FailedCount, Skipped);
+      except
+        on E: Exception do
+        begin
+          Inc(FailedCount, Length(Plan.Hits));
+          FormNotes := FormNotes + sLineBreak + ExtractFileName(Plan.FormFile) +
+            ': ' + E.Message;
+        end;
+      end;
+    end;
+
     // Inform LSP about the changes (not needed in unit-rename mode
     // because LSP was not used for verification, but harmless).
     if TLspManager.Instance.IsAlive then
@@ -235,19 +324,213 @@ begin
       end;
     end;
 
-    if FailedCount = 0 then
+    if (FailedCount = 0) and (FormNotes = '') then
       MessageDlg(Format('%d change(s) applied successfully (Ctrl+Z to undo).',
         [AppliedCount]), mtInformation, [mbOK], 0)
     else
-      MessageDlg(Format('%d applied, %d failed.',
-        [AppliedCount, FailedCount]), mtWarning, [mbOK], 0);
+      MessageDlg(Format('%d applied, %d failed.%s',
+        [AppliedCount, FailedCount, FormNotes]), mtWarning, [mbOK], 0);
   finally
+    FormFilesHandled.Free;
     AffectedFiles.Free;
   end;
 end;
 
+procedure TLspRenameWizard.CollectFormEdits(const AFiles: TArray<string>;
+  const ADefFile: string; ADefLine: Integer; const AOwnerType, AOldName,
+  ANewName: string);
+var
+  DeclLines: TArray<string>;
+  Decl, Low: string;
+  ImplLine, I, DeclIdx: Integer;
+  Parents: TDictionary<string, string>;
+  QualRoots: TDictionary<string, Boolean>;
+  Texts: TDictionary<string, string>;
+  Pairs: TList<TPair<string, string>>;   // (pas, form file)
+begin
+  FFormPlans := nil;
+  FFormDeclFile := ADefFile;
+  try
+    DeclLines := ReadDelphiFileLines(ADefFile);
+  except
+    Exit;
+  end;
+  if (ADefLine < 0) or (ADefLine > High(DeclLines)) then Exit;
+  DeclIdx := ADefLine;
+  Decl := DeclLines[DeclIdx];
+
+  // What kind of symbol is it? Members only count when declared INSIDE a
+  // class body in the interface part: a local variable "Button1" in
+  // TForm1.FormCreate has TForm1 as containing type too, and must never
+  // rename the form's real Button1.
+  ImplLine := MaxInt;
+  for I := 0 to High(DeclLines) do
+    if SameText(Trim(DeclLines[I]), 'implementation') then
+    begin
+      ImplLine := I;
+      Break;
+    end;
+
+  // DelphiLSP frequently answers GotoDefinition for a METHOD with its
+  // IMPLEMENTATION header ("procedure TDlgAbout.sbDbFilesPathClick") -
+  // tester: renaming an event handler showed both source lines but no
+  // form entry, because that line lies below 'implementation' and was
+  // taken for a local. An implementation header of the owner type is not
+  // a local: go to the member's declaration in the class body instead.
+  if (AOwnerType <> '') and (DeclIdx >= ImplLine)
+    and SameText(TImplementationFinder.OwnerTypeFromImplLine(Decl), AOwnerType) then
+  begin
+    var InClass := FindMemberDeclarationLine(string.Join(sLineBreak, DeclLines),
+      AOwnerType, AOldName);
+    if (InClass >= 0) and (InClass < ImplLine) then
+    begin
+      DeclIdx := InClass;
+      Decl := DeclLines[DeclIdx];
+      FDiagLog := FDiagLog + Format('Form check: definition was the ' +
+        'implementation header, using the class declaration at line %d' +
+        sLineBreak, [DeclIdx + 1]);
+    end;
+  end;
+  Low := LowerCase(TrimLeft(Decl));
+
+  if (AOwnerType <> '') and (DeclIdx < ImplLine) then
+  begin
+    if StartsStr('property ', Low) or StartsStr('class property ', Low) then
+      FFormTarget := dtProperty
+    else if StartsStr('procedure ', Low) or StartsStr('function ', Low)
+      or StartsStr('class procedure ', Low) or StartsStr('class function ', Low) then
+      FFormTarget := dtMethod
+    else if Pos(':', Decl) > 0 then
+      FFormTarget := dtField
+    else
+      Exit;
+  end
+  else if (AOwnerType = '') and TRegEx.IsMatch(Decl,
+    '^\s*' + TRegEx.Escape(AOldName) + '\s*(<[^>]*>)?\s*=\s*(packed\s+)?class\b',
+    [roIgnoreCase]) then
+    FFormTarget := dtType
+  else
+    Exit;
+
+  Parents := TDictionary<string, string>.Create;
+  QualRoots := TDictionary<string, Boolean>.Create;
+  Texts := TDictionary<string, string>.Create;
+  Pairs := TList<TPair<string, string>>.Create;
+  try
+    // Form files next to the scanned units (plus the declaring unit).
+    var Seen := TDictionary<string, Boolean>.Create;
+    try
+      for var F in AFiles + [ADefFile] do
+      begin
+        if not SameText(ExtractFileExt(F), '.pas') then Continue;
+        if Seen.ContainsKey(UpperCase(F)) then Continue;
+        Seen.Add(UpperCase(F), True);
+        var Form := FormFileOf(F);
+        if Form = '' then Continue;
+        if not IsTextFormFile(Form) then
+        begin
+          FDiagLog := FDiagLog + 'Form file skipped (binary format): ' + Form + sLineBreak;
+          Continue;
+        end;
+        try
+          Texts.Add(Form, TDelphiFileEncoding.ReadAll(Form));
+          Pairs.Add(TPair<string, string>.Create(F, Form));
+        except
+        end;
+      end;
+    finally
+      Seen.Free;
+    end;
+    if Pairs.Count = 0 then Exit;
+
+    // Class hierarchy from the scanned sources: an inherited form or a
+    // frame class only matches through its parent chain.
+    for var F in AFiles + [ADefFile] do
+      if SameText(ExtractFileExt(F), '.pas') then
+      try
+        CollectClassParents(ReadDelphiFileLines(F), Parents);
+      except
+      end;
+
+    var Owner := AOwnerType;
+    var Match: TDfmClassMatch :=
+      function(const AClass: string): Boolean
+      begin
+        Result := ClassMatchesType(Parents, AClass, Owner);
+      end;
+
+    // Roots whose class matches: "DataModule1.Button1" qualifiers.
+    for var Pr in Pairs do
+    begin
+      var Root := ReadDfmRoot(Texts[Pr.Value]);
+      if (Root.Name <> '') and Match(Root.ClassName) then
+        QualRoots.AddOrSetValue(UpperCase(Root.Name), True);
+    end;
+    var Qual: TDfmQualifierMatch :=
+      function(const AQualifier: string): Boolean
+      begin
+        Result := QualRoots.ContainsKey(UpperCase(AQualifier));
+      end;
+
+    for var Pr in Pairs do
+    begin
+      var Hits := FindDfmRenameHits(Texts[Pr.Value], AOldName, FFormTarget,
+        Match, Qual);
+      if Length(Hits) = 0 then Continue;
+
+      var Plan: TRenameFormPlan;
+      Plan.FormFile := Pr.Value;
+      Plan.PasFile := Pr.Key;
+      Plan.Hits := Hits;
+      FFormPlans := FFormPlans + [Plan];
+
+      // Same shape as the LSP edits, so preview, counting and the details
+      // log treat form occurrences like any other.
+      var FE: TLspFileEdits;
+      FE.FilePath := Pr.Value;
+      SetLength(FE.Edits, Length(Hits));
+      for I := 0 to High(Hits) do
+      begin
+        FE.Edits[I].Range.Start.Line := Hits[I].Line;
+        FE.Edits[I].Range.Start.Character := Hits[I].Col;
+        FE.Edits[I].Range.End_.Line := Hits[I].Line;
+        FE.Edits[I].Range.End_.Character := Hits[I].Col + Hits[I].Len;
+        FE.Edits[I].NewText := ANewName;
+      end;
+      FEdit.FileEdits := FEdit.FileEdits + [FE];
+      FDiagLog := FDiagLog + Format('Form file %s: %d occurrence(s)%s',
+        [ExtractFileName(Pr.Value), Length(Hits),
+         IfThen(Editor.IsFormInDesigner(Pr.Key), ' (open in the form designer)', '')]) +
+        sLineBreak;
+    end;
+  finally
+    Pairs.Free;
+    Texts.Free;
+    QualRoots.Free;
+    Parents.Free;
+  end;
+end;
+
+function TLspRenameWizard.FormHitKindAt(const AFile: string; ALine, ACol: Integer;
+  out AKind: string): Boolean;
+begin
+  Result := False;
+  for var Plan in FFormPlans do
+    if SameText(Plan.FormFile, AFile) then
+      for var H in Plan.Hits do
+        if (H.Line = ALine) and (H.Col = ACol) then
+        begin
+          AKind := DfmHitKindText(H.Kind);
+          if Editor.IsFormInDesigner(Plan.PasFile) then
+            AKind := AKind + ' (via designer)';
+          Exit(True);
+        end;
+end;
+
 procedure TLspRenameWizard.DoPreview(Sender: TObject);
 begin
+  // a previous preview's form plans must never be applied to this one
+  FFormPlans := nil;
   if FUnitRenameMode then
     DoPreviewForUnit
   else
@@ -282,7 +565,9 @@ begin
   FDialog.SetBusy(True);
   FDiagLog := '';
   try
-    ProjFiles := Editor.GetProjectSourceFiles;
+    // Units outside the project that use the renamed unit need the new
+    // name as well (settings: open units / units via uses).
+    ProjFiles := ProjectScopeFiles(FContext.FileName);
     FDiagLog :=
       '=== Diagnostics (Unit Rename) ===' + sLineBreak +
       'Old unit name: ' + FContext.WordAtCursor + sLineBreak +
@@ -488,8 +773,18 @@ begin
             [Length(ProjFiles)]));
         end;
     else
-      // Get project files from the IDE
-      ProjFiles := Editor.GetProjectSourceFiles;
+      // The project's sources, the caret's own unit ALWAYS (forum: a
+      // rename started in a unit outside the project changed every
+      // project unit but not the one it was started in), plus the
+      // extras ticked in the dialog.
+      begin
+        var Extra: TScopeExtra;
+        ProjFiles := ProjectScopeFiles(FContext.FileName,
+          FDialog.IncludeOpenUnits, FDialog.IncludeUsedUnits, Extra);
+        FDialog.SetStatus('Scope: ' + ScopeExtraText(Length(ProjFiles), Extra) + '.');
+        FDiagLog := FDiagLog + 'Scope: ' +
+          ScopeExtraText(Length(ProjFiles), Extra) + sLineBreak;
+      end;
     end;
     FDiagLog := FDiagLog + 'Project files: ' + IntToStr(Length(ProjFiles)) + sLineBreak + sLineBreak;
 
@@ -577,6 +872,30 @@ begin
 
     FDiagLog := FDiagLog + 'Declaration: ' + DefFilePath + ':' + IntToStr(DefLine + 1) + ':' + IntToStr(DefCol + 1) + sLineBreak;
 
+    // The DECLARATION may live in a unit none of the scanned files is -
+    // renaming every use but not the declaration does not compile. For
+    // the whole-project scope, scan that file too (never inside the
+    // RAD Studio installation: the RTL/VCL is not ours to rename).
+    if (FDialog.Scope = rscProject) and (DefFilePath <> '')
+      and TFile.Exists(DefFilePath) then
+    begin
+      var HaveDecl := False;
+      for var PF in ProjFiles do
+        if SameText(ExpandFileName(PF), ExpandFileName(DefFilePath)) then
+          HaveDecl := True;
+      var Bds := FindBdsRoot;
+      if (Bds <> '') and UpperCase(ExpandFileName(DefFilePath)).StartsWith(
+        UpperCase(IncludeTrailingPathDelimiter(ExpandFileName(Bds)))) then
+        HaveDecl := True;   // never rename inside the installation
+      if not HaveDecl then
+      begin
+        ProjFiles := ProjFiles + [DefFilePath];
+        Candidates := Candidates + FindCandidates(FContext.WordAtCursor, [DefFilePath]);
+        FDiagLog := FDiagLog + 'Declaration unit added to the scan: ' +
+          DefFilePath + sLineBreak;
+      end;
+    end;
+
     // Phase 2c: find interface/class method implementations.
     // Text-based scan over all project files with syntax filter on lines
     // like 'procedure TClass.Method'. Only classes that implement the
@@ -633,6 +952,18 @@ begin
       FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, DefFilePath, ImplFilesArray, Client);
     finally
       ImplFilesList.Free;
+    end;
+
+    // Form files: component names, event handlers, component references.
+    // Only when the LSP actually told us where the declaration is, and not
+    // for the "current method" scope (locals never appear in a form).
+    FFormPlans := nil;
+    if (Length(DefLocs) > 0) and (FDialog.Scope <> rscCurrentMethod)
+      and not FDialog.ScanCancelled then
+    begin
+      FDialog.SetStatus('Checking form files...');
+      CollectFormEdits(ProjFiles, DefFilePath, DefLine, OwnerType,
+        FContext.WordAtCursor, NewName);
     end;
 
     if Length(FEdit.FileEdits) = 0 then
@@ -942,7 +1273,11 @@ begin
         else
           Item.PreviewLine := OrigLine;
 
-        Item.Kind := DetermineKind(FE.FilePath, LineNo, StartCol, OrigLine);
+        var FormKind: string;
+        if FormHitKindAt(FE.FilePath, LineNo, StartCol, FormKind) then
+          Item.Kind := FormKind
+        else
+          Item.Kind := DetermineKind(FE.FilePath, LineNo, StartCol, OrigLine);
 
         List.Add(Item);
       end;

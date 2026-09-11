@@ -53,6 +53,8 @@ type
     FCmbScope: TComboBox;
     FLblScope: TLabel;
     FBtnPickUnits: TButton;
+    FChkOpenUnits: TCheckBox;
+    FChkUsedUnits: TCheckBox;
     FSelectedUnits: TArray<string>;
     FBusy: Boolean;          // a scan is running inside the click handler
     FScanCancelled: Boolean; // user pressed Stop / tried to close
@@ -73,6 +75,7 @@ type
     procedure DoFormShow(Sender: TObject);
     procedure DoScopeChange(Sender: TObject);
     procedure DoPickUnitsClick(Sender: TObject);
+    procedure DoScopeExtraClick(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
     procedure DoBtnStopClick(Sender: TObject);
     procedure DoCloseQuery(Sender: TObject; var CanClose: Boolean);
@@ -119,6 +122,9 @@ type
     ///  files). Read by the wizard when Preview runs.</summary>
     function Scope: TRenameScope;
     function SelectedUnits: TArray<string>;
+    /// <summary>Whole-project scope extras (see Expert.ScopeFiles).</summary>
+    function IncludeOpenUnits: Boolean;
+    function IncludeUsedUnits: Boolean;
     /// <summary>Unit-rename mode has no scopes - renaming a unit is
     ///  inherently project-wide.</summary>
     procedure HideScopeSelector;
@@ -131,7 +137,8 @@ implementation
 
 uses
   System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes,
-  Expert.ListViewSort, Expert.EditorHelperIntf, Expert.WithRefactorDialog;
+  Expert.ListViewSort, Expert.EditorHelperIntf, Expert.WithRefactorDialog,
+  Expert.PluginSettings;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -246,6 +253,28 @@ begin
   FBtnPickUnits.Caption := 'Select...';
   FBtnPickUnits.Visible := False;
   FBtnPickUnits.OnClick := DoPickUnitsClick;
+
+  // Forum request: the unit the rename starts in is not always part of
+  // the project. That one is ALWAYS scanned now; these two widen the
+  // whole-project scope further. Persisted - the same switches drive
+  // find references / implementations / unit references.
+  FChkOpenUnits := TCheckBox.Create(Self);
+  FChkOpenUnits.Parent := FPanelTop;
+  FChkOpenUnits.Left := 388;
+  FChkOpenUnits.Top := 116;
+  FChkOpenUnits.Width := 340;
+  FChkOpenUnits.Caption := 'plus units open in the editor';
+  FChkOpenUnits.Checked := TPluginSettings.ScopeIncludeOpenUnits;
+  FChkOpenUnits.OnClick := DoScopeExtraClick;
+
+  FChkUsedUnits := TCheckBox.Create(Self);
+  FChkUsedUnits.Parent := FPanelTop;
+  FChkUsedUnits.Left := 388;
+  FChkUsedUnits.Top := 137;
+  FChkUsedUnits.Width := 340;
+  FChkUsedUnits.Caption := 'plus units reachable via uses (outside the project)';
+  FChkUsedUnits.Checked := TPluginSettings.ScopeIncludeUsedUnits;
+  FChkUsedUnits.OnClick := DoScopeExtraClick;
 
   FBtnCancel := TButton.Create(Self);
   FBtnCancel.Parent := FPanelTop;
@@ -584,11 +613,43 @@ begin
   FLblScope.Visible := False;
   FCmbScope.Visible := False;
   FBtnPickUnits.Visible := False;
+  FChkOpenUnits.Visible := False;
+  FChkUsedUnits.Visible := False;
+end;
+
+function TRenameDialog.IncludeOpenUnits: Boolean;
+begin
+  Result := (FChkOpenUnits <> nil) and FChkOpenUnits.Checked;
+end;
+
+function TRenameDialog.IncludeUsedUnits: Boolean;
+begin
+  Result := (FChkUsedUnits <> nil) and FChkUsedUnits.Checked;
+end;
+
+procedure TRenameDialog.DoScopeExtraClick(Sender: TObject);
+begin
+  TPluginSettings.ScopeIncludeOpenUnits := FChkOpenUnits.Checked;
+  TPluginSettings.ScopeIncludeUsedUnits := FChkUsedUnits.Checked;
+  try
+    TPluginSettings.Save;
+  except
+    // a registry hiccup must not break the dialog
+  end;
+  // like a scope change: the shown preview belongs to the old file set
+  DoScopeChange(nil);
 end;
 
 procedure TRenameDialog.DoScopeChange(Sender: TObject);
 begin
   FBtnPickUnits.Visible := Scope = rscSelectedUnits;
+  // The extra units widen the WHOLE-PROJECT scope; for one unit, one
+  // method or a hand-picked set they would contradict the choice.
+  if FChkOpenUnits <> nil then
+  begin
+    FChkOpenUnits.Enabled := Scope = rscProject;
+    FChkUsedUnits.Enabled := Scope = rscProject;
+  end;
   // A scope change invalidates the previous preview.
   SetPreviewItems(nil);
   EnableRename(False);

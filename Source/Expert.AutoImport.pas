@@ -303,6 +303,7 @@ procedure LiveRefreshAfterCompile;
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.Classes, System.Types, System.UITypes,
   System.Generics.Collections, System.Generics.Defaults,
   System.IOUtils, System.Math, System.StrUtils,
@@ -3458,6 +3459,9 @@ var
   H: Integer;
   Tick: Cardinal;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsLiveTick);
   if (Editor = nil) or GOnDemandBusy then Exit;
   // No live churn while any modal dialog (incl. our own wizards) is open.
   if Application.ModalLevel > 0 then

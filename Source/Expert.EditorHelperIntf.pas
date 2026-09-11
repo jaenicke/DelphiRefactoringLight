@@ -114,6 +114,19 @@ type
     function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
+    /// <summary>True when the form belonging to APasFile is loaded in the
+    ///  IDE's form designer. The designer then OWNS the form: a .dfm
+    ///  changed on disk would simply be overwritten on the next save.
+    ///  Always False in standalone.</summary>
+    function IsFormInDesigner(const APasFile: string): Boolean;
+    /// <summary>Renames a component (AIsMethod = False) or an event
+    ///  handler method (True) through the form designer of APasFile - the
+    ///  path the Object Inspector takes, so the designer updates its own
+    ///  bindings and the declaration in the source. False with a reason in
+    ///  AMessage when the form is not in the designer or the designer
+    ///  refused (e.g. an inherited component).</summary>
+    function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
+      AIsMethod: Boolean; out AMessage: string): Boolean;
 
     /// <summary>Opens AFilePath in the editor and positions the cursor
     ///  at (ALine, ACol). 0-based positions (LSP convention).

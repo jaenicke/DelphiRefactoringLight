@@ -29,6 +29,7 @@ procedure UninstallQuickFixMarkers;
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.SysUtils, System.Types, System.Math,
   Vcl.Graphics, Vcl.Controls,
   ToolsAPI, ToolsAPI.Editor,
@@ -76,6 +77,9 @@ var
   LineText: string;
   CharW, LeftCol, X1, X2, Y, Indent, WordLen: Integer;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsMarkerPaint, 32);
   // Draw AFTER the IDE finished the line (Stage = plsEndPaint, after-event).
   if BeforeEvent or (Stage <> plsEndPaint) or (Context = nil) then Exit;
   try

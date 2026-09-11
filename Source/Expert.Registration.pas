@@ -24,7 +24,7 @@ uses
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
   Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow,
   Expert.BlameGutter, Expert.PluginSettings,
-  Expert.DialogHelper;
+  Expert.DialogHelper, Expert.ResourceMonitor;
 
 type
   TShortcutChangeHook = class
@@ -130,6 +130,10 @@ begin
   // or the live adjuster - which is exactly how a tester found it ("the
   // offset was only honoured once I went into the mini dialog").
   ApplyBlameSettings;
+  // GDI / USER objects and (32-bit) address space, sampled every 30 s
+  // into %TEMP%\RefactoringLight-resources.log - the numbers an
+  // "out of memory" report needs (see Expert.ResourceMonitor).
+  StartResourceMonitor;
 
   // On manual (re-)install inside a running IDE: show the restart hint.
   TRestartHint.Check;
@@ -141,6 +145,7 @@ finalization
   // Before anything else: hand the dockable form back to the IDE - it
   // must not outlive the BPL.
   UnregisterStatusWindow;
+  StopResourceMonitor;
   UninstallBlameGutter;
   UninstallQuickFixMarkers;
   UninstallStructureErrorSource;

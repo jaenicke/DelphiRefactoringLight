@@ -24,7 +24,8 @@ interface
 
 uses
   System.SysUtils, System.Classes, Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog,
-  Expert.LspManager, Expert.ImplementationFinder, Lsp.Uri, Lsp.Client, System.UITypes;
+  Expert.LspManager, Expert.ImplementationFinder, Lsp.Uri, Lsp.Client, System.UITypes,
+  Expert.ScopeFiles;
 
 type
   TLspFindImplementationsWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -141,7 +142,8 @@ begin
   FDialog.SetStatus('Saving all files...');
   Editor.SaveAllFiles;
 
-  ProjFiles := Editor.GetProjectSourceFiles;
+  // Project + the caret's unit + the extras from the settings.
+  ProjFiles := ProjectScopeFiles(FContext.FileName);
   if System.Length(ProjFiles) = 0 then
   begin
     FDialog.SetStatus('No project context found.');

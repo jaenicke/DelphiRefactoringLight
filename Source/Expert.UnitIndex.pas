@@ -70,6 +70,16 @@ type
     function IdentCount: Integer;
   end;
 
+  /// <summary>Per-unit input of BuildUnitSnapshot: what ParseUnit
+  ///  produced for one file (a trailing '<' on an identifier marks a
+  ///  generic declaration).</summary>
+  TUnitSource = record
+    UnitName: string;
+    Path: string;
+    Idents: TArray<string>;
+    HasInit: Boolean;
+  end;
+
   TUnitIndex = class
   private type
     TIndexedUnit = class
@@ -114,11 +124,17 @@ type
     FGlobalKey: string;    // cache path the global dict was last loaded for
     FProjectKey: string;   // cache path the project dict was last loaded for
     FScanCycle: Integer;   // completed worker cycles (interlocked)
+    // The two immutable LAYERS the published snapshot is composed of.
+    // Worker-only. The global one (RTL/VCL/third party - easily a million
+    // identifiers with DevExpress & co) is rebuilt only when the LIBRARY
+    // changes; saving a project file rebuilds just the small project one.
+    FGlobalLayer: IUnitSnapshot;
+    FProjectLayer: IUnitSnapshot;
     class var FInstance: TUnitIndex;
     function CacheFileFor(const AKey: string): string;
     function GetSnapshot: IUnitSnapshot;
     procedure EnsureWorker;
-    procedure PublishSnapshot;
+    procedure PublishSnapshot(ARebuildGlobal, ARebuildProject: Boolean);
     procedure LoadCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>);
     procedure SaveCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>);
     procedure CurrentSources(out AGlobalDirs, AProjectDirs, AProjectFiles: TArray<string>;
@@ -161,6 +177,23 @@ type
     ///  returning up to AMax (identifier, unit) hits.</summary>
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
   end;
+
+/// <summary>Builds an immutable snapshot from per-unit data. The build
+///  sorts one flat (key, unit) array instead of growing a dictionary of
+///  lists, so its transient memory is a few MB above the result - the
+///  old build held two extra dictionaries of the whole identifier set.
+///  Exposed for the console tests and the memory measurement.</summary>
+function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
+
+/// <summary>One view over a PROJECT and a GLOBAL layer (either may be
+///  nil). Project units shadow global units with the same PATH, and
+///  project hits come first - the same answers the old merged build
+///  gave, without ever copying the global layer.</summary>
+function ComposeUnitSnapshots(const AProject, AGlobal: IUnitSnapshot): IUnitSnapshot;
+
+/// <summary>Root directory of the newest installed RAD Studio (registry
+///  RootDir), '' when none is found.</summary>
+function FindBdsRoot: string;
 
 /// <summary>Parses the interface section of a .pas into its exported
 ///  identifiers; AHasInit reports an initialization/finalization section
@@ -1766,6 +1799,359 @@ end;
 //  TUnitIndex
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+//  Snapshot construction and layering
+// ---------------------------------------------------------------------------
+
+function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
+type
+  TKeyEntry = record
+    Key: string;     // UPPER identifier
+    Disp: string;    // original case
+    Entry: Integer;  // unit index, GenericBit for a generic declaration
+  end;
+var
+  Names, Paths, KeysUpper, Display: TArray<string>;
+  InitFlags: TArray<Boolean>;
+  Pairs: TArray<TKeyEntry>;
+  Total, I, J, K, G, Groups, Start: Integer;
+  Id, Up: string;
+  Entry: Integer;
+  Flat: TDictionary<string, TArray<Integer>>;
+  Ids: TArray<Integer>;
+begin
+  Total := 0;
+  for I := 0 to High(AUnits) do
+    Inc(Total, Length(AUnits[I].Idents));
+
+  SetLength(Names, Length(AUnits));
+  SetLength(Paths, Length(AUnits));
+  SetLength(InitFlags, Length(AUnits));
+  SetLength(Pairs, Total);
+  K := 0;
+  for I := 0 to High(AUnits) do
+  begin
+    Names[I] := AUnits[I].UnitName;
+    Paths[I] := AUnits[I].Path;
+    InitFlags[I] := AUnits[I].HasInit;
+    for J := 0 to High(AUnits[I].Idents) do
+    begin
+      Id := AUnits[I].Idents[J];
+      Entry := I;
+      // Trailing '<' = generic-declaration marker from ParseUnit; the key
+      // is the bare name, genericity travels as a flag bit.
+      if (Id <> '') and (Id[Length(Id)] = '<') then
+      begin
+        Id := Copy(Id, 1, Length(Id) - 1);
+        Entry := I or GenericBit;
+      end;
+      if Id = '' then Continue;
+      Up := UpperCase(Id);
+      // All-caps names (Winapi constants by the thousand) share ONE
+      // string instance for key and display instead of two copies.
+      if Up = Id then Up := Id;
+      Pairs[K].Key := Up;
+      Pairs[K].Disp := Id;
+      Pairs[K].Entry := Entry;
+      Inc(K);
+    end;
+  end;
+  SetLength(Pairs, K);
+
+  // Key order, then unit order - the order the old dictionary build
+  // produced per key (units were appended in index order).
+  TArray.Sort<TKeyEntry>(Pairs, TComparer<TKeyEntry>.Construct(
+    function(const A, B: TKeyEntry): Integer
+    begin
+      Result := CompareStr(A.Key, B.Key);
+      if Result = 0 then
+        Result := (A.Entry and not GenericBit) - (B.Entry and not GenericBit);
+      if Result = 0 then
+        Result := (A.Entry and GenericBit) - (B.Entry and GenericBit);
+    end));
+
+  Groups := 0;
+  for I := 0 to High(Pairs) do
+    if (I = 0) or (Pairs[I].Key <> Pairs[I - 1].Key) then Inc(Groups);
+
+  SetLength(KeysUpper, Groups);
+  SetLength(Display, Groups);
+  Flat := TDictionary<string, TArray<Integer>>.Create(Groups);
+  try
+    G := 0;
+    I := 0;
+    while I <= High(Pairs) do
+    begin
+      Start := I;
+      while (I <= High(Pairs)) and (Pairs[I].Key = Pairs[Start].Key) do Inc(I);
+      // Distinct entries of this key (a unit may declare a name twice -
+      // overloads - which must not list the unit twice).
+      SetLength(Ids, I - Start);
+      K := 0;
+      for J := Start to I - 1 do
+        if (K = 0) or (Ids[K - 1] <> Pairs[J].Entry) then
+        begin
+          Ids[K] := Pairs[J].Entry;
+          Inc(K);
+        end;
+      SetLength(Ids, K);
+      KeysUpper[G] := Pairs[Start].Key;
+      Display[G] := Pairs[Start].Disp;
+      Flat.Add(KeysUpper[G], Ids);
+      Ids := nil;   // the dictionary owns that array now
+      Inc(G);
+    end;
+    Pairs := nil;   // release the temporaries before the snapshot lives
+    Result := TUnitSnapshot.Create(Names, Paths, KeysUpper, Display,
+      InitFlags, Flat);
+  except
+    Flat.Free;
+    raise;
+  end;
+end;
+
+// Edit distance of a unit name, also against its LAST dotted segment
+// ('Windwos' -> 'Winapi.Windows'). Shared by the snapshot and the layer
+// composite so both rank alike. AMaxDist + 1 = too far.
+function UnitNameDistance(const AUpperQuery, AUpperName: string;
+  AMaxDist: Integer): Integer;
+var
+  P: Integer;
+  LastSeg: string;
+begin
+  Result := BoundedEditDistance(AUpperQuery, AUpperName, AMaxDist);
+  if Result <= AMaxDist then Exit;
+  P := AUpperName.LastDelimiter('.') + 1;   // 0-based helper -> 1-based char
+  if P > 1 then
+  begin
+    LastSeg := Copy(AUpperName, P + 1, MaxInt);
+    if LastSeg <> AUpperQuery then
+      Result := BoundedEditDistance(AUpperQuery, LastSeg, AMaxDist)
+    else
+      Result := 1;   // exact last segment: near-certain candidate
+  end;
+end;
+
+type
+  TLayeredSnapshot = class(TInterfacedObject, IUnitSnapshot)
+  private
+    FProject: IUnitSnapshot;
+    FGlobal: IUnitSnapshot;
+    // UPPER paths of the project layer that ALSO exist in the global one
+    // (a project directory on the library path). Global hits for those
+    // are hidden - the project copy wins, as in the old merged build.
+    FShadowed: TDictionary<string, Boolean>;
+    function Visible(const AHit: TFindUnitHit): Boolean; inline;
+  public
+    constructor Create(const AProject, AGlobal: IUnitSnapshot);
+    destructor Destroy; override;
+    function Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
+    function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
+    function FuzzyIdentifiers(const AIdent: string; AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
+    function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
+    function HasUnit(const AUnitName: string): Boolean;
+    function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
+    function HasInitCode(const AUnitName: string): Boolean;
+    function UnitCount: Integer;
+    function IdentCount: Integer;
+  end;
+
+constructor TLayeredSnapshot.Create(const AProject, AGlobal: IUnitSnapshot);
+var
+  ProjPaths: TDictionary<string, Boolean>;
+begin
+  inherited Create;
+  FProject := AProject;
+  FGlobal := AGlobal;
+  FShadowed := TDictionary<string, Boolean>.Create;
+  ProjPaths := TDictionary<string, Boolean>.Create;
+  try
+    for var P in (AProject as TUnitSnapshot).FUnitPath do
+      ProjPaths.AddOrSetValue(UpperCase(P), True);
+    for var P in (AGlobal as TUnitSnapshot).FUnitPath do
+      if ProjPaths.ContainsKey(UpperCase(P)) then
+        FShadowed.AddOrSetValue(UpperCase(P), True);
+  finally
+    ProjPaths.Free;
+  end;
+end;
+
+destructor TLayeredSnapshot.Destroy;
+begin
+  FShadowed.Free;
+  inherited;
+end;
+
+function TLayeredSnapshot.Visible(const AHit: TFindUnitHit): Boolean;
+begin
+  Result := (FShadowed.Count = 0) or not FShadowed.ContainsKey(UpperCase(AHit.Path));
+end;
+
+function TLayeredSnapshot.Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
+begin
+  Result := FProject.Lookup(AIdentifier);
+  for var H in FGlobal.Lookup(AIdentifier) do
+    if Visible(H) then Result := Result + [H];
+end;
+
+function TLayeredSnapshot.Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
+var
+  All: TList<TFindUnitHit>;
+begin
+  // Each layer answers its first AMax in key order; the first AMax of the
+  // merged, key-sorted list is then exactly what one index would give.
+  All := TList<TFindUnitHit>.Create;
+  try
+    All.AddRange(FProject.Search(ASub, AMax));
+    for var H in FGlobal.Search(ASub, AMax) do
+      if Visible(H) then All.Add(H);
+    // Stable by construction: the tie-break is the position, which puts a
+    // project hit ahead of a global one for the same identifier.
+    var Arr := All.ToArray;
+    var Pos: TArray<Integer>;
+    SetLength(Pos, Length(Arr));
+    for var I := 0 to High(Pos) do Pos[I] := I;
+    TArray.Sort<Integer>(Pos, TComparer<Integer>.Construct(
+      function(const A, B: Integer): Integer
+      begin
+        Result := CompareText(Arr[A].Identifier, Arr[B].Identifier);
+        if Result = 0 then Result := A - B;
+      end));
+    SetLength(Result, Min(AMax, Length(Pos)));
+    for var I := 0 to High(Result) do Result[I] := Arr[Pos[I]];
+  finally
+    All.Free;
+  end;
+end;
+
+function TLayeredSnapshot.FuzzyIdentifiers(const AIdent: string;
+  AMaxDist, AMax: Integer): TArray<TFindUnitHit>;
+type
+  TCand = record Dist: Integer; Key: string; Hit: TFindUnitHit; end;
+var
+  U: string;
+  Cands: TList<TCand>;
+  Seen: TDictionary<string, Boolean>;
+
+  procedure Take(const AHits: TArray<TFindUnitHit>);
+  begin
+    for var H in AHits do
+    begin
+      var C: TCand;
+      C.Key := UpperCase(H.Identifier);
+      if Seen.ContainsKey(C.Key) then Continue;   // project layer came first
+      Seen.Add(C.Key, True);
+      C.Dist := BoundedEditDistance(U, C.Key, AMaxDist);
+      C.Hit := H;
+      Cands.Add(C);
+    end;
+  end;
+
+begin
+  Result := nil;
+  U := UpperCase(Trim(AIdent));
+  Cands := TList<TCand>.Create;
+  Seen := TDictionary<string, Boolean>.Create;
+  try
+    Take(FProject.FuzzyIdentifiers(AIdent, AMaxDist, AMax));
+    Take(FGlobal.FuzzyIdentifiers(AIdent, AMaxDist, AMax));
+    Cands.Sort(TComparer<TCand>.Construct(
+      function(const A, B: TCand): Integer
+      begin
+        Result := A.Dist - B.Dist;
+        if Result = 0 then Result := CompareStr(A.Key, B.Key);
+      end));
+    for var I := 0 to Min(AMax, Cands.Count) - 1 do
+      Result := Result + [Cands[I].Hit];
+  finally
+    Seen.Free;
+    Cands.Free;
+  end;
+end;
+
+function TLayeredSnapshot.FuzzyUnitNames(const AName: string;
+  AMaxDist, AMax: Integer): TArray<string>;
+type
+  TCand = record Dist: Integer; Name: string; end;
+var
+  U: string;
+  Cands: TList<TCand>;
+  Seen: TDictionary<string, Boolean>;
+
+  procedure Take(const ANames: TArray<string>);
+  begin
+    for var N in ANames do
+    begin
+      if Seen.ContainsKey(UpperCase(N)) then Continue;
+      Seen.Add(UpperCase(N), True);
+      var C: TCand;
+      C.Name := N;
+      C.Dist := UnitNameDistance(U, UpperCase(N), AMaxDist);
+      Cands.Add(C);
+    end;
+  end;
+
+begin
+  Result := nil;
+  U := UpperCase(Trim(AName));
+  Cands := TList<TCand>.Create;
+  Seen := TDictionary<string, Boolean>.Create;
+  try
+    Take(FProject.FuzzyUnitNames(AName, AMaxDist, AMax));
+    Take(FGlobal.FuzzyUnitNames(AName, AMaxDist, AMax));
+    Cands.Sort(TComparer<TCand>.Construct(
+      function(const A, B: TCand): Integer
+      begin
+        Result := A.Dist - B.Dist;
+        if Result = 0 then Result := CompareText(A.Name, B.Name);
+      end));
+    for var I := 0 to Min(AMax, Cands.Count) - 1 do
+      Result := Result + [Cands[I].Name];
+  finally
+    Seen.Free;
+    Cands.Free;
+  end;
+end;
+
+function TLayeredSnapshot.HasUnit(const AUnitName: string): Boolean;
+begin
+  Result := FProject.HasUnit(AUnitName) or FGlobal.HasUnit(AUnitName);
+end;
+
+function TLayeredSnapshot.TryGetUnitPath(const AUnitName: string;
+  out APath: string): Boolean;
+begin
+  Result := FProject.TryGetUnitPath(AUnitName, APath)
+    or FGlobal.TryGetUnitPath(AUnitName, APath);
+end;
+
+function TLayeredSnapshot.HasInitCode(const AUnitName: string): Boolean;
+begin
+  if FProject.HasUnit(AUnitName) then
+    Result := FProject.HasInitCode(AUnitName)
+  else
+    Result := FGlobal.HasInitCode(AUnitName);
+end;
+
+function TLayeredSnapshot.UnitCount: Integer;
+begin
+  Result := FProject.UnitCount + FGlobal.UnitCount - FShadowed.Count;
+end;
+
+function TLayeredSnapshot.IdentCount: Integer;
+begin
+  // Distinct per layer; a name declared in both layers counts twice.
+  // Only used for status text and the "index empty?" test.
+  Result := FProject.IdentCount + FGlobal.IdentCount;
+end;
+
+function ComposeUnitSnapshots(const AProject, AGlobal: IUnitSnapshot): IUnitSnapshot;
+begin
+  if AProject = nil then Exit(AGlobal);
+  if AGlobal = nil then Exit(AProject);
+  Result := TLayeredSnapshot.Create(AProject, AGlobal);
+end;
+
 constructor TUnitIndex.Create;
 begin
   inherited Create;
@@ -1788,6 +2174,8 @@ begin
   FGlobalByPath.Free;
   FProjectByPath.Free;
   FSnapshot := nil;
+  FGlobalLayer := nil;
+  FProjectLayer := nil;
   FWake.Free;
   FLock.Free;
   inherited;
@@ -1935,85 +2323,56 @@ end;
 
 // ---- snapshot publication -------------------------------------------------
 
-procedure TUnitIndex.PublishSnapshot;
+procedure TUnitIndex.PublishSnapshot(ARebuildGlobal, ARebuildProject: Boolean);
+
+  function SourcesOf(ADict: TObjectDictionary<string, TIndexedUnit>): TArray<TUnitSource>;
+  var
+    I: Integer;
+  begin
+    SetLength(Result, ADict.Count);
+    I := 0;
+    for var U in ADict.Values do
+    begin
+      Result[I].UnitName := U.UnitName;
+      Result[I].Path := U.Path;
+      Result[I].Idents := U.Idents;   // reference, not a copy
+      Result[I].HasInit := U.HasInit;
+      Inc(I);
+    end;
+  end;
+
 var
-  Map: TDictionary<string, TList<Integer>>;
-  Names, Paths, Display: TArray<string>;
-  KeysUpper: TArray<string>;
-  Units: TList<TIndexedUnit>;
-  Seen: TDictionary<string, Boolean>;
-  I, J: Integer;
+  Snap: IUnitSnapshot;
 begin
-  // Merge the two scopes into one flat unit list (project entries win on a
-  // path collision, so a project copy of a unit shadows a library copy).
-  Units := TList<TIndexedUnit>.Create;
-  Seen := TDictionary<string, Boolean>.Create;
-  Map := TDictionary<string, TList<Integer>>.Create;
-  var DispD := TDictionary<string, string>.Create;
+  // MEMORY (tester: "Zu wenig Arbeitsspeicher" / EPNGOutMemory in a long
+  // IDE session): this used to MERGE both scopes into one new snapshot on
+  // every project change - i.e. the whole RTL/VCL/DevExpress identifier
+  // set was rebuilt, with two extra dictionaries of it alive during the
+  // build and the previous snapshot still referenced, each time a project
+  // file was saved. Measured on plain RTL/VCL: +47 MB transient per save,
+  // a multiple of that with large libraries - in a 32-bit IDE that is
+  // exactly the churn that fragments the address space until a large
+  // allocation (a DIB section for a PNG, say) fails.
+  // Now each scope is its own immutable layer; only a changed scope is
+  // rebuilt, and the published view just composes the two.
+  if ARebuildGlobal or (FGlobalLayer = nil) then
+  begin
+    FGlobalLayer := nil;            // let the old layer go BEFORE building
+    FGlobalLayer := BuildUnitSnapshot(SourcesOf(FGlobalByPath));
+  end;
+  if ARebuildProject or (FProjectLayer = nil) then
+  begin
+    FProjectLayer := nil;
+    FProjectLayer := BuildUnitSnapshot(SourcesOf(FProjectByPath));
+  end;
+
+  Snap := ComposeUnitSnapshots(FProjectLayer, FGlobalLayer);
+  FLock.Enter;
   try
-    for var U in FProjectByPath.Values do
-      if not Seen.ContainsKey(UpperCase(U.Path)) then
-      begin Seen.Add(UpperCase(U.Path), True); Units.Add(U); end;
-    for var U in FGlobalByPath.Values do
-      if not Seen.ContainsKey(UpperCase(U.Path)) then
-      begin Seen.Add(UpperCase(U.Path), True); Units.Add(U); end;
-
-    SetLength(Names, Units.Count);
-    SetLength(Paths, Units.Count);
-    var InitFlags: TArray<Boolean>;
-    SetLength(InitFlags, Units.Count);
-    for I := 0 to Units.Count - 1 do
-    begin
-      Names[I] := Units[I].UnitName;
-      Paths[I] := Units[I].Path;
-      InitFlags[I] := Units[I].HasInit;
-      for J := 0 to High(Units[I].Idents) do
-      begin
-        var Id := Units[I].Idents[J];
-        // Trailing '<' = generic-declaration marker from ParseUnit; the
-        // key is the bare name, genericity travels as a flag bit on the
-        // unit index (unit counts stay far below the bit).
-        var Entry := I;
-        if (Id <> '') and (Id[Length(Id)] = '<') then
-        begin
-          Id := Copy(Id, 1, Length(Id) - 1);
-          Entry := I or GenericBit;
-        end;
-        if Id = '' then Continue;
-        var Key := UpperCase(Id);
-        var Lst: TList<Integer>;
-        if not Map.TryGetValue(Key, Lst) then
-        begin Lst := TList<Integer>.Create; Map.Add(Key, Lst); DispD.Add(Key, Id); end;
-        if (Lst.Count = 0) or (Lst.Last <> Entry) then Lst.Add(Entry);
-      end;
-    end;
-
-    // Flatten to arrays + a sorted key list for search.
-    var Flat := TDictionary<string, TArray<Integer>>.Create;
-    KeysUpper := Map.Keys.ToArray;
-    TArray.Sort<string>(KeysUpper);
-    SetLength(Display, Length(KeysUpper));
-    for I := 0 to High(KeysUpper) do
-    begin
-      Flat.Add(KeysUpper[I], Map[KeysUpper[I]].ToArray);
-      Display[I] := DispD[KeysUpper[I]];
-    end;
-
-    var Snap: IUnitSnapshot := TUnitSnapshot.Create(Names, Paths, KeysUpper,
-      Display, InitFlags, Flat);
-    FLock.Enter;
-    try
-      FSnapshot := Snap;   // atomic reference swap; readers scan lock-free
-      FReady := True;
-    finally
-      FLock.Leave;
-    end;
+    FSnapshot := Snap;   // atomic reference swap; readers scan lock-free
+    FReady := True;
   finally
-    for var L in Map.Values do L.Free;
-    Map.Free;
-    DispD.Free;
-    Units.Free;
-    Seen.Free;
+    FLock.Leave;
   end;
 end;
 
@@ -2215,37 +2574,40 @@ begin
   LoadCache(GCache, FGlobalByPath);  FGlobalKey := GCache;
   LoadCache(PCache, FProjectByPath); FProjectKey := PCache;
   if (FGlobalByPath.Count > 0) or (FProjectByPath.Count > 0) then
-    PublishSnapshot;
+    PublishSnapshot(True, True);
 
   Cycle := 0;
   while (FWorker <> nil) and not FWorker.Terminated do
   begin
     try
       CurrentSources(GDirs, PDirs, PFiles, GCache, PCache);
-      var Changed := False;
+      var GChanged := False;
+      var PChanged := False;
 
       // A changed cache key means a different library set / project - reload
       // that scope's cache before refreshing it.
       if GCache <> FGlobalKey then
       begin
-        FGlobalByPath.Clear; LoadCache(GCache, FGlobalByPath); FGlobalKey := GCache; Changed := True;
+        FGlobalByPath.Clear; LoadCache(GCache, FGlobalByPath); FGlobalKey := GCache; GChanged := True;
       end;
       if PCache <> FProjectKey then
       begin
-        FProjectByPath.Clear; LoadCache(PCache, FProjectByPath); FProjectKey := PCache; Changed := True;
+        FProjectByPath.Clear; LoadCache(PCache, FProjectByPath); FProjectKey := PCache; PChanged := True;
       end;
 
       // Global scope: scan only on the first pass and rarely thereafter -
       // the RTL/VCL/library tree barely changes and is shared across projects.
       if (Cycle = 0) or (Cycle mod GlobalRescanCycles = 0) then
         if RefreshScope(GDirs, nil, FGlobalByPath, 'library') then
-        begin Changed := True; SaveCache(GCache, FGlobalByPath); end;
+        begin GChanged := True; SaveCache(GCache, FGlobalByPath); end;
 
       // Project scope: refresh every cycle (this is what changes while editing).
       if RefreshScope(PDirs, PFiles, FProjectByPath, 'project') then
-      begin Changed := True; SaveCache(PCache, FProjectByPath); end;
+      begin PChanged := True; SaveCache(PCache, FProjectByPath); end;
 
-      if Changed or not FReady then PublishSnapshot;
+      // Only the scope that changed is rebuilt - see PublishSnapshot.
+      if GChanged or PChanged or not FReady then
+        PublishSnapshot(GChanged, PChanged);
       var Snap := GetSnapshot;
       if Snap <> nil then
         SetStatus(Format('Index ready: %d units, %d identifiers.',

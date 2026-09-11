@@ -12,7 +12,7 @@ interface
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
-  Lsp.Client, Delphi.FileEncoding;
+  Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles;
 
 type
   TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -222,7 +222,9 @@ begin
   // Strategy 2: fallback - text search + GotoDefinition verification
   FDialog.SetStatus('Fallback: text search in project...');
 
-  ProjFiles := Editor.GetProjectSourceFiles;
+  // Project + the caret's unit + the extras from the settings (see
+  // Expert.ScopeFiles).
+  ProjFiles := ProjectScopeFiles(FContext.FileName);
 
   var TextCandidates := FindCandidatesByText(FContext.WordAtCursor, ProjFiles);
 

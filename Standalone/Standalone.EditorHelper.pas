@@ -140,6 +140,9 @@ type
     function SaveFile(const AFilePath: string): Boolean;
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
+    function IsFormInDesigner(const APasFile: string): Boolean;
+    function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
+      AIsMethod: Boolean; out AMessage: string): Boolean;
     function GotoLocation(const AFilePath: string;
       ALine, ACol: Integer; AHighlightLen: Integer = 0): Boolean;
     function AddFileToActiveProject(const AFilePath: string): Boolean;
@@ -610,6 +613,19 @@ begin end;
 procedure TStandaloneEditorHelper.NotifyClassStructureChanged(const AFilePath: string);
 // There is no form designer to notify in standalone. No-op.
 begin end;
+
+function TStandaloneEditorHelper.IsFormInDesigner(const APasFile: string): Boolean;
+// No form designer here - form files are always edited as text.
+begin
+  Result := False;
+end;
+
+function TStandaloneEditorHelper.RenameInFormDesigner(const APasFile, AOldName,
+  ANewName: string; AIsMethod: Boolean; out AMessage: string): Boolean;
+begin
+  AMessage := 'no form designer in the standalone version';
+  Result := False;
+end;
 
 function TStandaloneEditorHelper.GotoLocation(const AFilePath: string;
   ALine, ACol: Integer; AHighlightLen: Integer): Boolean;

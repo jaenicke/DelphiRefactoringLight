@@ -58,6 +58,7 @@ procedure ApplyBlameSettings;
 implementation
 
 uses
+  Expert.ResourceMonitor,
   System.SysUtils, System.Classes, System.Math, System.DateUtils,
   System.Generics.Collections,
   System.IOUtils, System.Hash,
@@ -307,6 +308,9 @@ var
   SavedStyle: TBrushStyle;
   Cv: TCanvas;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsBlamePaint, 32);
   if BeforeEvent or (Context = nil) then Exit;
   Cv := nil;
   SavedFontHeight := 0;
@@ -440,6 +444,9 @@ var
   X, CharW: Integer;
   Line: Integer;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsBlamePaint, 32);
   if BeforeEvent or (Stage <> plsEndPaint) or (Context = nil) then Exit;
   try
     Line := Context.LineState.LogicalLineNum;
@@ -704,6 +711,9 @@ var
   NewLines: TBlameLines;
   Changed: Boolean;
 begin
+  // GDI objects this call leaves behind are booked per subsystem -
+  // the status window shows the balance (Expert.ResourceMonitor).
+  var GdiG := GdiGuard(gsBlameTick);
   if not GEnabled then
   begin
     // Switched off, but buffers we widened are still out there: only the

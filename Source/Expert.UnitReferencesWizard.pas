@@ -40,7 +40,7 @@ uses
   System.Generics.Collections, System.Generics.Defaults,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
   Expert.EditorHelperIntf, Expert.UnitReferencesDialog, Expert.LspManager,
-  Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
+  Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles;
 
 type
   TLspFindUnitReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -723,7 +723,8 @@ begin
   FDialog.SetStatus('Scanning project files for uses of ' + TargetUnitName + '...');
   Application.ProcessMessages;
 
-  ProjFiles := Editor.GetProjectSourceFiles;
+  // Project + the current unit + open units / units via uses per settings.
+  ProjFiles := ProjectScopeFiles(FContext.FileName);
   UsingFiles := TList<string>.Create;
   UsingFileSet := TDictionary<string, Boolean>.Create;
   Symbols := TList<TSymbolPos>.Create;

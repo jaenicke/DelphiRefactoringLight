@@ -32,7 +32,7 @@ unit Expert.DialogHelper;
 interface
 
 uses
-  System.Classes, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
+  System.SysUtils, System.Classes, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
 
 type
   /// <summary>Class for the ad-hoc progress/tool windows built with
@@ -90,6 +90,12 @@ function CreateCheckProgress(const ACaption: string; AOwner: TComponent;
 ///  message box stays light in dark mode). Deliberately built on our own
 ///  registered form class - registering the VCL's TMessageForm with the
 ///  IDE theming service would restyle every plugin's ShowMessage.</summary>
+/// <summary>Themed single-line input box. AValidate returns '' for a
+///  valid value or the reason it is not (shown under the edit, OK stays
+///  disabled). True when confirmed; AValue holds the entered text.</summary>
+function AskThemedText(const ACaption, APrompt: string; var AValue: string;
+  const AValidate: TFunc<string, string>): Boolean;
+
 procedure ShowThemedMessage(const AMsg: string);
 
 /// <summary>Themed confirmation with an explicit DEFAULT of "no": used
@@ -106,7 +112,7 @@ procedure InstallRemovePrivateConfirm;
 implementation
 
 uses
-  System.SysUtils, Winapi.Windows, Vcl.Graphics, Expert.IdeThemes,
+  Winapi.Windows, Vcl.Graphics, Expert.IdeThemes,
   Expert.AutoImport
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 
@@ -350,6 +356,95 @@ begin
         [AInfo.TypeName, AInfo.Name, AInfo.BodyLines]);
       Result := AskThemedConfirm(Msg, 'Remove anyway');
     end;
+end;
+
+type
+  TTextInputValidator = class(TComponent)
+  public
+    Edit: TEdit;
+    ErrorLabel: TLabel;
+    OkButton: TButton;
+    Validate: TFunc<string, string>;
+    procedure Changed(Sender: TObject);
+  end;
+
+procedure TTextInputValidator.Changed(Sender: TObject);
+var
+  Msg: string;
+begin
+  Msg := '';
+  if Assigned(Validate) then Msg := Validate(Trim(Edit.Text));
+  ErrorLabel.Caption := Msg;
+  OkButton.Enabled := Msg = '';
+end;
+
+function AskThemedText(const ACaption, APrompt: string; var AValue: string;
+  const AValidate: TFunc<string, string>): Boolean;
+var
+  Dlg: TThemedToolForm;
+  Lbl, Err: TLabel;
+  Edt: TEdit;
+  BtnOk, BtnCancel: TButton;
+begin
+  Dlg := TThemedToolForm.CreateNew(nil);
+  try
+    Dlg.BorderStyle := bsDialog;
+    Dlg.Caption := ACaption;
+    Dlg.Position := poScreenCenter;
+    Dlg.ClientWidth := 420;
+
+    Lbl := TLabel.Create(Dlg);
+    Lbl.Parent := Dlg;
+    Lbl.SetBounds(16, 14, 388, 18);
+    Lbl.Caption := APrompt;
+
+    Edt := TEdit.Create(Dlg);
+    Edt.Parent := Dlg;
+    Edt.SetBounds(16, 36, 388, 24);
+    Edt.Text := AValue;
+
+    Err := TLabel.Create(Dlg);
+    Err.Parent := Dlg;
+    Err.AutoSize := False;
+    Err.SetBounds(16, 64, 388, 18);
+    Err.Caption := '';
+
+    BtnOk := TButton.Create(Dlg);
+    BtnOk.Parent := Dlg;
+    BtnOk.Caption := 'OK';
+    BtnOk.Default := True;
+    BtnOk.ModalResult := mrOk;
+    BtnOk.SetBounds(218, 90, 90, 26);
+
+    BtnCancel := TButton.Create(Dlg);
+    BtnCancel.Parent := Dlg;
+    BtnCancel.Caption := 'Cancel';
+    BtnCancel.Cancel := True;
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.SetBounds(314, 90, 90, 26);
+
+    Dlg.ClientHeight := 128;
+
+    // Validate live: the reason is visible while typing, and OK cannot
+    // confirm an invalid value (Enter would otherwise bypass the check).
+    // OnChange needs a METHOD - the owned validator carries the closure.
+    var Validator := TTextInputValidator.Create(Dlg);
+    Validator.Edit := Edt;
+    Validator.ErrorLabel := Err;
+    Validator.OkButton := BtnOk;
+    Validator.Validate := AValidate;
+    Edt.OnChange := Validator.Changed;
+    Validator.Changed(Edt);
+
+    EnableThemes(Dlg);
+    PrepareDialog(Dlg, nil);
+    Dlg.ActiveControl := Edt;
+    Edt.SelectAll;
+    Result := Dlg.ShowModal = mrOk;
+    if Result then AValue := Trim(Edt.Text);
+  finally
+    Dlg.Free;
+  end;
 end;
 
 function AskThemedConfirm(const AMsg, AConfirmCaption: string): Boolean;

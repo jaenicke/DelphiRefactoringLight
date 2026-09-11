@@ -33,6 +33,7 @@ uses
   Expert.ResourceMonitor in '..\Source\Expert.ResourceMonitor.pas',
   Expert.ScopeFiles in '..\Source\Expert.ScopeFiles.pas',
   Expert.DfmRename in '..\Source\Expert.DfmRename.pas',
+  Expert.EventGen in '..\Source\Expert.EventGen.pas',
   Expert.PluginSettings in '..\Source\Expert.PluginSettings.pas',
   Expert.UnitUsageProbe in '..\Source\Expert.UnitUsageProbe.pas',
   Expert.FindUnitDialog in '..\Source\Expert.FindUnitDialog.pas',

@@ -19,9 +19,20 @@ type
     Detail: string;
     Kind: Integer;     // LSP CompletionItemKind
     SortText: string;
+    /// <summary>0 = a normal LSP item (inserts its label). > 0 = a
+    ///  GENERATED entry (event handler / anonymous method); the popup
+    ///  hands the index to OnGenerate instead of inserting text.</summary>
+    GenIndex: Integer;
   end;
 
   TCompletionInsertEvent = procedure(const AText: string) of object;
+  TCompletionGenerateEvent = procedure(AGenIndex: Integer) of object;
+
+const
+  /// <summary>Kind of generated entries (outside the LSP range).</summary>
+  CompletionKindGenerated = 1000;
+
+type
 
   /// <summary>Helpers for parsing LSP completion payloads. Grouped into
   ///  a class to keep the unit free of global routines.</summary>
@@ -45,6 +56,7 @@ type
     FAllItems: TArray<TCompletionItem>;
     FFilteredItems: TList<TCompletionItem>;
     FOnInsert: TCompletionInsertEvent;
+    FOnGenerate: TCompletionGenerateEvent;
     /// <summary>Current filter prefix. Driven externally by the
     ///  caller's editor input via SetPrefix - the popup itself does
     ///  not own an Edit control any more, focus stays with the
@@ -107,6 +119,7 @@ type
     function IsActive: Boolean;
 
     property OnInsert: TCompletionInsertEvent read FOnInsert write FOnInsert;
+    property OnGenerate: TCompletionGenerateEvent read FOnGenerate write FOnGenerate;
     /// <summary>Optional callback invoked while the popup is in its
     ///  Loading state. Whatever the callback returns is appended to
     ///  the "Loading... (Xs)" line in the list, e.g.
@@ -210,6 +223,7 @@ begin
     13: Result := 'enum'; // Enum
     14: Result := 'kw';   // Keyword
     15: Result := 'snip'; // Snippet
+    CompletionKindGenerated: Result := 'gen';
     22: Result := 'type'; // Struct (= Record)
     25: Result := 'type'; // TypeParameter
   else
@@ -252,6 +266,8 @@ begin
       Item.Detail := ItemObj.GetValue<string>('detail', '');
       Item.Kind := ItemObj.GetValue<Integer>('kind', 1);
       Item.SortText := ItemObj.GetValue<string>('sortText', Item.Label_);
+      // the local record is reused and only its STRING fields are managed
+      Item.GenIndex := 0;
       ItemList.Add(Item);
     end;
 
@@ -578,8 +594,11 @@ procedure TCompletionPopup.InsertSelected;
 begin
   if (FListBox.ItemIndex >= 0) and (FListBox.ItemIndex < FFilteredItems.Count) then
   begin
-    if Assigned(FOnInsert) then
-      FOnInsert(FFilteredItems[FListBox.ItemIndex].Label_);
+    var Item := FFilteredItems[FListBox.ItemIndex];
+    if (Item.GenIndex > 0) and Assigned(FOnGenerate) then
+      FOnGenerate(Item.GenIndex)
+    else if Assigned(FOnInsert) then
+      FOnInsert(Item.Label_);
   end;
   HidePopup;
 end;

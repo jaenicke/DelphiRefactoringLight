@@ -35,7 +35,7 @@ procedure ShowStatusWindow;
 implementation
 
 uses
-  Expert.ResourceMonitor,
+  Expert.ResourceMonitor, Expert.CompletionWizard,
   System.SysUtils, System.Classes, System.IniFiles, System.IOUtils,
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
@@ -267,6 +267,12 @@ begin
   Row('  GDI balance of this plugin', GdiBalanceText,
     'objects our own ticks / paint handlers created and did not release ' +
     'since the IDE started - a number that keeps growing is a leak there');
+
+  // ---- code completion: generated entries ---------------------------------
+  // Why the last completion call did (not) offer an event handler / an
+  // anonymous method - otherwise "no entry" looks exactly like "broken".
+  Row('Completion: generated entries', CompletionGenerationNote,
+    'last code completion call; history in %TEMP%\RefactoringLight-completion.log');
 
   // ---- identifier index ---------------------------------------------------
   if TUnitIndex.Instance.Ready then S := 'ready' else S := 'building...';

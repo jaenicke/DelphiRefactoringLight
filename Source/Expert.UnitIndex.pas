@@ -1248,14 +1248,38 @@ var
   end;
 
   function IsHeader(const AUpper: string): Boolean;
+  var
+    Rest: string;
   begin
-    Result := StartsWithWord(AUpper, 'PROCEDURE')
-      or StartsWithWord(AUpper, 'FUNCTION')
-      or StartsWithWord(AUpper, 'CONSTRUCTOR')
-      or StartsWithWord(AUpper, 'DESTRUCTOR')
-      or StartsWithWord(AUpper, 'CLASS PROCEDURE')
-      or StartsWithWord(AUpper, 'CLASS FUNCTION')
-      or StartsWithWord(AUpper, 'OPERATOR');
+    Rest := '';
+    for var W in ['CLASS PROCEDURE', 'CLASS FUNCTION', 'PROCEDURE', 'FUNCTION',
+      'CONSTRUCTOR', 'DESTRUCTOR', 'OPERATOR'] do
+      if StartsWithWord(AUpper, W) then
+      begin
+        Rest := TrimLeft(Copy(AUpper, Length(W) + 1, MaxInt));
+        Break;
+      end;
+    // A header NAMES its routine. An ANONYMOUS method ("procedure",
+    // "procedure(Sender: TObject)", "function: Integer", "procedure
+    // begin") has no name - treating it as a header made the anonymous
+    // method the "enclosing routine" of everything below it (tester:
+    // no generated handler once the method contains one).
+    Result := (Rest <> '') and IsIdentStart(Rest[1])
+      and not StartsWithWord(Rest, 'BEGIN') and not StartsWithWord(Rest, 'VAR')
+      and not StartsWithWord(Rest, 'CONST');
+  end;
+
+  // "end;" / "end" - and the closing forms of an anonymous method passed
+  // as an argument: "end);", "end,", "end)". Those carried no depth
+  // decrement, so the routine's final "end;" was never reached.
+  function IsBlockEnd(const AUpper: string): Boolean;
+  var
+    Rest: string;
+  begin
+    if not StartsWithWord(AUpper, 'END') then Exit(False);
+    // "end else begin" nets zero and must not count
+    Rest := TrimLeft(Copy(AUpper, 4, MaxInt));
+    Result := (Rest = '') or CharInSet(Rest[1], [';', ',', ')']);
   end;
 
 begin
@@ -1291,7 +1315,7 @@ begin
     if StartsWithWord(U, 'BEGIN') or StartsWithWord(U, 'TRY')
       or StartsWithWord(U, 'CASE') then
       Inc(Depth)
-    else if (Depth > 0) and ((U = 'END;') or (U = 'END')) then
+    else if (Depth > 0) and IsBlockEnd(U) then
     begin
       Dec(Depth);
       if Depth = 0 then

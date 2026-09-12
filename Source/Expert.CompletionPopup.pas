@@ -486,23 +486,27 @@ procedure TCompletionPopup.ApplyFilter;
 var
   Filter: string;
   Item: TCompletionItem;
+  Pass: Integer;
 begin
   Filter := UpperCase(FFilterText);
   FFilteredItems.Clear;
   FListBox.Items.BeginUpdate;
   try
     FListBox.Items.Clear;
-    for Item in FAllItems do
-    begin
-      // Prefix match (case-insensitive) - mirrors Delphi's built-in
-      // Code Insight behavior: typing characters narrows the list to
-      // identifiers starting with those characters.
-      if (Filter = '') or UpperCase(Item.Label_).StartsWith(Filter) then
+    // Case-insensitive SUBSTRING match like the IDE's own Code Insight
+    // (tester: "Text" must also find "BeginText"); entries STARTING with
+    // the typed text come first, the rest keep their order behind them.
+    for Pass := 0 to 1 do
+      for Item in FAllItems do
       begin
-        FFilteredItems.Add(Item);
-        FListBox.Items.Add(Item.Label_);
+        var P := 1;
+        if Filter <> '' then P := Pos(Filter, UpperCase(Item.Label_));
+        if ((Pass = 0) and (P = 1)) or ((Pass = 1) and (P > 1)) then
+        begin
+          FFilteredItems.Add(Item);
+          FListBox.Items.Add(Item.Label_);
+        end;
       end;
-    end;
   finally
     FListBox.Items.EndUpdate;
   end;

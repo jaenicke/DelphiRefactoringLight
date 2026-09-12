@@ -23,6 +23,9 @@ type
     SuggestedName: string;
     Caption: string;
     Detail: string;
+    // the argument is the LAST parameter of every matching overload - the
+    // pick then closes the call (")" / ");", tester request)
+    CloseCall: Boolean;
   end;
 
   TLspCompletionWizard = class
@@ -517,19 +520,30 @@ var
   Source: TGenTypeSource;
   Found: TList<TProcTypeInfo>;
   ParamNames: TList<string>;
+  LastParams: TList<Boolean>;
   Lines: TArray<string>;
   Looked: TStringList;
   Note: string;
   IndexMissing: Boolean;
 
-  procedure AddInfo(const AInfo: TProcTypeInfo; const AParamName: string);
+  procedure AddInfo(const AInfo: TProcTypeInfo; const AParamName: string;
+    AIsLast: Boolean);
   begin
-    for var X in Found do
+    for var K := 0 to Found.Count - 1 do
+    begin
+      var X := Found[K];
       if (X.Kind = AInfo.Kind) and (X.IsFunction = AInfo.IsFunction)
         and SameText(X.Params, AInfo.Params)
-        and SameText(X.ResultType, AInfo.ResultType) then Exit;
+        and SameText(X.ResultType, AInfo.ResultType) then
+      begin
+        // an overload with MORE parameters after this one: do not close
+        LastParams[K] := LastParams[K] and AIsLast;
+        Exit;
+      end;
+    end;
     Found.Add(AInfo);
     ParamNames.Add(AParamName);
+    LastParams.Add(AIsLast);
   end;
 
   function KindText(const AInfo: TProcTypeInfo): string;
@@ -573,6 +587,7 @@ begin
   Files := TDictionary<string, string>.Create;
   Found := TList<TProcTypeInfo>.Create;
   ParamNames := TList<string>.Create;
+  LastParams := TList<Boolean>.Create;
   Looked := TStringList.Create;
   Looked.Sorted := True;
   Looked.Duplicates := dupIgnore;
@@ -623,13 +638,13 @@ begin
           if (TypeName <> '') and ResolveProcType(TypeName, CtxFile, Source, Info) then
           begin
             Add(TypeName + ' = ' + KindText(Info));
-            AddInfo(Info, '');
+            AddInfo(Info, '', False);
           end
           else if (TypeName = '') and (Owner <> '')
             and ResolveMemberProcType(Owner, ACtx.TargetName, CtxFile, Source, Info) then
           begin
             Add(Owner + '.' + ACtx.TargetName + ' = ' + KindText(Info));
-            AddInfo(Info, '');
+            AddInfo(Info, '', False);
           end
           else
             Add('type not resolved');
@@ -673,7 +688,7 @@ begin
                 if (TypeName <> '') and ResolveProcType(TypeName, CtxFile, Source, Info) then
                 begin
                   Add('"' + ParamLabel + '" = ' + KindText(Info));
-                  AddInfo(Info, ParamNameFromLabel(ParamLabel));
+                  AddInfo(Info, ParamNameFromLabel(ParamLabel), Active = Params.Count - 1);
                 end
                 else
                   Add('"' + ParamLabel + '": type not resolved');
@@ -700,6 +715,7 @@ begin
           O.SuggestedName := '';
           O.Caption := ProcHeadText(FI) + ' begin ' + #$2026 + ' end';
           O.Detail := 'insert an anonymous method (' + FI.TypeName + ')';
+          O.CloseCall := LastParams[I];
           Result := Result + [O];
         end;
         var SigKey := UpperCase(ProcHeadText(FI));
@@ -728,6 +744,7 @@ begin
             O.Caption := Name;
             O.Detail := 'create method ' + ProcHeadText(FI, Plan.ClassName + '.' + Name) +
               ' (' + FI.TypeName + ')';
+            O.CloseCall := LastParams[I];
             Result := Result + [O];
           end
           else
@@ -746,6 +763,7 @@ begin
   finally
     ANote := Note;
     Looked.Free;
+    LastParams.Free;
     ParamNames.Free;
     Found.Free;
     Files.Free;
@@ -812,6 +830,11 @@ begin
     EndCol := LineLen + 1;
   end;
   var StartCol := Min(Ctx.PrefixStartCol + 1, EndCol);
+  // last parameter: close the call right away (decided again NOW - the
+  // text after the caret may have changed since the list was built)
+  var Closing := '';
+  if AOffer.CloseCall then
+    Closing := CallClosingText(Lines, Line - 1, Col - 1, Ctx);
 
   if AOffer.Anonymous then
   begin
@@ -820,7 +843,7 @@ begin
       if CharInSet(C, [' ', #9]) then Indent := Indent + C else Break;
     Indent := Indent + '  ';
     Text := AnonymousMethodText(AOffer.Info, Indent, BodyOffset, BodyCol);
-    if Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol, Pad + Text) then
+    if Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol, Pad + Text + Closing) then
       Editor.GotoLocation(F, Line - 1 + BodyOffset, BodyCol);
     Exit;
   end;
@@ -854,7 +877,7 @@ begin
     ShowThemedMessage('The implementation could not be inserted.');
     Exit;
   end;
-  Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol, Pad + Name);
+  Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol, Pad + Name + Closing);
   Editor.InsertTextAtLineStart(F, Plan.DeclLine0 + 1, Plan.DeclText);
   Editor.GotoLocation(F, Plan.ImplBodyLine0 + Plan.DeclLines, 2);
 end;
@@ -871,13 +894,23 @@ var
   Col, StartCol, EndCol: Integer;
 begin
   Ctx := Editor.GetCurrentContext;
-  if not Ctx.IsValid then Exit;
+  // NOT Ctx.IsValid: the IDE sets it only with a WORD under the caret, so
+  // picking an entry right after "Foo." or on an empty line inserted
+  // nothing (tester) - the same trap Execute had.
+  if Ctx.FileName = '' then Exit;
   if not Editor.ReadEditorContent(Ctx.FileName, Content) then Exit;
   Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
   if (Ctx.Line < 1) or (Ctx.Line > Length(Lines)) then Exit;
   Line := Lines[Ctx.Line - 1];
   Col := Ctx.Column;
-  if Col > Length(Line) + 1 then Col := Length(Line) + 1;
+  // Caret in virtual space beyond the line end: the blanks up to it do
+  // not exist in the buffer - insert them with the text.
+  var Pad := '';
+  if Col > Length(Line) + 1 then
+  begin
+    Pad := StringOfChar(' ', Col - (Length(Line) + 1));
+    Col := Length(Line) + 1;
+  end;
   // Walk left to find the start of the word.
   StartCol := Col;
   while (StartCol > 1) and CharInSet(Line[StartCol - 1], ['A'..'Z','a'..'z','0'..'9','_']) do
@@ -887,7 +920,7 @@ begin
   EndCol := Col;
   while (EndCol <= Length(Line)) and CharInSet(Line[EndCol], ['A'..'Z','a'..'z','0'..'9','_']) do
     Inc(EndCol);
-  Editor.ReplaceSelection(Ctx.FileName, Ctx.Line, StartCol, Ctx.Line, EndCol, AText);
+  Editor.ReplaceSelection(Ctx.FileName, Ctx.Line, StartCol, Ctx.Line, EndCol, Pad + AText);
 end;
 
 function TLspCompletionWizard.IsPopupVisible: Boolean;

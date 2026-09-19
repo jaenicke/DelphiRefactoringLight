@@ -91,6 +91,9 @@
         <DCCReference Include="..\Source\Expert.SafeDeletePlan.pas"/>
         <DCCReference Include="..\Source\Expert.PascalScanner.pas"/>
         <DCCReference Include="..\Source\Expert.IncludeExpansion.pas"/>
+        <DCCReference Include="..\Source\Expert.InterfaceLinks.pas"/>
+        <DCCReference Include="..\Source\Expert.PropertyConvert.pas"/>
+        <DCCReference Include="Test.UserIdeas13.pas"/>
         <DCCReference Include="Test.RegressionSuite.pas"/>
         <DCCReference Include="Test.Issue11.pas"/>
         <BuildConfiguration Include="Release">

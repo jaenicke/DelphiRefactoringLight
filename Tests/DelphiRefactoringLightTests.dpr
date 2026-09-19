@@ -42,6 +42,9 @@ uses
   Expert.SafeDeletePlan in '..\Source\Expert.SafeDeletePlan.pas',
   Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',
   Expert.IncludeExpansion in '..\Source\Expert.IncludeExpansion.pas',
+  Expert.InterfaceLinks in '..\Source\Expert.InterfaceLinks.pas',
+  Expert.PropertyConvert in '..\Source\Expert.PropertyConvert.pas',
+  Test.UserIdeas13 in 'Test.UserIdeas13.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas';
 

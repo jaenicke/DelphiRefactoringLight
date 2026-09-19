@@ -96,7 +96,7 @@ uses
   Expert.ScopeFiles, Expert.LspManager, Expert.DiagStore, Expert.DialogHelper,
   Expert.IdeThemes, Expert.ListViewSort, Expert.WorkerLatch, Expert.McpServer,
   Expert.McpLspTools, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner,
-  Expert.IncludeExpansion;
+  Expert.IncludeExpansion, Expert.InterfaceLinks;
 
 type
   TCand = record
@@ -257,63 +257,6 @@ begin
   end;
 end;
 
-// The type header line of ATypeName in ALines, -1 = none; AIsInterface
-// when it is an interface.
-function TypeHeaderLine(const ALines: TArray<string>; const ATypeName: string;
-  out AIsInterface: Boolean): Integer;
-begin
-  AIsInterface := False;
-  for var L := 0 to High(ALines) do
-  begin
-    var T := Trim(StripLineComment(ALines[L]));
-    var P := Pos('=', T);
-    if P < 2 then Continue;
-    var N := Trim(Copy(T, 1, P - 1));
-    var LT := Pos('<', N);
-    if LT > 0 then N := Trim(Copy(N, 1, LT - 1));
-    if not SameText(N, ATypeName) then Continue;
-    var R := UpperCase(Trim(Copy(T, P + 1, MaxInt)));
-    if R.EndsWith(';') and (Pos('(', R) = 0) then Continue;   // forward
-    AIsInterface := R.StartsWith('INTERFACE') or R.StartsWith('DISPINTERFACE');
-    Exit(L);
-  end;
-  Result := -1;
-end;
-
-// 'IFoo.Bar' when one of AParents is an INTERFACE that declares AName.
-function ImplementedInterfaceMethod(const AParents: TArray<string>; const AName: string;
-  const ADeclContent: string; ASrc: TContentSource): string;
-var
-  Lines: TArray<string>;
-  IsIntf: Boolean;
-begin
-  Result := '';
-  var Snap := TUnitIndex.Instance.Snapshot;
-  for var P0 in AParents do
-  begin
-    var P := P0;
-    var LT := Pos('<', P);
-    if LT > 0 then P := Copy(P, 1, LT - 1);
-    var Dot := LastDelimiter('.', P);
-    P := Copy(P, Dot + 1, MaxInt);
-    // this unit first, then the units the index knows
-    var Contents: TArray<string> := [ADeclContent];
-    if Snap <> nil then
-      for var H in Snap.Lookup(P) do
-      begin
-        var C: string;
-        if ASrc.Get(H.Path, C) then Contents := Contents + [C];
-      end;
-    for var C in Contents do
-    begin
-      Lines := SplitContentLines(C);
-      if (TypeHeaderLine(Lines, P, IsIntf) >= 0) and IsIntf
-        and (FindMemberDeclarationLine(C, P, AName) >= 0) then
-        Exit(P + '.' + AName);
-    end;
-  end;
-end;
-
 function AnalyzeSafeDelete(const AIn: TSafeDeleteInput; AStop: THandle;
   const AProgress: TProc<Integer, Integer, string>): TSafeDeleteResult;
 var
@@ -432,8 +375,20 @@ begin
     end;
     if (Res.Symbol.Kind = sdkMethod) and not Res.Symbol.IsInterfaceMember then
     begin
-      var Intf := ImplementedInterfaceMethod(Res.Symbol.Parents, Res.Symbol.Name,
-        Res.DeclContent, Src);
+      // the interfaces of the class (and the ones they inherit from) - shared
+      // with find references (Expert.InterfaceLinks)
+      var Intf := '';
+      var Graph := TTypeGraph.Create(AIn.ScopeFiles + [Res.DeclFile],
+        function(const APath: string; out AContent: string): Boolean
+        begin
+          Result := Src.Get(APath, AContent);
+        end);
+      try
+        var IL := Graph.InterfaceMethodsImplementedBy(Res.Symbol.Container, Res.Symbol.Name);
+        if Length(IL) > 0 then Intf := IL[0].TypeName + '.' + Res.Symbol.Name;
+      finally
+        Graph.Free;
+      end;
       if Intf <> '' then
         Res.Symbol.Vetoes := Res.Symbol.Vetoes + ['it implements the interface method ' +
           Intf + ' - calls through the interface have no textual reference to it'];
@@ -508,7 +463,7 @@ begin
           Answer := IncCtx.Definition(Cd.F, Cd.L, Cd.C);
           // an EMPTY answer is retried briefly (the unit may still be in
           // analysis), a wrong one never
-          var Dl := GetTickCount64 + IfThen(FirstInFile, 3000, 600);
+          var Dl := GetTickCount64 + UInt64(IfThen(FirstInFile, 3000, 600));
           while (Length(Answer) = 0) and (GetTickCount64 < Dl) and not Stopped do
           begin
             Sleep(300);

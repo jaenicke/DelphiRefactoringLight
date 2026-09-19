@@ -338,6 +338,10 @@ function ClassOpenerName(const ATrimmed: string): string;
 function EnclosingContainerName(const ALines: TArray<string>; ALine0: Integer): string;
 /// <summary>AWord occurs in S as a whole word (case-insensitive).</summary>
 function HasWholeWordCI(const S, AWord: string): Boolean;
+/// <summary>0-based line an implementation block goes BEFORE: the
+///  initialization/finalization keyword, else the final 'end.'; -1 for a
+///  file without implementation section.</summary>
+function ImplInsertLine(const ALines: TArray<string>): Integer;
 
 /// <summary>True for diagnostic codes a quick-fix provider handles.
 ///  Everything else can never produce a fix (E2250 & co).</summary>

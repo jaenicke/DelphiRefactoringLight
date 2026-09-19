@@ -23,6 +23,10 @@ type
     /// <summary>'' = verified; otherwise why it could not be verified (the
     ///  hit is shown anyway - hiding it would look like "no reference").</summary>
     Note: string;
+    /// <summary>How the hit belongs to the symbol when it is not the symbol
+    ///  itself: "declared in interface IFoo", "call via interface IFoo",
+    ///  "implemented by TFoo", "call via class TFoo". '' otherwise.</summary>
+    Relation: string;
   end;
 
   TFindReferenceItems = TArray<TFindReferenceItem>;
@@ -236,7 +240,10 @@ begin
       LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
       LI.SubItems.Add(IntToStr(AItems[I].Col + 1));
       LI.SubItems.Add(AItems[I].Preview);
-      LI.SubItems.Add(AItems[I].Note);
+      if (AItems[I].Relation <> '') and (AItems[I].Note <> '') then
+        LI.SubItems.Add(AItems[I].Relation + '; ' + AItems[I].Note)
+      else
+        LI.SubItems.Add(AItems[I].Relation + AItems[I].Note);
     end;
     if FListView.Items.Count > 0 then
     begin

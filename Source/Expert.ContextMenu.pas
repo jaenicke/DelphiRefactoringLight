@@ -134,6 +134,11 @@ type
     procedure OnExtractVariable(Sender: TObject);
     procedure OnWrapTryFinally(Sender: TObject);
     procedure OnSafeDelete(Sender: TObject);
+    procedure OnConvertProperties(Sender: TObject);
+    procedure OnExpandIncludesCurrent(Sender: TObject);
+    procedure OnExpandIncludesSelected(Sender: TObject);
+    procedure OnExpandIncludesDirectory(Sender: TObject);
+    procedure OnExpandIncludesProject(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
     procedure OnShowMcpTools(Sender: TObject);
@@ -229,7 +234,8 @@ uses
   Expert.DebugConsistencyDialog,
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
-  Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete;
+  Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete, Expert.IncludeExpander,
+  Expert.PropertyConvertWizard;
 
 
 
@@ -417,7 +423,7 @@ function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
   end;
 
 var
-  Root, RemoveWithSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
+  Root, RemoveWithSub, IncludeSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
 begin
   Root := TMenuItem.Create(AOwner);
   Root.Caption := 'Refactoring Light';
@@ -430,12 +436,19 @@ begin
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
   Plain(Root, 'Safe delete...',           OnSafeDelete,           REQ_EDITOR);
+  Plain(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties, REQ_EDITOR);
 
   RemoveWithSub := Sub(Root, 'Remove with');
   Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);
   Plain(RemoveWithSub, 'In current unit',    OnRemoveWithCurrentUnit,   REQ_EDITOR);
   Plain(RemoveWithSub, 'In selected units...', OnRemoveWithSelectedUnits, REQ_PROJECT);
   Plain(RemoveWithSub, 'In whole project...', OnRemoveWithProjectWide,   REQ_PROJECT);
+
+  IncludeSub := Sub(Root, 'Expand include files');
+  Plain(IncludeSub, 'In current unit',       OnExpandIncludesCurrent,   REQ_EDITOR);
+  Plain(IncludeSub, 'In selected units...',  OnExpandIncludesSelected,  REQ_PROJECT);
+  Plain(IncludeSub, 'In a directory...',     OnExpandIncludesDirectory, REQ_ALWAYS);
+  Plain(IncludeSub, 'In whole project...',   OnExpandIncludesProject,   REQ_PROJECT);
 
   IfaceSub := Sub(Root, 'Interfaces');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
@@ -1524,6 +1537,31 @@ end;
 procedure TContextMenuInstaller.OnSafeDelete(Sender: TObject);
 begin
   SafeDeleteAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnConvertProperties(Sender: TObject);
+begin
+  ConvertPropertiesAtSelection;
+end;
+
+procedure TContextMenuInstaller.OnExpandIncludesCurrent(Sender: TObject);
+begin
+  ExpandIncludesCurrentUnit;
+end;
+
+procedure TContextMenuInstaller.OnExpandIncludesSelected(Sender: TObject);
+begin
+  ExpandIncludesSelectedUnits;
+end;
+
+procedure TContextMenuInstaller.OnExpandIncludesDirectory(Sender: TObject);
+begin
+  ExpandIncludesInDirectory;
+end;
+
+procedure TContextMenuInstaller.OnExpandIncludesProject(Sender: TObject);
+begin
+  ExpandIncludesProjectWide;
 end;
 
 procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);

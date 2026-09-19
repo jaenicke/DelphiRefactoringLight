@@ -36,7 +36,8 @@ uses
   Expert.ImplementationFinder, Expert.FindReferencesDialog, Expert.ScopeFiles,
   Expert.UsesGraph, Expert.DebugConsistency, Expert.DebugConsistencyDialog,
   Expert.VcsBlame, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
-  Expert.PluginSettings, Expert.IncludeExpansion, Lsp.Client, Lsp.Protocol, Lsp.Uri,
+  Expert.PluginSettings, Expert.IncludeExpansion, Expert.InterfaceLinks,
+  Expert.SafeDeletePlan, Lsp.Client, Lsp.Protocol, Lsp.Uri,
   Delphi.FileEncoding, Expert.PascalScanner;
 
 // ---------------------------------------------------------------------------
@@ -188,6 +189,7 @@ begin
     O.AddPair('line', TJSONNumber.Create(It.Line + 1));
     O.AddPair('column', TJSONNumber.Create(It.Col + 1));
     O.AddPair('text', Trim(It.Preview));
+    if It.Relation <> '' then O.AddPair('relation', It.Relation);
     if It.Note <> '' then O.AddPair('note', It.Note);
     Result.Add(O);
   end;
@@ -588,6 +590,8 @@ begin
     // Positions inside {$I} include files are answered through the
     // INCLUDING unit, sent expanded; freeing the context restores it.
     var ContentOf: TDictionary<string, string> := nil;
+    var Linked: TLinkedTargets := nil;
+    var Links: TArray<TMemberLink> := nil;
     var IncCtx := TLspIncludeContext.Create(Ctx.Client,
       function(const APath: string; out AContent: string): Boolean
       begin
@@ -603,12 +607,39 @@ begin
     try
     IncCtx.RegisterFiles(Ctx.ScopeFiles);
     var Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
-    if Length(Decl) = 0 then
-      Exit(McpErr('DelphiLSP knows no declaration for ' + Ctx.Identifier + ' at that position'));
-    var DeclFile := ExpandFileName(TLspUri.FileUriToPath(Decl[0].Uri));
-    var DeclLine := Decl[0].Range.Start.Line;
+    var DeclFile := '';
+    var DeclLine := -1;
+    if Length(Decl) > 0 then
+    begin
+      DeclFile := ExpandFileName(TLspUri.FileUriToPath(Decl[0].Uri));
+      DeclLine := Decl[0].Range.Start.Line;
+    end
+    else
+    begin
+      // DelphiLSP answers null AT a declaration - then the position IS it
+      var CL := Ctx.Content.Replace(#13#10, #10).Split([#10]);
+      if (L1 - 1 <= High(CL)) and LineDeclaresName(CL[L1 - 1], Ctx.Identifier) then
+      begin
+        DeclFile := F;
+        DeclLine := L1 - 1;
+      end
+      else
+        Exit(McpErr('DelphiLSP knows no declaration for ' + Ctx.Identifier + ' at that position'));
+    end;
     DeclFileOut := DeclFile;
     DeclLineOut := DeclLine;
+    // Interface <-> class (user request): the interface declaration a class
+    // method implements counts as a use, calls through the interface reach
+    // it; for an interface method, the implementing class methods and the
+    // calls on them.
+    Linked := TLinkedTargets.Create;
+    var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
+    try
+      Links := CollectLinkedTargets(Graph,
+        TImplementationFinder.FindContainingType(DeclFile, DeclLine), Ctx.Identifier, Linked);
+    finally
+      Graph.Free;
+    end;
     var Cands := TList<TFindReferenceItem>.Create;
     try
       for var SF in Ctx.ScopeFiles do
@@ -704,6 +735,19 @@ begin
             Verified := Verified + [Cd]
           else if SameText(ExpandFileName(Cd.FilePath), DeclFile) and (Cd.Line = DeclLine) then
             Verified := Verified + [Cd]   // the declaration itself
+          else if Linked.Contains(Cd.FilePath, Cd.Line) then
+          begin
+            var U := Cd;
+            U.Relation := Linked.DeclLabel(Cd.FilePath, Cd.Line);
+            Verified := Verified + [U];
+          end
+          else if (Length(D) > 0) and Linked.Contains(TLspUri.FileUriToPath(D[0].Uri),
+            D[0].Range.Start.Line) then
+          begin
+            var U := Cd;
+            U.Relation := Linked.CallLabel(TLspUri.FileUriToPath(D[0].Uri), D[0].Range.Start.Line);
+            Verified := Verified + [U];
+          end
           else if (Length(D) = 0) and IsIncludeFile(Cd.FilePath) then
           begin
             // never dropped silently: listed, marked unverified
@@ -735,6 +779,24 @@ begin
         FreeAndNil(ContentOf);
         Synced.Free;
       end;
+      // a linked declaration outside the scanned files (an interface of a
+      // library, say) has no text candidate - list it anyway
+      for var L in Links do
+      begin
+        var Have := False;
+        for var It in Verified do
+          if SameText(ExpandFileName(It.FilePath), ExpandFileName(L.FilePath)) and
+             (It.Line = L.Line) then Have := True;
+        if Have then Continue;
+        var Extra := Default(TFindReferenceItem);
+        Extra.FilePath := L.FilePath;
+        Extra.Line := L.Line;
+        Extra.Col := L.Col;
+        Extra.Length := Length(Ctx.Identifier);
+        Extra.Preview := L.Text;
+        Extra.Relation := Linked.DeclLabel(L.FilePath, L.Line);
+        Verified := Verified + [Extra];
+      end;
       Items := Verified;
       Method := Format('text scan of %d file(s), %d candidate(s) verified via ' +
         'GotoDefinition', [Length(Ctx.ScopeFiles), Cands.Count]);
@@ -752,6 +814,7 @@ begin
       Cands.Free;
     end;
     finally
+      Linked.Free;
       IncCtx.Free;
     end;
   end;

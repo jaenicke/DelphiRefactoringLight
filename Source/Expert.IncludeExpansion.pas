@@ -95,6 +95,24 @@ function ExpandUnitIncludes(const AFile, AText: string;
 function ExpandIncludeText(const AText, ABaseDir: string; AIncludes: TStrings;
   const AReader: TIncludeReader = nil): string;
 
+/// <summary>Include expander for DEBUGGING (user request): every resolvable
+///  include of AText replaced IN PLACE by its content, framed by marker
+///  lines that keep the original directive -
+///    // >>> include begin: {$I foo.inc}
+///    ...content...
+///    // <<< include end: foo.inc
+///  Line comments, because the directive itself contains braces. The
+///  markers start on a line of their own; a directive sharing its line with
+///  code gets that code on the lines around the block. Nested includes are
+///  expanded (and marked) too. ACount = number of includes expanded; 0 means
+///  the result equals AText. Revert with the version control system.</summary>
+function ExpandIncludesMarked(const AText, ABaseDir: string;
+  const AReader: TIncludeReader; out ACount: Integer): string;
+
+const
+  IncludeMarkerBegin = '// >>> include begin: ';
+  IncludeMarkerEnd = '// <<< include end: ';
+
 /// <summary>Full paths of the files AText of AFile includes (nested too),
 ///  without duplicates.</summary>
 function CollectIncludeFiles(const AFile, AText: string;
@@ -234,7 +252,11 @@ type
     FSegments: TList<TIncludeSegment>;
     FIncludes: TStrings;
     FSources: TDictionary<string, string>;
+    FMarked: Boolean;
+    FLineBreak: string;
+    FCount: Integer;
     procedure Run(const AFile, AText: string; ALo, AHi: Integer);
+    procedure EnsureLineStart;
   public
     constructor Create(const AReader: TIncludeReader; AIncludes: TStrings;
       ASources: TDictionary<string, string>);
@@ -258,6 +280,13 @@ begin
   FSegments.Free;
   FSB.Free;
   inherited;
+end;
+
+// Marked mode: the next text starts on a line of its own.
+procedure TExpander.EnsureLineStart;
+begin
+  if (FSB.Length > 0) and not CharInSet(FSB.Chars[FSB.Length - 1], [#10, #13]) then
+    FSB.Append(FLineBreak);
 end;
 
 // Appends AText[ALo..AHi) (1-based, exclusive end) verbatim and records it.
@@ -340,9 +369,39 @@ begin
         if Path <> '' then
         begin
           if FIncludes <> nil then FIncludes.Add(Path);
-          Run(AFile, AText, RunStart, Start);
-          Expand(Path, Sub, ExtractFileDir(Path), ADepth + 1);
-          FSB.Append(#10);   // synthetic, belongs to no file
+          Inc(FCount);
+          var RunEnd := Start;
+          if FMarked then
+          begin
+            // only indentation before the directive on its line: drop it
+            // instead of leaving a line of blanks behind
+            var LS := Start;
+            while (LS > RunStart) and CharInSet(AText[LS - 1], [' ', #9]) do Dec(LS);
+            if (LS = 1) or ((LS > RunStart) and CharInSet(AText[LS - 1], [#13, #10])) then
+              RunEnd := LS;
+          end;
+          Run(AFile, AText, RunStart, RunEnd);
+          if FMarked then
+          begin
+            EnsureLineStart;
+            FSB.Append(IncludeMarkerBegin + Copy(AText, Start, I - Start) + FLineBreak);
+            Expand(Path, Sub, ExtractFileDir(Path), ADepth + 1);
+            EnsureLineStart;
+            FSB.Append(IncludeMarkerEnd + ExtractFileName(Path) + FLineBreak);
+            // blanks and ONE line break right after the directive are
+            // already covered by the marker's own line end
+            var K := I;
+            while (K <= N) and CharInSet(AText[K], [' ', #9]) do Inc(K);
+            if (K <= N) and (AText[K] = #13) then Inc(K);
+            if (K <= N) and (AText[K] = #10) then Inc(K);
+            if (K > N) or (K > I) and CharInSet(AText[K - 1], [#13, #10]) then
+              I := K;
+          end
+          else
+          begin
+            Expand(Path, Sub, ExtractFileDir(Path), ADepth + 1);
+            FSB.Append(#10);   // synthetic, belongs to no file
+          end;
           RunStart := I;
         end;
       end;
@@ -368,6 +427,46 @@ begin
   try
     E.Expand('', AText, ABaseDir, 0);
     Result := E.FSB.ToString;
+  finally
+    E.Free;
+  end;
+end;
+
+function ExpandIncludesMarked(const AText, ABaseDir: string;
+  const AReader: TIncludeReader; out ACount: Integer): string;
+var
+  E: TExpander;
+  R: TIncludeReader;
+begin
+  ACount := 0;
+  if (Pos('{$I', UpperCase(AText)) = 0) and (Pos('(*$I', UpperCase(AText)) = 0) then
+    Exit(AText);
+  R := AReader;
+  if not Assigned(R) then R := DiskReader;
+  E := TExpander.Create(R, nil, nil);
+  try
+    E.FMarked := True;
+    // the file's own line break style
+    if Pos(#13#10, AText) > 0 then E.FLineBreak := #13#10
+    else if Pos(#10, AText) > 0 then E.FLineBreak := #10
+    else E.FLineBreak := sLineBreak;
+    E.Expand('', AText, ABaseDir, 0);
+    ACount := E.FCount;
+    if ACount = 0 then Exit(AText);
+    Result := E.FSB.ToString;
+    // an include with other line endings than the unit would leave the file
+    // MIXED - which the debugger (and the debug consistency check) dislikes.
+    // A unit with ONE style gets the whole result in that style; a unit that
+    // is mixed already is left as it is.
+    var CrLf := 0;
+    var Lf := 0;
+    for var K := 1 to Length(AText) do
+      if AText[K] = #10 then
+        if (K > 1) and (AText[K - 1] = #13) then Inc(CrLf) else Inc(Lf);
+    if (CrLf > 0) and (Lf = 0) then
+      Result := Result.Replace(#13#10, #10).Replace(#13, #10).Replace(#10, #13#10)
+    else if (Lf > 0) and (CrLf = 0) then
+      Result := Result.Replace(#13#10, #10);
   finally
     E.Free;
   end;

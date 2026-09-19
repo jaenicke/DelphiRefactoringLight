@@ -754,6 +754,29 @@ const
     'of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances).' +
     '"}},"required":["file","line","column"]}}' +
     ',' +
+    '{"name":"expand_includes","description":"Writes the content of every {$I}/{$INCLUDE} f' +
+    'ile IN PLACE into the including source (for debugging), framed by marker comments that ke' +
+    'ep the original directive (// >>> include begin: ... / // <<< include end: ...). Nested in' +
+    'cludes too. Files open in the IDE are changed in the editor buffer (not saved), closed fil' +
+    'es ON DISK - revert with version control. Pass file, files, directory (recursive, .pas/.dp' +
+    'r/.dpk) or project=true.","inputSchema":{"type":"object","properties":{"file":{"type":"st' +
+    'ring"},"files":{"type":"array","items":{"type":"string"}},"directory":{"type":"string"},"p' +
+    'roject":{"type":"boolean"},"instance":{"type":"integer","description":"Process id of the I' +
+    'DE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}}}}' +
+    ',' +
+    '{"name":"convert_properties","description":"Converts the properties declared on lines f' +
+    'rom_line..to_line of a class/record between direct field access and getter/setter methods.' +
+    ' to_accessors: read/write FX -> GetX/SetX, declarations added to the private section, impl' +
+    'ementations after the type''s last method. to_fields: only TRIVIAL accessors (Result := FX' +
+    ' / FX := Value), which are then removed; refused when used elsewhere, virtual/override/ove' +
+    'rload. Every property gets a row with the result or the reason. apply=true changes the IDE' +
+    ' buffer (not saved).","inputSchema":{"type":"object","properties":{"file":{"type":"string' +
+    '"},"from_line":{"type":"integer","description":"1-based."},"to_line":{"type":"integer"},"d' +
+    'irection":{"type":"string","enum":["to_accessors","to_fields"]},"getter":{"type":"boolean"' +
+    '},"setter":{"type":"boolean"},"apply":{"type":"boolean"},"instance":{"type":"integer","des' +
+    'cription":"Process id of the IDE to use. Normally omitted - the IDE is chosen automaticall' +
+    'y (see ide_instances)."}},"required":["file","from_line"]}}' +
+    ',' +
     '{"name":"debug_consistency","description":"Checks the active project for reasons why break' +
     'points are not hit or debug info does not match: duplicate sources on the search path, str' +
     'ay DCUs, LF line endings, debug options and directives, outdated executable / symbol files' +
@@ -901,6 +924,8 @@ begin
     'find_references / find_implementations, rename_preview + rename_apply ' +
     '(the IDE plugin''s rename incl. form files), uses_path / uses_cycles, ' +
     'safe_delete (check that nothing uses a symbol, then delete it), ' +
+    'expand_includes (include files written into their units for debugging), ' +
+    'convert_properties (field access <-> getter/setter), ' +
     'debug_consistency, blame / commit_info. The lsp_* tools talk to the ' +
     'plugin''s own DelphiLSP session directly. ' +
     'When something does not work as expected (no fixes, no diagnostics, ' +

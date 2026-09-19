@@ -735,14 +735,48 @@ begin
   BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
   if BytesRead < 0 then Exit;
 
+  // The editor keeps the buffer's FINAL line break through DeleteTo -
+  // measured 2026-09-19: every full replace of a buffer that ended with a
+  // line break grew the file by one CRLF. So the new text goes in WITHOUT
+  // its own last line break when the old buffer ended with one.
+  var Text := ANewContent;
+  if (BytesRead > 0) and (Buf[BytesRead - 1] = 10) then
+  begin
+    if Text.EndsWith(#13#10) then SetLength(Text, Length(Text) - 2)
+    else if Text.EndsWith(#10) then SetLength(Text, Length(Text) - 1);
+  end;
+
   // Writer: alles loeschen und neuen Inhalt einfuegen
   Writer := SourceEditor.CreateUndoableWriter;
   if Writer = nil then Exit;
   try
     Writer.DeleteTo(BytesRead);
-    Writer.Insert(PAnsiChar(UTF8Encode(ANewContent)));
+    Writer.Insert(PAnsiChar(UTF8Encode(Text)));
   finally
     Writer := nil;
+  end;
+
+  // Safety net: should an IDE version behave differently, surplus line
+  // breaks at the very end (and ONLY those) are removed again.
+  var Want := TEncoding.UTF8.GetBytes(ANewContent);
+  var NowBuf: TBytes;
+  var NowLen := ReadWholeEditorBuffer(SourceEditor, NowBuf);
+  if (NowLen > Length(Want)) and (Length(Want) > 0) then
+  begin
+    var OnlyEol := CompareMem(@NowBuf[0], @Want[0], Length(Want));
+    for var K := Length(Want) to NowLen - 1 do
+      if not (NowBuf[K] in [10, 13]) then OnlyEol := False;
+    if OnlyEol then
+    begin
+      Writer := SourceEditor.CreateUndoableWriter;
+      if Writer <> nil then
+      try
+        Writer.CopyTo(Length(Want));
+        Writer.DeleteTo(NowLen);
+      finally
+        Writer := nil;
+      end;
+    end;
   end;
   Result := True;
 end;

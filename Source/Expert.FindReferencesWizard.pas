@@ -13,7 +13,7 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles, Expert.UnitIndex,
-  Expert.IncludeExpansion;
+  Expert.IncludeExpansion, Expert.InterfaceLinks, Expert.ImplementationFinder;
 
 type
   TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -27,7 +27,7 @@ type
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
-      const ATargets: TLspSymbolTargets;
+      const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
       AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
     function ConvertLspLocations(const ALocations: TArray<TLspLocation>; const AOldName: string): TFindReferenceItems;
 
@@ -251,9 +251,11 @@ begin
     var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
     // The symbol = its declaration + implementation (see TLspSymbolTargets).
     var Targets: TLspSymbolTargets;
+    var DefLine := LspLine;
     if Length(DefLocs) > 0 then
     begin
       DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri);
+      DefLine := DefLocs[0].Range.Start.Line;
       IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLocs[0].Range.Start.Line,
         DefLocs[0].Range.Start.Character);
     end
@@ -264,8 +266,47 @@ begin
       IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
     end;
 
-    // Verify each candidate via GotoDefinition
-    Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Client, IncCtx);
+    // Interface <-> class (user request): the interface declaration a class
+    // method implements is a use of it - even when the interface is never
+    // called - and calls through the interface reach it; for an interface
+    // method, the implementing class methods and the calls on them.
+    var Linked := TLinkedTargets.Create;
+    try
+      var Links: TArray<TMemberLink> := nil;
+      var Graph := TTypeGraph.Create(ProjFiles, EditorOrDiskReader());
+      try
+        var Owner := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
+        Links := CollectLinkedTargets(Graph, Owner, FContext.WordAtCursor, Linked);
+      finally
+        Graph.Free;
+      end;
+
+      // Verify each candidate via GotoDefinition
+      Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
+        Client, IncCtx);
+
+      // a linked declaration outside the scanned files (an interface of a
+      // library, say) has no text candidate - list it anyway
+      for var L in Links do
+      begin
+        var Have := False;
+        for var It in Items do
+          if SameText(ExpandFileName(It.FilePath), ExpandFileName(L.FilePath)) and
+             (It.Line = L.Line) then Have := True;
+        if Have then Continue;
+        var Extra: TFindReferenceItem;
+        Extra.FilePath := L.FilePath;
+        Extra.Line := L.Line;
+        Extra.Col := L.Col;
+        Extra.Length := System.Length(FContext.WordAtCursor);
+        Extra.Preview := L.Text;
+        Extra.Note := '';
+        Extra.Relation := Linked.DeclLabel(L.FilePath, L.Line);
+        Items := Items + [Extra];
+      end;
+    finally
+      Linked.Free;
+    end;
   finally
     IncCtx.Free;
   end;
@@ -396,7 +437,7 @@ begin
 end;
 
 function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
-  const ATargets: TLspSymbolTargets;
+  const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
   AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
@@ -444,9 +485,23 @@ begin
         // alone says nothing: several same-named methods in one unit.
         if ATargets.Contains(C.FilePath, C.Line) then
           Matches := True
+        else if ALinked.Contains(C.FilePath, C.Line) then
+        begin
+          // the declaration in the interface / the implementing class
+          Matches := True;
+          C.Relation := ALinked.DeclLabel(C.FilePath, C.Line);
+        end
         else if System.Length(Defs) > 0 then
-          Matches := ATargets.Contains(TLspUri.FileUriToPath(Defs[0].Uri),
-            Defs[0].Range.Start.Line);
+        begin
+          var DF := TLspUri.FileUriToPath(Defs[0].Uri);
+          var DL := Defs[0].Range.Start.Line;
+          Matches := ATargets.Contains(DF, DL);
+          if not Matches and ALinked.Contains(DF, DL) then
+          begin
+            Matches := True;
+            C.Relation := ALinked.CallLabel(DF, DL);
+          end;
+        end;
       except
         // Error -> location skipped
         Matches := False;

@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.2.2** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.3.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -14,6 +14,8 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP                                                                                                |
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method                                                                                 |
 | *(menu only)*          | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
+| *(menu only)*          | **Convert properties** &mdash; switch the selected properties between direct field access and getter / setter methods, in both directions |
+| *(menu only)*          | **Expand include files** &mdash; write the content of `{$I}` files into their units (current unit, selected units, a directory or the whole project) so the code can be debugged where it runs |
 | *(menu only)*          | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
@@ -55,7 +57,8 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Reads the identifier under the cursor.
 - Tries `textDocument/references` on the LSP server first.
 - If that returns nothing (or the server does not support it), falls back to the same strategy as Rename: project-wide text search plus per-candidate verification via `textDocument/definition`.
-- Shows the results in a dialog (file, line, column, line preview).
+- Shows the results in a dialog (file, line, column, line preview, note).
+- **Interfaces**: for a class method that implements an interface method, the declaration in the interface counts as a use &mdash; also when the interface is never called &mdash; and calls through the interface are found ("declared in interface IFoo", "call via interface IFoo"). Interface inheritance is followed (`IFoo = interface(IBase)`). For an interface method it works the other way round: the implementing classes' methods and the calls on them ("implemented by TFoo", "call via class TFoo").
 - **Double-click** or **Enter** jumps to the location.
 
 ### Find Unit References (`Ctrl+Alt+Shift+F`)
@@ -137,6 +140,22 @@ Put the caret on a symbol - its declaration or any use - and choose **Safe delet
 - Refused outright: overloaded methods (another overload could silently take over the calls), `virtual` / `dynamic` / `abstract` / `override` / `message` methods (reachable through dispatch), `published` members (streaming, RTTI), methods implementing an interface method, multi-line data declarations and types with a body.
 - Supported: methods of classes, records and interfaces, free and nested routines, fields, properties, unit-level and local variables and constants (one name out of `A, B, C: Integer` is removed on its own), single-line types. A `///` doc comment directly above goes with it, and so does a `var` / `const` keyword that would be left without declarations.
 - The dialog lists what will be deleted and every occurrence with its verdict; **Delete** is enabled only when the check passed. The edit goes through the editor (undoable) and is not saved. Code outside the project scope (other projects using the unit) is not seen &mdash; the dialog says so.
+
+### Convert properties (menu only)
+Select the property declarations (or put the caret on one) and choose **Convert properties (field / getter, setter)...**. The dialog lists every selected property with what will happen or why not:
+- **Field access &rarr; getter / setter** (getter, setter or both): `property Name: string read FName write FName;` becomes `read GetName write SetName`; `function GetName: string;` / `procedure SetName(const Value: string);` go into the private section (a new one is created before the first visibility keyword, so no other member changes its visibility), the implementations (`Result := FName;` / `FName := Value;`) after the class's last method.
+- **Getter / setter &rarr; field access**: only for TRIVIAL accessors (`Result := FName;`, `Exit(FName);`, `FName := Value;`), which are then removed. Kept, with the reason shown, when the accessor is used anywhere else (for a non-private one: in any file of the project), or is `virtual` / `override` / `overload` / `message`.
+- Not supported (and said so): array and indexed properties, class properties, multi-line declarations, an accessor name that already exists.
+- The change goes through the editor (undoable) and is not saved; a round trip there and back gives the original text byte for byte.
+
+### Expand include files (menu only)
+**Expand include files** replaces every `{$I file}` / `{$INCLUDE file}` by the file's content, framed by marker comments that keep the directive:
+```pascal
+// >>> include begin: {$I Foo.inc}
+...content of Foo.inc...
+// <<< include end: Foo.inc
+```
+Nested includes are expanded too, a trailing `//` comment in an include cannot swallow the code after the directive, and the unit's line break style is kept. Reach: current unit, selected units, a directory (recursive) or the whole project. Open files are changed in the editor buffer (undoable, not saved), all others on disk &mdash; go back with your version control system.
 
 ### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
@@ -464,6 +483,10 @@ DelphiRefactoringLight/
 |   |-- Expert.ExtractMethodDialog.pas       # Progress / preview dialog
 |   |-- Expert.PascalScanner.pas             # The shared Pascal lexer + identifier / comment / string helpers
 |   |-- Expert.IncludeExpansion.pas          # {$I} expansion with a position map; DelphiLSP inside include files
+|   |-- Expert.IncludeExpander.pas           # "Expand include files" (marked, for debugging) + MCP tool
+|   |-- Expert.InterfaceLinks.pas            # Interface <-> class links of a method (find references, safe delete)
+|   |-- Expert.PropertyConvert.pas           # Property converter: the planner (pure)
+|   |-- Expert.PropertyConvertWizard.pas     # Property converter: dialog + MCP tool
 |   |-- Expert.SelectionValidator.pas        # Extract Method: selection validation
 |   |-- Expert.FindReferencesWizard.pas      # Find-references logic
 |   |-- Expert.FindReferencesDialog.pas      # Results dialog with list view

@@ -1,0 +1,545 @@
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *)
+unit Expert.InterfaceLinks;
+
+// Interface <-> class links of a METHOD, for find references (user request
+// 2026-09-19): a class method that implements an interface method is "used"
+// by that interface declaration - even when nobody ever calls it through the
+// interface - and calls through the interface reach it. The other way round,
+// an interface method is implemented (and reached) by the implementing class
+// methods.
+//
+//   InterfaceMethodsImplementedBy('TFoo', 'Bar') -> IFoo.Bar, IBase.Bar ...
+//     every interface in TFoo's parent list, plus the interfaces THEY inherit
+//     from (IFoo = interface(IBase)), that declares Bar;
+//   ClassMethodsImplementing('IFoo', 'Bar') -> TFoo.Bar, TOther.Bar ...
+//     every class whose parent list reaches IFoo (directly or through an
+//     interface descending from it) and declares Bar.
+//
+// The type graph covers the scanned files; interfaces declared elsewhere
+// (RTL/VCL, libraries) are loaded on demand through the identifier index.
+// Text level (comments and strings masked), no DelphiLSP: the scans verify
+// the call sites through DelphiLSP afterwards, with these positions as
+// additional targets.
+
+interface
+
+uses
+  System.SysUtils, System.Generics.Collections, Expert.IncludeExpansion;
+
+type
+  TMemberLink = record
+    TypeName: string;       // 'IFoo' / 'TFoo'
+    IsInterface: Boolean;   // the TYPE of this link
+    FilePath: string;
+    Line: Integer;          // 0-based line of the member declaration
+    Col: Integer;           // 0-based column of the member NAME there
+    ImplLine: Integer;      // class method implementation header, -1 = none
+    Text: string;           // the declaration line (trimmed)
+  end;
+
+  TTypeDecl = record
+    Name: string;
+    FilePath: string;
+    Line: Integer;
+    IsInterface: Boolean;
+    Parents: TArray<string>;
+  end;
+
+  TTypeGraph = class
+  private
+    FReader: TIncludeReader;
+    FTypes: TDictionary<string, TTypeDecl>;     // UPPER name -> declaration
+    FContents: TDictionary<string, string>;     // UPPER path -> content
+    FLoadedFiles: TDictionary<string, Boolean>;
+    FUseIndex: Boolean;
+    procedure LoadFile(const AFile: string);
+    function Content(const AFile: string): string;
+    function TryType(const AName: string; out ADecl: TTypeDecl): Boolean;
+    function MemberLink(const ADecl: TTypeDecl; const AMember: string;
+      out ALink: TMemberLink): Boolean;
+  public
+    /// <summary>AReader: content source (buffer or disk); nil = disk.
+    ///  AUseIndex: resolve types outside AFiles through the identifier
+    ///  index (off in tests).</summary>
+    constructor Create(const AFiles: TArray<string>; const AReader: TIncludeReader;
+      AUseIndex: Boolean = True);
+    destructor Destroy; override;
+    /// <summary>Interface methods AMember of every interface AClassName
+    ///  implements (its parent list and their interface ancestors).</summary>
+    function InterfaceMethodsImplementedBy(const AClassName,
+      AMember: string): TArray<TMemberLink>;
+    /// <summary>Class methods AMember of every scanned class that
+    ///  implements AInterfaceName (directly or via a descendant interface).</summary>
+    function ClassMethodsImplementing(const AInterfaceName,
+      AMember: string): TArray<TMemberLink>;
+    /// <summary>The declaration of AName, if known.</summary>
+    function FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
+  end;
+
+/// <summary>Type declarations in ALines (masked text is parsed, AFile only
+///  labels them): "X = class(...)", "X = interface(...)", generic names
+///  stripped to their base name; forward declarations are skipped.</summary>
+function ParseTypeDecls(const AFile: string; const ALines: TArray<string>): TArray<TTypeDecl>;
+
+/// <summary>Parent list of a type header at ALine0 (may wrap lines): unit
+///  qualifiers and generic arguments removed ('System.IInterface' ->
+///  'IInterface', 'IFoo<T>' -> 'IFoo').</summary>
+function TypeHeaderParents(const ALines: TArray<string>; ALine0: Integer): TArray<string>;
+
+/// <summary>0-based line of the implementation header "AType.AMember" in
+///  ALines ('procedure TFoo.Bar', also 'function TFoo<T>.Bar'), -1 = none.</summary>
+function FindMethodImplLine(const ALines: TArray<string>; const AType, AMember: string): Integer;
+
+type
+  /// <summary>Positions of a symbol's relatives with a label each ("declared
+  ///  in interface IFoo", "implemented by TFoo") - used by the find
+  ///  references scans to tell WHY a hit belongs to the symbol.</summary>
+  TLinkedTargets = class
+  private
+    FTypes: TDictionary<string, string>;   // key -> 'I:IFoo' / 'C:TFoo'
+    class function Key(const AFile: string; ALine: Integer): string; static;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    /// <summary>A position of a relative: the member in interface / class
+    ///  ATypeName.</summary>
+    procedure Add(const AFile: string; ALine: Integer; AIsInterface: Boolean;
+      const ATypeName: string);
+    function Contains(const AFile: string; ALine: Integer): Boolean;
+    /// <summary>For a hit AT the position: "declared in interface IFoo" /
+    ///  "implemented by TFoo"; '' when not linked.</summary>
+    function DeclLabel(const AFile: string; ALine: Integer): string;
+    /// <summary>For a hit that LEADS to the position: "call via interface
+    ///  IFoo" / "call via class TFoo"; '' when not linked.</summary>
+    function CallLabel(const AFile: string; ALine: Integer): string;
+    function Count: Integer;
+  end;
+
+/// <summary>Fills ATargets for the symbol AMember of AOwnerType: when
+///  AOwnerType is a CLASS, the interface declarations it implements
+///  ("declared in interface IFoo"); when it is an INTERFACE, the implementing
+///  class methods' declarations and implementations ("implemented by
+///  TFoo"). Returns the links (for rows the scans add themselves - e.g. an
+///  interface outside the scanned files).</summary>
+function CollectLinkedTargets(AGraph: TTypeGraph; const AOwnerType, AMember: string;
+  ATargets: TLinkedTargets): TArray<TMemberLink>;
+
+implementation
+
+uses
+  System.StrUtils, Expert.PascalScanner, Expert.UnitIndex, Delphi.FileEncoding;
+
+function SplitContentLinesLocal(const AContent: string): TArray<string>;
+begin
+  Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+end;
+
+function StripGenericAndUnit(const AName: string): string;
+begin
+  Result := Trim(AName);
+  var LT := Pos('<', Result);
+  if LT > 0 then Result := Trim(Copy(Result, 1, LT - 1));
+  var Dot := LastDelimiter('.', Result);
+  if Dot > 0 then Result := Copy(Result, Dot + 1, MaxInt);
+end;
+
+function TypeHeaderParents(const ALines: TArray<string>; ALine0: Integer): TArray<string>;
+var
+  Combined: string;
+  Open, Close, Depth, I: Integer;
+begin
+  Result := nil;
+  if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
+  Combined := ALines[ALine0];
+  var Eq := Pos('=', Combined);
+  Open := Pos('(', Combined, Eq + 1);
+  if (Eq = 0) or (Open = 0) then Exit;
+  // the '(' must follow the class / interface keyword directly
+  var Between := UpperCase(Trim(Copy(Combined, Eq + 1, Open - Eq - 1)));
+  if Between.StartsWith('PACKED ') then Between := TrimLeft(Copy(Between, 8, MaxInt));
+  // class / class abstract / class sealed / interface / dispinterface
+  if (Between <> 'CLASS') and (Between <> 'INTERFACE') and (Between <> 'DISPINTERFACE') and
+     not Between.StartsWith('CLASS ') then Exit;
+  I := ALine0;
+  Close := 0;
+  while Close = 0 do
+  begin
+    Depth := 0;
+    for var K := Open to Length(Combined) do
+      case Combined[K] of
+        '(', '<': Inc(Depth);
+        '>': Dec(Depth);
+        ')':
+          begin
+            Dec(Depth);
+            if Depth = 0 then begin Close := K; Break; end;
+          end;
+      end;
+    if Close = 0 then
+    begin
+      Inc(I);
+      if (I > High(ALines)) or (I - ALine0 > 20) then Exit;
+      Combined := Combined + ' ' + ALines[I];
+    end;
+  end;
+  // split at top-level commas (generic arguments may contain commas)
+  var Inside := Copy(Combined, Open + 1, Close - Open - 1);
+  var Part := '';
+  Depth := 0;
+  for var K := 1 to Length(Inside) + 1 do
+  begin
+    if (K > Length(Inside)) or ((Inside[K] = ',') and (Depth = 0)) then
+    begin
+      Part := StripGenericAndUnit(Part);
+      if Part <> '' then Result := Result + [Part];
+      Part := '';
+      Continue;
+    end;
+    case Inside[K] of
+      '<': Inc(Depth);
+      '>': Dec(Depth);
+    end;
+    Part := Part + Inside[K];
+  end;
+end;
+
+function ParseTypeDecls(const AFile: string; const ALines: TArray<string>): TArray<TTypeDecl>;
+var
+  M: TArray<string>;
+begin
+  Result := nil;
+  M := MaskCommentsAndStrings(ALines);
+  for var L := 0 to High(M) do
+  begin
+    var T := Trim(M[L]);
+    var Eq := Pos('=', T);
+    if Eq < 2 then Continue;
+    var Name := Trim(Copy(T, 1, Eq - 1));
+    // "type TFoo = class" on one line
+    if UpperCase(Name).StartsWith('TYPE ') then Name := Trim(Copy(Name, 6, MaxInt));
+    Name := StripGenericAndUnit(Name);
+    if not IsIdentifier(Name) then Continue;
+    var Rest := UpperCase(Trim(Copy(T, Eq + 1, MaxInt)));
+    if Rest.StartsWith('PACKED ') then Rest := TrimLeft(Copy(Rest, 8, MaxInt));
+    var IsIntf := Rest.StartsWith('INTERFACE') or Rest.StartsWith('DISPINTERFACE');
+    // "class", "class(", "class abstract", "class sealed" - but not "class of"
+    var IsClass := Rest.StartsWith('CLASS') and not Rest.StartsWith('CLASS OF');
+    if not (IsIntf or IsClass) then Continue;
+    // a forward declaration ("TFoo = class;" / "IFoo = interface;") has
+    // neither parents nor a body
+    var Word := IfThen(IsIntf, IfThen(Rest.StartsWith('DISP'), 'DISPINTERFACE', 'INTERFACE'), 'CLASS');
+    if Trim(Copy(Rest, Length(Word) + 1, MaxInt)) = ';' then Continue;
+    var D: TTypeDecl;
+    D.Name := Name;
+    D.FilePath := AFile;
+    D.Line := L;
+    D.IsInterface := IsIntf;
+    D.Parents := TypeHeaderParents(M, L);
+    Result := Result + [D];
+  end;
+end;
+
+function FindMethodImplLine(const ALines: TArray<string>; const AType, AMember: string): Integer;
+var
+  M: TArray<string>;
+  U, Want: string;
+begin
+  Result := -1;
+  M := MaskCommentsAndStrings(ALines);
+  Want := UpperCase(AMember);
+  for var L := 0 to High(M) do
+  begin
+    U := UpperCase(TrimLeft(M[L]));
+    if U.StartsWith('CLASS ') then U := TrimLeft(Copy(U, 7, MaxInt));
+    var KW := '';
+    for var K in ['PROCEDURE ', 'FUNCTION ', 'CONSTRUCTOR ', 'DESTRUCTOR '] do
+      if U.StartsWith(K) then KW := K;
+    if KW = '' then Continue;
+    U := TrimLeft(Copy(U, Length(KW) + 1, MaxInt));
+    // qualified name up to '(' ';' ':' or blank; generic arguments removed
+    var I := 1;
+    var Q := '';
+    var Depth := 0;
+    while I <= Length(U) do
+    begin
+      var C := U[I];
+      if C = '<' then Inc(Depth)
+      else if C = '>' then Dec(Depth)
+      else if (Depth = 0) and CharInSet(C, ['(', ';', ':', ' ']) then Break
+      else if Depth = 0 then Q := Q + C;
+      Inc(I);
+    end;
+    var Dot := LastDelimiter('.', Q);
+    if Dot = 0 then Continue;
+    if not SameText(Copy(Q, Dot + 1, MaxInt), Want) then Continue;
+    var Owner := Copy(Q, 1, Dot - 1);
+    var OD := LastDelimiter('.', Owner);
+    Owner := Copy(Owner, OD + 1, MaxInt);
+    if SameText(Owner, AType) then Exit(L);
+  end;
+end;
+
+{ TTypeGraph }
+
+constructor TTypeGraph.Create(const AFiles: TArray<string>; const AReader: TIncludeReader;
+  AUseIndex: Boolean);
+begin
+  inherited Create;
+  FReader := AReader;
+  FUseIndex := AUseIndex;
+  FTypes := TDictionary<string, TTypeDecl>.Create;
+  FContents := TDictionary<string, string>.Create;
+  FLoadedFiles := TDictionary<string, Boolean>.Create;
+  for var F in AFiles do LoadFile(F);
+end;
+
+destructor TTypeGraph.Destroy;
+begin
+  FLoadedFiles.Free;
+  FContents.Free;
+  FTypes.Free;
+  inherited;
+end;
+
+function TTypeGraph.Content(const AFile: string): string;
+begin
+  if FContents.TryGetValue(UpperCase(AFile), Result) then Exit;
+  Result := '';
+  if Assigned(FReader) then
+  begin
+    if not FReader(AFile, Result) then Result := '';
+  end
+  else
+    try
+      Result := ReadDelphiFile(AFile);
+    except
+      Result := '';
+    end;
+  FContents.AddOrSetValue(UpperCase(AFile), Result);
+end;
+
+procedure TTypeGraph.LoadFile(const AFile: string);
+begin
+  var Key := UpperCase(ExpandFileName(AFile));
+  if FLoadedFiles.ContainsKey(Key) then Exit;
+  FLoadedFiles.Add(Key, True);
+  var C := Content(AFile);
+  if (C = '') or ((Pos('CLASS', UpperCase(C)) = 0) and (Pos('INTERFACE', UpperCase(C)) = 0)) then
+    Exit;
+  for var D in ParseTypeDecls(AFile, SplitContentLinesLocal(C)) do
+    // first real declaration wins (a scan file before a library one)
+    if not FTypes.ContainsKey(UpperCase(D.Name)) then
+      FTypes.Add(UpperCase(D.Name), D);
+end;
+
+function TTypeGraph.TryType(const AName: string; out ADecl: TTypeDecl): Boolean;
+begin
+  if FTypes.TryGetValue(UpperCase(AName), ADecl) then Exit(True);
+  Result := False;
+  if not FUseIndex then Exit;
+  var Snap := TUnitIndex.Instance.Snapshot;
+  if Snap = nil then Exit;
+  for var H in Snap.Lookup(AName) do
+    LoadFile(H.Path);
+  Result := FTypes.TryGetValue(UpperCase(AName), ADecl);
+end;
+
+function TTypeGraph.FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
+begin
+  Result := TryType(StripGenericAndUnit(AName), ADecl);
+end;
+
+function TTypeGraph.MemberLink(const ADecl: TTypeDecl; const AMember: string;
+  out ALink: TMemberLink): Boolean;
+begin
+  Result := False;
+  var C := Content(ADecl.FilePath);
+  var L := FindMemberDeclarationLine(C, ADecl.Name, AMember);
+  if L < 0 then Exit;
+  var Lines := SplitContentLinesLocal(C);
+  if L > High(Lines) then Exit;
+  ALink := Default(TMemberLink);
+  ALink.TypeName := ADecl.Name;
+  ALink.IsInterface := ADecl.IsInterface;
+  ALink.FilePath := ADecl.FilePath;
+  ALink.Line := L;
+  ALink.Text := Trim(Lines[L]);
+  // the member NAME as a whole word on that line
+  var U := UpperCase(Lines[L]);
+  var W := UpperCase(AMember);
+  var P := Pos(W, U);
+  ALink.Col := 0;
+  while P > 0 do
+  begin
+    var E := P + Length(W);
+    if ((P = 1) or not IsIdentChar(U[P - 1])) and ((E > Length(U)) or not IsIdentChar(U[E])) then
+    begin
+      ALink.Col := P - 1;
+      Break;
+    end;
+    P := Pos(W, U, P + 1);
+  end;
+  ALink.ImplLine := -1;
+  if not ADecl.IsInterface then
+    ALink.ImplLine := FindMethodImplLine(Lines, ADecl.Name, AMember);
+  Result := True;
+end;
+
+function TTypeGraph.InterfaceMethodsImplementedBy(const AClassName,
+  AMember: string): TArray<TMemberLink>;
+var
+  Seen: TDictionary<string, Boolean>;
+
+  procedure Walk(const AIntf: string; ADepth: Integer);
+  var
+    D: TTypeDecl;
+    Link: TMemberLink;
+  begin
+    if (ADepth > 16) or Seen.ContainsKey(UpperCase(AIntf)) then Exit;
+    Seen.Add(UpperCase(AIntf), True);
+    if not TryType(AIntf, D) or not D.IsInterface then Exit;
+    if MemberLink(D, AMember, Link) then Result := Result + [Link];
+    for var P in D.Parents do Walk(P, ADepth + 1);
+  end;
+
+var
+  Cls: TTypeDecl;
+begin
+  Result := nil;
+  if not TryType(StripGenericAndUnit(AClassName), Cls) or Cls.IsInterface then Exit;
+  Seen := TDictionary<string, Boolean>.Create;
+  try
+    for var P in Cls.Parents do Walk(P, 0);
+  finally
+    Seen.Free;
+  end;
+end;
+
+function TTypeGraph.ClassMethodsImplementing(const AInterfaceName,
+  AMember: string): TArray<TMemberLink>;
+var
+  Target: string;
+
+  // AName (an interface) is ATarget or descends from it
+  function Reaches(const AName: string; ADepth: Integer): Boolean;
+  var
+    D: TTypeDecl;
+  begin
+    if SameText(AName, Target) then Exit(True);
+    if ADepth > 16 then Exit(False);
+    Result := False;
+    if not TryType(AName, D) or not D.IsInterface then Exit;
+    for var P in D.Parents do
+      if Reaches(P, ADepth + 1) then Exit(True);
+  end;
+
+begin
+  Result := nil;
+  Target := StripGenericAndUnit(AInterfaceName);
+  // only the SCANNED types are candidates (FTypes before any index loads)
+  var Classes: TArray<TTypeDecl> := nil;
+  for var D in FTypes.Values do
+    if not D.IsInterface then Classes := Classes + [D];
+  for var D in Classes do
+  begin
+    var Hit := False;
+    for var P in D.Parents do
+      if Reaches(P, 0) then begin Hit := True; Break; end;
+    if not Hit then Continue;
+    var Link: TMemberLink;
+    if MemberLink(D, AMember, Link) then Result := Result + [Link];
+  end;
+end;
+
+{ TLinkedTargets }
+
+class function TLinkedTargets.Key(const AFile: string; ALine: Integer): string;
+begin
+  Result := UpperCase(ExpandFileName(AFile)) + '|' + IntToStr(ALine);
+end;
+
+constructor TLinkedTargets.Create;
+begin
+  inherited;
+  FTypes := TDictionary<string, string>.Create;
+end;
+
+destructor TLinkedTargets.Destroy;
+begin
+  FTypes.Free;
+  inherited;
+end;
+
+procedure TLinkedTargets.Add(const AFile: string; ALine: Integer; AIsInterface: Boolean;
+  const ATypeName: string);
+begin
+  if (AFile <> '') and (ALine >= 0) and not FTypes.ContainsKey(Key(AFile, ALine)) then
+    FTypes.Add(Key(AFile, ALine), IfThen(AIsInterface, 'I:', 'C:') + ATypeName);
+end;
+
+function TLinkedTargets.Contains(const AFile: string; ALine: Integer): Boolean;
+begin
+  Result := FTypes.ContainsKey(Key(AFile, ALine));
+end;
+
+function TLinkedTargets.DeclLabel(const AFile: string; ALine: Integer): string;
+var
+  V: string;
+begin
+  Result := '';
+  if not FTypes.TryGetValue(Key(AFile, ALine), V) then Exit;
+  if V.StartsWith('I:') then
+    Result := 'declared in interface ' + Copy(V, 3, MaxInt)
+  else
+    Result := 'implemented by ' + Copy(V, 3, MaxInt);
+end;
+
+function TLinkedTargets.CallLabel(const AFile: string; ALine: Integer): string;
+var
+  V: string;
+begin
+  Result := '';
+  if not FTypes.TryGetValue(Key(AFile, ALine), V) then Exit;
+  if V.StartsWith('I:') then
+    Result := 'call via interface ' + Copy(V, 3, MaxInt)
+  else
+    Result := 'call via class ' + Copy(V, 3, MaxInt);
+end;
+
+function TLinkedTargets.Count: Integer;
+begin
+  Result := FTypes.Count;
+end;
+
+function CollectLinkedTargets(AGraph: TTypeGraph; const AOwnerType, AMember: string;
+  ATargets: TLinkedTargets): TArray<TMemberLink>;
+var
+  D: TTypeDecl;
+begin
+  Result := nil;
+  if (AOwnerType = '') or (AMember = '') or not AGraph.FindType(AOwnerType, D) then Exit;
+  if D.IsInterface then
+  begin
+    Result := AGraph.ClassMethodsImplementing(D.Name, AMember);
+    for var L in Result do
+    begin
+      ATargets.Add(L.FilePath, L.Line, False, L.TypeName);
+      if L.ImplLine >= 0 then
+        ATargets.Add(L.FilePath, L.ImplLine, False, L.TypeName);
+    end;
+  end
+  else
+  begin
+    Result := AGraph.InterfaceMethodsImplementedBy(D.Name, AMember);
+    for var L in Result do
+      ATargets.Add(L.FilePath, L.Line, True, L.TypeName);
+  end;
+end;
+
+end.

@@ -105,6 +105,13 @@ var
   AbsPath: string;
 begin
   AbsPath := ExpandFileName(APath);
+  // UNC "\\server\share\x.pas" -> "file://server/share/x.pas": the server
+  // is the URI's AUTHORITY. The old code produced "file://///server/...".
+  if AbsPath.StartsWith('\\') then
+  begin
+    AbsPath := StringReplace(Copy(AbsPath, 3, MaxInt), '\', '/', [rfReplaceAll]);
+    Exit('file://' + TLspUriHelper.PercentEncodePath(AbsPath));
+  end;
   // Backslashes -> forward slashes
   AbsPath := StringReplace(AbsPath, '\', '/', [rfReplaceAll]);
   // Percent-encode (but preserve '/' and ':')
@@ -114,20 +121,42 @@ end;
 class function TLspUri.FileUriToPath(const AUri: string): string;
 var
   Path: string;
+  IsUnc: Boolean;
 begin
-  Path := AUri;
-  // Strip "file:///" prefix
-  if Path.StartsWith('file:///', True) then
-    Path := Copy(Path, 9)
-  else if Path.StartsWith('file://', True) then
-    Path := Copy(Path, 8);
-
-  // Percent-decode
-  Path := TLspUriHelper.PercentDecode(Path);
+  // Decode FIRST: DelphiLSP sends "file:///c%3A/..." - with the colon still
+  // encoded the drive test below would take every local path for UNC.
+  Path := TLspUriHelper.PercentDecode(AUri);
+  IsUnc := False;
+  if Path.StartsWith('file://', True) then
+  begin
+    Path := Copy(Path, 8);   // after "file://": authority + path
+    if Path.StartsWith('localhost/', True) then
+      Path := Copy(Path, 10);   // "file://localhost/C:/x" = local
+    var SlashRun := 0;
+    while Path.StartsWith('/') do
+    begin
+      Delete(Path, 1, 1);
+      Inc(SlashRun);
+    end;
+    // UNC only with the shape "server/share/...": the authority form
+    // "file://server/share/x" (no slash left after "file://") or extra
+    // slashes before the server ("file:////server/...", and the
+    // "file://///server/..." this unit itself used to emit). A drive path
+    // is local, and so is anything without a share part - DelphiLSP
+    // sometimes answers with a bare "file:///Unit.pas", which must stay
+    // a (relative) file name instead of becoming "\\Unit.pas".
+    var IsDrive := (Length(Path) >= 2) and (Path[2] = ':') and
+      CharInSet(Path[1], ['A'..'Z', 'a'..'z']);
+    var Slash := Pos('/', Path);
+    var HasShare := (Slash > 1) and (Slash < Length(Path));
+    IsUnc := not IsDrive and HasShare and (SlashRun <> 1);
+  end;
 
   // Forward slashes -> backslashes (Windows)
   Path := StringReplace(Path, '/', '\', [rfReplaceAll]);
 
+  if IsUnc then
+    Path := '\\' + Path;
   Result := Path;
 end;
 

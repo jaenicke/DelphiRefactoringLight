@@ -1698,7 +1698,28 @@ begin
       EnsureImplementationUses(APlan.TargetFile, ImplOnly);
     end;
 
-    // 2) Remove declaration + implementation blocks from SOURCE.
+    // 2) Remove declaration + implementation blocks from SOURCE - but only
+    //    after the TARGET provably holds them. The removal is the one step
+    //    that cannot be recovered from: when the additive write above did
+    //    not land (file locked, module refused the edit), removing anyway
+    //    would lose the code in both units.
+    begin
+      var TargetNow := '';
+      try
+        TargetNow := ReadFile(APlan.TargetFile);
+      except
+        TargetNow := '';
+      end;
+      var FirstDeclLine := '';
+      for var DL in SplitLines(APlan.DeclarationText) do
+        if Trim(DL) <> '' then
+        begin
+          FirstDeclLine := Trim(DL);
+          Break;
+        end;
+      if (FirstDeclLine <> '') and (Pos(FirstDeclLine, TargetNow) = 0) then
+        Exit(False);
+    end;
     RemoveRangeFromSource(APlan.SourceFile, APlan);
 
     // 3) For every consumer, ensure interface uses contains TARGET.

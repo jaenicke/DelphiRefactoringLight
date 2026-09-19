@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jaenicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1088,6 +1088,7 @@ type
     Enabled: Boolean;
     Notes: string;
     function GetNewName: string;
+    function CreateBackup: Boolean;
     function Scope: TRenameScope;
     function SelectedUnits: TArray<string>;
     function IncludeOpenUnits: Boolean;
@@ -1103,6 +1104,9 @@ type
   end;
 
 function THeadlessRenameHost.GetNewName: string; begin Result := NewName; end;
+// no backup copies for remote renames - the caller works on a VCS
+// checkout and gets the full edit list back
+function THeadlessRenameHost.CreateBackup: Boolean; begin Result := False; end;
 function THeadlessRenameHost.Scope: TRenameScope; begin Result := ScopeValue; end;
 function THeadlessRenameHost.SelectedUnits: TArray<string>; begin Result := Units; end;
 function THeadlessRenameHost.IncludeOpenUnits: Boolean; begin Result := IncOpen; end;

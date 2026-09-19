@@ -368,6 +368,96 @@ begin
   end;
 end;
 
+// The source editor of AModule whose FileName IS AFilePath. A module
+// covers all its files (.pas AND .dfm), so "the first source editor"
+// silently answered with the .pas buffer for a .dfm request - and a write
+// then went into the wrong file.
+function SourceEditorFor(const AModule: IOTAModule;
+  const AFilePath: string): IOTASourceEditor;
+begin
+  Result := nil;
+  if AModule = nil then Exit;
+  for var I := 0 to AModule.GetModuleFileCount - 1 do
+    if Supports(AModule.GetModuleFileEditor(I), IOTASourceEditor, Result) then
+    begin
+      if SameText(ExpandFileName(Result.FileName), ExpandFileName(AFilePath)) then
+        Exit;
+      Result := nil;
+    end;
+end;
+
+// The COMPLETE UTF-8 buffer of ASourceEditor, or -1. Read in chunks until
+// the reader returns less than asked for; the old single read into a
+// buffer sized "lines * 200" silently cut long files short, and
+// ReplaceFileContent then deleted only that prefix and left the old TAIL
+// behind the new content.
+function ReadWholeEditorBuffer(const ASourceEditor: IOTASourceEditor;
+  out ABuf: TBytes): Integer;
+const
+  Chunk = 256 * 1024;
+  MaxBytes = 256 * 1024 * 1024;
+var
+  Reader: IOTAEditReader;
+  Got: Integer;
+begin
+  Result := -1;
+  ABuf := nil;
+  if ASourceEditor = nil then Exit;
+  Reader := ASourceEditor.CreateReader;
+  if Reader = nil then Exit;
+  try
+    Result := 0;
+    repeat
+      if Result + Chunk > MaxBytes then Exit(-1);
+      SetLength(ABuf, Result + Chunk);
+      Got := Reader.GetText(Result, PAnsiChar(@ABuf[Result]), Chunk);
+      if Got < 0 then Exit(-1);
+      Inc(Result, Got);
+    until Got < Chunk;
+    SetLength(ABuf, Result);
+  finally
+    Reader := nil;   // release BEFORE any writer is created
+  end;
+end;
+
+// Byte offset in the UTF-8 buffer of (ALine0, ACharCol0): ALine0 0-based,
+// ACharCol0 in UTF-16 code units (the LSP / string-index convention),
+// walked over the line's code points - a character column is NOT a byte
+// offset as soon as a non-ASCII character stands left of it. False when
+// the buffer has fewer lines. AColBeyond receives the columns that lay
+// behind the line end (0 when the column is inside the line).
+function BufferOffsetOf(const ABuf: TBytes; ABytes, ALine0, ACharCol0: Integer;
+  out AOffset, AColBeyond: Integer): Boolean;
+var
+  I, LineNum, CharsLeft: Integer;
+  B: Byte;
+begin
+  AOffset := -1;
+  AColBeyond := 0;
+  LineNum := 0;
+  I := 0;
+  while (I < ABytes) and (LineNum < ALine0) do
+  begin
+    if ABuf[I] = 10 then Inc(LineNum);
+    Inc(I);
+  end;
+  if LineNum < ALine0 then Exit(False);
+  CharsLeft := ACharCol0;
+  while (CharsLeft > 0) and (I < ABytes) and (ABuf[I] <> 10) and (ABuf[I] <> 13) do
+  begin
+    B := ABuf[I];
+    if B < $80 then begin Inc(I); Dec(CharsLeft); end
+    else if B >= $F0 then begin Inc(I, 4); Dec(CharsLeft, 2); end  // surrogate pair
+    else if B >= $E0 then begin Inc(I, 3); Dec(CharsLeft); end
+    else if B >= $C0 then begin Inc(I, 2); Dec(CharsLeft); end
+    else Inc(I);   // stray continuation byte
+  end;
+  if I > ABytes then I := ABytes;
+  if CharsLeft > 0 then AColBeyond := CharsLeft;
+  AOffset := I;
+  Result := True;
+end;
+
 procedure TIDEEditorHelper.SaveAllFiles;
 var
   ModuleServices: IOTAModuleServices;
@@ -470,13 +560,10 @@ var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
   SourceEditor: IOTASourceEditor;
-  Reader: IOTAEditReader;
   Writer: IOTAEditWriter;
-  I: Integer;
-  BufSize: Integer;
   Buf: TBytes;
   BytesRead: Integer;
-  LineNum, OldTextLen: Integer;
+  OldTextLen: Integer;
 begin
   Result := False;
 
@@ -490,57 +577,28 @@ begin
   if Module = nil then
     Exit;
 
-  // SourceEditor finden
-  SourceEditor := nil;
-  for I := 0 to Module.GetModuleFileCount - 1 do
-  begin
-    if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-      Break;
-  end;
+  // The editor of THIS file - not simply the module's first one, which is
+  // the .pas buffer even when a .dfm was asked for.
+  SourceEditor := SourceEditorFor(Module, AFilePath);
   if SourceEditor = nil then
     Exit;
 
-  // Lineare Position berechnen ueber den Reader
-  // Der Editor-Buffer ist UTF-8 kodiert mit #13#10 Zeilenenden
-  Reader := SourceEditor.CreateReader;
-  if Reader = nil then
+  // Der Editor-Buffer ist UTF-8 kodiert mit #13#10 Zeilenenden. Ganz
+  // lesen - ein abgeschnittener Puffer liefert falsche Positionen.
+  BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
+  if BytesRead < 0 then
     Exit;
 
-  // Buffer-Inhalt lesen (bis zu 4 MB)
-  BufSize := SourceEditor.GetLinesInBuffer * 200; // Schaetzung
-  if BufSize < 65536 then BufSize := 65536;
-  if BufSize > 4 * 1024 * 1024 then BufSize := 4 * 1024 * 1024;
-  SetLength(Buf, BufSize);
-  BytesRead := Reader.GetText(0, @Buf[0], BufSize);
-  Reader := nil; // Reader freigeben BEVOR Writer erstellt wird!
-
-  // Lineare Position finden: Zeilen zaehlen (0-basiert)
-  LineNum := 0;
-  I := 0;
-  while (I < BytesRead) and (LineNum < ALine) do
-  begin
-    if Buf[I] = 10 then // LF = Zeilenende
-      Inc(LineNum);
-    Inc(I);
-  end;
-  // I zeigt jetzt auf den Anfang von Zeile ALine.
   // ACol counts CHARACTERS (UTF-16 code units, the LSP convention), the
   // buffer is UTF-8 - adding ACol as a byte offset put every edit behind a
   // non-ASCII character on the same line ('Größe: ' + Button1.Caption) at
-  // the wrong place. Walk the line's code points instead.
-  var LinearPos := I;
-  var CharsLeft := ACol;
-  while (CharsLeft > 0) and (LinearPos < BytesRead) and (Buf[LinearPos] <> 10) do
-  begin
-    var B := Buf[LinearPos];
-    if B < $80 then begin Inc(LinearPos); Dec(CharsLeft); end
-    else if B >= $F0 then begin Inc(LinearPos, 4); Dec(CharsLeft, 2); end  // surrogate pair
-    else if B >= $E0 then begin Inc(LinearPos, 3); Dec(CharsLeft); end
-    else if B >= $C0 then begin Inc(LinearPos, 2); Dec(CharsLeft); end
-    else begin Inc(LinearPos); end;   // stray continuation byte
-  end;
-  if CharsLeft > 0 then
-    LinearPos := LinearPos + CharsLeft;   // beyond the line end: old behaviour
+  // the wrong place. BufferOffsetOf walks the line's code points; a line
+  // the buffer does not have, or a column behind the line end, is refused.
+  var LinearPos, Beyond: Integer;
+  if not BufferOffsetOf(Buf, BytesRead, ALine, ACol, LinearPos, Beyond) then
+    Exit;
+  if Beyond > 0 then
+    Exit;
 
   // Laenge des alten Textes in UTF-8 Bytes
   OldTextLen := Length(UTF8Encode(AOldText));
@@ -595,9 +653,8 @@ var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
   SourceEditor: IOTASourceEditor;
-  Reader: IOTAEditReader;
   Writer: IOTAEditWriter;
-  I, BufSize, BytesRead, LineNum: Integer;
+  I, BytesRead, LineNum: Integer;
   Buf: TBytes;
   LinearPos: Integer;
 begin
@@ -607,28 +664,12 @@ begin
   if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
-  // Pick the editor whose FileName matches the REQUESTED file. The
-  // module covers all its files (.pas AND .dfm), so "first source
-  // editor" silently returned the .pas buffer for a .dfm request.
-  SourceEditor := nil;
-  for I := 0 to Module.GetModuleFileCount - 1 do
-    if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-    begin
-      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
-        Break;
-      SourceEditor := nil;
-    end;
+  SourceEditor := SourceEditorFor(Module, AFilePath);
   if SourceEditor = nil then Exit;
 
-  // Lineare Position von Zeilenanfang berechnen
-  Reader := SourceEditor.CreateReader;
-  if Reader = nil then Exit;
-  BufSize := SourceEditor.GetLinesInBuffer * 200;
-  if BufSize < 65536 then BufSize := 65536;
-  if BufSize > 8 * 1024 * 1024 then BufSize := 8 * 1024 * 1024;
-  SetLength(Buf, BufSize);
-  BytesRead := Reader.GetText(0, @Buf[0], BufSize);
-  Reader := nil;
+  // Lineare Position von Zeilenanfang berechnen (ganzer Puffer)
+  BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
+  if BytesRead < 0 then Exit;
 
   LineNum := 1; // 1-basiert
   I := 0;
@@ -637,6 +678,11 @@ begin
     if Buf[I] = 10 then Inc(LineNum);
     Inc(I);
   end;
+  // Line ALine does not exist: the only valid spot is the very end
+  // (appending a line after the last one). Anything further is a stale
+  // line number - refuse instead of appending at the wrong place.
+  if (LineNum < ALine) and not ((LineNum = ALine - 1) and (I = BytesRead)) then
+    Exit;
   LinearPos := I;
 
   // Writer: CopyTo + Insert ohne Auto-Indent
@@ -658,9 +704,8 @@ var
   Module: IOTAModule;
   SourceEditor: IOTASourceEditor;
   Writer: IOTAEditWriter;
-  I, BufSize, BytesRead: Integer;
+  BytesRead: Integer;
   Buf: TBytes;
-  Reader: IOTAEditReader;
 begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
@@ -682,28 +727,13 @@ begin
     Exit;
   end;
 
-  // Pick the editor whose FileName matches the REQUESTED file. The
-  // module covers all its files (.pas AND .dfm), so "first source
-  // editor" silently returned the .pas buffer for a .dfm request.
-  SourceEditor := nil;
-  for I := 0 to Module.GetModuleFileCount - 1 do
-    if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-    begin
-      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
-        Break;
-      SourceEditor := nil;
-    end;
+  SourceEditor := SourceEditorFor(Module, AFilePath);
   if SourceEditor = nil then Exit;
 
-  // Aktuelle Laenge ermitteln
-  Reader := SourceEditor.CreateReader;
-  if Reader = nil then Exit;
-  BufSize := SourceEditor.GetLinesInBuffer * 200;
-  if BufSize < 65536 then BufSize := 65536;
-  if BufSize > 8 * 1024 * 1024 then BufSize := 8 * 1024 * 1024;
-  SetLength(Buf, BufSize);
-  BytesRead := Reader.GetText(0, @Buf[0], BufSize);
-  Reader := nil;
+  // Aktuelle Laenge ermitteln - VOLLSTAENDIG: DeleteTo mit einer zu
+  // kleinen Laenge liess den alten Dateirest hinter dem neuen Inhalt stehen.
+  BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
+  if BytesRead < 0 then Exit;
 
   // Writer: alles loeschen und neuen Inhalt einfuegen
   Writer := SourceEditor.CreateUndoableWriter;
@@ -724,27 +754,10 @@ var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
   SourceEditor: IOTASourceEditor;
-  Reader: IOTAEditReader;
   Writer: IOTAEditWriter;
-  I, BufSize, BytesRead: Integer;
+  BytesRead, Beyond: Integer;
   Buf: TBytes;
   StartPos, EndPos: Integer;
-
-  function FindLinearPos(ALine, ACol: Integer): Integer;
-  var
-    Idx, LN: Integer;
-  begin
-    LN := 1;
-    Idx := 0;
-    while (Idx < BytesRead) and (LN < ALine) do
-    begin
-      if Buf[Idx] = 10 then Inc(LN);
-      Inc(Idx);
-    end;
-    // Spalte (1-basiert, in Bytes) addieren
-    Result := Idx + (ACol - 1);
-  end;
-
 begin
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
@@ -752,31 +765,22 @@ begin
   if Module = nil then Module := OpenModuleSafe(ModuleServices, AFilePath);
   if Module = nil then Exit;
 
-  // Pick the editor whose FileName matches the REQUESTED file. The
-  // module covers all its files (.pas AND .dfm), so "first source
-  // editor" silently returned the .pas buffer for a .dfm request.
-  SourceEditor := nil;
-  for I := 0 to Module.GetModuleFileCount - 1 do
-    if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-    begin
-      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
-        Break;
-      SourceEditor := nil;
-    end;
+  SourceEditor := SourceEditorFor(Module, AFilePath);
   if SourceEditor = nil then Exit;
 
   // Reader: Buffer lesen und Positionen berechnen
-  Reader := SourceEditor.CreateReader;
-  if Reader = nil then Exit;
-  BufSize := SourceEditor.GetLinesInBuffer * 200;
-  if BufSize < 65536 then BufSize := 65536;
-  if BufSize > 16 * 1024 * 1024 then BufSize := 16 * 1024 * 1024;
-  SetLength(Buf, BufSize);
-  BytesRead := Reader.GetText(0, @Buf[0], BufSize);
-  Reader := nil;
+  BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
+  if BytesRead < 0 then Exit;
 
-  StartPos := FindLinearPos(AStartLine, AStartCol);
-  EndPos := FindLinearPos(AEndLine, AEndCol);
+  // Lines and columns are 1-based CHARACTER positions; the buffer is
+  // UTF-8, so the column is walked over code points (it was added as a
+  // byte count, which shifted every edit behind an umlaut). A column
+  // behind the line end stays at the line end - it must never run into
+  // the next line.
+  if not BufferOffsetOf(Buf, BytesRead, AStartLine - 1, AStartCol - 1, StartPos, Beyond) then
+    Exit;
+  if not BufferOffsetOf(Buf, BytesRead, AEndLine - 1, AEndCol - 1, EndPos, Beyond) then
+    Exit;
   if EndPos < StartPos then EndPos := StartPos;
 
   // Writer: Bereich loeschen und neuen Text einfuegen (ohne Auto-Indent)
@@ -1000,8 +1004,7 @@ var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
   SourceEditor: IOTASourceEditor;
-  Reader: IOTAEditReader;
-  I, BufSize, BytesRead: Integer;
+  I, BytesRead: Integer;
   Buf: TBytes;
 begin
   Result := False;
@@ -1037,27 +1040,11 @@ begin
   end;
   if Module = nil then Exit;
 
-  // Pick the editor whose FileName matches the REQUESTED file. The
-  // module covers all its files (.pas AND .dfm), so "first source
-  // editor" silently returned the .pas buffer for a .dfm request.
-  SourceEditor := nil;
-  for I := 0 to Module.GetModuleFileCount - 1 do
-    if Supports(Module.GetModuleFileEditor(I), IOTASourceEditor, SourceEditor) then
-    begin
-      if SameText(ExpandFileName(SourceEditor.FileName), ExpandFileName(AFilePath)) then
-        Break;
-      SourceEditor := nil;
-    end;
+  SourceEditor := SourceEditorFor(Module, AFilePath);
   if SourceEditor = nil then Exit;
 
-  Reader := SourceEditor.CreateReader;
-  if Reader = nil then Exit;
-  BufSize := SourceEditor.GetLinesInBuffer * 200;
-  if BufSize < 65536 then BufSize := 65536;
-  if BufSize > 16 * 1024 * 1024 then BufSize := 16 * 1024 * 1024;
-  SetLength(Buf, BufSize);
-  BytesRead := Reader.GetText(0, @Buf[0], BufSize);
-  Reader := nil;
+  BytesRead := ReadWholeEditorBuffer(SourceEditor, Buf);
+  if BytesRead < 0 then Exit;   // never hand out a truncated buffer
 
   AContent := TEncoding.UTF8.GetString(Buf, 0, BytesRead);
   Result := True;

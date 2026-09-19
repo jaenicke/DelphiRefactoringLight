@@ -99,6 +99,7 @@ contains
   Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
+  Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
   Expert.BlameGutter in '..\Source\Expert.BlameGutter.pas',
   Expert.ResourceMonitor in '..\Source\Expert.ResourceMonitor.pas',
   Expert.ScopeFiles in '..\Source\Expert.ScopeFiles.pas',

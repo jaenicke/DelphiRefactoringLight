@@ -1,4 +1,4 @@
-(*
+﻿(*
  * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -23,7 +23,7 @@ uses
   Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.UsesEditor,
   Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
-  Expert.UnitAvailability;
+  Expert.UnitAvailability, Expert.WorkerLatch;
 
 type
   // Reference-counted hand-off from the search thread back to the UI poll
@@ -235,14 +235,14 @@ begin
   LInbox := FInbox;   // captured by value (interface) - survives form close
   // The scan runs against the immutable snapshot, so it needs no lock and
   // cannot block the worker. Only the (bounded) result set crosses back.
-  TThread.CreateAnonymousThread(
+  StartWorker(   // counted: the package must not unload under it
     procedure
     begin
       // Cap hard: with only a couple of letters a substring match hits huge
       // numbers of identifiers. Filling thousands of rows into the (non
       // owner-data) list would stall the UI - the user just types more.
       LInbox.Post(LGen, TUnitIndex.Instance.Search(LText, 200));
-    end).Start;
+    end);
 end;
 
 procedure TFindUnitDialog.DoPoll(Sender: TObject);

@@ -79,7 +79,8 @@ implementation
 uses
   System.SysUtils, System.IOUtils, Winapi.Windows, Lsp.Protocol,
   Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
-  Expert.UnitIndex, Expert.AutoImport, Expert.MessagesReader;
+  Expert.UnitIndex, Expert.AutoImport, Expert.MessagesReader,
+  Expert.WorkerLatch;
 
 { TPrewarmIdeNotifier }
 
@@ -261,7 +262,9 @@ begin
   if Length(ScanFiles) = 0 then Exit;
 
   FInFlight := True;
-  TThread.CreateAnonymousThread(
+  // Counted worker (A7): the cold start takes 10-30 s, and unloading the
+  // package meanwhile must wait for it instead of unmapping its code.
+  if not StartWorker(
     procedure
     begin
       try
@@ -279,7 +282,8 @@ begin
       finally
         FInFlight := False;
       end;
-    end).Start;
+    end) then
+    FInFlight := False;   // shutdown began - nothing was started
 end;
 
 end.

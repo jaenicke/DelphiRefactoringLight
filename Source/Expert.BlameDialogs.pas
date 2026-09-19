@@ -63,7 +63,7 @@ uses
   Vcl.Menus,
   Expert.EditorHelperIntf, Expert.VcsBlame, Expert.DialogHelper,
   Expert.IdeThemes, Expert.ListViewSort, Expert.PluginSettings,
-  Expert.BlameGutter;
+  Expert.BlameGutter, Expert.WorkerLatch;
 
 function VcsName(AKind: TVcsKind): string;
 begin
@@ -192,8 +192,12 @@ begin
     Form.ClientHeight := 226;
     // Bottom right, so the gutter it adjusts stays visible.
     Form.Position := poDesigned;
-    Form.Left := Screen.WorkAreaRect.Right - Form.Width - 40;
-    Form.Top := Screen.WorkAreaRect.Bottom - Form.Height - 60;
+    // on the IDE's monitor - Screen.WorkAreaRect is the PRIMARY one
+    var WA := Screen.WorkAreaRect;
+    if (Application.MainForm <> nil) and (Application.MainForm.Monitor <> nil) then
+      WA := Application.MainForm.Monitor.WorkareaRect;
+    Form.Left := WA.Right - Form.Width - 40;
+    Form.Top := WA.Bottom - Form.Height - 60;
 
     Form.FLblOffset := Cap(10, '');
     Form.FOffset := Slider(28, 400, OldOffset);
@@ -490,7 +494,7 @@ begin
       [VcsName(Info.Kind), Info.ShortHash]));
   try
     var ThreadRef: IInterface := HolderRef;   // keeps it alive
-    TThread.CreateAnonymousThread(
+    StartWorker(   // counted: the package must not unload under it
       procedure
       var
         Res: TCommitInfo;
@@ -510,7 +514,7 @@ begin
             Holder.Done := True;
           end);
         ThreadRef := nil;
-      end).Start;
+      end);
 
     Waited := 0;
     while (not Holder.Done) and (Waited < CommitFetchTimeoutMs) do

@@ -23,6 +23,7 @@ type
     FEdit: TLspWorkspaceEdit;
     FBackupDir: string;
     FNoBackup: Boolean;
+    FSkipped: TArray<string>;
     procedure SortEditsReverse(var AEdits: TArray<TLspTextEdit>);
     function ApplyEditsToContent(const AContent: string; const AEdits: TArray<TLspTextEdit>): string;
   public
@@ -34,8 +35,14 @@ type
     /// <summary>Creates backups of the affected files.</summary>
     procedure CreateBackups;
 
-    /// <summary>Applies all changes to the files.</summary>
+    /// <summary>Applies all changes to the files. Files that do not exist
+    ///  are skipped and listed in SkippedFiles (this used to Writeln - which
+    ///  raises I/O error 103 in a GUI process and aborted the apply
+    ///  half-way).</summary>
     procedure Apply;
+
+    /// <summary>Files the last Apply skipped (not found).</summary>
+    function SkippedFiles: TArray<string>;
 
     /// <summary>Returns the number of affected files.</summary>
     function FileCount: Integer;
@@ -50,7 +57,50 @@ type
     property NoBackup: Boolean read FNoBackup write FNoBackup;
   end;
 
+/// <summary>Where AFile goes inside ABackupDir: its FULL path mirrored
+///  below it ("C:\src\Client\Utils.pas" -> "&lt;dir&gt;\C\src\Client\Utils.pas",
+///  "\\srv\share\x.pas" -> "&lt;dir&gt;\UNC\srv\share\x.pas"). Flattening to
+///  the file name made Client\Utils.pas and Server\Utils.pas overwrite each
+///  other's backup - and the lost one is exactly the one you need.</summary>
+function MirroredBackupPath(const ABackupDir, AFile: string): string;
+
+/// <summary>A new, empty, time-stamped backup directory below
+///  %LOCALAPPDATA%\DelphiRefactoringLight\backup (created).</summary>
+function NewRenameBackupDir: string;
+
 implementation
+
+function MirroredBackupPath(const ABackupDir, AFile: string): string;
+var
+  F: string;
+begin
+  F := ExpandFileName(AFile);
+  if F.StartsWith('\\') then
+    F := 'UNC\' + Copy(F, 3, MaxInt)
+  else if (Length(F) >= 2) and (F[2] = ':') then
+    F := F[1] + Copy(F, 3, MaxInt);
+  while (F <> '') and CharInSet(F[1], ['\', '/']) do
+    Delete(F, 1, 1);
+  Result := TPath.Combine(ABackupDir, F);
+end;
+
+function NewRenameBackupDir: string;
+var
+  Base, Stamp: string;
+  N: Integer;
+begin
+  Base := TPath.Combine(TPath.Combine(GetEnvironmentVariable('LOCALAPPDATA'),
+    'DelphiRefactoringLight'), 'backup');
+  Stamp := FormatDateTime('yyyy-mm-dd_hhnnss', Now);
+  Result := TPath.Combine(Base, Stamp);
+  N := 1;
+  while TDirectory.Exists(Result) do
+  begin
+    Inc(N);
+    Result := TPath.Combine(Base, Stamp + '_' + IntToStr(N));
+  end;
+  ForceDirectories(Result);
+end;
 
 { TWorkspaceEditApplier }
 
@@ -218,14 +268,14 @@ begin
     Exit;
 
   if FBackupDir = '' then
-    FBackupDir := TPath.Combine(TPath.GetTempPath, 'rename_backup_' + FormatDateTime('yyyymmdd_hhnnss', Now));
+    FBackupDir := NewRenameBackupDir;
 
   for FE in FEdit.FileEdits do
   begin
     if not TFile.Exists(FE.FilePath) then
       Continue;
 
-    BackupPath := TPath.Combine(FBackupDir, ExtractFileName(FE.FilePath));
+    BackupPath := MirroredBackupPath(FBackupDir, FE.FilePath);
     ForceDirectories(ExtractFilePath(BackupPath));
     TFile.Copy(FE.FilePath, BackupPath, True);
   end;
@@ -236,11 +286,12 @@ var
   FE: TLspFileEdits;
   Content, NewContent: string;
 begin
+  FSkipped := nil;
   for FE in FEdit.FileEdits do
   begin
     if not TFile.Exists(FE.FilePath) then
     begin
-      Writeln('WARNUNG: Datei nicht gefunden, uebersprungen: ', FE.FilePath);
+      FSkipped := FSkipped + [FE.FilePath];
       Continue;
     end;
 
@@ -249,6 +300,11 @@ begin
     NewContent := ApplyEditsToContent(Content, FE.Edits);
     WriteDelphiFile(FE.FilePath, NewContent, OrigEncoding);
   end;
+end;
+
+function TWorkspaceEditApplier.SkippedFiles: TArray<string>;
+begin
+  Result := FSkipped;
 end;
 
 function TWorkspaceEditApplier.FileCount: Integer;

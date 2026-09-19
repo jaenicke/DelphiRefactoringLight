@@ -480,6 +480,8 @@ begin
     Result := 'LSP no diagnostics - skipped (dead-code unknown)'
   else if wriInactiveRegion in AItem.Issues then
     Result := 'inactive $IFDEF region - skipped'
+  else if wriCommentInHeader in AItem.Issues then
+    Result := 'comment/directive before the body - manual review'
   else if wriMultipleTargets in AItem.Issues then
     Result := 'multi-target - manual review'
   else if wriTypeUnresolved in AItem.Issues then

@@ -141,8 +141,10 @@ begin
     // Ignore Content-Type and other headers
   end;
 
+  // Not a stream error: the pipe is fine, only this frame is unusable
+  // (stray output on the shared stdout/stderr pipe). The reader carries on.
   if ContentLength < 0 then
-    raise EStreamError.Create('Kein Content-Length Header empfangen');
+    raise EJSONException.Create('Kein Content-Length Header empfangen');
 
   // Read body
   Body := ReadBytes(ContentLength);

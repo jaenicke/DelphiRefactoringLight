@@ -10,7 +10,8 @@ unit Expert.LspManager;
 interface
 
 uses
-  System.SysUtils, System.Classes, Lsp.Client, System.Generics.Collections;
+  System.SysUtils, System.Classes, System.SyncObjs, Lsp.Client,
+  System.Generics.Collections;
 
 type
   /// <summary>
@@ -35,7 +36,19 @@ type
       FIsReady: Boolean;
       FProjectIndexed: Boolean;    // Alle Projektdateien via didOpen bekannt?
       FLspExePath: string;
+      // THREAD SAFETY: GetClient is called from worker threads (completion,
+      // signature help, prewarmer, live checker) as well as the main thread.
+      // FLock serialises every state change - without it a second caller
+      // saw "not ready yet", restarted, and FREED the client the first one
+      // was still initialising. A replaced client is never freed while a
+      // worker may hold it: it is shut down (requests fail fast) and parked
+      // in FRetired; the objects go only after RetiredGraceMs or when the
+      // manager itself is destroyed (after the worker latch has drained).
+      FLock: TCriticalSection;
+      FRetired: TList<TPair<TLspClient, UInt64>>;
     constructor CreatePrivate;
+    procedure RetireClient;
+    procedure SweepRetired(AAll: Boolean);
   public
     destructor Destroy; override;
 
@@ -60,7 +73,8 @@ type
     ///  Idempotent: wiederholte Aufrufe ohne Projektwechsel tun nichts.</summary>
     procedure EnsureProjectIndexed(const AProjectFiles: TArray<string>; AProgress: TLspIndexProgress = nil);
 
-    /// <summary>Prueft ob der LSP-Client noch laeuft.</summary>
+    /// <summary>Prueft ob der LSP-Client noch laeuft: Prozess lebt UND der
+    ///  Lese-Thread laeuft (ohne Round-Trip).</summary>
     function IsAlive: Boolean;
 
     /// <summary>Beendet den LSP-Client (z.B. beim Entladen des Experts).</summary>
@@ -91,6 +105,11 @@ type
     property ProjectIndexed: Boolean read FProjectIndexed;
 
     class procedure FreeInstance; reintroduce;
+
+    /// <summary>Ends a running DelphiLSP (if any) without creating the
+    ///  manager. At unload this wakes every worker that waits for an
+    ///  answer - their requests fail at once instead of timing out.</summary>
+    class procedure ShutdownIfRunning;
   end;
 
 implementation
@@ -101,6 +120,9 @@ uses
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI, Expert.EditorHelper {$ENDIF};
 
 const
+  /// <summary>How long a replaced client object stays alive for workers
+  ///  that may still hold it (the longest worker waits ~30 s).</summary>
+  RetiredGraceMs = 10 * 60 * 1000;
   /// <summary>Absolute Notfall-Fallback, falls weder Registry noch ToolsAPI
   ///  eine brauchbare Antwort liefern. Wird nur benutzt wenn die IDE einen
   ///  voellig defekten Registry-Stand hat.</summary>
@@ -216,6 +238,8 @@ end;
 constructor TLspManager.CreatePrivate;
 begin
   inherited Create;
+  FLock := TCriticalSection.Create;
+  FRetired := TList<TPair<TLspClient, UInt64>>.Create;
   FLspExePath := TLspPathResolver.ResolveLspExePath;
   FIsReady := False;
   FProjectIndexed := False;
@@ -224,14 +248,57 @@ end;
 destructor TLspManager.Destroy;
 begin
   Shutdown;
+  SweepRetired(True);   // the worker latch has drained by now
+  FRetired.Free;
+  FLock.Free;
   inherited;
 end;
 
 class function TLspManager.Instance: TLspManager;
+var
+  M: TLspManager;
 begin
+  // Workers call this too - create exactly one instance.
   if FInstance = nil then
-    FInstance := TLspManager.CreatePrivate;
+  begin
+    M := TLspManager.CreatePrivate;
+    if AtomicCmpExchange(Pointer(FInstance), Pointer(M), nil) <> nil then
+      M.Free;
+  end;
   Result := FInstance;
+end;
+
+// Caller holds FLock.
+procedure TLspManager.RetireClient;
+begin
+  if FClient <> nil then
+  begin
+    try
+      FClient.Shutdown;   // ends the process: pending waits wake up and fail
+    except
+      // Shutdown-Fehler ignorieren
+    end;
+    FRetired.Add(TPair<TLspClient, UInt64>.Create(FClient, GetTickCount64));
+    FClient := nil;
+  end;
+  FIsReady := False;
+  FProjectIndexed := False;
+  SweepRetired(False);
+end;
+
+// Caller holds FLock (or is the destructor).
+procedure TLspManager.SweepRetired(AAll: Boolean);
+begin
+  for var I := FRetired.Count - 1 downto 0 do
+    if AAll or (GetTickCount64 - FRetired[I].Value > RetiredGraceMs) then
+    begin
+      try
+        FRetired[I].Key.Free;
+      except
+        // a broken client must not stop the sweep
+      end;
+      FRetired.Delete(I);
+    end;
 end;
 
 class procedure TLspManager.FreeInstance;
@@ -239,35 +306,45 @@ begin
   FreeAndNil(FInstance);
 end;
 
-function TLspManager.IsAlive: Boolean;
+class procedure TLspManager.ShutdownIfRunning;
 begin
-  Result := (FClient <> nil) and FIsReady;
-  // Zusaetzlich pruefen ob der Prozess noch laeuft
-  if Result and (FClient <> nil) then
-  begin
-    try
-      // Leichtgewichtiger Test: Hover auf Position 0,0 einer leeren Datei
-      // Wenn der Prozess tot ist, wirft dies eine Exception
-      // Alternativ: Wir vertrauen darauf dass der ReaderThread Fehler meldet
-    except
-      Result := False;
-      Reset;
-    end;
-  end;
+  if FInstance <> nil then
+    FInstance.Shutdown;
+end;
+
+function TLspManager.IsAlive: Boolean;
+var
+  C: TLspClient;
+begin
+  // A real probe now: the old version had an EMPTY try block and answered
+  // "alive" for a dead reader thread, so every command then waited out its
+  // full timeout. A replaced client is never freed under us (FRetired), so
+  // reading the pointer without the lock is safe.
+  C := FClient;
+  Result := (C <> nil) and FIsReady and C.IsConnected;
 end;
 
 function TLspManager.PeekClient: TLspClient;
 begin
-  if (FClient <> nil) and FIsReady then
-    Result := FClient
-  else
-    Result := nil;
+  // Never block a poller: while another thread is (re)starting the client
+  // under the lock, there simply is no ready client yet.
+  if not FLock.TryEnter then Exit(nil);
+  try
+    if (FClient <> nil) and FIsReady and FClient.IsConnected then
+      Result := FClient
+    else
+      Result := nil;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TLspManager.GetClient(const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;
 var
   NeedRestart: Boolean;
 begin
+  FLock.Enter;
+  try
   NeedRestart := False;
 
   // Neustart noetig wenn:
@@ -279,12 +356,14 @@ begin
   else if not SameText(FCurrentProject, ADelphiLspJson) then
     NeedRestart := True
   else if not FIsReady then
-    NeedRestart := True;
+    NeedRestart := True
+  else if not FClient.IsConnected then
+    NeedRestart := True;   // process or reader thread died - start afresh
 
   if NeedRestart then
   begin
-    // Alten Client beenden
-    Shutdown;
+    // Alten Client beenden (nicht freigeben - ein Worker koennte ihn halten)
+    RetireClient;
 
     // Neuen Client starten
     FClient := TLspClient.Create(FLspExePath);
@@ -302,6 +381,7 @@ begin
       FIsReady := True;
       FProjectIndexed := False; // neu gestartet -> Index muss neu aufgebaut werden
     except
+      // Never handed out (other callers wait on FLock) - safe to free.
       FreeAndNil(FClient);
       FIsReady := False;
       FProjectIndexed := False;
@@ -310,14 +390,21 @@ begin
   end;
 
   Result := FClient;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TLspManager.EnsureProjectIndexed(const AProjectFiles: TArray<string>; AProgress: TLspIndexProgress);
 var
   I, N: Integer;
+  Client: TLspClient;
 begin
   if FProjectIndexed then Exit;
-  if FClient = nil then Exit;
+  // A local reference: a restart meanwhile retires FClient but never frees
+  // it while we may still use it.
+  Client := FClient;
+  if Client = nil then Exit;
 
   N := Length(AProjectFiles);
   if N = 0 then
@@ -341,7 +428,7 @@ begin
     if Assigned(AProgress) then
       AProgress(I + 1, N, AProjectFiles[I]);
     try
-      FClient.OpenDocument(AProjectFiles[I]);
+      Client.OpenDocument(AProjectFiles[I]);
     except
       // Einzelne Datei-Fehler ignorieren (z.B. fehlende Datei)
     end;
@@ -374,7 +461,7 @@ begin
     while (not SymbolsReady) and (Now < Deadline) do
     begin
       try
-        var SymJson := FClient.GetDocumentSymbols(ProbeFile);
+        var SymJson := Client.GetDocumentSymbols(ProbeFile);
         try
           if (SymJson <> nil) and (SymJson.Count > 0) then
           begin
@@ -422,7 +509,7 @@ begin
     while (not DefReady) and (Now < Deadline) do
     begin
       try
-        var Defs := FClient.GotoDefinition(ProbeFile, ProbeLine, ProbeCol);
+        var Defs := Client.GotoDefinition(ProbeFile, ProbeLine, ProbeCol);
         // Kein Throw == Server antwortet. Locations-Count egal.
         DefReady := True;
         if Length(Defs) = 0 then ; // explizit ignorieren
@@ -445,32 +532,32 @@ begin
   if Assigned(AProgress) then
     AProgress(N, N, '');
 
-  FProjectIndexed := True;
+  // only for the client we indexed - not for one started meanwhile
+  if Client = FClient then
+    FProjectIndexed := True;
 end;
 
 procedure TLspManager.Shutdown;
 begin
-  if FClient <> nil then
-  begin
-    try
-      FClient.Shutdown;
-    except
-      // Shutdown-Fehler ignorieren
-    end;
-    FreeAndNil(FClient);
+  FLock.Enter;
+  try
+    RetireClient;
+    FCurrentProject := '';
+    FCurrentRootPath := '';
+  finally
+    FLock.Leave;
   end;
-  FIsReady := False;
-  FProjectIndexed := False;
-  FCurrentProject := '';
-  FCurrentRootPath := '';
 end;
 
 procedure TLspManager.Reset;
 begin
-  FreeAndNil(FClient);
-  FIsReady := False;
-  FProjectIndexed := False;
-  FCurrentProject := '';
+  FLock.Enter;
+  try
+    RetireClient;
+    FCurrentProject := '';
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TLspManager.ApplyStatusToCaption(ADialog: TObject);
@@ -503,11 +590,13 @@ function TLspManager.GetWarmupStatusLine: string;
 // "cold-starting" forever.
 var
   Diag, Inactive: Integer;
+  C: TLspClient;
 begin
-  if FClient = nil then
+  C := FClient;   // never freed under us (see FRetired)
+  if C = nil then
     Exit('LSP not started yet - first action will trigger a cold start (~10-30 s).');
-  Diag := FClient.GetDiagnosticsCount;
-  Inactive := FClient.GetInactiveRangesTotal;
+  Diag := C.GetDiagnosticsCount;
+  Inactive := C.GetInactiveRangesTotal;
   if not FProjectIndexed then
   begin
     if Diag = 0 then

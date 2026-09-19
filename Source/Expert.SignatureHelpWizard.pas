@@ -113,8 +113,8 @@ type
 implementation
 
 uses
-  System.StrUtils, System.Math,
-  Expert.LspManager, Lsp.Client;
+  System.StrUtils, System.Math, System.Generics.Collections,
+  Expert.LspManager, Lsp.Client, Expert.WorkerLatch;
 
 const
   PadX = 8;
@@ -607,7 +607,7 @@ begin
   if (Editor = nil) or not Editor.ReadEditorContent(AFile, LiveContent) then
     LiveContent := '';
 
-  TThread.CreateAnonymousThread(
+  StartWorker(   // counted: the package must not unload under it
     procedure
     var
       Client: TLspClient;
@@ -691,7 +691,7 @@ begin
           FPopup.ShowSignature(SigLabel, ParamRanges, ActiveParamIdx,
             FLastScreenX, FLastScreenY);
         end);
-    end).Start;
+    end);
 end;
 
 procedure TLspSignatureHelpWizard.UpdateCursor(ALine, ACol: Integer);

@@ -71,7 +71,12 @@ type
     ///  with-statement sits inside an inactive {$IFDEF}-region. To be
     ///  safe we leave the occurrence untouched - rewriting code that
     ///  might be dead would silently produce wrong output.</summary>
-    wriLspNoDiagnostics
+    wriLspNoDiagnostics,
+    /// <summary>A comment or compiler directive stands between 'with' and
+    ///  the body ("with A do {$IFDEF X} begin ..."). The rewrite replaces
+    ///  that span, so it would be DROPPED - an {$IFDEF}/{$ENDIF} pair then
+    ///  even ends up unbalanced. Left for manual review.</summary>
+    wriCommentInHeader
   );
 
   /// <summary>Caller-controlled toggles for the rewriter.</summary>
@@ -365,6 +370,63 @@ end;
 function IsIdentCont(C: Char): Boolean; inline;
 begin
   Result := (C = '_') or C.IsLetterOrDigit;
+end;
+
+/// <summary>At ASource[AI] = '''': when this opens a Delphi 12+ MULTI-LINE
+///  string (an odd run of >= 3 quotes followed only by blanks up to the
+///  line end), skips the whole literal up to and including the closing
+///  run (the same number of quotes as the first non-blank characters of
+///  a line), updating ALine/ACol, and returns True. Otherwise returns
+///  False without moving. AN is the last index that may be read.</summary>
+function SkipMultiLineString(const ASource: string; var AI, ALine, ACol: Integer;
+  AN: Integer): Boolean;
+var
+  Q, K, I, Line, Col: Integer;
+begin
+  Result := False;
+  Q := 0;
+  while (AI + Q <= AN) and (ASource[AI + Q] = '''') do Inc(Q);
+  if (Q < 3) or not Odd(Q) then Exit;
+  K := AI + Q;
+  while (K <= AN) and CharInSet(ASource[K], [' ', #9]) do Inc(K);
+  if (K <= AN) and not CharInSet(ASource[K], [#13, #10]) then Exit;
+  I := K;
+  Line := ALine;
+  Col := ACol + (K - AI);
+  while I <= AN do
+  begin
+    // line break
+    if ASource[I] = #13 then
+    begin
+      Inc(I);
+      if (I <= AN) and (ASource[I] = #10) then Inc(I);
+    end
+    else if ASource[I] = #10 then
+      Inc(I)
+    else
+    begin
+      Inc(I);
+      Inc(Col);
+      Continue;
+    end;
+    Inc(Line);
+    Col := 1;
+    while (I <= AN) and CharInSet(ASource[I], [' ', #9]) do begin Inc(I); Inc(Col); end;
+    K := 0;
+    while (I + K <= AN) and (ASource[I + K] = '''') do Inc(K);
+    if K = Q then
+    begin
+      AI := I + Q;
+      ALine := Line;
+      ACol := Col + Q;
+      Exit(True);
+    end;
+  end;
+  // unterminated: consume to the end, never scan its content as code
+  AI := AN + 1;
+  ALine := Line;
+  ACol := Col;
+  Result := True;
 end;
 
 function IsPascalKeyword(const S: string): Boolean;
@@ -743,6 +805,19 @@ begin
            or (Word = 'CONSTRUCTOR') or (Word = 'DESTRUCTOR')
            or (Word = 'OPERATOR');
   end;
+end;
+
+/// <summary>True iff the (trimmed) declaration line is a property
+///  declaration ("property X: T read GetX;", optionally 'class property').
+///  A property may run a getter on every read, so a 'with' target that is
+///  a property must be evaluated ONCE into a temp variable.</summary>
+function DeclLineDeclaresProperty(const ALine: string): Boolean;
+var
+  S: string;
+begin
+  S := UpperCase(Trim(ALine));
+  if S.StartsWith('CLASS ') then S := TrimLeft(Copy(S, 7, MaxInt));
+  Result := S.StartsWith('PROPERTY ') or S.StartsWith('PROPERTY'#9);
 end;
 
 /// <summary>For a constructor/destructor declaration like
@@ -1515,7 +1590,9 @@ begin
         Continue;
       end;
 
-      // String literal
+      // String literal (multi-line ''' form first)
+      if (Ch = '''') and SkipMultiLineString(ASource, I, Line, Col, N) then
+        Continue;
       if Ch = '''' then
       begin
         Inc(I); Inc(Col);
@@ -1929,7 +2006,13 @@ begin
         Continue;
       end;
 
-      // Skip strings
+      // Skip strings (a Delphi 12+ multi-line ''' literal first - its
+      // CONTENT must never be taken for body identifiers)
+      if (Ch = '''') and SkipMultiLineString(ASource, I, Line, Col, N) then
+      begin
+        PrevSig := '''';
+        Continue;
+      end;
       if Ch = '''' then
       begin
         Inc(I); Inc(Col);
@@ -2780,6 +2863,13 @@ begin
   // erzeugen, weil sonst bei direkter Inline-Qualifizierung der Call
   // mehrfach ausgewertet würde.
   Result.IsMethod := DeclLineDeclaresMethod(DeclLineText);
+  // Ebenso ein PROPERTY: hinter 'read' kann ein Getter stehen, der bei
+  // Inline-Qualifizierung einmal PRO Referenz statt einmal laeuft - genau
+  // die Garantie, die 'with' gibt. Ob der Accessor ein Feld oder eine
+  // Methode ist, sieht man der Zeile nicht sicher an; die Temp-Variable
+  // ist in beiden Faellen korrekt.
+  if DeclLineDeclaresProperty(DeclLineText) then
+    Result.IsMethod := True;
 
   TypeName := ExtractTypeNameFromDeclarationLine(DeclLineText, TypeNameCol1);
 
@@ -3125,6 +3215,16 @@ begin
   Result.ReplaceRange.EndPos := ReplaceEnd;
   Result.OriginalText := Index.Slice(ReplaceStart, ReplaceEnd);
 
+  // Everything from 'with' up to the kept body text is REPLACED - a
+  // comment or {$IFDEF} in there would silently vanish.
+  var HeaderText := Index.Slice(ReplaceStart, AOccurrence.BodyInnerRange.StartPos);
+  if (Pos('{', HeaderText) > 0) or (Pos('(*', HeaderText) > 0)
+    or (Pos('//', HeaderText) > 0) then
+  begin
+    Include(Result.Issues, wriCommentInHeader);
+    Exit;
+  end;
+
   if Length(AOccurrence.Targets) = 0 then
   begin
     Include(Result.Issues, wriClassRangeUnknown);
@@ -3156,6 +3256,18 @@ begin
         Result.Debug.Targets[DI].Ancestors      := Targets[DI].Ancestors;
         Result.Debug.Targets[DI].ParentUnitHints := Targets[DI].ParentUnitHints;
       end;
+      Exit;
+    end;
+    // "Resolved" but without a READABLE class body (type from a
+    // precompiled package - the declaring .pas is not on disk - or the
+    // type hop failed): member names cannot be recognised, so body
+    // identifiers stay BARE and silently bind to whatever the enclosing
+    // scope provides ("Close" becomes the form's Close). Such a rewrite
+    // used to be reported "ok" - refuse instead (issue #10, Ian Branch).
+    if (Targets[I].TypeFile = '') or not TFile.Exists(Targets[I].TypeFile)
+      or (Targets[I].ClassStartLine <= 0) then
+    begin
+      Include(Result.Issues, wriClassRangeUnknown);
       Exit;
     end;
     // Pick the inline-var name for this target.
@@ -3266,6 +3378,7 @@ begin
   // record which prefix to inject. Refs we leave alone get '' as prefix.
   var DebugRefs := TList<TWithDebugRefInfo>.Create;
   var Prefixes := TDictionary<Integer, string>.Create;
+  var UnverifiableRef := False;
   try
     for Ref in BodyRefs do
     begin
@@ -3410,6 +3523,14 @@ begin
               end;
             end;
           end;
+
+          // Still unmatched, and its declaration lives in a file that is
+          // not on disk (a precompiled ancestor): it may well be an
+          // INHERITED member we simply cannot see. Leaving it bare would
+          // rebind it silently - refuse the whole rewrite instead.
+          if not Prefixes.ContainsKey(Ref.StartIdx) and (RefDefFile <> '')
+            and not TFile.Exists(RefDefFile) then
+            UnverifiableRef := True;
         end;
       end;
 
@@ -3433,6 +3554,11 @@ begin
       Result.Debug.Targets[I].ParentUnitHints := Targets[I].ParentUnitHints;
     end;
     Result.Debug.Refs := DebugRefs.ToArray;
+    if UnverifiableRef then
+    begin
+      Include(Result.Issues, wriClassRangeUnknown);
+      Exit;
+    end;
 
     // Rebuild body with prefixes injected.
     var InnerStartIdx := Index.PosToIndex(

@@ -25,7 +25,7 @@ uses
   Expert.StructureErrors, Expert.QuickFixMarkers, Expert.StatusWindow,
   Expert.BlameGutter, Expert.PluginSettings,
   Expert.DialogHelper, Expert.ResourceMonitor, Expert.McpServer,
-  Expert.PluginInfo;
+  Expert.PluginInfo, Expert.WorkerLatch, Expert.LspManager;
 
 type
   TShortcutChangeHook = class
@@ -156,6 +156,13 @@ finalization
   // Before the live checker: MCP requests read its data, and the server
   // waits for every running request before it returns.
   StopMcpServer;
+  // Background workers (completion, signature help, prewarmer, find-unit
+  // search, commit fetch): no new ones from here on, and the running ones
+  // finish BEFORE any object they use is freed or the code is unmapped.
+  // Ending DelphiLSP first wakes those waiting for an answer - their
+  // requests fail at once instead of timing out.
+  TLspManager.ShutdownIfRunning;
+  ShutdownWorkersAndWait;
   StopResourceMonitor;
   UninstallBlameGutter;
   UninstallQuickFixMarkers;

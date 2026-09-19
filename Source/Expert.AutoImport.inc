@@ -270,6 +270,25 @@ function H2219NameFromMessage(const AMessage: string): string;
 ///  while, and the fix would then offer to insert ';' after 'begin'.</summary>
 function CanTakeSemicolon(const ALine: string): Boolean;
 
+/// <summary>True when the statement starting on line ALine0 is the SOLE
+///  statement of a control structure: the previous code token (comments
+///  skipped, also multi-line ones) is THEN, ELSE, DO or a label/case
+///  colon. Deleting such a statement would make the FOLLOWING statement
+///  conditional ("if not FCached then" / "  FRetries := 0;" / "Load;").</summary>
+function IsSoleBranchStatement(const ALines: TArray<string>; ALine0: Integer): Boolean;
+
+/// <summary>The body line of a generated implementation stub (E2065 /
+///  DFM handler): '' for ordinary routines; for an instance CONSTRUCTOR or
+///  DESTRUCTOR the inherited call - a constructor stub without it compiles
+///  and fails much later, far from the cause. 'override' or a destructor ->
+///  'inherited;'; a new constructor of a TObject descendant ->
+///  'inherited Create;'; any other parent -> a TODO comment (the right
+///  ancestor constructor cannot be guessed); records -> nothing.
+///  ADeclText = the declaration's text incl. directives, AOpenerLine = the
+///  enclosing type's "TFoo = class(TBar)" line.</summary>
+function StubBodyLine(const AKind: string; AIsClassMethod: Boolean;
+  const ADeclText, AOpenerLine: string): string;
+
 /// <summary>True for diagnostic codes a quick-fix provider handles.
 ///  Everything else can never produce a fix (E2250 & co).</summary>
 function IsHandledDiagCode(const ACode: string): Boolean;
@@ -1836,6 +1855,9 @@ var
     if (RHS = '') or not RHS.EndsWith(';') then Exit;
     RHS := Trim(Copy(RHS, 1, Length(RHS) - 1));
     if not IsSafeLiteral(RHS) then Exit;
+    // "if X then" / "  A := 0;": deleting the line would pull the NEXT
+    // statement under the condition.
+    if IsSoleBranchStatement(Lines, D.Range.Start.Line) then Exit;
 
     F := Default(TQuickFix);
     F.Kind := qfRemoveAssign;
@@ -2447,6 +2469,8 @@ begin
   end;
 end;
 
+function IsTypeOpenerLine(const ALine: string): Boolean; forward;
+
 function CreateImplStub(const AFile: string; ALine0: Integer): Boolean;
 var
   Content, Kind, Hdr, Qualified, BareName, Params, Ret, ContainerName, Text: string;
@@ -2504,15 +2528,82 @@ begin
       end;
     end;
 
+  // The declaration's own lines (directives such as 'override' live on
+  // the last one) and the opener of the enclosing type decide the body.
+  var DeclText := '';
+  for I := ALine0 to Min(HdrEnd, High(Lines)) do
+    DeclText := DeclText + ' ' + StripLineComment(Lines[I]);
+  var Opener := '';
+  if ContainerName <> '' then
+    for I := ALine0 - 1 downto 0 do
+      if IsTypeOpenerLine(Lines[I]) then
+      begin
+        Opener := Lines[I];
+        Break;
+      end;
+  var Body := StubBodyLine(Kind, IsCM, DeclText, Opener);
+
   Text := '';
   if IsCM then Text := 'class ';
   Text := Text + Kind + ' ' + Qualified;
   if Params <> '' then Text := Text + '(' + Params + ')';
   if Ret <> '' then Text := Text + ': ' + Ret;
-  Text := Text + ';' + sLineBreak + 'begin' + sLineBreak + sLineBreak
+  Text := Text + ';' + sLineBreak + 'begin' + sLineBreak + Body + sLineBreak
     + 'end;' + sLineBreak + sLineBreak;
 
   Result := Editor.InsertTextAtLineStart(AFile, InsLine + 1, Text);
+end;
+
+function IsTypeOpenerLine(const ALine: string): Boolean;
+var
+  S: string;
+  P: Integer;
+begin
+  S := UpperCase(Trim(StripLineComment(ALine)));
+  P := Pos('=', S);
+  if P = 0 then Exit(False);
+  S := TrimLeft(Copy(S, P + 1, MaxInt));
+  if S.StartsWith('PACKED ') then S := TrimLeft(Copy(S, 8, MaxInt));
+  // a forward declaration ('TFoo = class;') and a metaclass ('class of')
+  // open no body
+  if S.StartsWith('CLASS OF') or (S = 'CLASS;') or (S = 'INTERFACE;') then Exit(False);
+  Result := S.StartsWith('CLASS') or S.StartsWith('RECORD') or S.StartsWith('OBJECT');
+end;
+
+function StubBodyLine(const AKind: string; AIsClassMethod: Boolean;
+  const ADeclText, AOpenerLine: string): string;
+var
+  Up, Parents: string;
+  P, Q: Integer;
+begin
+  Result := '';
+  if AIsClassMethod then Exit;   // class constructor/destructor: nothing to chain
+  if not (SameText(AKind, 'constructor') or SameText(AKind, 'destructor')) then Exit;
+  Up := UpperCase(AOpenerLine);
+  P := Pos('=', Up);
+  if P > 0 then Up := TrimLeft(Copy(Up, P + 1, MaxInt)) else Up := '';
+  if Up.StartsWith('PACKED ') then Up := TrimLeft(Copy(Up, 8, MaxInt));
+  if Up.StartsWith('RECORD') then Exit;   // records have no inheritance
+  // 'override': the ancestor HAS this exact signature - plain 'inherited;'
+  // is right. A destructor always chains (TObject.Destroy & co).
+  if HasWholeWordCI(ADeclText, 'override') or SameText(AKind, 'destructor') then
+    Exit('  inherited;');
+  // A NEW constructor: 'inherited;' would look for the same name AND
+  // parameters in the ancestor (E2008 for 'Create(A: Integer)' on TObject).
+  // Only a class derived from TObject has a known right answer.
+  Parents := '';
+  P := Pos('(', Up);
+  if P > 0 then
+  begin
+    Q := Pos(')', Up, P);
+    if Q > P then Parents := Trim(Copy(Up, P + 1, Q - P - 1));
+    P := Pos(',', Parents);
+    if P > 0 then Parents := Trim(Copy(Parents, 1, P - 1));
+  end;
+  if (Parents = '') or (Parents = 'TOBJECT') or (Parents = 'SYSTEM.TOBJECT') then
+    Result := '  inherited Create;'
+  else
+    Result := '  // TODO: call the inherited constructor - inherited Create(...);';
 end;
 
 // E2065 fix (forward class): inserts a minimal class declaration right
@@ -2624,7 +2715,33 @@ begin
   Lines := SplitContentLines(Content);
   if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
   if Trim(StripLineComment(Lines[ALine0])) <> AExpected then Exit;
+  if IsSoleBranchStatement(Lines, ALine0) then Exit;
   Result := Editor.DeleteLineAt(AFile, ALine0 + 1);
+end;
+
+function IsSoleBranchStatement(const ALines: TArray<string>; ALine0: Integer): Boolean;
+var
+  M: TArray<string>;
+  L, P, Q: Integer;
+  S, W: string;
+begin
+  Result := False;
+  if (ALine0 <= 0) or (ALine0 > High(ALines)) then Exit;
+  // Mask up to the statement's line: { } state carries across lines.
+  M := MaskCommentsAndStrings(Copy(ALines, 0, ALine0));
+  for L := ALine0 - 1 downto 0 do
+  begin
+    S := TrimRight(M[L]);
+    if S = '' then Continue;
+    P := Length(S);
+    if S[P] = ':' then Exit(True);           // label / case branch
+    if S[P] = ';' then Exit(False);
+    Q := P;
+    while (Q >= 1) and CharInSet(S[Q], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Dec(Q);
+    if (Q >= 1) and (S[Q] = '&') then Exit(False);   // escaped identifier
+    W := UpperCase(Copy(S, Q + 1, P - Q));
+    Exit((W = 'THEN') or (W = 'ELSE') or (W = 'DO'));
+  end;
 end;
 
 // W1010 fix: appends ' reintroduce;' after the declaration's first
@@ -3261,12 +3378,26 @@ begin
   Action := caFree;
 end;
 
+// Work area of the monitor showing APt. Screen.WorkAreaRect is the PRIMARY
+// monitor's - with the IDE on a monitor above or beside it, every
+// placement was clamped onto the wrong screen (or rejected altogether).
+function WorkAreaAt(const APt: TPoint): TRect;
+var
+  M: TMonitor;
+begin
+  M := Screen.MonitorFromPoint(APt, mdNearest);
+  if M <> nil then
+    Result := M.WorkareaRect
+  else
+    Result := Screen.WorkAreaRect;
+end;
+
 procedure TQuickFixPopup.ShowAt(const APt: TPoint);
 begin
   // Keep the popup on the visible work area.
-  var R := Screen.WorkAreaRect;
-  Left := Min(APt.X, R.Right - Width - 4);
-  Top := Min(APt.Y, R.Bottom - Height - 4);
+  var R := WorkAreaAt(APt);
+  Left := Max(R.Left, Min(APt.X, R.Right - Width - 4));
+  Top := Max(R.Top, Min(APt.Y, R.Bottom - Height - 4));
   Show;
   FArmDeactivate.Enabled := True;   // arm close-on-deactivate deferred
 end;
@@ -3330,7 +3461,7 @@ begin
   // Stay inside the editor window - otherwise the hint would float over
   // the tab bar or the toolbar.
   if not GetWindowRect(H, WndR) then Exit;
-  if (Top < WndR.Top) or (Top < Screen.WorkAreaRect.Top) then Exit;
+  if (Top < WndR.Top) or (Top < WorkAreaAt(P).Top) then Exit;
   APt := TPoint.Create(P.X, Top);
   Result := True;
 end;
@@ -3650,9 +3781,9 @@ var
   R, Cur: TRect;
   X, Y: Integer;
 begin
-  R := Screen.WorkAreaRect;
-  X := Min(APt.X, R.Right - Width - 4);
-  Y := Min(APt.Y, R.Bottom - Height - 4);
+  R := WorkAreaAt(APt);
+  X := Max(R.Left, Min(APt.X, R.Right - Width - 4));
+  Y := Max(R.Top, Min(APt.Y, R.Bottom - Height - 4));
 
   // A SetWindowPos on a TOPMOST window is NOT free: it sends
   // WM_WINDOWPOSCHANGING/CHANGED and makes Windows redo the z-order,
@@ -3699,6 +3830,7 @@ type
     // Popup that currently keeps the hint hidden (see UpdateHint).
     FBlockWnd: HWND;
     FBlockSince: Cardinal;
+    FBlockLastSeen: Cardinal;   // last probe that saw FBlockWnd blocking
     FBlockCls: string;
     FAnalysing: Boolean;
     // Last resolved quick fixes (UI thread only). TWO sources feed them:
@@ -3808,20 +3940,127 @@ begin
   if not IsBareIdent(Result) then Result := '';
 end;
 
+// ALine without its comments ({ }, (* *), //); string literals stay, so a
+// line ending in a string is still recognised as a statement.
+function StripAllLineComments(const ALine: string): string;
+var
+  I, N: Integer;
+  InStr: Boolean;
+  SB: TStringBuilder;
+begin
+  N := Length(ALine);
+  SB := TStringBuilder.Create(N);
+  try
+    InStr := False;
+    I := 1;
+    while I <= N do
+    begin
+      if InStr then
+      begin
+        SB.Append(ALine[I]);
+        if ALine[I] = '''' then InStr := False;
+        Inc(I);
+        Continue;
+      end;
+      case ALine[I] of
+        '''':
+          begin
+            InStr := True;
+            SB.Append(ALine[I]);
+            Inc(I);
+          end;
+        '{':
+          begin
+            while (I <= N) and (ALine[I] <> '}') do Inc(I);
+            Inc(I);
+            SB.Append(' ');
+          end;
+        '(':
+          if (I < N) and (ALine[I + 1] = '*') then
+          begin
+            Inc(I, 2);
+            while (I < N) and not ((ALine[I] = '*') and (ALine[I + 1] = ')')) do Inc(I);
+            Inc(I, 2);
+            SB.Append(' ');
+          end
+          else
+          begin
+            SB.Append(ALine[I]);
+            Inc(I);
+          end;
+        '/':
+          if (I < N) and (ALine[I + 1] = '/') then
+            Break
+          else
+          begin
+            SB.Append(ALine[I]);
+            Inc(I);
+          end;
+      else
+        SB.Append(ALine[I]);
+        Inc(I);
+      end;
+    end;
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
+end;
+
 function CanTakeSemicolon(const ALine: string): Boolean;
 const
-  // Keywords a statement never ends with - a ';' behind them is invalid.
-  Openers: array[0..17] of string = (
+  // Words a statement never ends with - a ';' behind them is invalid:
+  // block openers, binary operators (the expression continues on the next
+  // line), section and visibility keywords.
+  Openers: array[0..40] of string = (
     'BEGIN', 'THEN', 'ELSE', 'DO', 'OF', 'TRY', 'REPEAT', 'EXCEPT',
     'FINALLY', 'VAR', 'CONST', 'TYPE', 'TO', 'DOWNTO', 'IN', 'AND',
-    'OR', 'NOT');
+    'OR', 'NOT', 'DIV', 'MOD', 'SHL', 'SHR', 'XOR', 'AS', 'IS',
+    'WHILE', 'IF', 'FOR', 'WITH', 'CASE', 'RECORD', 'PACKED',
+    'PRIVATE', 'PROTECTED', 'PUBLIC', 'PUBLISHED', 'STRICT',
+    'IMPLEMENTATION', 'INITIALIZATION', 'FINALIZATION', 'USES');
 var
-  S, LastWord: string;
+  S, LastWord, FirstWord, U: string;
   I: Integer;
+
+  function HasWord(const AWord: string): Boolean;
+  var
+    P, E: Integer;
+  begin
+    Result := False;
+    P := Pos(AWord, U);
+    while P > 0 do
+    begin
+      E := P + Length(AWord);
+      if ((P = 1) or not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_'])) and
+         ((E > Length(U)) or not CharInSet(U[E], ['A'..'Z', '0'..'9', '_'])) then
+        Exit(True);
+      P := Pos(AWord, U, P + 1);
+    end;
+  end;
+
 begin
   Result := False;
-  S := TrimRight(StripLineComment(ALine));
+  // ALL comments go - "if X then { TODO }" used to end in '}', the
+  // last-word scan found nothing, and the guard let it through.
+  S := TrimRight(StripAllLineComments(ALine));
   if S = '' then Exit;
+  U := UpperCase(S);
+  // A control-structure HEADER wrapped before its keyword ("for I := 0 to
+  // 10" / "do" on the next line) ends in an ordinary operand, so the
+  // last-word rule cannot see it - the FIRST word can.
+  I := 1;
+  while (I <= Length(S)) and CharInSet(S[I], [' ', #9]) do Inc(I);
+  FirstWord := '';
+  while (I <= Length(S)) and CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+  begin
+    FirstWord := FirstWord + UpCase(S[I]);
+    Inc(I);
+  end;
+  if ((FirstWord = 'FOR') or (FirstWord = 'WHILE') or (FirstWord = 'WITH'))
+     and not HasWord('DO') then Exit;
+  if (FirstWord = 'IF') and not HasWord('THEN') then Exit;
+  if (FirstWord = 'CASE') and not HasWord('OF') then Exit;
   // Trailing operator / separator: the statement continues on the next
   // line, so nothing is missing HERE.
   if CharInSet(S[Length(S)],
@@ -4512,12 +4751,17 @@ begin
       // matching for seconds is something else (a floating tool window,
       // or a list the IDE only hides logically) and must not disable the
       // hint for good - after HintBlockMaxMs the same window is ignored.
-      if Blocker <> FBlockWnd then
+      // A NEW appearance restarts the clock: a different window, or the
+      // same handle after a gap in which no probe saw it (handles are
+      // recycled, and the IDE shows and hides the SAME completion window
+      // again and again - it must not count as one long-lived blocker).
+      if (Blocker <> FBlockWnd) or (GetTickCount - FBlockLastSeen > 2500) then
       begin
         FBlockWnd := Blocker;
         FBlockSince := GetTickCount;
         FBlockCls := BlockCls;
       end;
+      FBlockLastSeen := GetTickCount;
       if GetTickCount - FBlockSince < HintBlockMaxMs then
       begin
         FHint.HideHint;
@@ -4567,7 +4811,7 @@ begin
   GLiveShutdown := True;
   Waited := 0;
   while (TInterlocked.CompareExchange(GLiveWorkers, 0, 0) <> 0)
-    and (Waited < 15000) do
+    and (Waited < 35000) do   // above the worker's own worst case (~27 s)
   begin
     CheckSynchronize(10);
     Inc(Waited, 10);

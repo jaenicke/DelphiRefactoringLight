@@ -469,6 +469,45 @@ begin
   ApplyPlainEdits(Edits, AOk, AFailed);
 end;
 
+function PosLE(const A, B: TWithSourcePos): Boolean;
+begin
+  Result := (A.Line < B.Line) or ((A.Line = B.Line) and (A.Col <= B.Col));
+end;
+
+/// <summary>Drops every item whose replace range CONTAINS another
+///  requested item of the same file. Nested withs produce overlapping
+///  edits: the outer one replaces text the inner one has already changed
+///  (or the other way round). The inner ones go first; the enclosing ones
+///  are counted in ASkipped and handled by running "Remove with" again on
+///  the updated source.</summary>
+function DropEnclosingWithItems(const AItems: TArray<TWithRewriteResult>;
+  out ASkipped: Integer): TArray<TWithRewriteResult>;
+var
+  I, J: Integer;
+  Encloses: Boolean;
+begin
+  Result := nil;
+  ASkipped := 0;
+  for I := 0 to High(AItems) do
+  begin
+    Encloses := False;
+    for J := 0 to High(AItems) do
+      if (I <> J) and SameText(AItems[I].FileName, AItems[J].FileName)
+        and PosLE(AItems[I].ReplaceRange.StartPos, AItems[J].ReplaceRange.StartPos)
+        and PosLE(AItems[J].ReplaceRange.EndPos, AItems[I].ReplaceRange.EndPos)
+        and not (PosLE(AItems[J].ReplaceRange.StartPos, AItems[I].ReplaceRange.StartPos)
+             and PosLE(AItems[I].ReplaceRange.EndPos, AItems[J].ReplaceRange.EndPos)) then
+      begin
+        Encloses := True;
+        Break;
+      end;
+    if Encloses then
+      Inc(ASkipped)
+    else
+      Result := Result + [AItems[I]];
+  end;
+end;
+
 procedure ApplyEdits(const AItems: TArray<TWithRewriteResult>;
   AUseInlineVars: Boolean;
   out AOk, AFailed: Integer);
@@ -860,14 +899,26 @@ begin
             AUseInlineVars: Boolean;
             out AApplied: TArray<TWithRewriteResult>)
           var
-            ROk, RFailed: Integer;
+            ROk, RFailed, RSkipped: Integer;
           begin
             AApplied := nil;
             if Length(ARequested) = 0 then Exit;
-            ApplyEdits(ARequested, AUseInlineVars, ROk, RFailed);
-            if RFailed > 0 then
+            var ToApply := DropEnclosingWithItems(ARequested, RSkipped);
+            ApplyEdits(ToApply, AUseInlineVars, ROk, RFailed);
+            if RSkipped > 0 then
+              MessageDlg(Format('Applied %d edit(s); %d failed. %d enclosing ' +
+                'with statement(s) were skipped because they contain another ' +
+                'selected one - run "Remove with" again for them.',
+                [ROk, RFailed, RSkipped]), mtInformation, [mbOK], 0)
+            else if RFailed > 0 then
               MessageDlg(Format('Applied %d edit(s); %d failed.',
                 [ROk, RFailed]), mtWarning, [mbOK], 0);
+            if RSkipped > 0 then
+            begin
+              // the dialog keeps the skipped (enclosing) ones
+              if RFailed = 0 then AApplied := ToApply;
+              Exit;
+            end;
             // We don't actually know which individual items failed
             // vs succeeded here; the rewriter applies them in order
             // and bails on first error, so the first ROk items are

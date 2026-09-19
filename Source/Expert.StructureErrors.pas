@@ -361,19 +361,23 @@ procedure TRetryHelper.Tick(Sender: TObject);
 begin
   Inc(GRetryCount);
   TryInstall;
+  // Only DISABLE here: freeing the timer inside its own OnTimer destroys
+  // the window whose WndProc is still on the stack (a sporadic start-up
+  // AV). Timer and helper are freed in UninstallStructureErrorSource.
   if (GNotifierIndex >= 0) or (GRetryCount >= 10) then
-  begin
     GRetryTimer.Enabled := False;
-    FreeAndNil(GRetryTimer);
-    FreeAndNil(GRetryHelper);
-  end;
 end;
 
 procedure InstallStructureErrorSource;
 begin
   TryInstall;
   if GNotifierIndex >= 0 then Exit;
-  if GRetryTimer <> nil then Exit;
+  if GRetryTimer <> nil then
+  begin
+    GRetryCount := 0;
+    GRetryTimer.Enabled := True;   // a spent (disabled) retry timer
+    Exit;
+  end;
   GRetryHelper := TRetryHelper.Create;
   GRetryTimer := TTimer.Create(nil);
   GRetryTimer.Interval := 2000;
@@ -399,6 +403,8 @@ begin
     except
     end;
   GNotifierIndex := -1;
+  // the status window must not keep saying "installed"
+  GStructInstalled := False;
 end;
 
 end.

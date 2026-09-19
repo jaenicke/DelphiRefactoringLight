@@ -42,6 +42,9 @@ type
   IRenameHost = interface
     ['{3C1F7B2A-94D6-4E0B-A8C5-6E2D19F07B41}']
     function GetNewName: string;
+    /// <summary>Copy every affected file into a backup directory before
+    ///  the rename writes anything (the dialog's "Create backup").</summary>
+    function CreateBackup: Boolean;
     function Scope: TRenameScope;
     function SelectedUnits: TArray<string>;
     function IncludeOpenUnits: Boolean;
@@ -64,6 +67,7 @@ type
   public
     constructor Create(ADialog: TRenameDialog);
     function GetNewName: string;
+    function CreateBackup: Boolean;
     function Scope: TRenameScope;
     function SelectedUnits: TArray<string>;
     function IncludeOpenUnits: Boolean;
@@ -296,6 +300,45 @@ procedure TLspRenameWizard.ApplyFEdit;
 begin
   if Length(FEdit.FileEdits) = 0 then Exit;
 
+  // BACKUP first ("Create backup" in the dialog, on by default). Until
+  // now the checkbox did nothing at all - a safety net that did not exist.
+  // The copy is the state the rename starts from: the editor buffer for an
+  // open file (unsaved changes included), the disk file otherwise. A
+  // failing backup stops the rename before anything is written.
+  var BackupDir := '';
+  if FHost.CreateBackup then
+  begin
+    var Files := TList<string>.Create;
+    try
+      for var FE in FEdit.FileEdits do
+        if not Files.Contains(FE.FilePath) then Files.Add(FE.FilePath);
+      for var Plan in FFormPlans do
+        if not Files.Contains(Plan.FormFile) then Files.Add(Plan.FormFile);
+      try
+        BackupDir := NewRenameBackupDir;
+        for var F in Files do
+        begin
+          var Target := MirroredBackupPath(BackupDir, F);
+          ForceDirectories(ExtractFilePath(Target));
+          var Live: string;
+          if Editor.ReadEditorContent(F, Live) then
+            TDelphiFileEncoding.WriteAll(Target, Live, TDelphiFileEncoding.Detect(F))
+          else if TFile.Exists(F) then
+            TFile.Copy(F, Target, True);
+        end;
+      except
+        on E: Exception do
+        begin
+          FHost.Notify('The backup could not be created, nothing was renamed:' +
+            sLineBreak + E.Message, True);
+          Exit;
+        end;
+      end;
+    finally
+      Files.Free;
+    end;
+  end;
+
   var AppliedCount := 0;
   var FailedCount := 0;
   var FormNotes := '';
@@ -409,12 +452,15 @@ begin
       end;
     end;
 
+    var BackupNote := '';
+    if BackupDir <> '' then
+      BackupNote := sLineBreak + 'Backup of the previous state: ' + BackupDir;
     if (FailedCount = 0) and (FormNotes = '') then
-      FHost.Notify(Format('%d change(s) applied successfully (Ctrl+Z to undo).',
-        [AppliedCount]), False)
+      FHost.Notify(Format('%d change(s) applied successfully (Ctrl+Z to undo ' +
+        'in files open in the editor).%s', [AppliedCount, BackupNote]), False)
     else
-      FHost.Notify(Format('%d applied, %d failed.%s',
-        [AppliedCount, FailedCount, FormNotes]), True);
+      FHost.Notify(Format('%d applied, %d failed.%s%s',
+        [AppliedCount, FailedCount, FormNotes, BackupNote]), True);
   finally
     FormFilesHandled.Free;
     AffectedFiles.Free;
@@ -640,6 +686,11 @@ end;
 function TDialogRenameHost.GetNewName: string;
 begin
   Result := FDialog.GetNewName;
+end;
+
+function TDialogRenameHost.CreateBackup: Boolean;
+begin
+  Result := FDialog.GetCreateBackup;
 end;
 
 function TDialogRenameHost.Scope: TRenameScope;

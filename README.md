@@ -30,7 +30,7 @@ Unlike purely text-based tools, this package uses the actual LSP requests that D
 
 The package starts its own DelphiLSP session in single-process mode. An earlier version used `serverType: controller` (the same mode the IDE itself uses) to maximise the diagnostic coverage, but extensive testing showed that DelphiLSP's controller-mode sub-agents (`Agent0`/`Agent1`) need parent-process / COM-bridge context only `BDS.exe` can provide &mdash; spawned by anything else they crash silently and every subsequent `textDocument/hover` returns *Internal server error*. Single-process mode resolves hover reliably; the trade-off is that inactive-region diagnostics now depend on whatever DelphiLSP volunteers without the controller's `returnDccFlags`/`returnHoverModel` hints. By default the LSP is **pre-warmed automatically when a project opens**, so the first refactoring action does not have to pay the cold-start cost; this can be turned off in *Tools &rarr; Options &rarr; Refactoring Light*. Every refactoring dialog shows the current LSP warm-up status in its title bar.
 
-In the last three weeks I tested with big projects and used it myself in real life. A few fixes were neccessary, but now it should be a good help though it might not work in all cases. Important is, that you can always use undo, because changes are applied in a way to make this work.
+In the last three weeks I tested with big projects and used it myself in real life. A few fixes were neccessary, but now it should be a good help though it might not work in all cases. Changes to files that are open in the IDE go through the editor, so they can be undone there (Ctrl+Z). Files that are NOT open in an editor are written directly to disk and are not on the IDE's undo stack - for a project-wide rename keep the "Create backup" option on (the previous state of every affected file is copied to %LOCALAPPDATA%\DelphiRefactoringLight\backup\<timestamp>\ with its full path mirrored) or use version control.
 
 **If you encounter any problems, please let me now, so I can fix it.**
 
@@ -41,7 +41,7 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Runs a text search across all project files, then verifies each candidate semantically via `textDocument/definition`.
 - Extends the candidate set via `TImplementationFinder` with class method implementations &mdash; so renaming an interface method also renames the implementations in every class that implements that interface.
 - Shows a preview dialog with a list view: file, line, kind (`Interface declaration`, `Class declaration`, `Implementation`, `Call`, ...), original line, and preview line. A second tab holds the full diagnostic log.
-- Optional per-file backup.
+- Optional backup (on by default): before anything is written, every affected file (the editor buffer for open files, unsaved changes included) is copied to `%LOCALAPPDATA%\DelphiRefactoringLight\backup\<timestamp>\`, full path mirrored; the result message names the folder.
 - Applies the changes byte-precisely via `IOTAEditWriter` and reloads modified modules in the IDE.
 
 ### Find References (`Ctrl+Alt+Shift+U`)
@@ -159,7 +159,7 @@ Two related actions, both reached through the editor's *Refactoring Light &rarr;
     2. **Registers the new unit with the active project** (`IOTAProject.AddFile`) and opens it in the editor.
     3. **Rewrites the class** in the source unit: adds the new interface to the ancestor list, synthesises `private function GetX: T;` / `procedure SetX(const AValue: T);` accessors (grouped under the existing `private` section &mdash; no duplicate sections) for every field and every property without explicit `read` / `write` methods, and appends matching `function TClass.GetX: T; begin Result := X; end;` implementations before the unit's `end.`. The class-side does *not* gain a parallel property declaration because a property of the same name as the field would clash with the existing field.
     4. **Adds the new unit to the source unit's `uses`** clause (Delphi convention: at the end).
-  - All source-unit edits go through `IOTAEditWriter` (via `TEditorHelper.ReplaceFileContent`) so they are individually undoable in the IDE.
+  - Source-unit edits of files open in the IDE go through `IOTAEditWriter` (via `TEditorHelper.ReplaceFileContent`) so they are individually undoable there; files not open in an editor are written directly to disk (not undoable).
 
 - **Add to existing interface...**
   - Scans the project for `IXxx = interface` declarations and offers them in a dropdown.
@@ -417,7 +417,7 @@ Further scripts:
 
 1. Open `Packages\DelphiRefactoringLight.dproj` in RAD Studio.
 2. Platform: `Win32` for the 32-bit IDE, `Win64` for the 64-bit IDE
-   (`bin64ds.exe`); configuration: `Release`.
+   (`bin64\bds.exe`); configuration: `Release`.
 3. Right-click the package in the Project Manager &rarr; **Install**.
 4. Restart the IDE.
 

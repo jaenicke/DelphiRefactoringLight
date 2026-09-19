@@ -50,6 +50,7 @@ uses
   Expert.IdeThemes in '..\Source\Expert.IdeThemes.pas',
   Expert.ImplementationFinder in '..\Source\Expert.ImplementationFinder.pas',
   Expert.LspManager in '..\Source\Expert.LspManager.pas',
+  Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
   Expert.MoveToUnit in '..\Source\Expert.MoveToUnit.pas',
   Expert.MoveToUnitDialog in '..\Source\Expert.MoveToUnitDialog.pas',
   Expert.RestartHint in '..\Source\Expert.RestartHint.pas',

@@ -45,8 +45,11 @@ function StripLineComment(const L: string): string;
 ///  implementation clause, added to the interface clause; listing it in
 ///  both would not compile). The reverse direction is a no-op: a unit in
 ///  the interface uses is reachable from the implementation too.
-///  Clauses containing { } or (* *) (e.g. IFDEFs) are never rewritten -
-///  the move is refused (False) rather than risking a mangled clause.</summary>
+///  Comments and directives are masked before every scan, so a unit name
+///  or ';' inside a comment is never taken for code. REMOVING from (and so
+///  moving out of) a clause containing { } or (* *) is refused; ADDING is
+///  refused only when the clause's ';' lies inside an open {$IF...} block
+///  (the unit would then exist for one branch only).</summary>
 function AddUnitToUses(const AFilePath, AUnit: string;
   ASection: TUsesSection): Boolean;
 
@@ -68,7 +71,46 @@ implementation
 
 uses
   System.SysUtils, System.IOUtils, System.Math,
-  Expert.EditorHelperIntf;
+  Expert.EditorHelperIntf, Expert.UnitIndex;
+
+// Comment/string-MASKED copy of SL: same line count, same line lengths,
+// but comments ({ }, (* *), //), compiler directives and string literals
+// are blanked - { } state is carried ACROSS lines. Every scan that looks
+// for keywords, the clause's ';' or a unit token works on this copy, so a
+// ';' or a unit name inside "{ Vcl.Dialogs; removed }" is never taken for
+// code. Edits still go to SL at the SAME positions.
+function MaskLines(SL: TStringList): TStringList;
+begin
+  Result := TStringList.Create;
+  try
+    for var S in MaskCommentsAndStrings(SL.ToStringArray) do
+      Result.Add(S);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+function MaskText(const AContent: string): TStringList;
+var
+  SL: TStringList;
+begin
+  SL := TStringList.Create;
+  try
+    SL.Text := AContent;
+    Result := MaskLines(SL);
+  finally
+    SL.Free;
+  end;
+end;
+
+function IsUsesLine(const AMasked: string): Boolean;
+var
+  Low: string;
+begin
+  Low := LowerCase(Trim(AMasked));
+  Result := (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9);
+end;
 
 function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;
   const AOriginal: string): Boolean;
@@ -241,33 +283,29 @@ end;
 
 function UnitInUsesText(const AContent, AUnit: string): Boolean;
 var
-  SL: TStringList;
+  M: TStringList;
   I: Integer;
   InUses: Boolean;
-  L, Low: string;
 begin
   Result := False;
   if AUnit = '' then Exit;
-  SL := TStringList.Create;
+  M := MaskText(AContent);   // a commented-out unit is NOT in the clause
   try
-    SL.Text := AContent;
     InUses := False;
-    for I := 0 to SL.Count - 1 do
+    for I := 0 to M.Count - 1 do
     begin
-      L := StripLineComment(SL[I]);
-      Low := LowerCase(Trim(L));
       if not InUses then
       begin
-        if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
+        if IsUsesLine(M[I]) then
           InUses := True
         else
           Continue;
       end;
-      if TokenEquals(L, AUnit) then Exit(True);
-      if Pos(';', L) > 0 then InUses := False;
+      if TokenEquals(M[I], AUnit) then Exit(True);
+      if Pos(';', M[I]) > 0 then InUses := False;
     end;
   finally
-    SL.Free;
+    M.Free;
   end;
 end;
 
@@ -277,16 +315,15 @@ var
   SL: TStringList;
   I, ImplIdx, First, Last: Integer;
   InUses: Boolean;
-  L, Low: string;
+  L: string;
 begin
   Result := False;
   if AUnit = '' then Exit;
-  SL := TStringList.Create;
+  SL := MaskText(AContent);
   try
-    SL.Text := AContent;
     ImplIdx := SL.Count;
     for I := 0 to SL.Count - 1 do
-      if SameText(Trim(StripLineComment(SL[I])), 'implementation') then
+      if SameText(Trim(SL[I]), 'implementation') then
       begin
         ImplIdx := I;
         Break;
@@ -306,11 +343,10 @@ begin
     for I := First to Last do
     begin
       if (I < 0) or (I >= SL.Count) then Continue;
-      L := StripLineComment(SL[I]);
-      Low := LowerCase(Trim(L));
+      L := SL[I];
       if not InUses then
       begin
-        if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
+        if IsUsesLine(L) then
           InUses := True
         else
           Continue;
@@ -325,40 +361,85 @@ end;
 
 // Line index of the 'uses' keyword inside [AFrom..ATo), and the index of
 // the line carrying the closing ';'. False when the range has no clause.
-function FindUsesClause(SL: TStringList; AFrom, ATo: Integer;
+// AM is the MASKED copy (MaskLines).
+function FindUsesClause(AM: TStringList; AFrom, ATo: Integer;
   out AUsesIdx, ASemiIdx: Integer): Boolean;
 var
   I: Integer;
-  Low: string;
 begin
   Result := False;
   AUsesIdx := -1; ASemiIdx := -1;
   for I := AFrom to ATo - 1 do
-  begin
-    Low := LowerCase(Trim(StripLineComment(SL[I])));
-    if (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9) then
+    if IsUsesLine(AM[I]) then
     begin
       AUsesIdx := I;
       Break;
     end;
-  end;
   if AUsesIdx < 0 then Exit;
   for I := AUsesIdx to ATo - 1 do
-    if Pos(';', StripLineComment(SL[I])) > 0 then
+    if Pos(';', AM[I]) > 0 then
     begin
       ASemiIdx := I;
       Exit(True);
     end;
 end;
 
-function ClauseContains(SL: TStringList; AUsesIdx, ASemiIdx: Integer;
+function ClauseContains(AM: TStringList; AUsesIdx, ASemiIdx: Integer;
   const AUnit: string): Boolean;
 var
   I: Integer;
 begin
   Result := False;
   for I := AUsesIdx to ASemiIdx do
-    if TokenEquals(StripLineComment(SL[I]), AUnit) then Exit(True);
+    if TokenEquals(AM[I], AUnit) then Exit(True);
+end;
+
+// True when the clause's terminating ';' (first ';' of AM[ASemiIdx]) sits
+// OUTSIDE every conditional-compilation block opened in the clause. Only
+// then does inserting ", Unit" in front of it reach every configuration;
+// inside "{$IFDEF X} ..., B; {$ELSE} ... {$ENDIF}" the new unit would exist
+// for one branch only. Directives are found in the RAW lines at positions
+// the mask blanked.
+function SemicolonOutsideConditionals(SL, AM: TStringList;
+  AUsesIdx, ASemiIdx: Integer): Boolean;
+var
+  I, P, Stop, Depth, Q: Integer;
+  Raw, Name: string;
+begin
+  Depth := 0;
+  for I := AUsesIdx to ASemiIdx do
+  begin
+    Raw := SL[I];
+    if I = ASemiIdx then Stop := Pos(';', AM[I]) - 1 else Stop := Length(Raw);
+    P := 1;
+    while P <= Stop do
+    begin
+      Q := 0;
+      if (Raw[P] = '{') and (P < Length(Raw)) and (Raw[P + 1] = '$')
+        and (AM[I][P] <> '{') then
+        Q := P + 2
+      else if (Raw[P] = '(') and (P + 2 <= Length(Raw)) and (Raw[P + 1] = '*')
+        and (Raw[P + 2] = '$') and (AM[I][P] <> '(') then
+        Q := P + 3;
+      if Q > 0 then
+      begin
+        Name := '';
+        while (Q <= Length(Raw)) and CharInSet(Raw[Q], ['A'..'Z', 'a'..'z']) do
+        begin
+          Name := Name + UpCase(Raw[Q]);
+          Inc(Q);
+        end;
+        if (Name = 'IF') or (Name = 'IFDEF') or (Name = 'IFNDEF') or (Name = 'IFOPT') then
+          Inc(Depth)
+        else if (Name = 'ENDIF') or (Name = 'IFEND') then
+          Dec(Depth);
+        P := Q;
+      end
+      else
+        Inc(P);
+    end;
+  end;
+  Result := Depth = 0;
 end;
 
 // Removes AUnit from the clause [AUsesIdx..ASemiIdx]. Handles the common
@@ -485,7 +566,7 @@ end;
 function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 var
   Content, Low: string;
-  SL: TStringList;
+  SL, M: TStringList;
   I, IntfIdx, ImplIdx, UsesIdx, SemiIdx: Integer;
   Removed: Boolean;
 begin
@@ -497,9 +578,11 @@ begin
     try Content := TFile.ReadAllText(AFilePath); except Exit; end;
   end;
 
+  M := nil;
   SL := TStringList.Create;
   try
     SL.Text := Content;
+    M := MaskLines(SL);
     // Anchor at the section keywords (like AddUnitToUses) so text above
     // 'interface' - the unit header comment, say - can never be mistaken
     // for a uses clause. IntfIdx falls back to 0 for headerless files.
@@ -507,7 +590,7 @@ begin
     ImplIdx := SL.Count;
     for I := 0 to SL.Count - 1 do
     begin
-      Low := LowerCase(Trim(StripLineComment(SL[I])));
+      Low := LowerCase(Trim(M[I]));
       if (Low = 'interface') and (IntfIdx = 0) then
         IntfIdx := I + 1
       else if Low = 'implementation' then
@@ -519,17 +602,18 @@ begin
 
     Removed := False;
     // Interface clause first, then implementation clause.
-    if FindUsesClause(SL, IntfIdx, ImplIdx, UsesIdx, SemiIdx)
-      and ClauseContains(SL, UsesIdx, SemiIdx, AUnit) then
+    if FindUsesClause(M, IntfIdx, ImplIdx, UsesIdx, SemiIdx)
+      and ClauseContains(M, UsesIdx, SemiIdx, AUnit) then
       Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit)
     else if (ImplIdx < SL.Count)
-      and FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx)
-      and ClauseContains(SL, UsesIdx, SemiIdx, AUnit) then
+      and FindUsesClause(M, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx)
+      and ClauseContains(M, UsesIdx, SemiIdx, AUnit) then
       Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit);
 
     if Removed then
       Result := ApplyLinesMinimal(AFilePath, SL, Content);
   finally
+    M.Free;
     SL.Free;
   end;
 end;
@@ -538,7 +622,7 @@ function AddUnitToUses(const AFilePath, AUnit: string;
   ASection: TUsesSection): Boolean;
 var
   Content: string;
-  SL: TStringList;
+  SL, M: TStringList;
   I, IntfIdx, ImplIdx, StartIdx, EndIdx, UsesIdx, SemiIdx, P: Integer;
   Low: string;
   InIntf, InImpl: Boolean;
@@ -552,15 +636,17 @@ begin
     try Content := TFile.ReadAllText(AFilePath); except Exit; end;
   end;
 
+  M := nil;
   SL := TStringList.Create;
   try
     SL.Text := Content;
+    M := MaskLines(SL);
 
     // Section boundaries.
     IntfIdx := -1; ImplIdx := SL.Count;
     for I := 0 to SL.Count - 1 do
     begin
-      Low := LowerCase(Trim(StripLineComment(SL[I])));
+      Low := LowerCase(Trim(M[I]));
       if (Low = 'interface') and (IntfIdx < 0) then
         IntfIdx := I
       else if Low = 'implementation' then
@@ -573,11 +659,11 @@ begin
     // Where is the unit already listed?
     InIntf := False; InImpl := False;
     if (IntfIdx >= 0)
-      and FindUsesClause(SL, IntfIdx + 1, ImplIdx, UsesIdx, SemiIdx) then
-      InIntf := ClauseContains(SL, UsesIdx, SemiIdx, AUnit);
+      and FindUsesClause(M, IntfIdx + 1, ImplIdx, UsesIdx, SemiIdx) then
+      InIntf := ClauseContains(M, UsesIdx, SemiIdx, AUnit);
     if (ImplIdx < SL.Count)
-      and FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then
-      InImpl := ClauseContains(SL, UsesIdx, SemiIdx, AUnit);
+      and FindUsesClause(M, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then
+      InImpl := ClauseContains(M, UsesIdx, SemiIdx, AUnit);
 
     if ASection = usInterface then
     begin
@@ -588,8 +674,10 @@ begin
         // need, and listing it in both clauses would not compile. Removing
         // implementation lines never shifts the interface indices (the
         // implementation section comes after).
-        if not FindUsesClause(SL, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then Exit;
+        if not FindUsesClause(M, ImplIdx + 1, SL.Count, UsesIdx, SemiIdx) then Exit;
         if not RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit) then Exit;
+        FreeAndNil(M);
+        M := MaskLines(SL);   // lines below changed - keep the mask in step
       end;
       StartIdx := IntfIdx;
       EndIdx := ImplIdx;
@@ -604,11 +692,14 @@ begin
     if StartIdx < 0 then Exit;   // section not found
 
     // Insert into the section's uses clause (create one if missing).
-    if FindUsesClause(SL, StartIdx + 1, EndIdx, UsesIdx, SemiIdx) then
+    if FindUsesClause(M, StartIdx + 1, EndIdx, UsesIdx, SemiIdx) then
     begin
-      P := Pos(';', StripLineComment(SL[SemiIdx]));
+      // The ';' of the MASKED line is the clause's real terminator - one
+      // inside "{ Vcl.Dialogs; removed }" is blanked there. Before, the add
+      // went INTO such a comment and still reported success.
+      P := Pos(';', M[SemiIdx]);
       if P <= 0 then Exit;
-      P := Pos(';', SL[SemiIdx]);
+      if not SemicolonOutsideConditionals(SL, M, UsesIdx, SemiIdx) then Exit;
       SL[SemiIdx] := Copy(SL[SemiIdx], 1, P - 1) + ', ' + AUnit
         + Copy(SL[SemiIdx], P, MaxInt);
     end
@@ -617,6 +708,7 @@ begin
 
     Result := ApplyLinesMinimal(AFilePath, SL, Content);
   finally
+    M.Free;
     SL.Free;
   end;
 end;

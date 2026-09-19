@@ -109,7 +109,8 @@ implementation
 
 uses
   System.Generics.Collections, System.StrUtils, System.Math, System.IOUtils,
-  Delphi.FileEncoding, Expert.UnitIndex, Expert.DialogHelper, Lsp.Uri;
+  Delphi.FileEncoding, Expert.UnitIndex, Expert.DialogHelper, Lsp.Uri,
+  Expert.WorkerLatch;
 
 var
   GGenNote: string = 'no completion call yet';   // main thread only
@@ -417,7 +418,8 @@ begin
     SetGenNote(Format('buffer of %s not readable - nothing generated',
       [ExtractFileName(Context.FileName)]));
 
-  TThread.CreateAnonymousThread(
+  // Counted worker: the package must not unload under it (A7).
+  StartWorker(
     procedure
     var
       Client: TLspClient;
@@ -507,7 +509,7 @@ begin
           else
             FPopup.ShowItems(All, Prefix);
         end);
-    end).Start;
+    end);
 end;
 
 class function TLspCompletionWizard.BuildGenOffers(AClient: TLspClient;

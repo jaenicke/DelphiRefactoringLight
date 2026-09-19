@@ -264,8 +264,41 @@ end;
 /// <summary>Skips a Pascal string literal '...''...'. Doubled apostrophes
 ///  inside are escapes. Cursor must be at the opening apostrophe.</summary>
 procedure SkipString(var Cur: TCursor);
+var
+  Q, K: Integer;
 begin
   if Cur.Peek <> '''' then Exit;
+  // Delphi 12+ MULTI-LINE string: an odd run of >= 3 quotes followed only
+  // by blanks up to the line end; it ends at a line whose first non-blank
+  // characters are the same run. Without this the literal's CONTENT was
+  // scanned as code (and could have got a qualifier injected).
+  Q := 0;
+  while Cur.PeekAt(Q) = '''' do Inc(Q);
+  if (Q >= 3) and Odd(Q) then
+  begin
+    K := Q;
+    while CharInSet(Cur.PeekAt(K), [' ', #9]) do Inc(K);
+    if CharInSet(Cur.PeekAt(K), [#13, #10]) then
+    begin
+      for K := 1 to Q do Cur.Advance;
+      while not Cur.Eof do
+      begin
+        // at the start of a content line (after the line break)
+        while (not Cur.Eof) and not CharInSet(Cur.Peek, [#13, #10]) do Cur.Advance;
+        if Cur.Eof then Exit;
+        Cur.Advance;   // the line break (CRLF counts once)
+        while CharInSet(Cur.Peek, [' ', #9]) do Cur.Advance;
+        K := 0;
+        while Cur.PeekAt(K) = '''' do Inc(K);
+        if K = Q then
+        begin
+          for K := 1 to Q do Cur.Advance;
+          Exit;
+        end;
+      end;
+      Exit;
+    end;
+  end;
   Cur.Advance;
   while not Cur.Eof do
   begin
@@ -625,8 +658,11 @@ begin
               // The recursive call consumes its own body (and any
               // further nesting); the returned occurrence lands in
               // AResults via TryParseNestedWith.
-              TryParseNestedWith(IdentStart);
-              BoundaryNext := False;
+              // A complete with is a complete STATEMENT: its single-
+              // statement body already consumed the ';', so the next
+              // token starts a statement (a sibling with right after it
+              // was missed before).
+              BoundaryNext := TryParseNestedWith(IdentStart);
             end
             else if SameKeyword(Ident, 'then') or SameKeyword(Ident, 'else')
               or SameKeyword(Ident, 'do') or SameKeyword(Ident, 'of')
@@ -843,6 +879,7 @@ begin
             end;
 
             SkipTrivia(Cur);
+            var Parsed := False;
             if (Length(Occ.Targets) > 0) and IsIdentStart(Cur.Peek) then
             begin
               SaveIdx := Cur.Idx;
@@ -853,7 +890,10 @@ begin
               begin
                 Occ.DoPos := IdentStart;
                 if ReadBody(Cur, Occ, Results) then
+                begin
                   Results.Add(Occ);
+                  Parsed := True;
+                end;
               end
               else
               begin
@@ -864,10 +904,12 @@ begin
                 Cur.Col := SaveCol;
               end;
             end;
-            // After processing a with (or skipping a malformed one),
-            // we are no longer at a statement boundary unless the next
-            // token says so.
-            AtStmtBoundary := False;
+            // A complete with is a complete statement - a single-statement
+            // body even consumed its ';' - so the next token starts a new
+            // statement ("with A do X := 1; with B do Y := 2;" found only
+            // the first before). After a malformed one we are not at a
+            // boundary unless the next token says so.
+            AtStmtBoundary := Parsed;
             PrevSig := 'a';
             Continue;
           end;

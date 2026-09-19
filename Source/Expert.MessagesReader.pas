@@ -362,6 +362,43 @@ begin
   end;
 end;
 
+// "[dcc32 Fehler] FrmPPFrame.pas(3721): E2003 ..." -> "FrmPPFrame.pas": the
+// token directly in front of the first "(<digits>)". A file name that only
+// appears LATER in the text ("Other.pas(10): F2051 Unit Foo.pas was
+// compiled...") is not the file the message is about. '' when absent.
+function ExtractFilePart(const AText: string): string;
+var
+  P, Q, S: Integer;
+begin
+  Result := '';
+  P := Pos('(', AText);
+  while P > 0 do
+  begin
+    Q := P + 1;
+    while (Q <= Length(AText)) and AText[Q].IsDigit do Inc(Q);
+    if (Q > P + 1) and (Q <= Length(AText)) and (AText[Q] = ')') then
+    begin
+      S := P - 1;
+      while (S >= 1) and not CharInSet(AText[S], [' ', #9, ']', '"', '''']) do Dec(S);
+      Exit(Copy(AText, S + 1, P - S - 1));
+    end;
+    P := Pos('(', AText, P + 1);
+  end;
+end;
+
+// LSP severity from the language-independent code letter: E/F error,
+// W warning, H hint. Every message used to become an ERROR, so a clean
+// build with 40 H2077 hints reported 40 errors.
+function SeverityOfCode(const ACode: string): Integer;
+begin
+  Result := 1;
+  if ACode = '' then Exit;
+  case UpCase(ACode[1]) of
+    'W': Result := 2;
+    'H': Result := 4;
+  end;
+end;
+
 // --- the walk ---------------------------------------------------------------
 
 type
@@ -431,26 +468,40 @@ begin
           if Code = '' then Exit;             // not a compiler message
 
           // TFileMessageLine knows file/line/column exactly; plain lines
-          // only carry the text (then parse it).
+          // only carry the text (then parse it). The line/column getters
+          // are called ONLY on such a line: the export fallback is a raw
+          // method pointer, and on a TLine / TCompilerMsgLine it would read
+          // a field the object does not have (garbage line, or an AV).
           FileName := LineFile(ALine);
-          if not GetIntOf(ALine, 'GetLine', SymMsgLine, LineNo) then LineNo := 0;
-          if not GetIntOf(ALine, 'GetColumn', SymMsgCol, ColNo) then ColNo := 0;
+          LineNo := 0;
+          ColNo := 0;
+          if ClassIsOrDescends(ALine, 'TFileMessageLine') then
+          begin
+            if not GetIntOf(ALine, 'GetLine', SymMsgLine, LineNo) then LineNo := 0;
+            if not GetIntOf(ALine, 'GetColumn', SymMsgCol, ColNo) then ColNo := 0;
+          end;
           if LineNo <= 0 then LineNo := ExtractLineNo(Text);
           if LineNo <= 0 then Exit;
 
-          // Belongs to the file we were asked about?
-          if FileName <> '' then
+          // Belongs to the file we were asked about? A full path must be
+          // THIS path (two Utils.pas in different folders must not mix);
+          // only a bare name can be compared by name. Without a file the
+          // message's own "<file>(<line>)" prefix decides - not any file
+          // name that happens to occur somewhere in the text.
+          if FileName = '' then
+            FileName := ExtractFilePart(Text);
+          if FileName = '' then Exit;
+          if ExtractFilePath(FileName) <> '' then
           begin
-            if not SameText(FileName, AFile)
-              and not SameText(ExtractFileName(FileName), Base) then Exit;
+            if not SameText(ExpandFileName(FileName), ExpandFileName(AFile)) then Exit;
           end
-          else if Pos(LowerCase(Base), LowerCase(Text)) = 0 then
+          else if not SameText(FileName, Base) then
             Exit;
 
           D := Default(TLspErrorDiag);
           D.Code := Code;
           D.Message := Text;
-          D.Severity := 1;
+          D.Severity := SeverityOfCode(Code);
           D.Range.Start.Line := LineNo - 1;            // 0-based
           if ColNo > 0 then D.Range.Start.Character := ColNo - 1
           else D.Range.Start.Character := 0;
@@ -581,8 +632,20 @@ begin
   end;
 end;
 
+var
+  GDumpDone: Boolean = False;
+  // Keeps the process-wide RTTI pool alive: every Call* helper declares a
+  // local TRttiContext, and without a long-lived one the pool was built
+  // and torn down again for each of them.
+  GRttiKeepAlive: TRttiContext;
+
 procedure DumpMessagesWindow;
 begin
+  // ONCE per session: the walk covers ~29,000 exported names on the main
+  // thread, and the exports of a loaded module cannot change - running it
+  // after every compile only cost time.
+  if GDumpDone then Exit;
+  GDumpDone := True;
   try
     GLog := TStringList.Create;
     try
@@ -599,5 +662,11 @@ begin
     // diagnostics must never disturb the IDE
   end;
 end;
+
+initialization
+  GRttiKeepAlive := TRttiContext.Create;
+
+finalization
+  GRttiKeepAlive.Free;
 
 end.

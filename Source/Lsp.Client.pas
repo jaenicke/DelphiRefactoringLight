@@ -72,6 +72,9 @@ type
     FPosLock: TCriticalSection;
     FLastPosFile: string;                        // file of the last position request
     FDocLines: TDictionary<string, Integer>;     // UPPER path -> lines last sent
+    // UPPER file NAME -> full path of every document sent to the server
+    // ('' when two different paths share the name) - see ResolveBareUris
+    FKnownFiles: TDictionary<string, string>;
     FAutoCompleteUnits: Boolean;
     FDiagnosticsCount: Integer;
     // Pushes per file (see GetFileDiagnosticsVersion).
@@ -79,7 +82,13 @@ type
     /// <summary>Set of uppercase file paths that have received at least
     ///  one publishDiagnostics notification.</summary>
     FFilesWithDiagnostics: TDictionary<string, Boolean>;
+    /// <summary>The reader thread has ended - nothing will ever answer.</summary>
+    FReaderDead: Boolean;
 
+    procedure MarkReaderDead;
+    procedure CheckConnected;
+    function ResolveBareUris(const ALocs: TArray<TLspLocation>;
+      const ARequestFile: string): TArray<TLspLocation>;
     function NextRequestId: Integer;
     procedure BeforePositionRequest(const AMethod: string; AParams: TJSONValue);
     function LineCountOf(const AFilePath: string): Integer;
@@ -106,6 +115,10 @@ type
     /// <summary>Starts the LSP server as a subprocess.</summary>
     procedure Start;
 
+    /// <summary>The server process runs AND the reader thread is alive.
+    ///  Cheap (no round trip). False means every request would fail.</summary>
+    function IsConnected: Boolean;
+
     /// <summary>Sends a request and waits for the response.</summary>
     function SendRequest(const AMethod: string; AParams: TJSONValue; ATimeoutMs: Cardinal = 60000): TJSONObject;
 
@@ -131,8 +144,10 @@ type
     /// <summary>Closes a document on the LSP server (didClose).</summary>
     procedure CloseDocument(const AFilePath: string);
 
-    /// <summary>Refreshes a document at the LSP (didClose + didOpen).</summary>
-    procedure RefreshDocument(const AFilePath: string);
+    /// <summary>Refreshes a document at the LSP (didClose + didOpen).
+    ///  Virtual (like GotoDefinition) so tests can script the server's
+    ///  answers without starting one.</summary>
+    procedure RefreshDocument(const AFilePath: string); virtual;
     /// <summary>RefreshDocument with the content HANDED IN. The plain
     ///  version reads the live editor buffer, which is ToolsAPI and
     ///  therefore MAIN-THREAD ONLY - a background worker must capture the
@@ -152,7 +167,7 @@ type
       AIncludeDeclaration: Boolean = True): TArray<TLspLocation>;
 
     /// <summary>Jumps to the definition of the identifier at the position.</summary>
-    function GotoDefinition(const AFilePath: string; ALine, ACol: Integer): TArray<TLspLocation>;
+    function GotoDefinition(const AFilePath: string; ALine, ACol: Integer): TArray<TLspLocation>; virtual;
 
     /// <summary>Finds implementations (e.g. class methods that implement an interface).</summary>
     function GotoImplementation(const AFilePath: string; ALine, ACol: Integer): TArray<TLspLocation>;
@@ -313,23 +328,80 @@ end;
 { TLspClient.TReaderThread }
 
 procedure TLspClient.TReaderThread.Execute;
+const
+  // A desynchronised stream produces nothing but bad frames - give up
+  // after this many in a row instead of spinning forever.
+  MaxBadFramesInRow = 20;
 var
   Msg: TJSONObject;
+  BadInRow: Integer;
 begin
-  while not Terminated do
-  begin
-    try
-      Msg := FOwner.FTransport.ReadMessage;
-      FOwner.DispatchResponse(Msg);
-    except
-      on E: EStreamError do
-      begin
-        if not Terminated then
-          FOwner.Log('<--', 'ERROR', E.Message);
-        Exit;
+  BadInRow := 0;
+  try
+    while not Terminated do
+    begin
+      try
+        Msg := FOwner.FTransport.ReadMessage;
+      except
+        on E: EStreamError do
+        begin
+          // The pipe is gone (process ended or handle closed): final.
+          if not Terminated then
+            FOwner.Log('<--', 'ERROR', E.Message);
+          Exit;
+        end;
+        on E: Exception do
+        begin
+          // One malformed frame (EJSONException & co) used to kill this
+          // thread silently - and every later request then sat out its
+          // full timeout, for the rest of the IDE session.
+          if not Terminated then
+            FOwner.Log('<--', 'BAD FRAME', E.ClassName + ': ' + E.Message);
+          Inc(BadInRow);
+          if BadInRow >= MaxBadFramesInRow then Exit;
+          Continue;
+        end;
+      end;
+      BadInRow := 0;
+      try
+        FOwner.DispatchResponse(Msg);
+      except
+        on E: Exception do
+          // e.g. an id of unexpected type - drop this message, keep reading
+          if not Terminated then
+            FOwner.Log('<--', 'DISPATCH ERROR', E.ClassName + ': ' + E.Message);
       end;
     end;
+  finally
+    FOwner.MarkReaderDead;
   end;
+end;
+
+procedure TLspClient.MarkReaderDead;
+begin
+  FReaderDead := True;
+  // Wake every waiter NOW with no response: they raise "connection lost"
+  // at once instead of waiting out their timeout.
+  FPendingLock.Enter;
+  try
+    for var P in FPending.Values do
+      P.Event.SetEvent;
+  finally
+    FPendingLock.Leave;
+  end;
+end;
+
+function TLspClient.IsConnected: Boolean;
+begin
+  Result := (FReaderThread <> nil) and not FReaderDead and
+    (FProcessHandle <> INVALID_HANDLE_VALUE) and
+    (WaitForSingleObject(FProcessHandle, 0) = WAIT_TIMEOUT);
+end;
+
+procedure TLspClient.CheckConnected;
+begin
+  if FReaderDead then
+    raise ELspError.Create(-32099, 'Connection to DelphiLSP lost');
 end;
 
 { TLspClient }
@@ -346,6 +418,7 @@ begin
   FInactiveRangesLock := TCriticalSection.Create;
   FPosLock := TCriticalSection.Create;
   FDocLines := TDictionary<string, Integer>.Create;
+  FKnownFiles := TDictionary<string, string>.Create;
   FAutoCompleteUnits := True;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
   FFileDiagVersion := TDictionary<string, Integer>.Create;
@@ -384,6 +457,7 @@ begin
   FPending.Free;
   FPendingLock.Free;
   FreeAndNil(FDocLines);
+  FreeAndNil(FKnownFiles);
   FreeAndNil(FPosLock);
   FInactiveRanges.Free;
   FErrorDiags.Free;
@@ -609,6 +683,11 @@ var
   WaitResult: TWaitResult;
   ErrorObj: TJSONObject;
 begin
+  if FReaderDead then
+  begin
+    AParams.Free;   // the caller handed us ownership
+    CheckConnected;
+  end;
   BeforePositionRequest(AMethod, AParams);
   Id := NextRequestId;
 
@@ -626,6 +705,8 @@ begin
   FPendingLock.Enter;
   try
     FPending.Add(Id, Pending);
+    // the reader may have died meanwhile - never wait for nothing
+    if FReaderDead then Pending.Event.SetEvent;
   finally
     FPendingLock.Leave;
   end;
@@ -653,6 +734,8 @@ begin
   Result := Pending.Response;
   Pending.Response := nil; // Ownership to caller
   Pending.Free;
+  if Result = nil then   // woken by MarkReaderDead
+    raise ELspError.Create(-32099, 'Connection to DelphiLSP lost during ' + AMethod);
 
   // Check for error
   if Result.TryGetValue<TJSONObject>('error', ErrorObj) then
@@ -670,6 +753,11 @@ var
   Msg: TJSONObject;
   Pending: TPendingRequest;
 begin
+  if FReaderDead then
+  begin
+    AParams.Free;
+    CheckConnected;
+  end;
   BeforePositionRequest(AMethod, AParams);
   Result := NextRequestId;
 
@@ -687,6 +775,8 @@ begin
   FPendingLock.Enter;
   try
     FPending.Add(Result, Pending);
+    // the reader may have died meanwhile - never wait for nothing
+    if FReaderDead then Pending.Event.SetEvent;
   finally
     FPendingLock.Leave;
   end;
@@ -728,6 +818,9 @@ begin
   Result := Pending.Response;
   Pending.Response := nil;
   Pending.Free;
+  if Result = nil then   // woken by MarkReaderDead
+    raise ELspError.Create(-32099, 'Connection to DelphiLSP lost (request #' +
+      IntToStr(ARequestId) + ')');
 
   if Result.TryGetValue<TJSONObject>('error', ErrorObj) then
   begin
@@ -869,6 +962,12 @@ begin
   FPosLock.Enter;
   try
     FDocLines.AddOrSetValue(UpperCase(AbsPath), Lines);
+    var NameKey := UpperCase(ExtractFileName(AbsPath));
+    var Known: string;
+    if not FKnownFiles.TryGetValue(NameKey, Known) then
+      FKnownFiles.Add(NameKey, AbsPath)
+    else if (Known <> '') and not SameText(Known, AbsPath) then
+      FKnownFiles[NameKey] := '';   // ambiguous
   finally
     FPosLock.Leave;
   end;
@@ -1046,6 +1145,40 @@ begin
   finally
     Response.Free;
   end;
+  Result := ResolveBareUris(Result, AFilePath);
+end;
+
+function TLspClient.ResolveBareUris(const ALocs: TArray<TLspLocation>;
+  const ARequestFile: string): TArray<TLspLocation>;
+var
+  P, Full, Cand: string;
+begin
+  // MEASURED (DelphiLSP 13, right after a didOpen): a definition can come
+  // back as "file:///Expert.LspManager.pas" - the file NAME only. Taken as
+  // a relative path it resolved against the IDE's working directory, and
+  // find references then rejected the symbol's own declaration. Resolve
+  // the name against the documents this session has sent, then against
+  // the requesting file's folder.
+  Result := ALocs;
+  for var I := 0 to High(Result) do
+  begin
+    P := TLspUri.FileUriToPath(Result[I].Uri);
+    if (P = '') or (ExtractFilePath(P) <> '') then Continue;
+    Full := '';
+    FPosLock.Enter;
+    try
+      if not FKnownFiles.TryGetValue(UpperCase(P), Full) then Full := '';
+    finally
+      FPosLock.Leave;
+    end;
+    if Full = '' then
+    begin
+      Cand := ExtractFilePath(ExpandFileName(ARequestFile)) + P;
+      if FileExists(Cand) then Full := Cand;
+    end;
+    if Full <> '' then
+      Result[I].Uri := TLspUri.PathToFileUri(Full);
+  end;
 end;
 
 function TLspClient.GotoDefinition(const AFilePath: string; ALine, ACol: Integer): TArray<TLspLocation>;
@@ -1092,6 +1225,7 @@ begin
   finally
     Response.Free;
   end;
+  Result := ResolveBareUris(Result, AFilePath);
 end;
 
 function TLspClient.GotoImplementation(const AFilePath: string; ALine, ACol: Integer): TArray<TLspLocation>;
@@ -1137,6 +1271,7 @@ begin
   finally
     Response.Free;
   end;
+  Result := ResolveBareUris(Result, AFilePath);
 end;
 
 function TLspClient.GetHover(const AFilePath: string; ALine, ACol: Integer): string;
@@ -1344,7 +1479,9 @@ begin
 
   Path := TLspUri.FileUriToPath(Uri);
   if Path = '' then Exit;
-  UpKey := AnsiUpperCase(Path);
+  // Same normalisation as every reader (ExpandFileName) - otherwise writer
+  // and reader keys can differ (UNC, "..\" segments) and never match.
+  UpKey := AnsiUpperCase(ExpandFileName(Path));
 
   FInactiveRangesLock.Enter;
   try

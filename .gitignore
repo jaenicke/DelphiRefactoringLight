@@ -94,3 +94,7 @@ Packages/Output2/DelphiRefactoringLight370.bpl
 # MCP bridge build output
 Mcp/Bin/
 Mcp/DCU/
+
+# DUnitX test output
+Tests/Win32/
+Tests/Win64/

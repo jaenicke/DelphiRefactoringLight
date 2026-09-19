@@ -178,7 +178,7 @@ implementation
 uses
   System.IOUtils, System.DateUtils, System.SyncObjs, System.Math,
   System.StrUtils, System.Win.Registry, Winapi.Windows, Winapi.ShellAPI,
-  Expert.ResourceMonitor;
+  Expert.ResourceMonitor, Delphi.FileEncoding;
 
 { TBlameLine }
 
@@ -619,39 +619,10 @@ end;
 //  Running the VCS client
 // ---------------------------------------------------------------------------
 
-// Well-formed UTF-8 (no overlongs, no surrogates, <= U+10FFFF)? Checked by
-// hand: the RTL decoders either replace silently or fail per call, which
-// cannot tell a line apart.
-function IsValidUtf8(const B: TBytes; AStart, ALen: Integer): Boolean;
-var
-  I, Stop, Need: Integer;
-  C: Byte;
-  CP: Cardinal;
+// Well-formed UTF-8 check: shared with the source-file reader.
+function IsValidUtf8(const B: TBytes; AStart, ALen: Integer): Boolean; inline;
 begin
-  I := AStart;
-  Stop := AStart + ALen;
-  while I < Stop do
-  begin
-    C := B[I];
-    if C < $80 then begin Inc(I); Continue; end;
-    if (C and $E0) = $C0 then begin Need := 1; CP := C and $1F; end
-    else if (C and $F0) = $E0 then begin Need := 2; CP := C and $0F; end
-    else if (C and $F8) = $F0 then begin Need := 3; CP := C and $07; end
-    else Exit(False);
-    if I + Need >= Stop then Exit(False);
-    for var K := 1 to Need do
-    begin
-      if (B[I + K] and $C0) <> $80 then Exit(False);
-      CP := (CP shl 6) or (B[I + K] and $3F);
-    end;
-    case Need of
-      1: if CP < $80 then Exit(False);
-      2: if (CP < $800) or ((CP >= $D800) and (CP <= $DFFF)) then Exit(False);
-      3: if (CP < $10000) or (CP > $10FFFF) then Exit(False);
-    end;
-    Inc(I, Need + 1);
-  end;
-  Result := True;
+  Result := TDelphiFileEncoding.IsValidUtf8(B, AStart, ALen);
 end;
 
 function DecodeVcsOutput(const ABytes: TBytes; ACount: Integer): string;
@@ -1429,7 +1400,8 @@ var
 begin
   GShutdown := True;
   Waited := 0;
-  while (GWorkers > 0) and (Waited < 5000) do
+  // bound ABOVE the longest worker (svn blame + log can take 30 s)
+  while (GWorkers > 0) and (Waited < 35000) do
   begin
     Sleep(20);
     Inc(Waited, 20);

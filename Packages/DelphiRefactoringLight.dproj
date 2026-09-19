@@ -57,7 +57,7 @@
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;Vcl.Imaging;Vcl.Touch;Vcl.Samples;Vcl.Shell;$(DCC_Namespace)</DCC_Namespace>
         <GenDll>true</GenDll>
         <GenPackage>true</GenPackage>
-        <DCC_DcuOutput>.\DCU</DCC_DcuOutput>
+        <DCC_DcuOutput>.\DCU\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_MapFile>3</DCC_MapFile>
         <DCC_Description>Delphi Refactoring Light - Rename / Find References / Extract Method via DelphiLSP</DCC_Description>
         <DllSuffix>$(Auto)</DllSuffix>
@@ -164,6 +164,7 @@
         <DCCReference Include="..\Source\Expert.UsesEditor.pas"/>
         <DCCReference Include="..\Source\Expert.UnitIndex.pas"/>
         <DCCReference Include="..\Source\Expert.VcsBlame.pas"/>
+        <DCCReference Include="..\Source\Expert.WorkerLatch.pas"/>
         <DCCReference Include="..\Source\Expert.BlameGutter.pas"/>
         <DCCReference Include="..\Source\Expert.ResourceMonitor.pas"/>
         <DCCReference Include="..\Source\Expert.ScopeFiles.pas"/>

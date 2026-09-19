@@ -9,6 +9,6 @@ if not exist DCU mkdir DCU
 if not exist Output mkdir Output
 set CONFIG=%1
 if "%CONFIG%"=="" set CONFIG=Debug
-msbuild RefactoringLightStandalone.dproj /t:Build /p:Config=%CONFIG% /p:Platform=Win32 /p:DCC_ExeOutput=.\Output /p:DCC_DcuOutput=.\DCU /v:minimal
+msbuild RefactoringLightStandalone.dproj /t:Build /p:Config=%CONFIG% /p:Platform=Win32 /p:DCC_ExeOutput=.\Output /p:DCC_DcuOutput=.\DCU\Win32\%CONFIG% /v:minimal
 echo.
 echo Exit Code: %ERRORLEVEL%

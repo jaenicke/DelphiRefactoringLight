@@ -58,6 +58,8 @@
         <VerInfo_Locale>1031</VerInfo_Locale>
         <VerInfo_Keys>CompanyName=;FileDescription=;FileVersion=1.0.0.0;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProductName=;ProductVersion=1.0.0.0;Comments=;CFBundleName=</VerInfo_Keys>
         <DCC_Define>STANDALONE_BUILD;$(DCC_Define)</DCC_Define>
+        <DCC_DcuOutput>.\DCU\$(Platform)\$(Config)</DCC_DcuOutput>
+        <DCC_ExeOutput>.\Output</DCC_ExeOutput>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_Namespace>Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>
@@ -135,6 +137,7 @@
         <DCCReference Include="..\Source\Expert.IdeThemes.pas"/>
         <DCCReference Include="..\Source\Expert.ImplementationFinder.pas"/>
         <DCCReference Include="..\Source\Expert.LspManager.pas"/>
+        <DCCReference Include="..\Source\Expert.WorkerLatch.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnit.pas"/>
         <DCCReference Include="..\Source\Expert.MoveToUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.RestartHint.pas"/>

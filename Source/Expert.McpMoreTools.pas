@@ -1572,8 +1572,9 @@ begin
   Res.AddPair('moved', Ident);
   Res.AddPair('new_unit', NewFile);
   if Msg <> '' then Res.AddPair('note', Msg);
-  Res.AddPair('saved', 'The new unit was written to disk and added to the project; ' +
-    'the edited units are changed in the IDE (not saved).');
+  Res.AddPair('saved', 'The new unit was created on disk and added to the project; ' +
+    'its content and the edits of the other units are in the IDE buffers (not ' +
+    'saved) - units that are not open in the IDE were changed on disk.');
   Result := McpOk(Res);
 end;
 

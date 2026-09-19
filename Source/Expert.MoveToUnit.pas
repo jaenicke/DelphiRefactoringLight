@@ -1791,6 +1791,29 @@ begin
     end;
     RemoveRangeFromSource(APlan.SourceFile, APlan);
 
+    // 2b) The SOURCE itself may still use the moved symbol (the rest of the
+    //     unit using the class that was taken out - the normal case for a
+    //     move to a new unit). It is no consumer in the plan, so it never
+    //     got the target: in its interface uses when the interface still
+    //     mentions the symbol, else in its implementation uses (which
+    //     cannot form an interface-level cycle).
+    begin
+      var Left := StripCommentsAndStringsKeepNewlines(ReadFile(APlan.SourceFile));
+      var InIntf := False;
+      var InImpl := False;
+      var PastImpl := False;
+      for var Ln in SplitLines(Left) do
+      begin
+        if StartsWithKeyword(Ln, 'implementation') then PastImpl := True;
+        if HasWord(Ln, APlan.Symbol) then
+          if PastImpl then InImpl := True else InIntf := True;
+      end;
+      if InIntf then
+        EnsureInterfaceUses(APlan.SourceFile, TargetUnit)
+      else if InImpl then
+        EnsureImplementationUses(APlan.SourceFile, [TargetUnit]);
+    end;
+
     // 3) For every consumer, ensure interface uses contains TARGET.
     for C in APlan.Consumers do
       EnsureInterfaceUses(C, TargetUnit);

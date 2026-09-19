@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.6.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.7.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -19,7 +19,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+S`     | **Change signature** &mdash; add, remove, reorder or rename parameters, change their type, modifier or default value; every header of the method's family (interfaces, implementing classes, overrides) and every call site verified via DelphiLSP change with it |
 | `Ctrl+Alt+Shift+D`     | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
-| `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
+| `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Menu entry and shortcut open the same small dialog to pick the scope (at cursor / current unit / selected units / project-wide); the last choice is preselected |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised |
 | *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
@@ -96,11 +96,11 @@ In the last three weeks I tested with big projects and used it myself in real li
 - **Align** rewrites the selected row to the majority signature: a declaration gets the reference signature (directives such as `virtual; override;` stay), an implementation goes through the E2037 fixer, which keeps its **parameter names** because the body uses them. An implementation is aligned only after the class declaration of its unit matches. Not saved; `Ctrl+Z` undoes it.
 
 ### Remove with (`Ctrl+Alt+Shift+W`)
-- The editor context menu exposes the action as a submenu with four scopes:
-  - **At cursor only** &mdash; just the `with`-statement that encloses the caret. Default for the global shortcut, since it's the fastest single-edit case. If no `with` encloses the caret, falls back to the current unit.
+- *Remove with...* in the menu and the shortcut both open a dialog with four scopes (the choice of the last run is preselected, a double-click or Enter confirms):
+  - **At cursor only** &mdash; just the `with`-statement that encloses the caret. Preselected the first time, since it's the fastest single-edit case. If no `with` encloses the caret, falls back to the current unit.
   - **In current unit** &mdash; the active editor file.
   - **In selected units...** &mdash; opens a multi-select list of all project source files; scan only the chosen ones.
-  - **In whole project...** &mdash; project-wide scan. On very large code bases (10k+ files) this can take many minutes; that's why it now requires an explicit submenu pick instead of being the default action.
+  - **In whole project...** &mdash; project-wide scan. On very large code bases (10k+ files) this can take many minutes; that's why it is never the default choice.
 - Saves any unsaved editor buffers, starts / reuses DelphiLSP and ensures the chosen file set is indexed. Per-file: triggers `RefreshDocument` (which sends `didOpen` plus a `didChange` v2 with the full content, mirroring what the IDE itself sends), actively requests `textDocument/documentSymbol` to force analysis, then waits up to 90 s (30 s per file in project-wide scope) for any inactive-region diagnostics. The dialog title bar reflects the active scope and the current LSP warm-up status.
 - Scans every `*.pas` / `*.dpr` / `*.dpk` in the chosen scope for `with ... do` statements:
   - **`begin..end`** bodies &mdash; full block.
@@ -165,7 +165,7 @@ Select the property declarations (or put the caret on one) and choose **Convert 
 ...content of Foo.inc...
 // <<< include end: Foo.inc
 ```
-Nested includes are expanded too, a trailing `//` comment in an include cannot swallow the code after the directive, and the unit's line break style is kept. Reach: current unit, selected units, a directory (recursive) or the whole project. Open files are changed in the editor buffer (undoable, not saved), all others on disk &mdash; go back with your version control system.
+Nested includes are expanded too, a trailing `//` comment in an include cannot swallow the code after the directive, and the unit's line break style is kept. The menu entry *Expand include files...* asks where: current unit, selected units, a directory (recursive) or the whole project. Open files are changed in the editor buffer (undoable, not saved), all others on disk &mdash; go back with your version control system.
 
 ### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
@@ -274,7 +274,7 @@ Project-wide find / replace driven by a per-project JSON rules file. Replaces do
 - A match DelphiLSP gives **no answer** for (typically an inactive `{$IFDEF}` branch) is listed as *NOT VERIFIED* and replaced only when the preview's checkbox *Also replace the N occurrence(s) DelphiLSP could not verify* is ticked (off by default).
 - The preview shows the verdict per match; without a DelphiLSP session it says so and falls back to the old text-only behaviour. MCP tool: `semantic_replace` (report, `apply`, `include_unverified`).
 
-Reached via *Refactoring Light &rarr; Semantic replace*. The submenu mirrors the *Remove with* layout:
+Reached via *Refactoring Light &rarr; Semantic replace...*, which opens a dialog with the same kind of scope choice as *Remove with*:
 
 - **In current unit** &mdash; act only on the editor's current file.
 - **In selected units&hellip;** &mdash; a checklist of every project `*.pas` with a live filter and *Select all* / *Clear* shortcuts.

@@ -134,12 +134,11 @@ type
     procedure OnExtractVariable(Sender: TObject);
     procedure OnWrapTryFinally(Sender: TObject);
     procedure OnSafeDelete(Sender: TObject);
+    procedure OnRemoveWithChoose(Sender: TObject);
+    procedure OnExpandIncludesChoose(Sender: TObject);
+    procedure OnSemanticReplaceChoose(Sender: TObject);
     procedure OnChangeSignature(Sender: TObject);
     procedure OnConvertProperties(Sender: TObject);
-    procedure OnExpandIncludesCurrent(Sender: TObject);
-    procedure OnExpandIncludesSelected(Sender: TObject);
-    procedure OnExpandIncludesDirectory(Sender: TObject);
-    procedure OnExpandIncludesProject(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
     procedure OnShowMcpTools(Sender: TObject);
@@ -147,10 +146,6 @@ type
     procedure OnBlameCommit(Sender: TObject);
     procedure OnBlameList(Sender: TObject);
     procedure OnSignatureCheck(Sender: TObject);
-    procedure OnRemoveWithProjectWide(Sender: TObject);
-    procedure OnRemoveWithCurrentUnit(Sender: TObject);
-    procedure OnRemoveWithSelectedUnits(Sender: TObject);
-    procedure OnRemoveWithAtCursor(Sender: TObject);
     procedure OnUnitRefs(Sender: TObject);
     procedure OnFindUnit(Sender: TObject);
     procedure OnAddUnitAtCursor(Sender: TObject);
@@ -162,10 +157,6 @@ type
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
     procedure OnDelegateInterface(Sender: TObject);
-    procedure OnSemanticReplaceCurrent(Sender: TObject);
-    procedure OnSemanticReplaceSelected(Sender: TObject);
-    procedure OnSemanticReplaceProject(Sender: TObject);
-    procedure OnSemanticReplaceEditRules(Sender: TObject);
     procedure OnCheckDfmEvents(Sender: TObject);
     procedure OnCheckInterfaceGuids(Sender: TObject);
     procedure OnCheckCircularRefs(Sender: TObject);
@@ -237,9 +228,7 @@ uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete, Expert.IncludeExpander,
-  Expert.PropertyConvertWizard, Expert.ChangeSignature;
-
-
+  Expert.PropertyConvertWizard, Expert.ChangeSignature, Expert.ScopeChooser;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -425,7 +414,7 @@ function TContextMenuInstaller.BuildMenuTree(AOwner: TComponent;
   end;
 
 var
-  Root, RemoveWithSub, IncludeSub, IfaceSub, SemSub, ChecksSub: TMenuItem;
+  Root, IfaceSub, ChecksSub: TMenuItem;
 begin
   Root := TMenuItem.Create(AOwner);
   Root.Caption := 'Refactoring Light';
@@ -443,17 +432,11 @@ begin
   Leaf(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties,
     skConvertProperties, REQ_EDITOR);
 
-  RemoveWithSub := Sub(Root, 'Remove with');
-  Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);
-  Plain(RemoveWithSub, 'In current unit',    OnRemoveWithCurrentUnit,   REQ_EDITOR);
-  Plain(RemoveWithSub, 'In selected units...', OnRemoveWithSelectedUnits, REQ_PROJECT);
-  Plain(RemoveWithSub, 'In whole project...', OnRemoveWithProjectWide,   REQ_PROJECT);
-
-  IncludeSub := Sub(Root, 'Expand include files');
-  Plain(IncludeSub, 'In current unit',       OnExpandIncludesCurrent,   REQ_EDITOR);
-  Plain(IncludeSub, 'In selected units...',  OnExpandIncludesSelected,  REQ_PROJECT);
-  Plain(IncludeSub, 'In a directory...',     OnExpandIncludesDirectory, REQ_ALWAYS);
-  Plain(IncludeSub, 'In whole project...',   OnExpandIncludesProject,   REQ_PROJECT);
+  // one entry per multi-scope tool, the scope is picked in a dialog
+  // (Expert.ScopeChooser) - the local menu cannot nest, and the old
+  // submenus took twelve flat rows there
+  Leaf(Root, 'Remove with...',            OnRemoveWithChoose,     skRemoveWith, REQ_PROJECT);
+  Plain(Root, 'Expand include files...',  OnExpandIncludesChoose, REQ_ALWAYS);
 
   IfaceSub := Sub(Root, 'Interfaces');
   Plain(IfaceSub, 'Extract new interface from class...', OnExtractInterface,       REQ_EDITOR);
@@ -477,11 +460,7 @@ begin
 
   // ---- Project-wide tools & checks ----------------------------------------
   Sep(Root);
-  SemSub := Sub(Root, 'Semantic replace');
-  Plain(SemSub, 'In current unit',    OnSemanticReplaceCurrent,   REQ_EDITOR);
-  Plain(SemSub, 'In selected units...', OnSemanticReplaceSelected, REQ_PROJECT);
-  Plain(SemSub, 'In whole project...', OnSemanticReplaceProject,   REQ_PROJECT);
-  Plain(SemSub, 'Edit rules...',       OnSemanticReplaceEditRules, REQ_PROJECT);
+  Plain(Root, 'Semantic replace...',      OnSemanticReplaceChoose, REQ_PROJECT);
 
   ChecksSub := Sub(Root, 'Project checks');
   Plain(ChecksSub, 'DFM event handlers...',        OnCheckDfmEvents,       REQ_PROJECT);
@@ -1544,6 +1523,21 @@ begin
   SafeDeleteAtCursor;
 end;
 
+procedure TContextMenuInstaller.OnRemoveWithChoose(Sender: TObject);
+begin
+  ChooseRemoveWith;
+end;
+
+procedure TContextMenuInstaller.OnExpandIncludesChoose(Sender: TObject);
+begin
+  ChooseExpandIncludes;
+end;
+
+procedure TContextMenuInstaller.OnSemanticReplaceChoose(Sender: TObject);
+begin
+  ChooseSemanticReplace;
+end;
+
 procedure TContextMenuInstaller.OnChangeSignature(Sender: TObject);
 begin
   ChangeSignatureAtCursor;
@@ -1552,26 +1546,6 @@ end;
 procedure TContextMenuInstaller.OnConvertProperties(Sender: TObject);
 begin
   ConvertPropertiesAtSelection;
-end;
-
-procedure TContextMenuInstaller.OnExpandIncludesCurrent(Sender: TObject);
-begin
-  ExpandIncludesCurrentUnit;
-end;
-
-procedure TContextMenuInstaller.OnExpandIncludesSelected(Sender: TObject);
-begin
-  ExpandIncludesSelectedUnits;
-end;
-
-procedure TContextMenuInstaller.OnExpandIncludesDirectory(Sender: TObject);
-begin
-  ExpandIncludesInDirectory;
-end;
-
-procedure TContextMenuInstaller.OnExpandIncludesProject(Sender: TObject);
-begin
-  ExpandIncludesProjectWide;
 end;
 
 procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);
@@ -1614,30 +1588,6 @@ procedure TContextMenuInstaller.OnSignatureCheck(Sender: TObject);
 begin
   if SignatureCheckInstance <> nil then
     SignatureCheckInstance.Execute;
-end;
-
-procedure TContextMenuInstaller.OnRemoveWithAtCursor(Sender: TObject);
-begin
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.ExecuteAtCursor;
-end;
-
-procedure TContextMenuInstaller.OnRemoveWithCurrentUnit(Sender: TObject);
-begin
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.ExecuteCurrentUnit;
-end;
-
-procedure TContextMenuInstaller.OnRemoveWithSelectedUnits(Sender: TObject);
-begin
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.ExecuteSelectedUnits;
-end;
-
-procedure TContextMenuInstaller.OnRemoveWithProjectWide(Sender: TObject);
-begin
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.ExecuteProjectWide;
 end;
 
 procedure TContextMenuInstaller.OnUnitRefs(Sender: TObject);
@@ -1695,26 +1645,6 @@ end;
 procedure TContextMenuInstaller.OnDelegateInterface(Sender: TObject);
 begin
   Expert.ExtractInterfaceWizard.DelegateInterfaceImplementation;
-end;
-
-procedure TContextMenuInstaller.OnSemanticReplaceCurrent(Sender: TObject);
-begin
-  Expert.SemanticReplaceWizard.ApplySemanticReplacements_CurrentUnit;
-end;
-
-procedure TContextMenuInstaller.OnSemanticReplaceSelected(Sender: TObject);
-begin
-  Expert.SemanticReplaceWizard.ApplySemanticReplacements_SelectedUnits;
-end;
-
-procedure TContextMenuInstaller.OnSemanticReplaceProject(Sender: TObject);
-begin
-  Expert.SemanticReplaceWizard.ApplySemanticReplacements_Project;
-end;
-
-procedure TContextMenuInstaller.OnSemanticReplaceEditRules(Sender: TObject);
-begin
-  Expert.SemanticReplaceWizard.EditSemanticReplaceRules;
 end;
 
 procedure TContextMenuInstaller.OnCheckDfmEvents(Sender: TObject);

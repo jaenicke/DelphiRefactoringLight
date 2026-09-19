@@ -53,7 +53,8 @@ uses
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
   Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard, Expert.ChangeSignature,
-  Expert.SafeDelete, Expert.StatementRefactor, Expert.PropertyConvertWizard;
+  Expert.SafeDelete, Expert.StatementRefactor, Expert.PropertyConvertWizard,
+  Expert.ScopeChooser;
 
 { TLspKeyBinding }
 
@@ -109,8 +110,8 @@ procedure TLspKeyBinding.RemoveWithKeyProc(const Context: IOTAKeyContext; KeyCod
 begin
   BindingResult := krHandled;   // swallow the key either way
   if not TExpertsShortCut.AllowAction(skRemoveWith) then Exit;
-  if WithRefactorInstance <> nil then
-    WithRefactorInstance.Execute;
+  // the same scope dialog as the menu entry (Expert.ScopeChooser)
+  ChooseRemoveWith;
 end;
 
 procedure TLspKeyBinding.UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);

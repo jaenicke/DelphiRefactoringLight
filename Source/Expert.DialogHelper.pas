@@ -96,6 +96,22 @@ function CreateCheckProgress(const ACaption: string; AOwner: TComponent;
 function AskThemedText(const ACaption, APrompt: string; var AValue: string;
   const AValidate: TFunc<string, string>): Boolean;
 
+type
+  /// <summary>One option of ChooseThemedOption.</summary>
+  TThemedChoice = record
+    Caption: string;
+    Hint: string;        // one line below the option
+    Enabled: Boolean;
+    DisabledWhy: string; // replaces the hint while disabled
+  end;
+
+/// <summary>Themed chooser: one radio button per option with a hint line
+///  below it. AIndex in = the preselected option (falls back to the first
+///  enabled one), out = the chosen one. Double-click on an option or Enter
+///  confirms. False = cancelled or nothing enabled.</summary>
+function ChooseThemedOption(const ACaption, APrompt: string;
+  const AOptions: TArray<TThemedChoice>; var AIndex: Integer): Boolean;
+
 procedure ShowThemedMessage(const AMsg: string);
 
 /// <summary>Themed confirmation with an explicit DEFAULT of "no": used
@@ -442,6 +458,113 @@ begin
     Edt.SelectAll;
     Result := Dlg.ShowModal = mrOk;
     if Result then AValue := Trim(Edt.Text);
+  finally
+    Dlg.Free;
+  end;
+end;
+
+type
+  // double-click on an option confirms (OnDblClick needs a METHOD)
+  TChoiceConfirm = class(TComponent)
+  public
+    Form: TForm;
+    procedure DblClick(Sender: TObject);
+  end;
+
+procedure TChoiceConfirm.DblClick(Sender: TObject);
+begin
+  if (Sender is TRadioButton) and TRadioButton(Sender).Enabled then
+  begin
+    TRadioButton(Sender).Checked := True;
+    Form.ModalResult := mrOk;
+  end;
+end;
+
+function ChooseThemedOption(const ACaption, APrompt: string;
+  const AOptions: TArray<TThemedChoice>; var AIndex: Integer): Boolean;
+const
+  W = 460;
+var
+  Dlg: TThemedToolForm;
+  Radios: TArray<TRadioButton>;
+begin
+  Result := False;
+  var First := -1;
+  for var I := 0 to High(AOptions) do
+    if AOptions[I].Enabled and (First < 0) then First := I;
+  if First < 0 then Exit;
+  if (AIndex < 0) or (AIndex > High(AOptions)) or not AOptions[AIndex].Enabled then
+    AIndex := First;
+  Dlg := TThemedToolForm.CreateNew(nil);
+  try
+    Dlg.BorderStyle := bsDialog;
+    Dlg.Caption := ACaption;
+    Dlg.Position := poScreenCenter;
+    Dlg.ClientWidth := W;
+    var Confirm := TChoiceConfirm.Create(Dlg);
+    Confirm.Form := Dlg;
+
+    var Y := 14;
+    if APrompt <> '' then
+    begin
+      var Lbl := TLabel.Create(Dlg);
+      Lbl.Parent := Dlg;
+      Lbl.AutoSize := False;
+      Lbl.WordWrap := True;
+      Lbl.SetBounds(16, Y, W - 32, 34);
+      Lbl.Caption := APrompt;
+      Inc(Y, 40);
+    end;
+    SetLength(Radios, Length(AOptions));
+    for var I := 0 to High(AOptions) do
+    begin
+      var R := TRadioButton.Create(Dlg);
+      R.Parent := Dlg;
+      R.SetBounds(16, Y, W - 32, 20);
+      R.Caption := AOptions[I].Caption;
+      R.Enabled := AOptions[I].Enabled;
+      R.Checked := I = AIndex;
+      R.OnDblClick := Confirm.DblClick;
+      Radios[I] := R;
+      var H := TLabel.Create(Dlg);
+      H.Parent := Dlg;
+      H.AutoSize := False;
+      H.SetBounds(36, Y + 20, W - 52, 16);
+      if AOptions[I].Enabled then H.Caption := AOptions[I].Hint
+      else H.Caption := AOptions[I].DisabledWhy;
+      H.Font.Color := GetThemedColor(clGrayText);
+      H.ShowAccelChar := False;
+      Inc(Y, 44);
+    end;
+
+    var BtnOk := TButton.Create(Dlg);
+    BtnOk.Parent := Dlg;
+    BtnOk.Caption := 'OK';
+    BtnOk.Default := True;
+    BtnOk.ModalResult := mrOk;
+    BtnOk.SetBounds(W - 202, Y + 6, 90, 26);
+    var BtnCancel := TButton.Create(Dlg);
+    BtnCancel.Parent := Dlg;
+    BtnCancel.Caption := 'Cancel';
+    BtnCancel.Cancel := True;
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.SetBounds(W - 106, Y + 6, 90, 26);
+    Dlg.ClientHeight := Y + 46;
+
+    EnableThemes(Dlg);
+    PrepareDialog(Dlg, nil);
+    Dlg.ActiveControl := Radios[AIndex];
+    Result := Dlg.ShowModal = mrOk;
+    if Result then
+    begin
+      Result := False;
+      for var I := 0 to High(Radios) do
+        if Radios[I].Checked and Radios[I].Enabled then
+        begin
+          AIndex := I;
+          Result := True;
+        end;
+    end;
   finally
     Dlg.Free;
   end;

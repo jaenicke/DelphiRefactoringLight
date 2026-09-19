@@ -37,7 +37,10 @@ uses
   Test.UsesEditorMinimalWrite in 'Test.UsesEditorMinimalWrite.pas',
   Test.AutoImportGenericResolve in 'Test.AutoImportGenericResolve.pas',
   Test.InheritedDefectFixes in 'Test.InheritedDefectFixes.pas',
-  Test.RegressionSuite in 'Test.RegressionSuite.pas';
+  Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
+  Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',
+  Test.RegressionSuite in 'Test.RegressionSuite.pas',
+  Test.Issue11 in 'Test.Issue11.pas';
 
 var
   Runner: ITestRunner;

@@ -1051,7 +1051,7 @@ end;
 
 procedure RegisterStatusWindow;
 begin
-  RegisterDock(GDockable, GRegistered, 'Refactoring Light Status',
+  RegisterDock(GDockable, GRegistered, 'Refactoring Light Status ' + PluginVersion,
     'RefactoringLightStatus', TStatusFrame);
   RegisterDock(GToolsDockable, GToolsRegistered, 'Refactoring Light MCP Tools',
     'RefactoringLightMcpTools', TMcpToolsFrame);

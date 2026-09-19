@@ -35,7 +35,7 @@ type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
     qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
     qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken,
-    qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar);
+    qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod);
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -289,6 +289,29 @@ function IsSoleBranchStatement(const ALines: TArray<string>; ALine0: Integer): B
 function StubBodyLine(const AKind: string; AIsClassMethod: Boolean;
   const ADeclText, AOpenerLine: string): string;
 
+/// <summary>E2291 "Missing implementation of interface method IFoo.Bar":
+///  the interface and method named by the (localized) message - the LAST
+///  dotted identifier in it, quotes ignored. False when there is none.</summary>
+function E2291MethodFromMessage(const AMessage: string; out AIntf, AMethod: string): Boolean;
+
+/// <summary>The class-side declaration for the interface method declared
+///  at ADeclLine0 of AIntfLines: "procedure Bar(const A: Integer);" plus the
+///  calling convention it carries (stdcall/safecall/cdecl/pascal/register -
+///  it is part of the interface contract). False for an overloaded method
+///  (the diagnostic cannot say which overload is missing) or an unreadable
+///  header.</summary>
+function InterfaceMethodDecl(const AIntfLines: TArray<string>; ADeclLine0: Integer;
+  out ADecl: string): Boolean;
+
+/// <summary>Where ADecls go into the class declared at AClassLine0: the end
+///  of its (last) PUBLIC section, or a new "public" section before the
+///  class's 'end;'. AText is ready for InsertTextAtLineStart(AInsLine),
+///  AFirstDeclLine the 0-based line the first declaration will occupy.
+///  False when the class body cannot be delimited.</summary>
+function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0: Integer;
+  const ADecls: TArray<string>; out AInsLine: Integer; out AText: string;
+  out AFirstDeclLine: Integer): Boolean;
+
 /// <summary>True for diagnostic codes a quick-fix provider handles.
 ///  Everything else can never produce a fix (E2250 & co).</summary>
 function IsHandledDiagCode(const ACode: string): Boolean;
@@ -350,7 +373,8 @@ uses
   Lsp.Client, Lsp.Uri, Expert.LspManager,
   Expert.EditorHelperIntf, Expert.UnitAvailability, Expert.DiagStore,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
-  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
+  Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
+  Delphi.FileEncoding;
 
 type
   TMissingIdent = record
@@ -1058,6 +1082,8 @@ begin
   AInsertLine0 := BeginLine;
   Result := True;
 end;
+
+function ClassOpenerName(const ATrimmed: string): string; forward;
 
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;
@@ -1945,6 +1971,81 @@ var
     Res.Add(F);
   end;
 
+  // E2291 "Missing implementation of interface method IFoo.Bar", reported
+  // at the CLASS header: copy the method's declaration from the interface
+  // (this unit, or the unit the index knows for it) into the class and
+  // create the empty implementation. Class Completion does NOT do this.
+  procedure AddE2291(const D: TLspErrorDiag);
+  var
+    Intf, Meth, IntfBare, ClassName, Decl, IntfContent: string;
+    IntfLines: TArray<string>;
+    DeclLine, P: Integer;
+    F: TQuickFix;
+  begin
+    if (D.Range.Start.Line < 0) or (D.Range.Start.Line > High(Lines)) then Exit;
+    if not E2291MethodFromMessage(D.Message, Intf, Meth) then
+    begin
+      Decline(D.Code, '', 'no interface method named in the message');
+      Exit;
+    end;
+    if Seen.ContainsKey('I91|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Intf + '.' + Meth)) then Exit;
+    Seen.Add('I91|' + IntToStr(D.Range.Start.Line) + '|' + UpperCase(Intf + '.' + Meth), True);
+    ClassName := ClassOpenerName(Trim(StripLineComment(Lines[D.Range.Start.Line])));
+    if ClassName = '' then
+    begin
+      Decline(D.Code, Meth, 'the diagnosed line is not a class declaration (stale?)');
+      Exit;
+    end;
+    IntfBare := Intf;
+    P := LastDelimiter('.', IntfBare);
+    if P > 0 then IntfBare := Copy(IntfBare, P + 1, MaxInt);
+    if (IntfBare = '') or (Pos('<', IntfBare) > 0) then
+    begin
+      Decline(D.Code, Meth, 'generic interfaces are not supported');
+      Exit;
+    end;
+    // the interface: this unit first, then the unit(s) the index knows
+    IntfLines := Lines;
+    DeclLine := FindMemberDeclarationLine(AContent, IntfBare, Meth);
+    if (DeclLine < 0) and (Snap <> nil) then
+      for var H in Snap.Lookup(IntfBare) do
+      begin
+        if (H.Path = '') or not TFile.Exists(H.Path) then Continue;
+        try
+          IntfContent := ReadDelphiFile(H.Path);
+        except
+          Continue;
+        end;
+        DeclLine := FindMemberDeclarationLine(IntfContent, IntfBare, Meth);
+        if DeclLine >= 0 then
+        begin
+          IntfLines := SplitContentLines(IntfContent);
+          Break;
+        end;
+      end;
+    if DeclLine < 0 then
+    begin
+      Decline(D.Code, Meth, Format('the declaration of %s.%s was not found', [IntfBare, Meth]));
+      Exit;
+    end;
+    if not InterfaceMethodDecl(IntfLines, DeclLine, Decl) then
+    begin
+      Decline(D.Code, Meth, 'overloaded or unreadable interface method');
+      Exit;
+    end;
+    F := Default(TQuickFix);
+    F.Kind := qfImplIntfMethod;
+    F.Line := D.Range.Start.Line;
+    P := Pos(UpperCase(ClassName), UpperCase(Lines[F.Line]));
+    if P > 0 then F.Col := P - 1;
+    F.TokenLen := Length(ClassName);
+    F.Identifier := IntfBare + '.' + Meth;
+    F.OldUnit := ClassName;          // class name, for the "all" caption
+    F.NewText := Decl;
+    F.Caption := Format('Implement %s.%s in %s', [IntfBare, Meth, ClassName]);
+    Res.Add(F);
+  end;
+
 var
   Key: string;
 begin
@@ -1962,6 +2063,10 @@ begin
     begin
       Key := Format('%s|%d|%d', [UpperCase(D.Code), D.Range.Start.Line,
         D.Range.Start.Character]);
+      // E2291 reports EVERY missing method at the same class-header
+      // position - only the message tells them apart.
+      if SameText(D.Code, 'E2291') then
+        Key := Key + '|' + UpperCase(D.Message);
       if Seen.ContainsKey(Key) then Continue;
       Seen.Add(Key, True);
 
@@ -1984,7 +2089,38 @@ begin
       else if SameText(D.Code, 'W1036') then AddW1036(D)
       else if SameText(D.Code, 'H2077') then AddH2077(D)
       else if SameText(D.Code, 'W1010') then AddW1010(D)
-      else if SameText(D.Code, 'E2065') then AddE2065(D);
+      else if SameText(D.Code, 'E2065') then AddE2065(D)
+      else if SameText(D.Code, 'E2291') then AddE2291(D);
+    end;
+    // Several interface methods missing in the SAME class: one more fix
+    // that implements all of them in one go.
+    var ByClass := TObjectDictionary<Integer, TList<Integer>>.Create([doOwnsValues]);
+    try
+      for var I := 0 to Res.Count - 1 do
+        if Res[I].Kind = qfImplIntfMethod then
+        begin
+          var Idx: TList<Integer>;
+          if not ByClass.TryGetValue(Res[I].Line, Idx) then
+          begin
+            Idx := TList<Integer>.Create;
+            ByClass.Add(Res[I].Line, Idx);
+          end;
+          Idx.Add(I);
+        end;
+      for var Pair in ByClass do
+        if Pair.Value.Count > 1 then
+        begin
+          var All := Res[Pair.Value[0]];
+          All.NewText := '';
+          for var I in Pair.Value do
+            All.NewText := All.NewText + IfThen(All.NewText <> '', #10, '') + Res[I].NewText;
+          All.Identifier := '*';
+          All.Caption := Format('Implement all %d missing interface methods in %s',
+            [Pair.Value.Count, All.OldUnit]);
+          Res.Add(All);
+        end;
+    finally
+      ByClass.Free;
     end;
     Result := Res.ToArray;
   finally
@@ -2606,6 +2742,210 @@ begin
     Result := '  // TODO: call the inherited constructor - inherited Create(...);';
 end;
 
+function E2291MethodFromMessage(const AMessage: string; out AIntf, AMethod: string): Boolean;
+var
+  I, S, P: Integer;
+  Tok: string;
+begin
+  Result := False;
+  AIntf := '';
+  AMethod := '';
+  I := 1;
+  while I <= Length(AMessage) do
+  begin
+    if CharInSet(AMessage[I], ['A'..'Z', 'a'..'z', '_']) then
+    begin
+      S := I;
+      while (I <= Length(AMessage)) and
+        CharInSet(AMessage[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do Inc(I);
+      Tok := Copy(AMessage, S, I - S);
+      while Tok.EndsWith('.') do Delete(Tok, Length(Tok), 1);   // sentence end
+      P := LastDelimiter('.', Tok);
+      if (P > 1) and (P < Length(Tok)) then
+      begin
+        AIntf := Copy(Tok, 1, P - 1);
+        AMethod := Copy(Tok, P + 1, MaxInt);
+        Result := True;   // keep scanning: the LAST dotted token wins
+      end;
+    end
+    else
+      Inc(I);
+  end;
+end;
+
+function InterfaceMethodDecl(const AIntfLines: TArray<string>; ADeclLine0: Integer;
+  out ADecl: string): Boolean;
+const
+  Conventions: array[0..4] of string = ('stdcall', 'safecall', 'cdecl', 'pascal', 'register');
+var
+  Kind, Hdr, Qual, Params, Ret, Tail, U: string;
+  IsCM: Boolean;
+  HdrEnd, P: Integer;
+begin
+  Result := False;
+  ADecl := '';
+  if (ADeclLine0 < 0) or (ADeclLine0 > High(AIntfLines)) then Exit;
+  if not IsHeaderLine(StripLineComment(AIntfLines[ADeclLine0]), Kind, IsCM) then Exit;
+  Hdr := CollectHeader(AIntfLines, ADeclLine0, HdrEnd);
+  if (Hdr = '') or not ParseHeader(Hdr, Kind, Qual, Params, Ret) then Exit;
+  // directives: what follows the signature's ';' on its last line
+  Tail := StripLineComment(AIntfLines[HdrEnd]);
+  P := Pos(';', Tail);
+  if HdrEnd = ADeclLine0 then
+  begin
+    // the signature's ';' is the first one outside the parameter list
+    var Depth := 0;
+    P := 0;
+    for var I := 1 to Length(Tail) do
+      case Tail[I] of
+        '(': Inc(Depth);
+        ')': Dec(Depth);
+        ';': if Depth = 0 then begin P := I; Break; end;
+      end;
+  end;
+  if P > 0 then Tail := Copy(Tail, P + 1, MaxInt) else Tail := '';
+  U := UpperCase(Tail);
+  if HasWholeWordCI(Tail, 'overload') then Exit;
+  ADecl := Kind + ' ' + Qual;
+  if Params <> '' then ADecl := ADecl + '(' + Params + ')';
+  if Ret <> '' then ADecl := ADecl + ': ' + Ret;
+  ADecl := ADecl + ';';
+  for var C in Conventions do
+    if HasWholeWordCI(Tail, C) then
+      ADecl := ADecl + ' ' + C + ';';
+  Result := True;
+end;
+
+function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0: Integer;
+  const ADecls: TArray<string>; out AInsLine: Integer; out AText: string;
+  out AFirstDeclLine: Integer): Boolean;
+
+  function Indent(const S: string): string;
+  var
+    K: Integer;
+  begin
+    K := 1;
+    while (K <= Length(S)) and CharInSet(S[K], [' ', #9]) do Inc(K);
+    Result := Copy(S, 1, K - 1);
+  end;
+
+  function VisibilityWord(const T: string): string;
+  var
+    U: string;
+  begin
+    U := LowerCase(T);
+    if U.StartsWith('strict ') then U := Trim(Copy(U, 8, MaxInt));
+    for var W in ['public', 'published', 'protected', 'private', 'automated'] do
+      if (U = W) then Exit(W);
+    Result := '';
+  end;
+
+var
+  Depth, EndLine, LastPublic, NextVis, L: Integer;
+  T, VisIndent, MemberIndent: string;
+begin
+  Result := False;
+  AInsLine := -1;
+  AText := '';
+  AFirstDeclLine := -1;
+  if (AClassLine0 < 0) or (AClassLine0 > High(ALines)) or (Length(ADecls) = 0) then Exit;
+  if ClassOpenerName(Trim(StripLineComment(ALines[AClassLine0]))) = '' then Exit;
+  // the class body: up to ITS 'end;' (nested classes/records counted)
+  Depth := 1;
+  EndLine := -1;
+  LastPublic := -1;
+  VisIndent := '';
+  for L := AClassLine0 + 1 to High(ALines) do
+  begin
+    T := Trim(StripLineComment(ALines[L]));
+    if (ClassOpenerName(T) <> '') or
+       (T.ToUpper.Contains('= RECORD') and not T.EndsWith(';')) then
+      Inc(Depth)
+    else if SameText(T, 'end;') or SameText(T, 'end') then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        EndLine := L;
+        Break;
+      end;
+    end
+    else if (Depth = 1) and (VisibilityWord(T) <> '') then
+    begin
+      if VisIndent = '' then VisIndent := Indent(ALines[L]);
+      if VisibilityWord(T) = 'public' then LastPublic := L;
+    end;
+  end;
+  if EndLine < 0 then Exit;
+  if VisIndent = '' then VisIndent := Indent(ALines[AClassLine0]) + '  ';
+  MemberIndent := VisIndent + '  ';
+  if LastPublic >= 0 then
+  begin
+    // end of that public section: the next visibility keyword or the end
+    NextVis := EndLine;
+    Depth := 1;
+    for L := LastPublic + 1 to EndLine - 1 do
+    begin
+      T := Trim(StripLineComment(ALines[L]));
+      if (ClassOpenerName(T) <> '') or
+         (T.ToUpper.Contains('= RECORD') and not T.EndsWith(';')) then Inc(Depth)
+      else if SameText(T, 'end;') or SameText(T, 'end') then Dec(Depth)
+      else if (Depth = 1) and (VisibilityWord(T) <> '') then
+      begin
+        NextVis := L;
+        Break;
+      end;
+    end;
+    AInsLine := NextVis;
+    AFirstDeclLine := NextVis;
+  end
+  else
+  begin
+    AInsLine := EndLine;
+    AText := VisIndent + 'public' + sLineBreak;
+    AFirstDeclLine := EndLine + 1;
+  end;
+  for var Dcl in ADecls do
+    AText := AText + MemberIndent + Dcl + sLineBreak;
+  Result := True;
+end;
+
+// E2291 fix: declares the missing interface methods in the class and
+// creates their empty implementations. ADecls come from the resolver
+// (InterfaceMethodDecl); already declared ones are skipped.
+function ImplementInterfaceMethods(const AFile: string; AClassLine0: Integer;
+  const ADecls: TArray<string>): Boolean;
+var
+  Content, ClassName, Kind, Qual, Params, Ret, Text: string;
+  Lines: TArray<string>;
+  Todo: TArray<string>;
+  InsLine, FirstDecl: Integer;
+  IsCM: Boolean;
+begin
+  Result := False;
+  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  if (AClassLine0 < 0) or (AClassLine0 > High(Lines)) then Exit;
+  ClassName := ClassOpenerName(Trim(StripLineComment(Lines[AClassLine0])));
+  if ClassName = '' then Exit;   // stale
+  Todo := nil;
+  for var Dcl in ADecls do
+  begin
+    if not IsHeaderLine(Dcl, Kind, IsCM) or not ParseHeader(Dcl, Kind, Qual, Params, Ret) then
+      Continue;
+    if FindMemberDeclarationLine(Content, ClassName, Qual) >= 0 then Continue;   // done already
+    Todo := Todo + [Dcl];
+  end;
+  if Length(Todo) = 0 then Exit;
+  if not PlanInterfaceMethodInsertion(Lines, AClassLine0, Todo, InsLine, Text, FirstDecl) then
+    Exit;
+  if not Editor.InsertTextAtLineStart(AFile, InsLine + 1, Text) then Exit;
+  // the implementations go BELOW the class, so the declaration lines stay
+  for var K := 0 to High(Todo) do
+    CreateImplStub(AFile, FirstDecl + K);
+  Result := True;
+end;
+
 // E2065 fix (forward class): inserts a minimal class declaration right
 // after the forward declaration line.
 function CreateClassStub(const AFile, AClassName: string; ALine0: Integer): Boolean;
@@ -3068,6 +3408,8 @@ begin
         AFix.Line, AFix.Col);
     qfDeclareVar, qfDeclareInlineVar:
       Result := DeclareVariable(AFile, AFix);
+    qfImplIntfMethod:
+      Result := ImplementInterfaceMethods(AFile, AFix.Line, AFix.NewText.Split([#10]));
     qfRemovePrivate:
       begin
         var Info := Default(TPrivateMember);
@@ -3280,7 +3622,7 @@ begin
           end;
         qfInsertSemi, qfInitVar, qfRemoveAssign, qfAddReintroduce,
         qfImplStub, qfClassStub, qfRemoveToken, qfRemovePrivate,
-        qfDeclareVar, qfDeclareInlineVar:
+        qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod:
           begin
             // These carry an action-ready caption from the resolver.
             A.Caption := FFixes[I].Caption;
@@ -4094,9 +4436,9 @@ end;
 
 function IsHandledDiagCode(const ACode: string): Boolean;
 const
-  Handled: array[0..12] of string = (
+  Handled: array[0..13] of string = (
     'E2003', 'F2613', 'F2063', 'E2037', 'H2443', 'H2164',
-    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065', 'H2219');
+    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065', 'H2219', 'E2291');
 begin
   Result := False;
   for var C in Handled do

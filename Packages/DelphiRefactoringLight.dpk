@@ -100,6 +100,7 @@ contains
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
   Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
+  Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',
   Expert.BlameGutter in '..\Source\Expert.BlameGutter.pas',
   Expert.ResourceMonitor in '..\Source\Expert.ResourceMonitor.pas',
   Expert.ScopeFiles in '..\Source\Expert.ScopeFiles.pas',

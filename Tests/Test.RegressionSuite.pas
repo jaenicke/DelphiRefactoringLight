@@ -65,6 +65,16 @@ type
     [Test] procedure EnclosingRoutine_WithAnonymousMethods;
   end;
 
+  /// <summary>The version is shown by the IDE (splash, About box, status
+  ///  window) from Expert.Version, by Windows from the .dproj version info,
+  ///  and at the top of the README - all three must name the SAME version,
+  ///  or nobody can tell whether the installed build is the current one.</summary>
+  [TestFixture]
+  TVersionTests = class
+  public
+    [Test] procedure ReadmeDprojAndPluginVersionAgree;
+  end;
+
   [TestFixture]
   TMiscRegressionTests = class
   public
@@ -82,7 +92,7 @@ uses
   System.SysUtils, System.IOUtils, System.Classes, System.SyncObjs,
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
-  Expert.WorkerLatch;
+  Expert.WorkerLatch, Expert.Version, System.RegularExpressions;
 
 const
   NL = sLineBreak;
@@ -338,6 +348,39 @@ begin
   end;
 end;
 
+{ TVersionTests }
+
+procedure TVersionTests.ReadmeDprojAndPluginVersionAgree;
+var
+  Root, Readme, Dproj: string;
+  M: TMatch;
+  Parts: TArray<string>;
+begin
+  // the repository root: walk up from the test exe (Tests\<platform>\<config>)
+  Root := ExtractFilePath(ParamStr(0));
+  while (Root <> '') and not TFile.Exists(TPath.Combine(Root, 'README.md')) do
+  begin
+    var Up := ExtractFilePath(ExcludeTrailingPathDelimiter(Root));
+    if Up = Root then Root := '' else Root := Up;
+  end;
+  Assert.IsTrue(Root <> '', 'repository root (README.md) not found above the test exe');
+  Readme := TFile.ReadAllText(TPath.Combine(Root, 'README.md'));
+  Dproj := TFile.ReadAllText(TPath.Combine(Root, 'Packages\DelphiRefactoringLight.dproj'));
+
+  M := TRegEx.Match(Readme, '\*\*Version ([0-9.]+)\*\*');
+  Assert.IsTrue(M.Success, 'README.md has no "**Version x.y.z**" line');
+  Assert.AreEqual(PluginVersion, M.Groups[1].Value, 'README version vs Expert.Version');
+
+  Parts := PluginVersion.Split(['.']);
+  while Length(Parts) < 3 do Parts := Parts + ['0'];
+  Assert.IsTrue(Dproj.Contains('<VerInfo_MajorVer>' + Parts[0] + '</VerInfo_MajorVer>'), 'dproj MajorVer');
+  Assert.IsTrue(Dproj.Contains('<VerInfo_MinorVer>' + Parts[1] + '</VerInfo_MinorVer>'), 'dproj MinorVer');
+  Assert.IsTrue(Dproj.Contains('<VerInfo_Release>' + Parts[2] + '</VerInfo_Release>'), 'dproj Release');
+  Assert.IsTrue(Dproj.Contains('FileVersion=' + Parts[0] + '.' + Parts[1] + '.' + Parts[2] + '.0;'),
+    'dproj FileVersion key');
+  Assert.IsTrue(Dproj.Contains('ProductVersion=' + PluginVersion + ';'), 'dproj ProductVersion key');
+end;
+
 { TMiscRegressionTests }
 
 procedure TMiscRegressionTests.LspUri_EncodedDriveColon_IsLocal;
@@ -415,5 +458,6 @@ initialization
   TDUnitX.RegisterTestFixture(TWithScannerRegressionTests);
   TDUnitX.RegisterTestFixture(TSourceScanRegressionTests);
   TDUnitX.RegisterTestFixture(TMiscRegressionTests);
+  TDUnitX.RegisterTestFixture(TVersionTests);
 
 end.

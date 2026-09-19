@@ -1,5 +1,7 @@
 ﻿# Delphi Refactoring Light
 
+**Version 1.1.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
 | Shortcut               | Feature                                                                                                                                              |
@@ -11,6 +13,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+G`     | **Find original symbol** &mdash; jump to the declaration via the plugin's own LSP session, as a reliable alternative to `Ctrl+Click` (which is flaky in Delphi 13.1). Based on PR&nbsp;#9 by Dumach; rebind to plain `Ctrl+G` in *Tools &rarr; Options &rarr; Refactoring Light* if you prefer the PR's original chord (the default avoids shadowing the IDE's own `Ctrl+G`) |
 | `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP                                                                                                |
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method                                                                                 |
+| *(menu only)*          | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
@@ -41,6 +44,7 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Runs a text search across all project files, then verifies each candidate semantically via `textDocument/definition`.
 - Extends the candidate set via `TImplementationFinder` with class method implementations &mdash; so renaming an interface method also renames the implementations in every class that implements that interface.
 - Shows a preview dialog with a list view: file, line, kind (`Interface declaration`, `Class declaration`, `Implementation`, `Call`, ...), original line, and preview line. A second tab holds the full diagnostic log.
+- **Name conflict check**: when the new name already exists &mdash; in code of the files the rename touches, as a member of the owner class, or declared in a unit the declaring file uses &mdash; the status line says so and the details tab lists the places. Such a rename can compile and still change what a name refers to; it is reported, not refused.
 - Optional backup (on by default): before anything is written, every affected file (the editor buffer for open files, unsaved changes included) is copied to `%LOCALAPPDATA%\DelphiRefactoringLight\backup\<timestamp>\`, full path mirrored; the result message names the folder.
 - Applies the changes byte-precisely via `IOTAEditWriter` and reloads modified modules in the IDE.
 
@@ -81,7 +85,7 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Each entry is normalized (whitespace and case folded, leading `TClass.` qualifier stripped) and compared against the majority signature.
 - The interactive dialog lists every entry with role (`Class decl.`, `Interface decl.`, `Implementation`), container, file, line, match flag and the full signature. Rows that differ from the majority are tinted red.
 - **Double-click** to jump to a location (dialog stays open), **Enter** to jump and close.
-- v1 is diagnostic only &mdash; no automatic rewriting; review and fix the mismatches yourself.
+- **Align** rewrites the selected row to the majority signature: a declaration gets the reference signature (directives such as `virtual; override;` stay), an implementation goes through the E2037 fixer, which keeps its **parameter names** because the body uses them. An implementation is aligned only after the class declaration of its unit matches. Not saved; `Ctrl+Z` undoes it.
 
 ### Remove with (`Ctrl+Alt+Shift+W`)
 - The editor context menu exposes the action as a submenu with four scopes:
@@ -111,12 +115,17 @@ In the last three weeks I tested with big projects and used it myself in real li
   2. **`textDocument/definition`** as fallback for inherited members (in the direct class range or any ancestor's range).
   3. **`DeclFile` soft match** for cases where the type's full source is unavailable but the decl file is known.
   4. **`ParentUnitHints`** (basename of the body-ref's LSP result vs the parent's unit qualifier).
-- **Inactive `{$IFDEF}`-region detection**: when DelphiLSP pushes `publishDiagnostics` with code `H2655`/`H2656` and tag `Unnecessary` for a file, the wizard skips any `with`-statement inside such a region with status *"inactive $IFDEF region &mdash; skipped"*. If DelphiLSP delivers **no** diagnostics for a file at all (which can happen in single-process mode for files outside the active build configuration, or when the server has not finished analysing), all occurrences in that file are skipped with status *"LSP no diagnostics &mdash; skipped (dead-code unknown)"*. The wizard deliberately does **not** fall back to a text-based `{$IFDEF}` scanner &mdash; Pascal's `$IF defined(...)`, `$IFOPT`, nested `$IF`s and project-specific defines make a reliable scanner impractical, and silently rewriting code that might be dead would be worse than the honest skip.
+- **Inactive `{$IFDEF}`-region detection**: when DelphiLSP pushes `publishDiagnostics` with code `H2655`/`H2656` and tag `Unnecessary` for a file, the wizard skips any `with`-statement inside such a region with status *"inactive $IFDEF region &mdash; skipped"*. If DelphiLSP delivers **no** diagnostics for a file at all (which can happen in single-process mode for files outside the active build configuration, or when the server has not finished analysing), all occurrences in that file are skipped with status *"LSP no diagnostics &mdash; skipped (dead-code unknown)"* &mdash; **unless the file contains no conditional directive at all** (no `{$IF..}`/`{$ELSE..}`, no `{$I}` include): then no line of it can be inactive and the question does not arise. The wizard deliberately does **not** fall back to a text-based `{$IFDEF}` scanner &mdash; Pascal's `$IF defined(...)`, `$IFOPT`, nested `$IF`s and project-specific defines make a reliable scanner impractical, and silently rewriting code that might be dead would be worse than the honest skip.
 - Review dialog with two tabs:
   - **Diff** &mdash; before / after side by side, per occurrence.
   - **Debug** &mdash; per-target type info (resolved type file, class line range, parsed direct members, chosen inline-var name, qualify-prefix, ancestor list, parent hints, resolve note) and per-body-identifier resolution (LSP result, match source, applied prefix). Useful for verifying the rewrite is sound before applying.
 - **Apply selected**, **Apply all** or **Close**. Applied edits go through `IOTAEditWriter` so they are individually undoable in the IDE.
 - v1 limitations: nested `with`-statements inside the body are flagged as multi-target / manual review.
+
+### Extract variable / Wrap in try..finally (menu only)
+- **Extract variable**: select an expression on one line; the plugin proposes a name (`Foo.Bar.Count` &rarr; `LCount`), declares `var LCount := Foo.Bar.Count;` right before the **statement** that contains it and replaces the selection. Deliberately never at the routine's `begin`, and refused where even the statement start would change the meaning: after a short-circuit `and`/`or` (`if Assigned(X) and (X.Foo > 0)` would dereference nil), in a loop condition, in a branch or loop body on the same line, as the only statement of a `then`/`else`/`do` branch, on a `case` branch, inside a `with`, or when the name is already used in the routine. Uses Delphi's inline variables (10.3+).
+- **Wrap in try..finally**: select complete statements; they move into a `try` block, and the `finally` part is inferred from the statement right before them &mdash; `X := TFoo.Create` &rarr; `X.Free`, `X.BeginUpdate` &rarr; `X.EndUpdate`, `X.Enter`/`Acquire`/`Lock` &rarr; `Leave`/`Release`/`Unlock`, `TMonitor.Enter(X)` &rarr; `TMonitor.Exit(X)`, otherwise a TODO comment. Only wrapper lines are added, so a wrong guess is a compile error, never silent damage. Selections with an unbalanced `begin`/`try`/`case`..`end` are refused.
+- Both write through the editor (undoable) and are not saved.
 
 ### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
@@ -330,7 +339,8 @@ Quick fixes driven by real compiler diagnostics instead of guessing. Each diagno
 - **W1036 Variable might not have been initialized** &mdash; inserts `X := Default(<Type>);` right after the enclosing routine's `begin` (type taken from the routine's `var` block; exotic type shapes are refused).
 - **H2077 Value assigned never used** &mdash; removes the dead assignment, but only when the whole statement sits on one line and the right-hand side cannot carry a side effect (no calls, no indexing).
 - **W1010 Method hides virtual method** &mdash; appends `reintroduce;` as the first directive after the declaration.
-- **E2065 Unsatisfied forward declaration** &mdash; two shapes: a declared-but-unimplemented **method or routine** gets an empty implementation generated before the unit's final `end.` (class-qualified automatically, parameter list and return type taken from the declaration; ambiguous overloads and `external` declarations are refused) &mdash; and a **forward class declaration** (`TNode = class;`) that never received its full declaration gets a minimal `TNode = class(TObject) &hellip; end;` stub inserted after the forward line.
+- **E2291 Missing implementation of interface method** &mdash; copies the method's declaration from the interface (the same unit, or the unit the identifier index knows for it; the calling convention is kept) into the class's `public` section (created when missing) and generates the empty implementation. With several missing methods an additional *Implement all N missing interface methods* fix does them in one go. Overloaded interface methods are refused (the diagnostic does not say which overload is missing). Class Completion (`Ctrl+Shift+C`) does not do this.
+- **E2065 Unsatisfied forward declaration** &mdash; two shapes: a declared-but-unimplemented **method or routine** gets an empty implementation generated before the unit's final `end.` (class-qualified automatically, parameter list and return type taken from the declaration; ambiguous overloads and `external` declarations are refused; a constructor or destructor body chains to the ancestor: `inherited;` for `override` and destructors, `inherited Create;` for a TObject descendant, a TODO comment where the right ancestor constructor cannot be known) &mdash; and a **forward class declaration** (`TNode = class;`) that never received its full declaration gets a minimal `TNode = class(TObject) &hellip; end;` stub inserted after the forward line.
 
 The **DFM event-handler check** also gained generation: *missing handler* rows are now auto-fixable too &mdash; the expected parameter list is resolved at check time (component source first, the built-in table with synthesized parameter names as fallback), and the fix inserts the declaration into the form class plus an empty implementation body.
 
@@ -539,6 +549,17 @@ DelphiRefactoringLight/
 - **Error-Insight tap via the Structure view** (`Expert.StructureErrors`, IDE only): there is no public ToolsAPI for reading Error Insight diagnostics directly, but the Structure pane mirrors them &mdash; and the pane IS scriptable: `BorlandIDEServices` implements `IOTAStructureView` (see `StructureViewAPI.pas`), and an `IOTAStructureNotifier` receives `StructureChanged` on every re-evaluation. Error entries are parsed language-independently (the `E2003` code prefix and the trailing `(line:col)` are the same in every IDE language; the identifier itself is read from the buffer at that position, never from the localized message). This makes the IDE's own analysis the primary diagnostics source for the auto-import lightbulb &mdash; zero extra analysis cost, works in unsaved projects.
 - **Notifier threading rule (hard-won)**: the Structure notifier is dispatched from `CheckSynchronize` during the IDE's LSP refresh &mdash; and `TThread.Queue`/`ForceQueue` procs run in `CheckSynchronize` too. Touching windows there (show/hide/`SetWindowPos`/opening popups) triggers a synchronous activation cascade into `TEditWindow.ActivateModule` &rarr; `TParseThread.CancelAndLock`, which can deadlock the IDE against its parser thread. The plugin therefore updates only STATE in notifier/queue callbacks; every hint/popup window operation runs from plain `WM_TIMER` ticks.
 - **Live lightbulb mechanics** (`TAutoImportLive`): a 400 ms UI timer reads the active buffer via two cheap, side-effect-free helpers (`GetActiveFileName` from `TopBuffer`, `GetCaretLineCol` from `TopView.CursorPos` &mdash; deliberately NOT `GetCurrentContext`, which moves the edit position and would collapse the user's selection when called from a timer). The hint window is `WS_EX_NOACTIVATE` (clicking it never steals the editor focus) and is shown/hidden via raw `ShowWindow` calls &mdash; symmetrically, since a VCL `Hide` would be a no-op for a window VCL never marked visible. In LSP-fallback mode the poller sends the (unsaved) buffer content on the main thread and lets a worker thread wait for the diagnostics push; the worker never touches ToolsAPI.
+
+## Tests
+
+`Tests\` holds a DUnitX project (`DelphiRefactoringLightTests.dproj`) for the IDE-free layer: scanners, parsers, the `uses` editor, the quick-fix providers, file encoding and URI conversion. Neither the IDE nor DelphiLSP is needed. Run `Tests\run-tests.cmd` (Win32) or `Tests\run-tests.cmd Win64`; the exit code is 0 when every test passes.
+
+## Contributors
+
+- **Ian Branch** &mdash; the code audit in issue [#10](https://github.com/jaenicke/DelphiRefactoringLight/issues/10) (together with Claude Code), which led to a round of robustness and safety fixes (file encoding, editor write paths, LSP session lifetime, quick-fix guards, `with` rewriting), the DUnitX test fixtures in `Tests\`, and the ideas in issue [#11](https://github.com/jaenicke/DelphiRefactoringLight/issues/11).
+- **Dumach** &mdash; *Find original symbol* (PR #9).
+- **kalwados** &mdash; Delphi 12.x compatibility (PR #12).
+- The testers in the [Delphi-PRAXiS](https://www.delphipraxis.net) thread, whose reports shaped many of the fixes.
 
 ## AI Disclosure
 

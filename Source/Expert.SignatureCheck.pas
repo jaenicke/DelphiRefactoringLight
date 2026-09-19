@@ -73,6 +73,23 @@ type
     class function AllEqual(const AEntries: TSignatureEntries): Boolean;
 
     class function RoleToString(ARole: TSignatureRole): string;
+
+    /// <summary>ARaw (a signature as read from the source: keyword, name,
+    ///  parameters, result - no directives) with its routine NAME
+    ///  re-qualified: the qualifier of the name ("TFoo." / "TFoo.TInner.")
+    ///  is replaced by AQualifier + '.' ('' = no qualifier). The trailing
+    ///  ';' is dropped. '' when ARaw has no recognisable keyword.</summary>
+    class function SignatureForContainer(const ARaw, AQualifier: string): string; static;
+
+    /// <summary>ALines with the signature of the routine header at/above
+    ///  ALine0 (keyword .. first ';' at paren depth 0, possibly spanning
+    ///  lines) replaced by ANewSignature. Text before the keyword ('class ',
+    ///  the indentation) and after the ';' (directives such as 'virtual;
+    ///  override;') is kept, a multi-line header becomes one line. False -
+    ///  nothing replaced - when no header is found or the span contains a
+    ///  comment (it would be lost).</summary>
+    class function ReplaceSignature(const ALines: TArray<string>; ALine0: Integer;
+      const ANewSignature: string; out AResult: TArray<string>): Boolean; static;
   end;
 
 implementation
@@ -468,6 +485,143 @@ begin
   else
     Result := 'Unknown';
   end;
+end;
+
+const
+  CHeaderKeywords: array[0..3] of string = ('PROCEDURE', 'FUNCTION', 'CONSTRUCTOR', 'DESTRUCTOR');
+
+// Position (1-based) of a header keyword as a whole word in ALine, 0 if none.
+function HeaderKeywordPos(const ALine: string; out AKeyword: string): Integer;
+var
+  U: string;
+  P, E: Integer;
+begin
+  Result := 0;
+  AKeyword := '';
+  U := UpperCase(ALine);
+  for var KW in CHeaderKeywords do
+  begin
+    P := Pos(KW, U);
+    while P > 0 do
+    begin
+      E := P + Length(KW);
+      if ((P = 1) or not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_', '.']))
+        and ((E > Length(U)) or not CharInSet(U[E], ['A'..'Z', '0'..'9', '_'])) then
+      begin
+        if (Result = 0) or (P < Result) then
+        begin
+          Result := P;
+          AKeyword := KW;
+        end;
+        Break;
+      end;
+      P := Pos(KW, U, P + 1);
+    end;
+  end;
+end;
+
+class function TSignatureChecker.SignatureForContainer(const ARaw,
+  AQualifier: string): string;
+var
+  S, KW, Name, Rest: string;
+  P, I, Depth: Integer;
+begin
+  Result := '';
+  S := Trim(ARaw);
+  while S.EndsWith(';') do S := TrimRight(Copy(S, 1, Length(S) - 1));
+  P := HeaderKeywordPos(S, KW);
+  if P = 0 then Exit;
+  I := P + Length(KW);
+  while (I <= Length(S)) and CharInSet(S[I], [' ', #9]) do Inc(I);
+  // the (possibly dotted, possibly generic) name runs to '(' / ':' / end
+  var NameStart := I;
+  Depth := 0;
+  while I <= Length(S) do
+  begin
+    if S[I] = '<' then Inc(Depth)
+    else if S[I] = '>' then Dec(Depth)
+    else if (Depth = 0) and CharInSet(S[I], ['(', ':', ' ', #9, ';']) then Break;
+    Inc(I);
+  end;
+  Name := Copy(S, NameStart, I - NameStart);
+  Rest := Copy(S, I, MaxInt);
+  // last segment outside <...>
+  Depth := 0;
+  var Cut := 0;
+  for var K := 1 to Length(Name) do
+    if Name[K] = '<' then Inc(Depth)
+    else if Name[K] = '>' then Dec(Depth)
+    else if (Name[K] = '.') and (Depth = 0) then Cut := K;
+  Name := Copy(Name, Cut + 1, MaxInt);
+  if Name = '' then Exit;
+  if AQualifier <> '' then Name := AQualifier + '.' + Name;
+  Result := Copy(S, P, Length(KW)) + ' ' + Name + Rest;
+end;
+
+class function TSignatureChecker.ReplaceSignature(const ALines: TArray<string>;
+  ALine0: Integer; const ANewSignature: string; out AResult: TArray<string>): Boolean;
+var
+  StartLine, StartCol, EndLine, EndCol, L, C, Depth: Integer;
+  KW, Line, NewSig: string;
+begin
+  Result := False;
+  AResult := nil;
+  if (ALine0 < 0) or (ALine0 > High(ALines)) or (Trim(ANewSignature) = '') then Exit;
+  StartLine := -1;
+  StartCol := 0;
+  for L := ALine0 downto Max(0, ALine0 - 5) do
+  begin
+    StartCol := HeaderKeywordPos(ALines[L], KW);
+    if StartCol > 0 then
+    begin
+      StartLine := L;
+      Break;
+    end;
+  end;
+  if StartLine < 0 then Exit;
+  // walk to the first ';' at paren depth 0
+  EndLine := -1;
+  EndCol := 0;
+  Depth := 0;
+  L := StartLine;
+  C := StartCol;
+  while (L <= High(ALines)) and (L <= StartLine + 20) and (EndLine < 0) do
+  begin
+    Line := ALines[L];
+    while C <= Length(Line) do
+    begin
+      case Line[C] of
+        '{': Exit;                                  // a comment would be lost
+        '/': if (C < Length(Line)) and (Line[C + 1] = '/') then Exit;
+        '(':
+          begin
+            if (C < Length(Line)) and (Line[C + 1] = '*') then Exit;
+            Inc(Depth);
+          end;
+        ')': Dec(Depth);
+        ';':
+          if Depth = 0 then
+          begin
+            EndLine := L;
+            EndCol := C;
+            Break;
+          end;
+      end;
+      Inc(C);
+    end;
+    Inc(L);
+    C := 1;
+  end;
+  if EndLine < 0 then Exit;
+  NewSig := Trim(ANewSignature);
+  while NewSig.EndsWith(';') do NewSig := TrimRight(Copy(NewSig, 1, Length(NewSig) - 1));
+  SetLength(AResult, Length(ALines) - (EndLine - StartLine));
+  for L := 0 to StartLine - 1 do AResult[L] := ALines[L];
+  AResult[StartLine] := Copy(ALines[StartLine], 1, StartCol - 1) + NewSig + ';' +
+    Copy(ALines[EndLine], EndCol + 1, MaxInt);
+  for L := EndLine + 1 to High(ALines) do
+    AResult[L - (EndLine - StartLine)] := ALines[L];
+  Result := True;
 end;
 
 end.

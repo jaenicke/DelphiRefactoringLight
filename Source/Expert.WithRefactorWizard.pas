@@ -815,7 +815,14 @@ begin
           // Textanalyse waere unzuverlaessig (verschachtelte $IF,
           // $IF defined, $IFOPT, projektspezifische Defines, ...).
           // Wir markieren in dem Fall alle Occurrences als skipped.
-          var FileHasDiagnostics: Boolean := Client.HasReceivedDiagnostics(ScanFiles[FileIdx]);
+          // ...UNLESS the file contains no conditional directive at all:
+          // then no line of it can be inactive, and the question the
+          // diagnostics answer does not arise (idea: Ian Branch, #11).
+          // Not a text-based $IFDEF evaluation - only the ABSENCE of any
+          // {$IF..}/{$ELSE..} (and of {$I} includes, which could bring one).
+          var FileHasDiagnostics: Boolean :=
+            Client.HasReceivedDiagnostics(ScanFiles[FileIdx])
+            or not TWithScanner.SourceHasConditionals(Source);
 
           for Occ in Occs do
           begin

@@ -131,6 +131,8 @@ type
     procedure OnFindImplementations(Sender: TObject);
     procedure OnFindOriginal(Sender: TObject);
     procedure OnExtractMethod(Sender: TObject);
+    procedure OnExtractVariable(Sender: TObject);
+    procedure OnWrapTryFinally(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
     procedure OnShowMcpTools(Sender: TObject);
@@ -226,7 +228,7 @@ uses
   Expert.DebugConsistencyDialog,
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
-  Expert.UsesCleanup;
+  Expert.UsesCleanup, Expert.StatementRefactor;
 
 
 
@@ -422,6 +424,8 @@ begin
   // ---- Refactor code at the cursor ----------------------------------------
   Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
   Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
+  Plain(Root, 'Extract variable...',      OnExtractVariable,      REQ_EDITOR);
+  Plain(Root, 'Wrap in try..finally',     OnWrapTryFinally,       REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
 
@@ -1503,6 +1507,16 @@ procedure TContextMenuInstaller.OnExtractMethod(Sender: TObject);
 begin
   if ExtractMethodInstance <> nil then
     ExtractMethodInstance.Execute;
+end;
+
+procedure TContextMenuInstaller.OnExtractVariable(Sender: TObject);
+begin
+  ExtractVariableAtSelection;
+end;
+
+procedure TContextMenuInstaller.OnWrapTryFinally(Sender: TObject);
+begin
+  WrapSelectionInTryFinally;
 end;
 
 procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);

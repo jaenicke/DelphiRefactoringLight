@@ -18,7 +18,7 @@ uses
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
   Expert.UnitIndex, Expert.UnitUsageProbe, Expert.ScopeFiles, Expert.DfmRename,
   Lsp.Uri, Lsp.Protocol,
-  Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding;
+  Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding, Expert.UsesEditor;
 
 type
   TRenameCandidate = record
@@ -113,6 +113,9 @@ type
       const AOldName, ANewName: string): TLspWorkspaceEdit;
 
     function FindCandidates(const AOldName: string; const AFiles: TArray<string>): TArray<TRenameCandidate>;
+    /// <summary>'' or a report of places where ANewName already exists
+    ///  (files of the edit, a member of the owner type, a used unit).</summary>
+    function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
     function VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>; const AOldName, ANewName: string;
       const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
 
@@ -1298,7 +1301,17 @@ begin
         ScopeWarn := '  WARNING: the declaration is OUTSIDE the selected ' +
           'scope and stays unchanged.';
     end;
-    FHost.SetDetailsText(TrimLeft(ScopeWarn) + sLineBreak + sLineBreak + FDiagLog);
+    // CONFLICT CHECK (issue #11): the new name may already exist where the
+    // renamed symbol lives or is used. Such a rename can compile and still
+    // mean something different - a local hiding a field, a method hiding
+    // an ancestor member, a global shadowed by a used unit. Reported, not
+    // refused: the user decides.
+    var Conflict := NameConflictNote(NewName, OwnerType, DefFilePath);
+    if Conflict <> '' then
+      ScopeWarn := ScopeWarn + '  NOTE: "' + NewName + '" already exists - ' +
+        'see the details tab.';
+    FHost.SetDetailsText(TrimLeft(ScopeWarn) + sLineBreak + Conflict + sLineBreak +
+      sLineBreak + FDiagLog);
     FHost.EnableRename(True);
     FHost.SetStatus(Format('Done: %d change(s) in %d file(s).%s',
       [TotalEdits, Length(FEdit.FileEdits), ScopeWarn]));
@@ -1315,6 +1328,77 @@ begin
 end;
 
 { Helper functions }
+
+function TLspRenameWizard.NameConflictNote(const ANewName, AOwnerType,
+  ADefFile: string): string;
+const
+  MaxExamples = 5;
+var
+  Lines: TArray<string>;
+  Content, DefContent: string;
+  Examples: TStringList;
+  Total: Integer;
+begin
+  Result := '';
+  Examples := TStringList.Create;
+  try
+    Total := 0;
+    // 1. the new name already occurs in the files this rename touches
+    for var FE in FEdit.FileEdits do
+    begin
+      if not Editor.ReadEditorContent(FE.FilePath, Content) then
+        try
+          Content := ReadDelphiFile(FE.FilePath);
+        except
+          Continue;
+        end;
+      if SameText(FE.FilePath, ADefFile) then DefContent := Content;
+      Lines := Content.Split([#13#10, #10]);
+      for var L in CodeWordLines(Lines, ANewName) do
+      begin
+        Inc(Total);
+        if Examples.Count < MaxExamples then
+          Examples.Add(Format('  %s:%d  %s', [ExtractFileName(FE.FilePath), L + 1,
+            Trim(Lines[L])]));
+      end;
+    end;
+    if Total > 0 then
+      Result := Result + Format('"%s" already occurs %d time(s) in the files ' +
+        'this rename touches:', [ANewName, Total]) + sLineBreak +
+        Examples.Text;
+    if (DefContent = '') and (ADefFile <> '') then
+      try
+        if not Editor.ReadEditorContent(ADefFile, DefContent) then
+          DefContent := ReadDelphiFile(ADefFile);
+      except
+        DefContent := '';
+      end;
+    // 2. a member of that name in the owner type (hides / is hidden)
+    if (AOwnerType <> '') and (DefContent <> '') then
+    begin
+      var ML := FindMemberDeclarationLine(DefContent, AOwnerType, ANewName);
+      if ML >= 0 then
+        Result := Result + Format('%s already declares a member "%s" (%s:%d).',
+          [AOwnerType, ANewName, ExtractFileName(ADefFile), ML + 1]) + sLineBreak;
+    end;
+    // 3. a unit in the declaring file's uses clause declares it globally
+    if DefContent <> '' then
+    begin
+      var Units := '';
+      for var Hit in TUnitIndex.Instance.Lookup(ANewName) do
+        if UnitInUsesText(DefContent, Hit.UnitName) and (Pos(Hit.UnitName, Units) = 0) then
+          Units := Units + IfThen(Units <> '', ', ', '') + Hit.UnitName;
+      if Units <> '' then
+        Result := Result + Format('"%s" is also declared in unit(s) used here: %s.',
+          [ANewName, Units]) + sLineBreak;
+    end;
+    if Result <> '' then
+      Result := 'NAME CONFLICT CHECK - the rename can compile and still change ' +
+        'what a name refers to:' + sLineBreak + Result;
+  finally
+    Examples.Free;
+  end;
+end;
 
 { Text search }
 

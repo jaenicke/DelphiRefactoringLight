@@ -86,7 +86,10 @@
         <DCCReference Include="Test.UsesEditorMinimalWrite.pas"/>
         <DCCReference Include="Test.AutoImportGenericResolve.pas"/>
         <DCCReference Include="Test.InheritedDefectFixes.pas"/>
+        <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.StatementRefactor.pas"/>
         <DCCReference Include="Test.RegressionSuite.pas"/>
+        <DCCReference Include="Test.Issue11.pas"/>
         <BuildConfiguration Include="Release">
             <Key>Cfg_1</Key>
             <CfgParent>Base</CfgParent>

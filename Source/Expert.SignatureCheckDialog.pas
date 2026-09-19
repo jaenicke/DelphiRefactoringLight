@@ -28,7 +28,9 @@ type
     FStatusLabel: TLabel;
     FListView: TListView;
     FBtnGoto: TButton;
+    FBtnAlign: TButton;
     FBtnClose: TButton;
+    FOnAlign: TFunc<TSignatureEntry, TSignatureEntry, string>;
     FEntries: TSignatureEntries;
     FOnGotoLocation: TProc<TSignatureEntry>;
     FReferenceNormalized: string;
@@ -46,6 +48,12 @@ type
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure GotoSelected;
     function PickReference(const AEntries: TSignatureEntries): string;
+    procedure DoBtnAlignClick(Sender: TObject);
+    procedure DoListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
+    function SelectedIndex: Integer;
+    function ReferenceEntry(out AEntry: TSignatureEntry): Boolean;
+    function AlignBlocker(AIdx: Integer): string;
+    procedure UpdateAlignButton;
   public
     constructor CreateDialog(AOwner: TComponent; const AMethodName: string); reintroduce;
 
@@ -59,6 +67,9 @@ type
     procedure SetClosable;
 
     property OnGotoLocation: TProc<TSignatureEntry> read FOnGotoLocation write FOnGotoLocation;
+    /// <summary>Aligns the first entry with the second (the reference).
+    ///  Returns '' on success, else the reason it was refused.</summary>
+    property OnAlign: TFunc<TSignatureEntry, TSignatureEntry, string> read FOnAlign write FOnAlign;
   end;
 
 implementation
@@ -130,6 +141,22 @@ begin
   FBtnGoto.Default := True;
   FBtnGoto.Enabled := False;
 
+  // Aligns the selected divergent row with the majority signature - the
+  // fix for what the list shows (it used to be diagnostic only).
+  FBtnAlign := TButton.Create(Self);
+  FBtnAlign.Parent := BtnPanel;
+  FBtnAlign.Caption := 'Align';
+  FBtnAlign.Hint := 'Rewrite the selected declaration / implementation to the ' +
+    'majority signature (implementations keep their parameter names)';
+  FBtnAlign.ShowHint := True;
+  FBtnAlign.Width := 100;
+  FBtnAlign.Height := 28;
+  FBtnAlign.Top := 6;
+  FBtnAlign.Anchors := [akTop, akRight];
+  FBtnAlign.Left := FBtnGoto.Left - FBtnAlign.Width - 6;
+  FBtnAlign.OnClick := DoBtnAlignClick;
+  FBtnAlign.Enabled := False;
+
   FListView := TListView.Create(Self);
   FListView.Parent := Self;
   FListView.Align := alClient;
@@ -146,6 +173,7 @@ begin
   FListView.OnDblClick := DoListDblClick;
   FListView.OnKeyDown := DoListKeyDown;
   FListView.OnCustomDrawItem := DoListCustomDrawItem;
+  FListView.OnSelectItem := DoListSelectItem;
 
   Col := FListView.Columns.Add;
   Col.Caption := 'Role';
@@ -242,6 +270,90 @@ begin
   end;
 
   FBtnGoto.Enabled := Length(AEntries) > 0;
+  UpdateAlignButton;
+end;
+
+function TSignatureCheckDialog.SelectedIndex: Integer;
+begin
+  Result := -1;
+  if Assigned(FListView.Selected) then
+    Result := NativeInt(FListView.Selected.Data);
+  if (Result < 0) or (Result > High(FEntries)) then Result := -1;
+end;
+
+// The entry the others are aligned to: one carrying the majority signature,
+// a DECLARATION preferred (its text has no "TClass." qualifier and its
+// parameter names are the documented ones).
+function TSignatureCheckDialog.ReferenceEntry(out AEntry: TSignatureEntry): Boolean;
+begin
+  Result := False;
+  for var Pass := 0 to 1 do
+    for var E in FEntries do
+      if (E.Normalized = FReferenceNormalized)
+        and ((Pass = 1) or (E.Role in [srInterfaceDecl, srClassDecl])) then
+      begin
+        AEntry := E;
+        Exit(True);
+      end;
+end;
+
+// '' when the row at AIdx can be aligned, else why not.
+function TSignatureCheckDialog.AlignBlocker(AIdx: Integer): string;
+var
+  Ref: TSignatureEntry;
+begin
+  if AIdx < 0 then Exit('select a row');
+  if FEntries[AIdx].Normalized = FReferenceNormalized then
+    Exit('this row already matches');
+  if not ReferenceEntry(Ref) then Exit('no reference signature');
+  if FEntries[AIdx].Role = srImplementation then
+    // the implementation is aligned with the class declaration of ITS unit
+    // - which must be the right one first
+    for var E in FEntries do
+      if (E.Role = srClassDecl) and SameText(E.FilePath, FEntries[AIdx].FilePath)
+        and SameText(E.Container, FEntries[AIdx].Container)
+        and (E.Normalized <> FReferenceNormalized) then
+        Exit('align the class declaration first');
+  Result := '';
+end;
+
+procedure TSignatureCheckDialog.UpdateAlignButton;
+begin
+  FBtnAlign.Enabled := Assigned(FOnAlign) and (AlignBlocker(SelectedIndex) = '');
+end;
+
+procedure TSignatureCheckDialog.DoListSelectItem(Sender: TObject; Item: TListItem;
+  Selected: Boolean);
+begin
+  UpdateAlignButton;
+end;
+
+procedure TSignatureCheckDialog.DoBtnAlignClick(Sender: TObject);
+var
+  Idx: Integer;
+  Ref: TSignatureEntry;
+  Why: string;
+begin
+  Idx := SelectedIndex;
+  Why := AlignBlocker(Idx);
+  if Why = '' then
+    if not ReferenceEntry(Ref) then Why := 'no reference signature';
+  if Why = '' then
+    Why := FOnAlign(FEntries[Idx], Ref);
+  if Why <> '' then
+  begin
+    SetStatus('Not aligned: ' + Why);
+    Exit;
+  end;
+  // The buffer is changed (not saved); the row now carries the reference.
+  FEntries[Idx].Normalized := FReferenceNormalized;
+  if FListView.Selected <> nil then
+    FListView.Selected.SubItems[3] := 'aligned';
+  FListView.Invalidate;
+  SetStatus(Format('%s in %s, line %d aligned (not saved - Ctrl+Z undoes it).',
+    [TSignatureChecker.RoleToString(FEntries[Idx].Role),
+     ExtractFileName(FEntries[Idx].FilePath), FEntries[Idx].Line + 1]));
+  UpdateAlignButton;
 end;
 
 procedure TSignatureCheckDialog.SetStatus(const AText: string);

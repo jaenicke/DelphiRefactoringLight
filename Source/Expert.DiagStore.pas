@@ -182,6 +182,32 @@ var
     Result := (R.Start.Line = R.End_.Line) and (R.Start.Character = R.End_.Character);
   end;
 
+  // Codes that report SEVERAL different problems at one position: E2291
+  // names every missing interface method at the class header. The member
+  // named in the message (last dotted identifier) tells them apart - and
+  // it is the same in every source's wording.
+  function DistinctPart(const D: TLspErrorDiag): string;
+  var
+    I, S: Integer;
+    Tok: string;
+  begin
+    Result := '';
+    if not SameText(D.Code, 'E2291') then Exit;
+    I := 1;
+    while I <= Length(D.Message) do
+      if CharInSet(D.Message[I], ['A'..'Z', 'a'..'z', '_']) then
+      begin
+        S := I;
+        while (I <= Length(D.Message)) and
+          CharInSet(D.Message[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do Inc(I);
+        Tok := Copy(D.Message, S, I - S);
+        while Tok.EndsWith('.') do Delete(Tok, Length(Tok), 1);
+        if Pos('.', Tok) > 0 then Result := UpperCase(Tok);
+      end
+      else
+        Inc(I);
+  end;
+
 begin
   Result := nil;
   ASources := nil;
@@ -201,10 +227,14 @@ begin
       for var D in S.Diags do
       begin
         K := UpperCase(D.Code) + '|' + IntToStr(D.Range.Start.Line) + '|' +
-          IntToStr(D.Range.Start.Character);
-        KL := UpperCase(D.Code) + '|' + IntToStr(D.Range.Start.Line);
+          IntToStr(D.Range.Start.Character) + '|' + DistinctPart(D);
+        KL := UpperCase(D.Code) + '|' + IntToStr(D.Range.Start.Line) + '|' + DistinctPart(D);
         Idx := -1;
-        if not Index.TryGetValue(K, Idx) then
+        // the SAME source reporting the same position twice means two
+        // different problems - never merge those
+        if Index.TryGetValue(K, Idx) and (Pos(S.Source, ASources[Idx]) > 0) then
+          Idx := -1
+        else if not Index.TryGetValue(K, Idx) then
         begin
           Idx := -1;
           // The Structure view reports a POSITION only (zero-length range)
@@ -226,7 +256,7 @@ begin
             Result[Idx].Range := D.Range;
           Continue;
         end;
-        Index.Add(K, Length(Result));
+        Index.AddOrSetValue(K, Length(Result));
         if ByLine.ContainsKey(KL) then
           ByLine[KL] := -1
         else

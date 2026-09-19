@@ -21,6 +21,7 @@ type
     FDialog: TSignatureCheckDialog;
     FContext: TEditorContext;
     procedure DoGotoLocation(AEntry: TSignatureEntry);
+    function DoAlign(AEntry, ARef: TSignatureEntry): string;
     procedure CollectAndShow;
   public
     {$IFNDEF STANDALONE_BUILD}
@@ -43,6 +44,9 @@ var
   SignatureCheckInstance: TLspSignatureCheckWizard;
 
 implementation
+
+uses
+  Expert.AutoImport, Expert.UsesEditor, Delphi.FileEncoding;
 
 {$IFNDEF STANDALONE_BUILD}
 { TLspSignatureCheckWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
@@ -72,6 +76,48 @@ begin
     Length(AEntry.Name));
 end;
 
+// Aligns AEntry with ARef (a row carrying the majority signature).
+// Implementation: the E2037 fixer - types and result from the class
+// declaration of the same unit, the implementation's parameter NAMES are
+// kept (the body uses them). Declaration: the reference signature
+// replaces the declared one, directives after it stay.
+function TLspSignatureCheckWizard.DoAlign(AEntry, ARef: TSignatureEntry): string;
+var
+  Content, NewSig: string;
+  Lines, NewLines: TArray<string>;
+  SL: TStringList;
+begin
+  Result := '';
+  if AEntry.Role = srImplementation then
+  begin
+    if not AlignImplHeaderToDecl(AEntry.FilePath, AEntry.Line) then
+      Result := 'the implementation header could not be matched to a unique ' +
+        'declaration (overloads?)';
+    Exit;
+  end;
+  if not Editor.ReadEditorContent(AEntry.FilePath, Content) then
+    try
+      Content := ReadDelphiFile(AEntry.FilePath);
+    except
+      on E: Exception do Exit(E.Message);
+    end;
+  NewSig := TSignatureChecker.SignatureForContainer(ARef.RawSignature, '');
+  if NewSig = '' then Exit('the reference signature is not readable');
+  SL := TStringList.Create;
+  try
+    SL.Text := Content;
+    Lines := SL.ToStringArray;
+    if not TSignatureChecker.ReplaceSignature(Lines, AEntry.Line, NewSig, NewLines) then
+      Exit('the declaration could not be located (or it carries a comment)');
+    SL.Clear;
+    for var L in NewLines do SL.Add(L);
+    if not ApplyLinesMinimal(AEntry.FilePath, SL, Content) then
+      Result := 'writing the change failed';
+  finally
+    SL.Free;
+  end;
+end;
+
 procedure TLspSignatureCheckWizard.Execute;
 var
   PrevDialog: TSignatureCheckDialog;
@@ -96,6 +142,7 @@ begin
     FContext := Ctx;
     FDialog := TSignatureCheckDialog.CreateDialog(Application.MainForm, Ctx.WordAtCursor);
     FDialog.OnGotoLocation := DoGotoLocation;
+    FDialog.OnAlign := DoAlign;
     TLspManager.Instance.ApplyStatusToCaption(FDialog);
     FDialog.Show;
     try

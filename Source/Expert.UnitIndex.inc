@@ -254,6 +254,13 @@ function FindDeclarationLine(const AContent, AIdent: string): Integer;
 ///  for a non-blank character.</summary>
 function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 
+/// <summary>0-based lines on which AWord occurs as a whole identifier in
+///  CODE (comments and strings masked, case-insensitive; a '&amp;'-escaped
+///  or dotted occurrence counts too). Used by the rename conflict check:
+///  a new name that already occurs where the renamed symbol is used can
+///  hide - or be hidden by - the existing one.</summary>
+function CodeWordLines(const ALines: TArray<string>; const AWord: string): TArray<Integer>;
+
 /// <summary>0-based line range of the routine that CONTAINS ALine0 -
 ///  from its header (procedure/function/constructor/destructor, including
 ///  a qualified or generic one) to its final "end;". False when the line
@@ -1333,6 +1340,34 @@ begin
   finally
     EnvVars.Free;
     Dirs.Free;
+  end;
+end;
+
+function CodeWordLines(const ALines: TArray<string>; const AWord: string): TArray<Integer>;
+var
+  M: TArray<string>;
+  U, W: string;
+  P, E: Integer;
+begin
+  Result := nil;
+  if AWord = '' then Exit;
+  W := UpperCase(AWord);
+  M := MaskCommentsAndStrings(ALines);
+  for var L := 0 to High(M) do
+  begin
+    U := UpperCase(M[L]);
+    P := Pos(W, U);
+    while P > 0 do
+    begin
+      E := P + Length(W);
+      if ((P = 1) or not CharInSet(U[P - 1], ['A'..'Z', '0'..'9', '_']))
+        and ((E > Length(U)) or not CharInSet(U[E], ['A'..'Z', '0'..'9', '_'])) then
+      begin
+        Result := Result + [L];
+        Break;
+      end;
+      P := Pos(W, U, P + 1);
+    end;
   end;
 end;
 

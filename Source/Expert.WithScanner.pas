@@ -105,6 +105,14 @@ type
 
     /// <summary>Convenience overload reading from a file.</summary>
     class function ScanFile(const AFileName: string): TArray<TWithOccurrence>; static;
+
+    /// <summary>True when ASource contains ANY conditional-compilation
+    ///  directive ({$IF / $IFDEF / $IFNDEF / $IFOPT / $ELSE / $ELSEIF, also
+    ///  in the (*$ *) form) or an include ({$I file} / {$INCLUDE}), which
+    ///  could bring one. Deliberately conservative - a directive inside a
+    ///  comment counts too. False means: no line of this source can be in
+    ///  an inactive region.</summary>
+    class function SourceHasConditionals(const ASource: string): Boolean; static;
   end;
 
 implementation
@@ -950,6 +958,36 @@ begin
 
   // Suppress hint about PrevSig being assigned but not read
   if PrevSig = #1 then ;
+end;
+
+class function TWithScanner.SourceHasConditionals(const ASource: string): Boolean;
+var
+  U: string;
+  P, Q: Integer;
+  Name: string;
+begin
+  U := UpperCase(ASource);
+  P := 1;
+  while True do
+  begin
+    // next '{$' or '(*$'
+    var A := Pos('{$', U, P);
+    var B := Pos('(*$', U, P);
+    if (A = 0) and (B = 0) then Exit(False);
+    if (A = 0) or ((B > 0) and (B < A)) then Q := B + 3 else Q := A + 2;
+    Name := '';
+    while (Q <= Length(U)) and CharInSet(U[Q], ['A'..'Z']) do
+    begin
+      Name := Name + U[Q];
+      Inc(Q);
+    end;
+    if Name.StartsWith('IF') or Name.StartsWith('ELSE') or (Name = 'INCLUDE') then
+      Exit(True);
+    // {$I file} / {$I+} / {$I-}: only the FILE form is an include
+    if (Name = 'I') and (Q <= Length(U)) and not CharInSet(U[Q], ['+', '-']) then
+      Exit(True);
+    P := Q;
+  end;
 end;
 
 class function TWithScanner.ScanFile(const AFileName: string): TArray<TWithOccurrence>;

@@ -451,6 +451,11 @@ const
     '    procedure Init(const ABoolean: Boolean); overload;'#13#10 +
     '  end;'#13#10 +
     ''#13#10 +
+    '  TMyRec1 = record'#13#10 +
+    '  public'#13#10 +
+    '    procedure Init;'#13#10 +
+    '  end;'#13#10 +
+    ''#13#10 +
     'implementation'#13#10 +
     ''#13#10 +
     'procedure TMyClassB.Test;'#13#10 +
@@ -492,6 +497,11 @@ begin
     // the overload pair: a position, but not THE declaration
     Assert.IsTrue(Graph.FindMember('TMyClassA', 'Init', Link, Ambiguous), 'Init found');
     Assert.IsTrue(Ambiguous, 'Init is overloaded');
+    // a RECORD is a type with members too (the forum example of post #150
+    // is records) - without them such a use site stays unresolvable
+    Assert.IsTrue(Graph.FindMember('TMyRec1', 'Init', Link, Ambiguous), 'record member');
+    Assert.AreEqual('TMyRec1', Link.TypeName, 'record type');
+    Assert.IsFalse(Ambiguous, 'the record declares Init once');
 
     Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, Src, UseShared,
       Pos('Shared', Lines[UseShared]) - 1, 'Shared', Link)), 'use site resolved');

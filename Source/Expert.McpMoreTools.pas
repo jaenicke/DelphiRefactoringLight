@@ -641,6 +641,7 @@ begin
     var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
     Links := CollectLinkedTargets(Graph,
       TImplementationFinder.FindContainingType(DeclFile, DeclLine), Ctx.Identifier, Linked);
+    var PreSkipped := 0;
     var Cands := TList<TFindReferenceItem>.Create;
     try
       for var SF in Ctx.ScopeFiles do
@@ -697,6 +698,36 @@ begin
         try
           var Key := UpperCase(Cd.FilePath);
 
+          // PRE-CHECK without DelphiLSP: the qualifier's declared type can
+          // already say this is another type's member - then no request is
+          // needed (the server takes one at a time, so that is real time).
+          begin
+            var PreContent: string;
+            var PreLink: TMemberLink;
+            // The target test MUST include the LINKED positions (the
+            // implementing classes and their implementation headers).
+            // Without them the pre-check dropped "TDialogRenameHost
+            // .SetStatus" as a foreign member - caught by comparing the
+            // result against the run before the filter existed.
+            if ContentOf.TryGetValue(Key, PreContent) and
+               (ClassifyUnansweredUse(Graph, PreContent, Cd.Line, Cd.Col,
+                 Ctx.Identifier,
+                 function(AFile: string; ALine: Integer): Boolean
+                 begin
+                   Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
+                     or Linked.Contains(AFile, ALine);
+                 end,
+                 function(AFile: string): Boolean
+                 begin
+                   Result := SameText(ExpandFileName(AFile), DeclFile)
+                     or Linked.ContainsFile(AFile);
+                 end, PreLink) = uuOtherSymbol) then
+            begin
+              Inc(PreSkipped);
+              Continue;
+            end;
+          end;
+
           if not Synced.ContainsKey(Key) then
           begin
             Synced.Add(Key, True);
@@ -747,11 +778,13 @@ begin
                 Ctx.Identifier,
                 function(AFile: string; ALine: Integer): Boolean
                 begin
-                  Result := SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine);
+                  Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
+                    or Linked.Contains(AFile, ALine);
                 end,
                 function(AFile: string): Boolean
                 begin
-                  Result := SameText(ExpandFileName(AFile), DeclFile);
+                  Result := SameText(ExpandFileName(AFile), DeclFile)
+                    or Linked.ContainsFile(AFile);
                 end, Link) of
                 uuOurs: TypeIsRef := True;
                 uuOtherSymbol:
@@ -846,6 +879,10 @@ begin
       Items := Verified;
       Method := Format('text scan of %d file(s), %d candidate(s) verified via ' +
         'GotoDefinition', [Length(Ctx.ScopeFiles), Cands.Count]);
+      if PreSkipped > 0 then
+        Method := Method + Format('; %d of them decided from the sources ' +
+          '(another type''s member), so that many requests were saved',
+          [PreSkipped]);
       if SentCount > 0 then
         Method := Method + Format('; %d file(s) (re)sent to DelphiLSP and ' +
           'waited for', [SentCount]);

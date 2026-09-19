@@ -1778,7 +1778,7 @@ var
   Contents: TDictionary<string, string>;
   Graph: TTypeGraph;
   LastOpenedFile: string;
-  VerifiedCount, SkippedCount, I: Integer;
+  VerifiedCount, SkippedCount, PreSkipped, I: Integer;
   C: TRenameCandidate;
   TextEdit: TLspTextEdit;
 
@@ -1842,6 +1842,7 @@ begin
     LastOpenedFile := '';
     VerifiedCount := 0;
     SkippedCount := 0;
+    PreSkipped := 0;
 
     FHost.SetProgress(0, Length(ACandidates));
 
@@ -1852,6 +1853,34 @@ begin
       FHost.SetProgress(I + 1, Length(ACandidates));
       if (I mod 3 = 0) then
         FHost.SetStatus(Format('Verifying %d/%d (ok:%d skip:%d)', [I + 1, Length(ACandidates), VerifiedCount, SkippedCount]));
+
+      // PRE-CHECK without DelphiLSP: when the qualifier's declared type
+      // says this occurrence is a member of ANOTHER type, no request is
+      // needed at all. That is the only speed lever there is - DelphiLSP
+      // answers "Request removed" to a second request while one is still
+      // open, so verification is strictly one round trip per candidate
+      // (measured 2026-09-20).
+      begin
+        var PreLink: TMemberLink;
+        if ClassifyUnansweredUse(Graph, FileContent(C.FilePath), C.Line, C.Col,
+          AOldName,
+          function(AFile: string; ALine: Integer): Boolean
+          begin
+            Result := ATargets.Contains(AFile, ALine);
+          end,
+          function(AFile: string): Boolean
+          begin
+            Result := ATargets.ContainsFile(AFile);
+          end, PreLink) = uuOtherSymbol then
+        begin
+          Inc(SkippedCount);
+          Inc(PreSkipped);
+          FDiagLog := FDiagLog + Format('  [%d] %s:%d:%d => member of %s -> ' +
+            'SKIP (decided from the sources, no request)' + sLineBreak,
+            [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1, PreLink.TypeName]);
+          Continue;
+        end;
+      end;
 
       // Hand the file to DelphiLSP - ONLY when its content changed since it
       // was last sent, and then WAIT until the unit is analysed. The old
@@ -2020,6 +2049,11 @@ begin
     end;
 
     FHost.SetProgress(Length(ACandidates), Length(ACandidates));
+    if PreSkipped > 0 then
+      FDiagLog := FDiagLog + Format(
+        '%d of %d candidate(s) were decided from the sources - that many ' +
+        'DelphiLSP requests saved.' + sLineBreak,
+        [PreSkipped, Length(ACandidates)]);
 
     SetLength(Result.FileEdits, FileMap.Count);
     var Idx := 0;

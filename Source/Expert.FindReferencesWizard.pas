@@ -23,6 +23,8 @@ type
     // restaurieren ihn am Ende.
     FDialog: TFindReferencesDialog;
     FContext: TEditorContext;
+    // candidates decided from the sources, without a DelphiLSP request
+    FPreSkipped: Integer;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
@@ -163,6 +165,7 @@ var
   LspLine, LspCol: Integer;
   DefLineOut: Integer;
 begin
+  FPreSkipped := 0;
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
@@ -350,12 +353,19 @@ begin
   for var It in Items do
     if It.Note <> '' then Inc(Unverified);
   FDialog.SetItems(Items);
+  // how many candidates never needed a DelphiLSP request (their qualifier's
+  // declared type already said they belong to another type)
+  var FromSource := '';
+  if FPreSkipped > 0 then
+    FromSource := Format(' %d were decided from the sources without asking ' +
+      'DelphiLSP.', [FPreSkipped]);
   if Unverified > 0 then
     FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
-      '(see the Note column).', [Length(Items) - Unverified, Length(TextCandidates), Unverified]))
+      '(see the Note column).%s', [Length(Items) - Unverified, Length(TextCandidates),
+      Unverified, FromSource]))
   else
-    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.',
-      [Length(Items), Length(TextCandidates)]));
+    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.%s',
+      [Length(Items), Length(TextCandidates), FromSource]));
 end;
 
 function TLspFindReferencesWizard.ConvertLspLocations(const ALocations: TArray<TLspLocation>;
@@ -510,6 +520,29 @@ begin
         Application.ProcessMessages;
       end;
 
+      // PRE-CHECK without DelphiLSP: a use site whose qualifier has a
+      // declared type can be recognised as ANOTHER type's member from the
+      // sources alone - and then no request is needed. DelphiLSP refuses a
+      // second request while one is open ("Request removed", measured
+      // 2026-09-20), so every saved request is saved waiting time.
+      begin
+        var PreLink: TMemberLink;
+        if ClassifyUnansweredUse(AGraph, FileContent(C.FilePath), C.Line, C.Col,
+          AOldName,
+          function(AFile: string; ALine: Integer): Boolean
+          begin
+            Result := ATargets.Contains(AFile, ALine) or ALinked.Contains(AFile, ALine);
+          end,
+          function(AFile: string): Boolean
+          begin
+            Result := ATargets.ContainsFile(AFile) or ALinked.ContainsFile(AFile);
+          end, PreLink) = uuOtherSymbol then
+        begin
+          Inc(FPreSkipped);
+          Continue;
+        end;
+      end;
+
       // Send each file once, only when its content changed, and wait for
       // the analysis then (the old re-open + 300 ms lost answers). An
       // include file (or a unit currently sent expanded) is served by the
@@ -596,7 +629,7 @@ begin
           end,
           function(AFile: string): Boolean
           begin
-            Result := ATargets.ContainsFile(AFile);
+            Result := ATargets.ContainsFile(AFile) or ALinked.ContainsFile(AFile);
           end, Link) of
           uuOurs:
             begin

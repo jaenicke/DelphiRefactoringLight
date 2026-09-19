@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.8.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.8.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -63,6 +63,10 @@ In the last three weeks I tested with big projects and used it myself in real li
   - it is a member of **another type** &mdash; the occurrence is not a reference and disappears (it used to be an unverified row you had to judge yourself);
   - it is **our** member &mdash; the row says *verified via TMyClassA*, and Rename renames it (this is what keeps an inactive `{$IFDEF}` branch consistent);
   - the type declares the member **several times** (overloads) &mdash; the text cannot tell them apart, so it stays *UNVERIFIED* and Rename leaves it alone.
+  
+  Records and old-style objects count as types here, not just classes and interfaces, and a qualifier declared in another unit is resolved through the identifier index.
+  
+  The same step also makes the scan **faster**, which is the only way to: DelphiLSP answers one request at a time (a second one while the first is open comes back as *Request removed*), so a verification costs one round trip per occurrence. Everything the sources can decide saves one. Measured on this plugin's own sources, *Find References* for `IRenameHost.SetStatus`: 170 occurrences, 89 of them settled without asking DelphiLSP, same 35 references as before. The status line and the MCP result say how many requests were saved.
   
   This is also the answer to a Delphi 13.1 bug ([RSS-5463](https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5463)): when a class declares a method as a `private` / `public` **overload pair**, DelphiLSP answers nothing at all for it from another unit &mdash; no definition, no completion. *Find original symbol* uses the same resolution and jumps to the declaration anyway.
 - **Interfaces**: for a class method that implements an interface method, the declaration in the interface counts as a use &mdash; also when the interface is never called &mdash; and calls through the interface are found ("declared in interface IFoo", "call via interface IFoo"). Interface inheritance is followed (`IFoo = interface(IBase)`). For an interface method it works the other way round: the implementing classes' methods and the calls on them ("implemented by TFoo", "call via class TFoo").

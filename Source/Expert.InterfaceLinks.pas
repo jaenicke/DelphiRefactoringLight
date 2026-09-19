@@ -57,6 +57,7 @@ type
     FTypes: TDictionary<string, TTypeDecl>;     // UPPER name -> declaration
     FContents: TDictionary<string, string>;     // UPPER path -> content
     FLoadedFiles: TDictionary<string, Boolean>;
+    FGlobals: TDictionary<string, string>;      // UPPER name -> declared type
     FUseIndex: Boolean;
     procedure LoadFile(const AFile: string);
     function Content(const AFile: string): string;
@@ -80,6 +81,12 @@ type
       AMember: string): TArray<TMemberLink>;
     /// <summary>The declaration of AName, if known.</summary>
     function FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
+    /// <summary>The declared type of a GLOBAL variable or typed constant
+    ///  AName, looked up through the identifier index (which holds the
+    ///  top-level declarations of every reachable unit) - for a use site
+    ///  whose qualifier lives in another unit. '' when unknown, and always
+    ///  '' without the index (tests).</summary>
+    function TypeOfGlobal(const AName: string): string;
     /// <summary>The declaration of AMember in ATypeName or, when that type
     ///  does not declare it, in its nearest ANCESTOR that does (classes and
     ///  interfaces alike). This is the member lookup the compiler does and
@@ -129,6 +136,9 @@ type
     procedure Add(const AFile: string; ALine: Integer; AIsInterface: Boolean;
       const ATypeName: string);
     function Contains(const AFile: string; ALine: Integer): Boolean;
+    /// <summary>Any linked position in that FILE - the coarse test for
+    ///  cases where a line cannot be pinned down (overloads).</summary>
+    function ContainsFile(const AFile: string): Boolean;
     /// <summary>For a hit AT the position: "declared in interface IFoo" /
     ///  "implemented by TFoo"; '' when not linked.</summary>
     function DeclLabel(const AFile: string; ALine: Integer): string;
@@ -286,10 +296,20 @@ begin
     var IsIntf := Rest.StartsWith('INTERFACE') or Rest.StartsWith('DISPINTERFACE');
     // "class", "class(", "class abstract", "class sealed" - but not "class of"
     var IsClass := Rest.StartsWith('CLASS') and not Rest.StartsWith('CLASS OF');
-    if not (IsIntf or IsClass) then Continue;
+    // RECORDs and old-style OBJECTs have methods too, and a use site does
+    // not care which kind its type is ("Idx.Init(Src)"). They were missing
+    // here, which made every record member unresolvable - the forum
+    // example of post #150 is records throughout.
+    var IsRecord := (Rest.StartsWith('RECORD') or Rest.StartsWith('OBJECT'))
+      and not Rest.StartsWith('RECORD HELPER') and not Rest.StartsWith('OBJECT OF');
+    if not (IsIntf or IsClass or IsRecord) then Continue;
     // a forward declaration ("TFoo = class;" / "IFoo = interface;") has
     // neither parents nor a body
-    var Word := IfThen(IsIntf, IfThen(Rest.StartsWith('DISP'), 'DISPINTERFACE', 'INTERFACE'), 'CLASS');
+    var Word := 'CLASS';
+    if IsIntf then
+      Word := IfThen(Rest.StartsWith('DISP'), 'DISPINTERFACE', 'INTERFACE')
+    else if IsRecord then
+      Word := IfThen(Rest.StartsWith('OBJECT'), 'OBJECT', 'RECORD');
     if Trim(Copy(Rest, Length(Word) + 1, MaxInt)) = ';' then Continue;
     var D: TTypeDecl;
     D.Name := Name;
@@ -352,12 +372,14 @@ begin
   FTypes := TDictionary<string, TTypeDecl>.Create;
   FContents := TDictionary<string, string>.Create;
   FLoadedFiles := TDictionary<string, Boolean>.Create;
+  FGlobals := TDictionary<string, string>.Create;
   for var F in AFiles do LoadFile(F);
 end;
 
 destructor TTypeGraph.Destroy;
 begin
   FLoadedFiles.Free;
+  FGlobals.Free;
   FContents.Free;
   FTypes.Free;
   inherited;
@@ -411,6 +433,28 @@ begin
   Result := TryType(StripGenericAndUnit(AName), ADecl);
 end;
 
+function TTypeGraph.TypeOfGlobal(const AName: string): string;
+begin
+  Result := '';
+  if not FUseIndex then Exit;
+  if FGlobals.TryGetValue(UpperCase(AName), Result) then Exit;
+  var Snap := TUnitIndex.Instance.Snapshot;
+  if Snap <> nil then
+    for var H in Snap.Lookup(AName) do
+    begin
+      if H.Path = '' then Continue;
+      var C := Content(H.Path);
+      if C = '' then Continue;
+      var L := FindDeclarationLine(C, AName);
+      if L < 0 then Continue;
+      Result := DeclaredTypeOfIdentifier(C, L, AName);
+      if Result <> '' then Break;
+    end;
+  // '' is cached too: an identifier that is no global must not be looked
+  // up again for every one of its occurrences
+  FGlobals.AddOrSetValue(UpperCase(AName), Result);
+end;
+
 function ResolveMemberUse(AGraph: TTypeGraph; const AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   out ALink: TMemberLink): TMemberUseResult;
@@ -434,6 +478,10 @@ begin
     TypeName := Decl.Name
   else
     TypeName := DeclaredTypeOfIdentifier(AContent, ALine0, Qualifier);
+  // Not declared in this file? Then it is a global of ANOTHER unit
+  // ("WizardInstance.Execute"), which the identifier index can point to.
+  if TypeName = '' then
+    TypeName := AGraph.TypeOfGlobal(Qualifier);
   if TypeName = '' then Exit;
   if not AGraph.FindMember(TypeName, AMember, ALink, Ambiguous) then Exit;
   if Ambiguous then Result := murAmbiguous else Result := murResolved;
@@ -686,6 +734,15 @@ end;
 function TLinkedTargets.Contains(const AFile: string; ALine: Integer): Boolean;
 begin
   Result := FTypes.ContainsKey(Key(AFile, ALine));
+end;
+
+function TLinkedTargets.ContainsFile(const AFile: string): Boolean;
+begin
+  Result := False;
+  if AFile = '' then Exit;
+  var Prefix := UpperCase(ExpandFileName(AFile)) + '|';
+  for var K in FTypes.Keys do
+    if K.StartsWith(Prefix) then Exit(True);
 end;
 
 function TLinkedTargets.DeclLabel(const AFile: string; ALine: Integer): string;

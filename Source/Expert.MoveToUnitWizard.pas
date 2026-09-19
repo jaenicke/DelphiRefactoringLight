@@ -16,7 +16,7 @@ unit Expert.MoveToUnitWizard;
 interface
 
 uses
-  System.SysUtils, System.UITypes,
+  System.SysUtils, System.UITypes, System.StrUtils,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
   Expert.EditorHelperIntf, Expert.MoveToUnit, Expert.MoveToUnitDialog;
 
@@ -42,7 +42,15 @@ type
 var
   MoveToUnitInstance: TLspMoveToUnitWizard;
 
+/// <summary>Editor entry point "Move to new unit...": asks for the new
+///  unit's name (created next to the current unit; a path is accepted)
+///  and moves the identifier at the cursor there.</summary>
+procedure MoveToNewUnitAtCursor;
+
 implementation
+
+uses
+  Expert.DialogHelper;
 
 {$IFNDEF STANDALONE_BUILD}
 { TLspMoveToUnitWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
@@ -94,6 +102,51 @@ begin
   if Target = '' then Exit;
 
   TLspMoveToUnit.Execute(Ctx.WordAtCursor, Ctx.FileName, Target, Ctx);
+end;
+
+procedure MoveToNewUnitAtCursor;
+var
+  Ctx: TEditorContext;
+  Name, Err: string;
+begin
+  Ctx := Editor.GetCurrentContext;
+  if (Ctx.FileName = '') or not SameText(ExtractFileExt(Ctx.FileName), '.pas') then
+  begin
+    ShowThemedMessage('Please open a Delphi unit (.pas) first.');
+    Exit;
+  end;
+  if Ctx.WordAtCursor = '' then
+  begin
+    ShowThemedMessage('Place the cursor on the identifier to move first.');
+    Exit;
+  end;
+  // "TCustomerList" -> "CustomerList": the usual one-class-per-unit name
+  Name := Ctx.WordAtCursor;
+  if (Length(Name) > 1) and (Name[1] = 'T') and CharInSet(Name[2], ['A'..'Z']) then
+    Name := Copy(Name, 2, MaxInt);
+  var Dir := ExtractFilePath(Ctx.FileName);
+  if not AskThemedText('Move to new unit',
+    Format('Move %s into a NEW unit. Unit name (created in %s; a full path is ' +
+      'accepted, too):', [Ctx.WordAtCursor, Dir]), Name,
+    function(AValue: string): string
+    begin
+      var V := Trim(AValue);
+      if SameText(ExtractFileExt(V), '.pas') then V := ChangeFileExt(V, '');
+      Result := CheckNewUnitName(ExtractFileName(V));
+      if (Result = '') and FileExists(IfThen(ExtractFilePath(V) <> '', V, Dir + V) + '.pas') then
+        Result := 'that unit already exists';
+    end) then
+    Exit;
+  Name := Trim(Name);
+  if SameText(ExtractFileExt(Name), '.pas') then Name := ChangeFileExt(Name, '');
+  var NewFile := IfThen(ExtractFilePath(Name) <> '', Name, Dir + Name) + '.pas';
+  if TLspMoveToUnit.ExecuteToNewUnit(Ctx.WordAtCursor, Ctx.FileName, NewFile, Err) then
+  begin
+    if Err <> '' then ShowThemedMessage(Err);
+    Editor.GotoLocation(NewFile, 0, 0);
+  end
+  else
+    ShowThemedMessage('Move to new unit: ' + Err);
 end;
 
 end.

@@ -95,6 +95,7 @@
         <DCCReference Include="..\Source\Expert.PropertyConvert.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureEdit.pas"/>
         <DCCReference Include="..\Source\Expert.ReferenceKind.pas"/>
+        <DCCReference Include="..\Source\Expert.SemanticReplace.pas"/>
         <DCCReference Include="Test.UserIdeas13.pas"/>
         <DCCReference Include="Test.RepoHygiene.pas"/>
         <DCCReference Include="Test.RegressionSuite.pas"/>

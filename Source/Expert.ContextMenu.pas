@@ -158,6 +158,7 @@ type
     procedure OnResolveMissingUnits(Sender: TObject);
     procedure OnUsesCleanup(Sender: TObject);
     procedure OnMoveToUnit(Sender: TObject);
+    procedure OnMoveToNewUnit(Sender: TObject);
     procedure OnExtractInterface(Sender: TObject);
     procedure OnAddToExistingInterface(Sender: TObject);
     procedure OnDelegateInterface(Sender: TObject);
@@ -437,6 +438,7 @@ begin
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Change signature...',       OnChangeSignature,      skChangeSignature, REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
+  Plain(Root, 'Move to new unit...',      OnMoveToNewUnit,        REQ_EDITOR);
   Leaf(Root, 'Safe delete...',            OnSafeDelete,           skSafeDelete,      REQ_EDITOR);
   Leaf(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties,
     skConvertProperties, REQ_EDITOR);
@@ -1667,6 +1669,11 @@ end;
 procedure TContextMenuInstaller.OnUsesCleanup(Sender: TObject);
 begin
   CleanupUsesCurrentUnit;
+end;
+
+procedure TContextMenuInstaller.OnMoveToNewUnit(Sender: TObject);
+begin
+  MoveToNewUnitAtCursor;
 end;
 
 procedure TContextMenuInstaller.OnMoveToUnit(Sender: TObject);

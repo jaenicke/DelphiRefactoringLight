@@ -134,6 +134,35 @@ function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
   AUnitChoice: Integer): Boolean;
 
+type
+  /// <summary>Asked before each fix of a batch; return '' to apply it or
+  ///  the reason why not (the MCP bridge refuses what needs a dialog).</summary>
+  TQuickFixBatchCheck = reference to function(const AFix: TQuickFix): string;
+
+/// <summary>Order in which a batch is applied: fixes that edit AT their
+///  own line bottom-up (a fix never moves the lines above it), then the
+///  uses-clause fixes, which work by unit NAME and not by position. Pure.</summary>
+function OrderFixesForBatch(const AFixes: TArray<TQuickFix>): TArray<TQuickFix>;
+
+/// <summary>Where the line AAnchor (the fix line's text when the batch
+///  started) is now: AOldLine when it is still there, else AOldLine +
+///  ADelta (the change of the line count so far), else the NEAREST equal
+///  line within 60 lines; -1 when it is gone (the fix is skipped, never
+///  applied somewhere else). Pure.</summary>
+function RelocateFixLine(const ALines: TArray<string>; const AAnchor: string;
+  AOldLine, ADelta: Integer): Integer;
+
+/// <summary>Applies several fixes of ONE file (see OrderFixesForBatch /
+///  RelocateFixLine). A qfAddUnit fix is applied only with exactly one
+///  candidate unit - several need a choice. ACheck may refuse single
+///  fixes. Returns the number applied; AReport lists the skipped ones
+///  with their reason.</summary>
+function ApplyQuickFixBatch(const AFile: string; const AFixes: TArray<TQuickFix>;
+  const ACheck: TQuickFixBatchCheck; out AReport: string): Integer;
+
+/// <summary>Human-readable kind of a fix ("Remove unused variable").</summary>
+function QuickFixKindText(AKind: TQuickFixKind): string;
+
 /// <summary>E2037 fix: rewrites the implementation header at/around ALine0
 ///  (0-based) so parameters and return type match the declaration, keeping
 ///  the implementation's parameter names. False when the declaration is
@@ -3451,6 +3480,151 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+//  Batch: several fixes of one unit in one go
+// ---------------------------------------------------------------------------
+
+function QuickFixKindText(AKind: TQuickFixKind): string;
+const
+  Texts: array[TQuickFixKind] of string = ('Add unit to uses', 'Did you mean ...',
+    'Fix uses entry', 'Remove uses entry', 'Align implementation header',
+    'Remove unused variable', 'Insert missing ;', 'Initialize variable',
+    'Remove dead assignment', 'Add reintroduce', 'Create implementation stub',
+    'Create class stub', 'Remove stray token', 'Remove unused private member',
+    'Declare variable', 'Declare inline variable', 'Implement interface method');
+begin
+  Result := Texts[AKind];
+end;
+
+function IsUsesFix(AKind: TQuickFixKind): Boolean;
+begin
+  // edits the uses clause by unit NAME - no position to keep valid
+  Result := AKind in [qfAddUnit, qfRemoveUses];
+end;
+
+function OrderFixesForBatch(const AFixes: TArray<TQuickFix>): TArray<TQuickFix>;
+begin
+  Result := Copy(AFixes);
+  TArray.Sort<TQuickFix>(Result, TComparer<TQuickFix>.Construct(
+    function(const L, R: TQuickFix): Integer
+    begin
+      // positional fixes first, bottom-up; uses fixes last
+      Result := Ord(IsUsesFix(L.Kind)) - Ord(IsUsesFix(R.Kind));
+      if Result = 0 then Result := R.Line - L.Line;
+      if Result = 0 then Result := R.Col - L.Col;
+    end));
+end;
+
+function RelocateFixLine(const ALines: TArray<string>; const AAnchor: string;
+  AOldLine, ADelta: Integer): Integer;
+begin
+  if (AOldLine >= 0) and (AOldLine <= High(ALines)) and (ALines[AOldLine] = AAnchor) then
+    Exit(AOldLine);
+  var Shifted := AOldLine + ADelta;
+  if (ADelta <> 0) and (Shifted >= 0) and (Shifted <= High(ALines)) and
+     (ALines[Shifted] = AAnchor) then
+    Exit(Shifted);
+  for var D := 1 to 60 do
+  begin
+    if (AOldLine - D >= 0) and (AOldLine - D <= High(ALines)) and
+       (ALines[AOldLine - D] = AAnchor) then
+      Exit(AOldLine - D);
+    if (AOldLine + D <= High(ALines)) and (AOldLine + D >= 0) and
+       (ALines[AOldLine + D] = AAnchor) then
+      Exit(AOldLine + D);
+  end;
+  Result := -1;
+end;
+
+function ApplyQuickFixBatch(const AFile: string; const AFixes: TArray<TQuickFix>;
+  const ACheck: TQuickFixBatchCheck; out AReport: string): Integer;
+
+  function CurrentLines: TArray<string>;
+  var
+    C: string;
+  begin
+    if not ((Editor <> nil) and Editor.ReadEditorContent(AFile, C)) then
+      try
+        C := ReadDelphiFile(AFile);
+      except
+        C := '';
+      end;
+    Result := SplitContentLines(C);
+  end;
+
+  procedure Skip(const AFix: TQuickFix; const AWhy: string);
+  begin
+    AReport := AReport + Format('line %d: %s - %s', [AFix.Line + 1, AFix.Caption, AWhy]) +
+      sLineBreak;
+  end;
+
+var
+  Ordered: TArray<TQuickFix>;
+  Anchors, AuxAnchors: TArray<string>;
+begin
+  Result := 0;
+  AReport := '';
+  Ordered := OrderFixesForBatch(AFixes);
+  var Start := CurrentLines;
+  var StartCount := Length(Start);
+  SetLength(Anchors, Length(Ordered));
+  SetLength(AuxAnchors, Length(Ordered));
+  for var I := 0 to High(Ordered) do
+  begin
+    if (Ordered[I].Line >= 0) and (Ordered[I].Line <= High(Start)) then
+      Anchors[I] := Start[Ordered[I].Line];
+    if (Ordered[I].AuxLine > 0) and (Ordered[I].AuxLine <= High(Start)) then
+      AuxAnchors[I] := Start[Ordered[I].AuxLine];
+  end;
+  for var I := 0 to High(Ordered) do
+  begin
+    var Fix := Ordered[I];
+    if (Fix.Kind = qfAddUnit) and (Length(Fix.UnitNames) <> 1) then
+    begin
+      Skip(Fix, Format('%d candidate units - choose one in the quick-fix popup',
+        [Length(Fix.UnitNames)]));
+      Continue;
+    end;
+    if Assigned(ACheck) then
+    begin
+      var Why := ACheck(Fix);
+      if Why <> '' then
+      begin
+        Skip(Fix, Why);
+        Continue;
+      end;
+    end;
+    if not IsUsesFix(Fix.Kind) then
+    begin
+      // an earlier fix of the batch may have moved this one's lines
+      var Cur := CurrentLines;
+      var Delta := Length(Cur) - StartCount;
+      var NewLine := RelocateFixLine(Cur, Anchors[I], Fix.Line, Delta);
+      if NewLine < 0 then
+      begin
+        Skip(Fix, 'its line changed while the batch ran - apply it on its own');
+        Continue;
+      end;
+      var Shift := NewLine - Fix.Line;
+      Fix.Line := NewLine;
+      if (Fix.AuxLine > 0) and (AuxAnchors[I] <> '') then
+      begin
+        var NewAux := RelocateFixLine(Cur, AuxAnchors[I], Fix.AuxLine + Shift, 0);
+        if NewAux < 0 then
+        begin
+          Skip(Fix, 'its line changed while the batch ran - apply it on its own');
+          Continue;
+        end;
+        Fix.AuxLine := NewAux;
+      end;
+    end;
+    if ApplyQuickFix(AFile, Fix, 0) then
+      Inc(Result)
+    else
+      Skip(Fix, 'the code there no longer matches');
+  end;
+end;
+
+// ---------------------------------------------------------------------------
 //  Caret-anchored quick-fix chooser popup (VS-like)
 // ---------------------------------------------------------------------------
 //
@@ -5370,12 +5544,21 @@ type
     FFixes: TArray<TQuickFix>;
     FBtnGoto: TButton;
     FBtnClose: TButton;
+    FBtnKind: TButton;
+    FBtnApply: TButton;
     procedure DoDblClick(Sender: TObject);
     procedure DoGotoClick(Sender: TObject);
     procedure DoCloseClick(Sender: TObject);
+    procedure DoKindClick(Sender: TObject);
+    procedure DoApplyClick(Sender: TObject);
+    procedure DoItemChecked(Sender: TObject; Item: TListItem);
   public
     HasChosen: Boolean;
     ChosenFix: TQuickFix;
+    /// <summary>The unit the fixes belong to (for "Apply ticked").</summary>
+    FileName: string;
+    /// <summary>After "Apply ticked": what happened.</summary>
+    BatchReport: string;
     constructor CreateDialog(AOwner: TComponent;
       const AFixes: TArray<TQuickFix>);
   end;
@@ -5411,11 +5594,14 @@ begin
   FList.ViewStyle := vsReport;
   FList.ReadOnly := True;
   FList.RowSelect := True;
+  FList.Checkboxes := True;   // batch: tick fixes, "Apply ticked"
   FList.OnDblClick := DoDblClick;
-  Col := FList.Columns.Add; Col.Caption := 'Line';    Col.Width := 60;
+  FList.OnItemChecked := DoItemChecked;
+  Col := FList.Columns.Add; Col.Caption := 'Line';    Col.Width := 70;
     Col.Alignment := taRightJustify;
-  Col := FList.Columns.Add; Col.Caption := 'Fix';     Col.Width := 320;
-  Col := FList.Columns.Add; Col.Caption := 'Details'; Col.Width := 330;
+  Col := FList.Columns.Add; Col.Caption := 'Kind';    Col.Width := 190;
+  Col := FList.Columns.Add; Col.Caption := 'Fix';     Col.Width := 300;
+  Col := FList.Columns.Add; Col.Caption := 'Details'; Col.Width := 260;
 
   Panel := TPanel.Create(Self);
   Panel.Parent := Self;
@@ -5440,6 +5626,23 @@ begin
   FBtnGoto.Default := True;
   FBtnGoto.OnClick := DoGotoClick;
 
+  FBtnApply := TButton.Create(Self);
+  FBtnApply.Parent := Panel;
+  FBtnApply.Caption := '&Apply ticked';
+  FBtnApply.Align := alRight;
+  FBtnApply.Width := 110;
+  FBtnApply.AlignWithMargins := True;
+  FBtnApply.Enabled := False;
+  FBtnApply.OnClick := DoApplyClick;
+
+  FBtnKind := TButton.Create(Self);
+  FBtnKind.Parent := Panel;
+  FBtnKind.Caption := '&Tick all of this kind';
+  FBtnKind.Align := alLeft;
+  FBtnKind.Width := 150;
+  FBtnKind.AlignWithMargins := True;
+  FBtnKind.OnClick := DoKindClick;
+
   FList.Items.BeginUpdate;
   try
     for var I := 0 to High(FFixes) do
@@ -5447,6 +5650,7 @@ begin
       Item := FList.Items.Add;
       Item.Data := Pointer(NativeInt(I));
       Item.Caption := IntToStr(FFixes[I].Line + 1);
+      Item.SubItems.Add(QuickFixKindText(FFixes[I].Kind));
       Item.SubItems.Add(FFixes[I].Caption);
       case FFixes[I].Kind of
         qfAddUnit:
@@ -5483,6 +5687,47 @@ end;
 procedure TQuickFixListDialog.DoDblClick(Sender: TObject);
 begin
   DoGotoClick(Sender);
+end;
+
+procedure TQuickFixListDialog.DoItemChecked(Sender: TObject; Item: TListItem);
+begin
+  var Any := False;
+  for var I := 0 to FList.Items.Count - 1 do
+    if FList.Items[I].Checked then Any := True;
+  FBtnApply.Enabled := Any;
+end;
+
+// ticks every fix of the SELECTED row's kind ("remove all unused variables")
+procedure TQuickFixListDialog.DoKindClick(Sender: TObject);
+begin
+  if FList.Selected = nil then
+  begin
+    ShowThemedMessage('Select a fix of the kind to tick first.');
+    Exit;
+  end;
+  var Kind := FFixes[NativeInt(FList.Selected.Data)].Kind;
+  for var I := 0 to FList.Items.Count - 1 do
+    if FFixes[NativeInt(FList.Items[I].Data)].Kind = Kind then
+      FList.Items[I].Checked := True;
+end;
+
+procedure TQuickFixListDialog.DoApplyClick(Sender: TObject);
+var
+  Ticked: TArray<TQuickFix>;
+  Report: string;
+begin
+  Ticked := nil;
+  for var I := 0 to FList.Items.Count - 1 do
+    if FList.Items[I].Checked then
+      Ticked := Ticked + [FFixes[NativeInt(FList.Items[I].Data)]];
+  if Length(Ticked) = 0 then Exit;
+  var Applied := ApplyQuickFixBatch(FileName, Ticked, nil, Report);
+  BatchReport := Format('%d of %d fix(es) applied (in the editor - Ctrl+Z undoes ' +
+    'them one by one).', [Applied, Length(Ticked)]);
+  if Report <> '' then
+    BatchReport := BatchReport + sLineBreak + sLineBreak + 'Not applied:' + sLineBreak + Report;
+  // the list is stale now - the live check re-analyses the unit
+  ModalResult := mrOk;
 end;
 
 procedure TQuickFixListDialog.DoCloseClick(Sender: TObject);
@@ -5538,8 +5783,11 @@ begin
 
   var Dlg := TQuickFixListDialog.CreateDialog(Application.MainForm, Fixes);
   try
+    Dlg.FileName := Ctx.FileName;
     Dlg.ShowModal;
-    if Dlg.HasChosen then
+    if Dlg.BatchReport <> '' then
+      ShowThemedMessage(Dlg.BatchReport)
+    else if Dlg.HasChosen then
     begin
       // Jump to the fix and open the regular chooser popup there - it
       // offers the unit choice / target section exactly like the caret

@@ -29,10 +29,51 @@ unit Expert.SemanticReplaceWizard;
 
 interface
 
+uses
+  Expert.SemanticReplace, Lsp.Client;
+
+type
+  TSemanticFilePlan = record
+    FileName: string;
+    Original: string;
+    Matches: TArray<TSemanticReplaceMatch>;
+    /// <summary>Parallel to Matches; empty = not verified (no DelphiLSP).</summary>
+    Verdicts: TArray<TMatchVerdict>;
+    Targets: TArray<TMatchTarget>;
+  end;
+
+  /// <summary>Progress + cancel: False stops the verification.</summary>
+  TSemanticReplaceProgress = reference to function(ACur, ATotal: Integer;
+    const AText: string): Boolean;
+
 procedure EditSemanticReplaceRules;
 procedure ApplySemanticReplacements_CurrentUnit;
 procedure ApplySemanticReplacements_SelectedUnits;
 procedure ApplySemanticReplacements_Project;
+
+/// <summary><project root>\semantic-replace.json ('' without a project).</summary>
+function SemanticRulesPath: string;
+
+/// <summary>Asks DelphiLSP for the declaration of every match's LAST
+///  identifier and decides per match (VerifyVerdicts over all matches of
+///  a rule). Sends each file's Original text (so the offsets fit) - safe
+///  on any thread. False = cancelled.</summary>
+function VerifySemanticPlans(AClient: TLspClient; var APlans: TArray<TSemanticFilePlan>;
+  const ARules: TArray<TSemanticReplaceRule>; const AProgress: TSemanticReplaceProgress;
+  out ADominant: TArray<string>): Boolean;
+
+/// <summary>Offsets of the matches that must NOT be replaced.</summary>
+function SemanticSkipOffsets(const APlan: TSemanticFilePlan; AIncludeUnverified: Boolean): TArray<Integer>;
+
+/// <summary>Human-readable verdict of one match.</summary>
+function SemanticVerdictText(AVerdict: TMatchVerdict; const ATarget: TMatchTarget;
+  const ARule: TSemanticReplaceRule): string;
+
+/// <summary>Main thread: writes APlan (skipping the unverified matches as
+///  asked) incl. the rules' uses units. Returns the number of replaced
+///  occurrences (0 = nothing written).</summary>
+function ApplySemanticPlan(const APlan: TSemanticFilePlan;
+  const ARules: TArray<TSemanticReplaceRule>; AIncludeUnverified: Boolean): Integer;
 
 implementation
 
@@ -40,12 +81,20 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.StrUtils, System.UITypes,
   System.Generics.Collections,
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls,
+  Winapi.Windows, System.Math,
   Expert.EditorHelperIntf, Expert.DialogHelper,
-  Expert.SemanticReplace, Expert.SemanticReplaceDialogs,
-  Delphi.FileEncoding;
+  Expert.SemanticReplaceDialogs, Expert.LspManager,
+  Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
 
 const
   CRulesFileName = 'semantic-replace.json';
+
+function SemanticRulesPath: string;
+begin
+  Result := '';
+  var Root := Editor.GetProjectRoot;
+  if Root <> '' then Result := IncludeTrailingPathDelimiter(Root) + CRulesFileName;
+end;
 
 function RulesFilePath(out APath: string): Boolean;
 var
@@ -242,83 +291,254 @@ begin
   Result := True;
 end;
 
-type
-  TFilePlan = record
-    FileName: string;
-    NewContent: string;
-    UsesToAdd: TArray<string>;
-    Stats: TSemanticReplaceStats;
-    Matches: TArray<TSemanticReplaceMatch>;
-    Original: string;
+function SemanticVerdictText(AVerdict: TMatchVerdict; const ATarget: TMatchTarget;
+  const ARule: TSemanticReplaceRule): string;
+begin
+  var Where := '';
+  if ATarget.TargetFile <> '' then
+    Where := Format('%s:%d', [ExtractFileName(ATarget.TargetFile), ATarget.TargetLine + 1]);
+  case AVerdict of
+    mvVerified: Result := 'verified -> ' + Where;
+    mvOtherSymbol: Result := 'SKIPPED: another symbol of that name -> ' + Where;
+    mvWrongUnit: Result := Format('SKIPPED: declared in %s, the rule expects %s',
+      [Where, ARule.DeclaredIn]);
+    mvNoAnswer: Result := 'NOT VERIFIED: DelphiLSP gave no answer (replaced only ' +
+      'with the checkbox)';
+  end;
+end;
+
+function VerifySemanticPlans(AClient: TLspClient; var APlans: TArray<TSemanticFilePlan>;
+  const ARules: TArray<TSemanticReplaceRule>; const AProgress: TSemanticReplaceProgress;
+  out ADominant: TArray<string>): Boolean;
+var
+  All: TArray<TMatchTarget>;
+
+  function Go(ACur, ATotal: Integer; const AText: string): Boolean;
+  begin
+    Result := (not Assigned(AProgress)) or AProgress(ACur, ATotal, AText);
   end;
 
-function BuildPreviewText(const APlans: TArray<TFilePlan>;
-  const ARules: TArray<TSemanticReplaceRule>): string;
+begin
+  Result := False;
+  ADominant := nil;
+  var Total := 0;
+  for var P in APlans do Inc(Total, Length(P.Matches));
+  var Done := 0;
+  All := nil;
+  for var PI := 0 to High(APlans) do
+  begin
+    var F := APlans[PI].FileName;
+    var Before := AClient.GetFileDiagnosticsVersion(F);
+    // the text the offsets belong to - not a re-read that could differ
+    if AClient.SyncDocumentWith(F, APlans[PI].Original) then
+    begin
+      var Cb: TSemanticReplaceProgress := AProgress;   // a nested routine cannot be captured
+      var Cur := Done;
+      AClient.WaitFileAnalysed(F, Before, 30000,
+        function: Boolean
+        begin
+          Result := (not Assigned(Cb)) or Cb(Cur, Total, 'Waiting for DelphiLSP to analyse ' +
+            ExtractFileName(F) + '...');
+        end);
+    end;
+    if not Go(Done, Total, ExtractFileName(F)) then Exit;
+    SetLength(APlans[PI].Targets, Length(APlans[PI].Matches));
+    for var MI := 0 to High(APlans[PI].Matches) do
+    begin
+      Inc(Done);
+      if not Go(Done, Total, Format('%s (%d/%d)', [ExtractFileName(F), Done, Total])) then Exit;
+      var M := APlans[PI].Matches[MI];
+      var T := Default(TMatchTarget);
+      T.RuleIdx := M.RuleIdx;
+      T.TargetLine := -1;
+      var L, C: Integer;
+      TSemanticReplaceEngine.OffsetToLineCol(APlans[PI].Original,
+        TSemanticReplaceEngine.VerifyOffset(ARules[M.RuleIdx], M), L, C);
+      var D: TArray<TLspLocation> := nil;
+      try
+        D := AClient.GotoDefinition(F, L - 1, C - 1);
+        // an EMPTY answer is retried briefly (the unit may still be in
+        // analysis), a wrong one never
+        var Dl := GetTickCount64 + UInt64(IfThen(MI = 0, 3000, 600));
+        while (Length(D) = 0) and (GetTickCount64 < Dl) do
+        begin
+          Sleep(150);
+          if not Go(Done, Total, Format('%s (%d/%d) - waiting for an answer',
+            [ExtractFileName(F), Done, Total])) then Exit;
+          D := AClient.GotoDefinition(F, L - 1, C - 1);
+        end;
+      except
+        D := nil;
+      end;
+      if Length(D) > 0 then
+      begin
+        T.TargetFile := TLspUri.FileUriToPath(D[0].Uri);
+        T.TargetLine := D[0].Range.Start.Line;
+      end;
+      APlans[PI].Targets[MI] := T;
+      All := All + [T];
+    end;
+  end;
+  // decide over ALL matches of a rule at once (the majority is project-wide)
+  var V := TSemanticReplaceEngine.VerifyVerdicts(ARules, All, ADominant);
+  var K := 0;
+  for var PI := 0 to High(APlans) do
+  begin
+    SetLength(APlans[PI].Verdicts, Length(APlans[PI].Matches));
+    for var MI := 0 to High(APlans[PI].Matches) do
+    begin
+      APlans[PI].Verdicts[MI] := V[K];
+      Inc(K);
+    end;
+  end;
+  Result := True;
+end;
+
+// The wizard's verification: the client of the project, a progress window.
+// ANote explains a verification that could not run. False = cancelled.
+function VerifyPlans(var APlans: TArray<TSemanticFilePlan>;
+  const ARules: TArray<TSemanticReplaceRule>; out ADominant: TArray<string>;
+  out ANote: string): Boolean;
+var
+  Client: TLspClient;
+  Prog: TCheckProgressWindow;
+begin
+  Result := True;
+  ANote := '';
+  ADominant := nil;
+  var Json := Editor.FindDelphiLspJson;
+  var Root := Editor.GetProjectRoot;
+  var Dproj := Editor.GetCurrentProjectDproj;
+  if (Json = '') or (Dproj = '') then
+  begin
+    ANote := 'No .delphilsp.json / project - the matches are NOT verified (text only).';
+    Exit;
+  end;
+  try
+    Client := TLspManager.Instance.GetClient(Root, Dproj, Json);
+  except
+    on E: Exception do
+    begin
+      ANote := 'DelphiLSP could not be started (' + E.Message + ') - the matches ' +
+        'are NOT verified (text only).';
+      Exit;
+    end;
+  end;
+  Prog := CreateCheckProgress('Semantic replace', Application.MainForm,
+    'Verifying the matches with DelphiLSP...');
+  try
+    Result := VerifySemanticPlans(Client, APlans, ARules,
+      function(ACur, ATotal: Integer; const AText: string): Boolean
+      begin
+        Prog.Step(ACur, ATotal, AText);
+        Result := Prog.Visible;
+      end, ADominant);
+  finally
+    Prog.Free;
+  end;
+end;
+
+// Offsets of the matches that must NOT be replaced.
+function SemanticSkipOffsets(const APlan: TSemanticFilePlan; AIncludeUnverified: Boolean): TArray<Integer>;
+begin
+  Result := nil;
+  if Length(APlan.Verdicts) = 0 then Exit;   // not verified at all: text only
+  for var I := 0 to High(APlan.Matches) do
+    case APlan.Verdicts[I] of
+      mvOtherSymbol, mvWrongUnit: Result := Result + [APlan.Matches[I].Offset];
+      mvNoAnswer: if not AIncludeUnverified then Result := Result + [APlan.Matches[I].Offset];
+    end;
+end;
+
+function BuildPreviewText(const APlans: TArray<TSemanticFilePlan>;
+  const ARules: TArray<TSemanticReplaceRule>; const ADominant: TArray<string>;
+  const ANote: string): string;
 var
   SB: TStringBuilder;
-  P: TFilePlan;
-  M: TSemanticReplaceMatch;
   Line, Col: Integer;
   Orig, NewLine: string;
-  RuleMap: TDictionary<Integer, Integer>;   // ruleIdx -> count
 begin
   SB := TStringBuilder.Create;
-  RuleMap := TDictionary<Integer, Integer>.Create;
   try
-    for P in APlans do
+    if ANote <> '' then SB.Append('!!! ').Append(ANote).AppendLine.AppendLine;
+    for var R := 0 to High(ARules) do
+      if (R <= High(ADominant)) and (ADominant[R] <> '') then
+      begin
+        if ARules[R].DeclaredIn <> '' then
+          SB.AppendFormat('Rule "%s": the symbol must be declared in %s', [ARules[R].Find,
+            ARules[R].DeclaredIn]).AppendLine
+        else
+          SB.AppendFormat('Rule "%s": the symbol is the one at %s (most matches lead there)',
+            [ARules[R].Find, ADominant[R]]).AppendLine;
+      end;
+    if Length(ADominant) > 0 then SB.AppendLine;
+    for var P in APlans do
     begin
-      SB.Append('=== ').Append(ExtractFileName(P.FileName)).Append(' ').AppendLine;
+      SB.Append('=== ').Append(ExtractFileName(P.FileName)).AppendLine;
       SB.Append('    ').Append(P.FileName).AppendLine.AppendLine;
-      if Length(P.UsesToAdd) > 0 then
+      for var I := 0 to High(P.Matches) do
       begin
-        SB.Append('    uses += ').Append(string.Join(', ', P.UsesToAdd))
-          .AppendLine.AppendLine;
-      end;
-      // Recompute rule-in-method counts to mirror local-var logic.
-      RuleMap.Clear;
-      for M in P.Matches do
-      begin
-        var Cnt: Integer;
-        if RuleMap.TryGetValue(M.RuleIdx, Cnt) then RuleMap[M.RuleIdx] := Cnt + 1
-        else RuleMap.Add(M.RuleIdx, 1);
-      end;
-      for M in P.Matches do
-      begin
+        var M := P.Matches[I];
         TSemanticReplaceEngine.OffsetToLineCol(P.Original, M.Offset, Line, Col);
         Orig := TSemanticReplaceEngine.LineAtOffset(P.Original, M.Offset);
         var R := ARules[M.RuleIdx];
-        var Replacement := R.Replace;
-        if (R.LocalVarName <> '') and (R.LocalVarType <> '') and
-           (R.LocalVarValue <> '') and (R.ReplaceWhenLocalVar <> '') and
-           RuleMap.ContainsKey(M.RuleIdx) and (RuleMap[M.RuleIdx] >= 2) then
-          Replacement := R.ReplaceWhenLocalVar;
-        // Replace the actual matched text inside the line for the
-        // "after" view; keep surrounding code intact.
-        NewLine := StringReplace(Orig, R.Find, Replacement, []);
-        SB.Append('    L').Append(Line).Append(':').AppendLine;
+        NewLine := StringReplace(Orig, R.Find, R.Replace, []);
+        SB.Append('    L').Append(Line);
+        if Length(P.Verdicts) > 0 then
+          SB.Append('  [').Append(SemanticVerdictText(P.Verdicts[I], P.Targets[I], R)).Append(']');
+        SB.AppendLine;
         SB.Append('      - ').Append(TrimLeft(Orig)).AppendLine;
-        SB.Append('      + ').Append(TrimLeft(NewLine)).AppendLine.AppendLine;
+        if (Length(P.Verdicts) = 0) or (P.Verdicts[I] in [mvVerified, mvNoAnswer]) then
+          SB.Append('      + ').Append(TrimLeft(NewLine)).AppendLine;
+        SB.AppendLine;
       end;
-      if P.Stats.LocalVarsIntroduced > 0 then
-        SB.Append('    -- ').Append(P.Stats.LocalVarsIntroduced)
-          .Append(' local var(s) will be hoisted right after BEGIN.')
-          .AppendLine.AppendLine;
     end;
     Result := SB.ToString;
   finally
-    RuleMap.Free;
     SB.Free;
   end;
+end;
+
+// Per-file uses to add: every rule that hit, deduped.
+function UsesForHits(const ARules: TArray<TSemanticReplaceRule>;
+  const AStats: TSemanticReplaceStats): TArray<string>;
+begin
+  Result := nil;
+  var Seen := TDictionary<string, Boolean>.Create;
+  try
+    for var Rh in AStats.RuleHits do
+      for var U in ARules[Rh].UsesToAdd do
+        if not Seen.ContainsKey(UpperCase(U)) then
+        begin
+          Seen.Add(UpperCase(U), True);
+          Result := Result + [U];
+        end;
+  finally
+    Seen.Free;
+  end;
+end;
+
+function ApplySemanticPlan(const APlan: TSemanticFilePlan;
+  const ARules: TArray<TSemanticReplaceRule>; AIncludeUnverified: Boolean): Integer;
+var
+  Stats: TSemanticReplaceStats;
+begin
+  var Content := TSemanticReplaceEngine.ApplyToText(APlan.Original, ARules,
+    SemanticSkipOffsets(APlan, AIncludeUnverified), Stats);
+  Result := Stats.Occurrences;
+  if Result = 0 then Exit;
+  var UsesToAdd := UsesForHits(ARules, Stats);
+  if Length(UsesToAdd) > 0 then
+    AddUsesToInterfaceClause(Content, UsesToAdd);
+  WriteSourceText(APlan.FileName, Content);
 end;
 
 procedure RunReplaceOver(const AFiles: TArray<string>);
 var
   Rules: TArray<TSemanticReplaceRule>;
-  Path: string;
-  Plans: TList<TFilePlan>;
-  TotalEdits, TotalLocalVars, TotalFiles: Integer;
-  Preview, Summary: string;
-  P: TFilePlan;
+  Path, Note: string;
+  Plans: TArray<TSemanticFilePlan>;
+  Dominant: TArray<string>;
 begin
   if Length(AFiles) = 0 then
   begin
@@ -327,80 +547,80 @@ begin
   if not EnsureRulesLoaded(Rules, Path) then Exit;
   Editor.SaveAllFiles;
 
-  Plans := TList<TFilePlan>.Create;
-  TotalEdits := 0;
-  TotalLocalVars := 0;
-  TotalFiles := 0;
+  // 1. the text matches
+  Plans := nil;
+  Screen.Cursor := crHourGlass;
   try
-    Screen.Cursor := crHourGlass;
-    try
-      for var F in AFiles do
-      begin
-        var Plan: TFilePlan;
-        Plan.FileName := F;
-        try
-          Plan.Original := ReadSourceText(F);
-        except
-          Continue;
-        end;
-        Plan.NewContent := TSemanticReplaceEngine.ApplyToText(
-          Plan.Original, Rules, Plan.Stats);
-        if Plan.Stats.Occurrences = 0 then Continue;
-        Plan.Matches := TSemanticReplaceEngine.FindAllMatches(Plan.Original, Rules);
-        // Per-file uses to add: every rule that hit, deduped.
-        Plan.UsesToAdd := nil;
-        var Seen: TDictionary<string, Boolean> :=
-          TDictionary<string, Boolean>.Create;
-        try
-          for var Rh in Plan.Stats.RuleHits do
-            for var U in Rules[Rh].UsesToAdd do
-              if not Seen.ContainsKey(UpperCase(U)) then
-              begin
-                Seen.Add(UpperCase(U), True);
-                Plan.UsesToAdd := Plan.UsesToAdd + [U];
-              end;
-        finally
-          Seen.Free;
-        end;
-        Plans.Add(Plan);
-        Inc(TotalEdits, Plan.Stats.Occurrences);
-        Inc(TotalLocalVars, Plan.Stats.LocalVarsIntroduced);
-        Inc(TotalFiles);
-      end;
-    finally
-      Screen.Cursor := crDefault;
-    end;
-
-    if TotalFiles = 0 then
+    for var F in AFiles do
     begin
-      ShowThemedMessage('No matches found.'); Exit;
-    end;
-
-    Preview := BuildPreviewText(Plans.ToArray, Rules);
-    Summary := Format(
-      '%d file(s), %d occurrence(s), %d local var(s) to hoist.',
-      [TotalFiles, TotalEdits, TotalLocalVars]);
-
-    if not TSemanticReplacePreviewDialog.Confirm(Application.MainForm,
-      Summary, Preview) then Exit;
-
-    Screen.Cursor := crHourGlass;
-    try
-      for P in Plans do
-      begin
-        var Content: string := P.NewContent;
-        if Length(P.UsesToAdd) > 0 then
-          AddUsesToInterfaceClause(Content, P.UsesToAdd);
-        WriteSourceText(P.FileName, Content);
+      var Plan := Default(TSemanticFilePlan);
+      Plan.FileName := F;
+      try
+        Plan.Original := ReadSourceText(F);
+      except
+        Continue;
       end;
-    finally
-      Screen.Cursor := crDefault;
+      Plan.Matches := TSemanticReplaceEngine.FindAllMatches(Plan.Original, Rules);
+      if Length(Plan.Matches) > 0 then Plans := Plans + [Plan];
     end;
-    ShowThemedMessage(Format('Applied to %d file(s), %d occurrence(s) replaced.',
-      [TotalFiles, TotalEdits]));
   finally
-    Plans.Free;
+    Screen.Cursor := crDefault;
   end;
+  if Length(Plans) = 0 then
+  begin
+    ShowThemedMessage('No matches found.'); Exit;
+  end;
+
+  // 2. which of them ARE the symbol (DelphiLSP)
+  if not VerifyPlans(Plans, Rules, Dominant, Note) then
+  begin
+    ShowThemedMessage('Semantic replace cancelled.');
+    Exit;
+  end;
+
+  // 3. preview
+  var Verified := 0;
+  var Other := 0;
+  var NoAnswer := 0;
+  var Unchecked := 0;
+  for var P in Plans do
+    if Length(P.Verdicts) = 0 then
+      Inc(Unchecked, Length(P.Matches))
+    else
+      for var V in P.Verdicts do
+        case V of
+          mvVerified: Inc(Verified);
+          mvOtherSymbol, mvWrongUnit: Inc(Other);
+          mvNoAnswer: Inc(NoAnswer);
+        end;
+  var Summary: string;
+  if Unchecked > 0 then
+    Summary := Format('%d file(s), %d occurrence(s) - NOT verified (text only).',
+      [Length(Plans), Unchecked])
+  else
+    Summary := Format('%d file(s): %d occurrence(s) verified and replaced, %d skipped ' +
+      '(another symbol), %d not verifiable.', [Length(Plans), Verified, Other, NoAnswer]);
+  var IncludeUnverified: Boolean;
+  if not TSemanticReplacePreviewDialog.Confirm(Application.MainForm, Summary,
+    BuildPreviewText(Plans, Rules, Dominant, Note), NoAnswer, IncludeUnverified) then Exit;
+
+  // 4. apply
+  var TotalFiles := 0;
+  var TotalEdits := 0;
+  Screen.Cursor := crHourGlass;
+  try
+    for var P in Plans do
+    begin
+      var N := ApplySemanticPlan(P, Rules, IncludeUnverified);
+      if N = 0 then Continue;
+      Inc(TotalFiles);
+      Inc(TotalEdits, N);
+    end;
+  finally
+    Screen.Cursor := crDefault;
+  end;
+  ShowThemedMessage(Format('Applied to %d file(s), %d occurrence(s) replaced.',
+    [TotalFiles, TotalEdits]));
 end;
 
 procedure ApplySemanticReplacements_CurrentUnit;

@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.5.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.6.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -180,7 +180,8 @@ Nested includes are expanded too, a trailing `//` comment in an include cannot s
 
 ### Move identifier to other unit (`Ctrl+Shift+M`)
 - Place the cursor on a top-level symbol to move: **type / class / interface / record**, **routine** (`function`/`procedure`), **constant**, **variable**, or **resource string**. For classes, the move includes the class declaration *and* every method-implementation block in the same unit (matched by `TClass.Method` qualifier; overloads with the same name move together).
-- A modal dialog lists the project's other `.pas` files; pick the target unit. Existing units only &mdash; new ones are not created.
+- A modal dialog lists the project's other `.pas` files; pick the target unit.
+- **Move to new unit...** (separate menu entry) creates the target instead: it asks for the unit name (created next to the current unit, a full path is accepted; the default for `TCustomerList` is `CustomerList`), writes an empty unit (UTF-8 with BOM, CRLF), adds it to the project and runs the same move. When only the moved *implementation* needs identifiers that stay in the source unit, the source goes into the new unit's `implementation uses`. When the *declaration* itself needs them (a field of a type that stays behind, say), the move is refused before anything is created &mdash; the new unit would have to use the source in its interface while the source uses the new unit, a circular unit reference. MCP tool: `move_to_new_unit`.
 - The engine performs the move:
   1. **Locate** the declaration range (interface section, including any preceding `type` / `var` / `const` keyword as appropriate) and the impl block range(s).
   2. **Collect required uses**: for each identifier referenced inside the moved range it asks `textDocument/definition` and records the declaring file's unit name. Identifiers that resolve to `System` (built-ins like `Length`, `IntToStr`, ...) are filtered out. Identifiers whose declaration falls **inside the moved range itself** (local vars, parameters, the symbol's own type members) are also filtered.
@@ -265,6 +266,13 @@ end;                             // I drops scope -> _Release -> FRefCount = 0 -
 ### Semantic replace (menu only)
 
 Project-wide find / replace driven by a per-project JSON rules file. Replaces dotted identifier expressions (typically the migration shape `Manager.Config.WriteConfig` &rarr; `TAppCentral.Get<IConfig>.WriteConfig`), keeps each file's `uses` clause in sync with what the rewrites need, and optionally hoists a local variable when the same rule fires multiple times in the same routine.
+
+**Every match is verified with DelphiLSP** (the declaration of the LAST identifier of `find`), so a local variable or another class that happens to spell the same path is never rewritten:
+
+- With the rule's optional **`declaredIn`** ("Vcl.Forms" or "Forms" &mdash; *Declared in unit* in the rule editor) the symbol must be declared in that unit.
+- Without it, all matches of a rule must lead to the **same declaration**: the most frequent one is the symbol, the others are listed as *SKIPPED: another symbol of that name*.
+- A match DelphiLSP gives **no answer** for (typically an inactive `{$IFDEF}` branch) is listed as *NOT VERIFIED* and replaced only when the preview's checkbox *Also replace the N occurrence(s) DelphiLSP could not verify* is ticked (off by default).
+- The preview shows the verdict per match; without a DelphiLSP session it says so and falls back to the old text-only behaviour. MCP tool: `semantic_replace` (report, `apply`, `include_unverified`).
 
 Reached via *Refactoring Light &rarr; Semantic replace*. The submenu mirrors the *Remove with* layout:
 
@@ -393,6 +401,7 @@ UI:
 - **Two complementary diagnostics sources (merged)**:
   - **Structure view (IDE)**: the IDE's own Error Insight, tapped via the official Structure-view API (`IOTAStructureView` + `IOTAStructureNotifier`) &mdash; fires live on every re-evaluation, so error-based fixes appear in step with the IDE's red squiggle, without needing a saved project. Carries **errors only**.
   - **Own LSP session (both hosts)**: a low-frequency poller pushes the (unsaved) buffer to the plugin's own DelphiLSP session once per idle buffer state (~1.5 s debounce) and collects the full diagnostics &mdash; the **only source of hint fixes** (H2443/H2164). Its result is the superset and replaces the structure result for the same buffer state (never the other way around), so hint fixes survive later Structure-view refreshes, reappear a few seconds after applying another fix, and show up right after opening a project &mdash; **no compile needed**. It never cold-starts the LSP by itself (it waits for the prewarmer), and a real compile still triggers an immediate refresh.
+- **Several fixes at once**: *Show all quick fixes...* lists every fix of the unit with its **kind**; tick fixes (or select one and press *Tick all of this kind*, e.g. every *Remove unused variable*) and *Apply ticked*. The batch runs bottom-up with the `uses`-clause fixes last; before each fix its line is located again (an earlier fix may have inserted or removed lines), and a fix whose line cannot be found is skipped and reported, never applied somewhere else. *Add unit* fixes with several candidate units are skipped (they need your choice). MCP tool: `apply_quick_fixes` (`kind` or `fix_ids`).
 - **Structure-view double-click**: double-clicking an error entry in the Structure pane's *Errors* node performs the IDE's normal jump-to-error and then opens the quick-fix popup right at the error position (a no-op when there is no fix for that line).
 - **On-demand entries** (editor context menu / Refactor menu / standalone menu):
   - *Add unit for identifier at cursor* &mdash; resolves the identifier under the caret (single candidate: applied immediately; several: chooser popup). The Refactor-menu entry is context-sensitive: it shows *"(N found)"* when the live check has fresh results and is disabled when the check is certain there is nothing to fix.

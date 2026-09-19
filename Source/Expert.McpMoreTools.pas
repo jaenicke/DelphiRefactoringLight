@@ -37,6 +37,7 @@ uses
   Expert.UsesGraph, Expert.DebugConsistency, Expert.DebugConsistencyDialog,
   Expert.VcsBlame, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
   Expert.PluginSettings, Expert.IncludeExpansion, Expert.InterfaceLinks,
+  Expert.SemanticReplace, Expert.SemanticReplaceWizard, Expert.MoveToUnit, Expert.SafeDelete,
   Expert.SafeDeletePlan, Lsp.Client, Lsp.Protocol, Lsp.Uri,
   Delphi.FileEncoding, Expert.PascalScanner;
 
@@ -1385,6 +1386,197 @@ begin
   Result := McpOk(Res);
 end;
 
+// ---------------------------------------------------------------------------
+//  Semantic replace (rules from <project>\semantic-replace.json)
+// ---------------------------------------------------------------------------
+
+function VerdictName(AVerdict: TMatchVerdict): string;
+begin
+  case AVerdict of
+    mvVerified: Result := 'verified';
+    mvOtherSymbol: Result := 'other_symbol';
+    mvWrongUnit: Result := 'wrong_unit';
+  else
+    Result := 'no_answer';
+  end;
+end;
+
+function ToolSemanticReplace(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Err, RulesPath, LoadErr: string;
+  Rules: TArray<TSemanticReplaceRule>;
+  Files: TArray<string>;
+  Plans: TArray<TSemanticFilePlan>;
+  Dominant: TArray<string>;
+  Client: TLspClient;
+begin
+  var DoApply := AArgs.GetValue<Boolean>('apply', False);
+  var IncludeUnverified := AArgs.GetValue<Boolean>('include_unverified', False);
+  var MaxRows := AArgs.GetValue<Integer>('max', 100);
+  Files := nil;
+  if AArgs.GetValue('files') is TJSONArray then
+    for var V in TJSONArray(AArgs.GetValue('files')) do
+      Files := Files + [ExpandFileName(V.Value)];
+  Plans := nil;
+  Client := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      RulesPath := SemanticRulesPath;
+      if (RulesPath = '') or not FileExists(RulesPath) then Exit;
+      Rules := TSemanticReplaceEngine.LoadRules(RulesPath, LoadErr);
+      if Length(Files) = 0 then Files := Editor.GetProjectSourceFiles;
+      for var F in Files do
+      begin
+        var P := Default(TSemanticFilePlan);
+        P.FileName := F;
+        if not McpReadContent(F, P.Original) then Continue;
+        P.Matches := TSemanticReplaceEngine.FindAllMatches(P.Original, Rules);
+        if Length(P.Matches) > 0 then Plans := Plans + [P];
+      end;
+      Client := TLspManager.Instance.PeekClient;
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if (RulesPath = '') or not FileExists(RulesPath) then
+    Exit(McpErr('no semantic-replace.json in the project root (' + RulesPath +
+      ') - create the rules in the IDE (Refactoring Light > Semantic replace > Edit rules)'));
+  if LoadErr <> '' then Exit(McpErr('the rules file is invalid: ' + LoadErr));
+
+  var Note := '';
+  if Client = nil then
+    Note := 'the plugin''s DelphiLSP session is not running - matches are NOT verified'
+  else if not VerifySemanticPlans(Client, Plans, Rules,
+    function(ACur, ATotal: Integer; const AText: string): Boolean
+    begin
+      Result := WaitForSingleObject(AStop, 0) <> WAIT_OBJECT_0;
+    end, Dominant) then
+    Exit(McpErr('cancelled'));
+
+  var Res := TJSONObject.Create;
+  Res.AddPair('rules_file', RulesPath);
+  if Note <> '' then Res.AddPair('note', Note);
+  var RA := TJSONArray.Create;
+  for var R := 0 to High(Rules) do
+  begin
+    var O := TJSONObject.Create;
+    O.AddPair('find', Rules[R].Find);
+    O.AddPair('replace', Rules[R].Replace);
+    if Rules[R].DeclaredIn <> '' then O.AddPair('declaredIn', Rules[R].DeclaredIn);
+    if (R <= High(Dominant)) and (Dominant[R] <> '') then O.AddPair('symbol', Dominant[R]);
+    RA.Add(O);
+  end;
+  Res.AddPair('rules', RA);
+  var Counts: array[TMatchVerdict] of Integer;
+  for var V := Low(TMatchVerdict) to High(TMatchVerdict) do Counts[V] := 0;
+  var MA := TJSONArray.Create;
+  var Rows := 0;
+  for var P in Plans do
+    for var I := 0 to High(P.Matches) do
+    begin
+      var Verdict := mvVerified;
+      if Length(P.Verdicts) > 0 then Verdict := P.Verdicts[I];
+      Inc(Counts[Verdict]);
+      if Rows >= MaxRows then Continue;
+      Inc(Rows);
+      var L, C: Integer;
+      TSemanticReplaceEngine.OffsetToLineCol(P.Original, P.Matches[I].Offset, L, C);
+      var O := TJSONObject.Create;
+      O.AddPair('file', P.FileName);
+      O.AddPair('line', TJSONNumber.Create(L));
+      O.AddPair('column', TJSONNumber.Create(C));
+      O.AddPair('text', Trim(TSemanticReplaceEngine.LineAtOffset(P.Original, P.Matches[I].Offset)));
+      O.AddPair('rule', Rules[P.Matches[I].RuleIdx].Find);
+      if Length(P.Verdicts) > 0 then
+      begin
+        O.AddPair('verdict', VerdictName(Verdict));
+        O.AddPair('detail', SemanticVerdictText(Verdict, P.Targets[I],
+          Rules[P.Matches[I].RuleIdx]));
+      end;
+      MA.Add(O);
+    end;
+  Res.AddPair('verified', TJSONNumber.Create(Counts[mvVerified]));
+  Res.AddPair('other_symbol', TJSONNumber.Create(Counts[mvOtherSymbol] + Counts[mvWrongUnit]));
+  Res.AddPair('no_answer', TJSONNumber.Create(Counts[mvNoAnswer]));
+  Res.AddPair('matches', MA);
+  if DoApply then
+  begin
+    var Replaced := 0;
+    var Changed := '';
+    if not McpRunOnMain(
+      procedure
+      begin
+        for var P in Plans do
+        begin
+          var Cur: string;
+          if not McpReadContent(P.FileName, Cur) or (Cur <> P.Original) then
+          begin
+            Changed := Changed + ExtractFileName(P.FileName) + ' ';
+            Continue;
+          end;
+          Inc(Replaced, ApplySemanticPlan(P, Rules, IncludeUnverified));
+        end;
+      end, False, AStop, Err, 120000) then
+    begin
+      Res.Free;
+      Exit(McpErr(Err));
+    end;
+    Res.AddPair('replaced', TJSONNumber.Create(Replaced));
+    if Changed <> '' then
+      Res.AddPair('skipped_changed_files', Trim(Changed));
+  end;
+  Result := McpOk(Res);
+end;
+
+// ---------------------------------------------------------------------------
+//  Move to new unit
+// ---------------------------------------------------------------------------
+
+function ToolMoveToNewUnit(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, NewUnit, Err: string;
+  L1, C1: Integer;
+begin
+  F := ExpandFileName(AArgs.GetValue<string>('file', ''));
+  L1 := AArgs.GetValue<Integer>('line', 0);
+  C1 := AArgs.GetValue<Integer>('column', 0);
+  NewUnit := Trim(AArgs.GetValue<string>('new_unit', ''));
+  if (AArgs.GetValue<string>('file', '') = '') or (L1 < 1) or (C1 < 1) or (NewUnit = '') then
+    Exit(McpErr('arguments "file", "line", "column" (1-based) and "new_unit" are required'));
+  if SameText(ExtractFileExt(NewUnit), '.pas') then NewUnit := ChangeFileExt(NewUnit, '');
+  var NewFile := NewUnit;
+  if ExtractFilePath(NewFile) = '' then NewFile := ExtractFilePath(F) + NewFile;
+  NewFile := NewFile + '.pas';
+  var Ok := False;
+  var Ident := '';
+  var Msg := '';
+  if not McpRunOnMain(
+    procedure
+    var
+      C: string;
+      Col0: Integer;
+    begin
+      if not McpReadContent(F, C) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      Ident := IdentifierAtPos(C.Replace(#13#10, #10).Split([#10]), L1 - 1, C1 - 1, Col0);
+      if Ident = '' then
+      begin
+        Msg := 'there is no identifier at that position';
+        Exit;
+      end;
+      Ok := TLspMoveToUnit.ExecuteToNewUnit(Ident, F, NewFile, Msg);
+    end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(Msg));
+  var Res := TJSONObject.Create;
+  Res.AddPair('moved', Ident);
+  Res.AddPair('new_unit', NewFile);
+  if Msg <> '' then Res.AddPair('note', Msg);
+  Res.AddPair('saved', 'The new unit was written to disk and added to the project; ' +
+    'the edited units are changed in the IDE (not saved).');
+  Result := McpOk(Res);
+end;
+
 initialization
   RegisterMcpTool('find_unit', ToolFindUnit);
   RegisterMcpTool('add_unit', ToolAddUnit);
@@ -1399,6 +1591,8 @@ initialization
   RegisterMcpTool('commit_info', ToolCommitInfo);
   RegisterMcpTool('rename_preview', ToolRenamePreview);
   RegisterMcpTool('rename_apply', ToolRenameApply);
+  RegisterMcpTool('semantic_replace', ToolSemanticReplace);
+  RegisterMcpTool('move_to_new_unit', ToolMoveToNewUnit);
 
 finalization
   // before the BPL unloads - the wizard holds no IDE references of its own

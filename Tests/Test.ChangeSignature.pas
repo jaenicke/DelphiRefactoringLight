@@ -29,13 +29,15 @@ type
     [Test] procedure TypeGraph_OverrideChain;
     [Test] procedure MemberDeclaration_AfterNestedClasses;
     [Test] procedure ReferenceKinds_Classified;
+    [Test] procedure BatchFixes_And_SemanticVerdicts;
   end;
 
 implementation
 
 uses
   System.SysUtils, System.Types, System.IOUtils, Expert.SignatureEdit, Expert.InterfaceLinks,
-  Expert.UnitIndex, Expert.ReferenceKind, Expert.PascalScanner;
+  Expert.UnitIndex, Expert.ReferenceKind, Expert.PascalScanner, Expert.SemanticReplace,
+  Expert.AutoImport;
 
 const
   Src: array[0..18] of string = (
@@ -375,6 +377,55 @@ begin
   if SymbolKindFromDeclLine('    property Count: Integer read FCount;', 'Count') <> rsData then KFails := KFails + ' sk-prop';
   if SymbolKindFromDeclLine('procedure TFoo.Run(A: Integer);', 'Run') <> rsProcedure then KFails := KFails + ' sk-impl';
   Assert.AreEqual('', KFails, 'reference kinds:' + KFails);
+end;
+
+
+procedure TChangeSignatureTests.BatchFixes_And_SemanticVerdicts;
+begin
+  var BFails := '';
+  // ---- semantic replace: the verdicts and leaving matches out
+  var SRules: TArray<TSemanticReplaceRule>;
+  SetLength(SRules, 2);
+  SRules[0].Find := 'A.Go'; SRules[0].Replace := 'B.Go';
+  SRules[1].Find := 'X.Run'; SRules[1].Replace := 'Y.Run'; SRules[1].DeclaredIn := 'Vcl.Forms';
+  var STargets: TArray<TMatchTarget>;
+  SetLength(STargets, 6);
+  STargets[0].RuleIdx := 0; STargets[0].TargetFile := 'C:\p\x.pas'; STargets[0].TargetLine := 10;
+  STargets[1].RuleIdx := 0; STargets[1].TargetFile := 'C:\p\x.pas'; STargets[1].TargetLine := 10;
+  STargets[2].RuleIdx := 0; STargets[2].TargetFile := 'C:\p\y.pas'; STargets[2].TargetLine := 3;
+  STargets[3].RuleIdx := 0; STargets[3].TargetFile := ''; STargets[3].TargetLine := -1;
+  STargets[4].RuleIdx := 1; STargets[4].TargetFile := 'C:\bds\Vcl.Forms.pas'; STargets[4].TargetLine := 5;
+  STargets[5].RuleIdx := 1; STargets[5].TargetFile := 'C:\p\Other.pas'; STargets[5].TargetLine := 1;
+  var SDom: TArray<string>;
+  var SV := TSemanticReplaceEngine.VerifyVerdicts(SRules, STargets, SDom);
+  if (SV[0] <> mvVerified) or (SV[1] <> mvVerified) or (SV[2] <> mvOtherSymbol) or
+     (SV[3] <> mvNoAnswer) or (SV[4] <> mvVerified) or (SV[5] <> mvWrongUnit) then
+    BFails := BFails + ' sr-verdicts';
+  if SDom[0] <> 'x.pas:11' then BFails := BFails + ' sr-dominant(' + SDom[0] + ')';
+  var SSrc := 'begin A.Go; A.Go; end';
+  var SMatches := TSemanticReplaceEngine.FindAllMatches(SSrc, [SRules[0]]);
+  var SStats: TSemanticReplaceStats;
+  if (Length(SMatches) <> 2) or (TSemanticReplaceEngine.ApplyToText(SSrc, [SRules[0]],
+     [SMatches[1].Offset], SStats) <> 'begin B.Go; A.Go; end') or (SStats.Occurrences <> 1) then
+    BFails := BFails + ' sr-skip';
+  if (Length(SMatches) = 2) and (TSemanticReplaceEngine.VerifyOffset(SRules[0], SMatches[0]) <>
+     SMatches[0].Offset + 2) then
+    BFails := BFails + ' sr-verify-offset';
+  // ---- batch quick fixes: order, relocation, a real batch
+  var BFixes: TArray<TQuickFix>;
+  SetLength(BFixes, 3);
+  BFixes[0].Kind := qfAddUnit; BFixes[0].Line := 20;
+  BFixes[1].Kind := qfRemoveVar; BFixes[1].Line := 5;
+  BFixes[2].Kind := qfRemoveVar; BFixes[2].Line := 12;
+  var BOrd := OrderFixesForBatch(BFixes);
+  if (BOrd[0].Line <> 12) or (BOrd[1].Line <> 5) or (BOrd[2].Kind <> qfAddUnit) then
+    BFails := BFails + ' batch-order';
+  if RelocateFixLine(['a', 'b', 'x', 'c'], 'x', 1, 1) <> 2 then BFails := BFails + ' reloc-delta';
+  if RelocateFixLine(['a', 'b', 'x', 'c'], 'x', 3, 0) <> 2 then BFails := BFails + ' reloc-near';
+  if RelocateFixLine(['a', 'b', 'c'], 'x', 1, 0) <> -1 then BFails := BFails + ' reloc-gone';
+  // (a real batch on a file runs in the console suite - it needs the
+  // editor stand-in that writes files; this project has none)
+  Assert.AreEqual('', BFails, BFails);
 end;
 
 initialization

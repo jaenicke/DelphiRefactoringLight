@@ -48,7 +48,23 @@ type
     LocalVarType: string;
     LocalVarValue: string;
     ReplaceWhenLocalVar: string;
+    /// <summary>Optional. The unit the matched symbol must be DECLARED in
+    ///  ("Vcl.Forms" or "Forms"): every match is verified through
+    ///  DelphiLSP and replaced only when the last identifier of Find leads
+    ///  into that unit. Without it, all matches of the rule must lead to
+    ///  the SAME declaration (the most frequent one wins, the others are
+    ///  skipped as a different symbol of the same name).</summary>
+    DeclaredIn: string;
   end;
+
+  /// <summary>What DelphiLSP said about one match (see VerifyVerdicts).</summary>
+  TMatchTarget = record
+    RuleIdx: Integer;
+    TargetFile: string;   // '' = DelphiLSP gave no answer
+    TargetLine: Integer;  // 0-based
+  end;
+
+  TMatchVerdict = (mvVerified, mvOtherSymbol, mvWrongUnit, mvNoAnswer);
 
   TSemanticReplaceMatch = record
     RuleIdx: Integer;
@@ -88,7 +104,29 @@ type
     ///  hit list.</summary>
     class function ApplyToText(const AOriginal: string;
       const ARules: TArray<TSemanticReplaceRule>;
-      out AStats: TSemanticReplaceStats): string;
+      out AStats: TSemanticReplaceStats): string; overload;
+    /// <summary>ApplyToText, leaving out the matches starting at an offset
+    ///  in ASkipOffsets (1-based) - they are not replaced and do not count
+    ///  for the local-var hoisting either.</summary>
+    class function ApplyToText(const AOriginal: string;
+      const ARules: TArray<TSemanticReplaceRule>; const ASkipOffsets: TArray<Integer>;
+      out AStats: TSemanticReplaceStats): string; overload;
+
+    /// <summary>1-based offset of the LAST identifier of the match (the one
+    ///  whose declaration is verified: "Manager.Config.WriteConfig" ->
+    ///  WriteConfig).</summary>
+    class function VerifyOffset(const ARule: TSemanticReplaceRule;
+      const AMatch: TSemanticReplaceMatch): Integer;
+
+    /// <summary>Pure decision per match from what DelphiLSP answered:
+    ///  with DeclaredIn the target file's unit must be that unit
+    ///  (mvWrongUnit otherwise); without it the most frequent target of
+    ///  the RULE is the symbol (ties: the first one met) and every other
+    ///  target is mvOtherSymbol. No answer is always mvNoAnswer. ADominant
+    ///  receives the chosen target per rule ('' = none) for the preview.</summary>
+    class function VerifyVerdicts(const ARules: TArray<TSemanticReplaceRule>;
+      const ATargets: TArray<TMatchTarget>;
+      out ADominant: TArray<string>): TArray<TMatchVerdict>;
 
     /// <summary>Writes the given rules back to a JSON file using the
     ///  same shape LoadRules expects.</summary>
@@ -197,6 +235,7 @@ begin
         Rule.LocalVarValue := LocalObj.GetValue<string>('value', '');
         Rule.ReplaceWhenLocalVar := LocalObj.GetValue<string>('replace', '');
       end;
+      Rule.DeclaredIn := Trim(Obj.GetValue<string>('declaredIn', ''));
       if Rule.Find <> '' then List.Add(Rule);
     end;
     Result := List.ToArray;
@@ -228,6 +267,7 @@ begin
       Obj := TJSONObject.Create;
       Obj.AddPair('find', R.Find);
       Obj.AddPair('replace', R.Replace);
+      if R.DeclaredIn <> '' then Obj.AddPair('declaredIn', R.DeclaredIn);
       if Length(R.UsesToAdd) > 0 then
       begin
         UsesArr := TJSONArray.Create;
@@ -581,6 +621,93 @@ end;
 class function TSemanticReplaceEngine.ApplyToText(const AOriginal: string;
   const ARules: TArray<TSemanticReplaceRule>;
   out AStats: TSemanticReplaceStats): string;
+begin
+  Result := ApplyToText(AOriginal, ARules, nil, AStats);
+end;
+
+class function TSemanticReplaceEngine.VerifyOffset(const ARule: TSemanticReplaceRule;
+  const AMatch: TSemanticReplaceMatch): Integer;
+begin
+  Result := AMatch.Offset + LastDelimiter('.', ARule.Find);
+end;
+
+class function TSemanticReplaceEngine.VerifyVerdicts(
+  const ARules: TArray<TSemanticReplaceRule>; const ATargets: TArray<TMatchTarget>;
+  out ADominant: TArray<string>): TArray<TMatchVerdict>;
+
+  function UnitOfFile(const AFile: string): string;
+  begin
+    Result := ChangeFileExt(ExtractFileName(AFile), '');
+  end;
+
+  // "Vcl.Forms" matches Vcl.Forms.pas; a short "Forms" matches it too
+  function InUnit(const AFile, AUnit: string): Boolean;
+  begin
+    var U := UnitOfFile(AFile);
+    Result := SameText(U, AUnit) or U.ToUpper.EndsWith('.' + AUnit.ToUpper);
+  end;
+
+  function Key(const T: TMatchTarget): string;
+  begin
+    Result := UpperCase(ExpandFileName(T.TargetFile)) + ':' + IntToStr(T.TargetLine);
+  end;
+
+begin
+  SetLength(Result, Length(ATargets));
+  SetLength(ADominant, Length(ARules));
+  for var R := 0 to High(ARules) do
+  begin
+    // the most frequent answered target of this rule
+    var Counts := TDictionary<string, Integer>.Create;
+    try
+      var Best := '';
+      var BestN := 0;
+      var BestLabel := '';
+      for var T in ATargets do
+        if (T.RuleIdx = R) and (T.TargetFile <> '') then
+        begin
+          var K := Key(T);
+          var N: Integer;
+          if not Counts.TryGetValue(K, N) then N := 0;
+          Inc(N);
+          Counts.AddOrSetValue(K, N);
+          if N > BestN then
+          begin
+            BestN := N;
+            Best := K;
+            BestLabel := Format('%s:%d', [ExtractFileName(T.TargetFile), T.TargetLine + 1]);
+          end;
+        end;
+      if ARules[R].DeclaredIn <> '' then
+        ADominant[R] := ARules[R].DeclaredIn
+      else
+        ADominant[R] := BestLabel;
+      for var I := 0 to High(ATargets) do
+      begin
+        if ATargets[I].RuleIdx <> R then Continue;
+        if ATargets[I].TargetFile = '' then
+          Result[I] := mvNoAnswer
+        else if ARules[R].DeclaredIn <> '' then
+        begin
+          if InUnit(ATargets[I].TargetFile, ARules[R].DeclaredIn) then
+            Result[I] := mvVerified
+          else
+            Result[I] := mvWrongUnit;
+        end
+        else if Key(ATargets[I]) = Best then
+          Result[I] := mvVerified
+        else
+          Result[I] := mvOtherSymbol;
+      end;
+    finally
+      Counts.Free;
+    end;
+  end;
+end;
+
+class function TSemanticReplaceEngine.ApplyToText(const AOriginal: string;
+  const ARules: TArray<TSemanticReplaceRule>; const ASkipOffsets: TArray<Integer>;
+  out AStats: TSemanticReplaceStats): string;
 type
   TPendingEdit = record
     Offset: Integer;       // 1-based, position in AOriginal
@@ -651,7 +778,9 @@ begin
   RuleHit := TDictionary<Integer, Boolean>.Create;
   BodyRuleCount := TDictionary<Int64, Integer>.Create;
   HoistedKeys := TDictionary<Int64, Boolean>.Create;
+  var Skip := TDictionary<Integer, Boolean>.Create;
   try
+    for var O in ASkipOffsets do Skip.AddOrSetValue(O, True);
     Bodies := FindMethodBodies(AOriginal);
 
     // Anonymous methods can't capture the nested IncBodyRule, so we
@@ -664,6 +793,7 @@ begin
         K: Int64;
         V: Integer;
       begin
+        if Skip.ContainsKey(AOffset) then Exit;   // not verified - left alone
         Mt.RuleIdx := ARuleIdx;
         Mt.Offset := AOffset;
         Mt.Length := Length(ARules[ARuleIdx].Find);
@@ -739,6 +869,7 @@ begin
     for var K in RuleHit.Keys do
       AStats.RuleHits := AStats.RuleHits + [K];
   finally
+    Skip.Free;
     HoistedKeys.Free;
     BodyRuleCount.Free;
     RuleHit.Free;

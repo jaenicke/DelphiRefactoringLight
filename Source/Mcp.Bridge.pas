@@ -115,7 +115,8 @@ begin
      (AName = 'find_implementations') or AName.StartsWith('uses_') or
      (AName = 'analyze_uses') or (AName = 'debug_consistency') or
      (AName = 'blame') or (AName = 'commit_info') or (AName = 'safe_delete') or
-     (AName = 'change_signature') then
+     (AName = 'change_signature') or (AName = 'semantic_replace') or
+     (AName = 'move_to_new_unit') or (AName = 'apply_quick_fixes') then
     Result := 300000
   else
     Result := ToolTimeoutMs;

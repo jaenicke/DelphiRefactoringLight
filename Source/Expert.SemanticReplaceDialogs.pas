@@ -24,7 +24,7 @@ uses
 type
   TSemanticReplaceRuleEditDialog = class(TForm)
   private
-    FEdtFind, FEdtReplace, FEdtUses: TEdit;
+    FEdtFind, FEdtReplace, FEdtUses, FEdtDeclaredIn: TEdit;
     FEdtVarName, FEdtVarType, FEdtVarValue, FEdtVarReplace: TEdit;
     FBtnOk, FBtnCancel: TButton;
     procedure BuildLayout;
@@ -80,12 +80,18 @@ type
     FMemo: TMemo;
     FBtnApply, FBtnCancel: TButton;
     FLblSummary: TLabel;
+    FChkUnverified: TCheckBox;
     procedure BuildLayout;
   public
     constructor CreateDialog(AOwner: TComponent;
       const ASummary, APreview: string);
     class function Confirm(AOwner: TComponent;
-      const ASummary, APreview: string): Boolean;
+      const ASummary, APreview: string): Boolean; overload;
+    /// <summary>With AUnverifiedCount > 0 a checkbox "also replace the N
+    ///  occurrence(s) DelphiLSP could not verify" is shown (off by
+    ///  default); AIncludeUnverified returns its state.</summary>
+    class function Confirm(AOwner: TComponent; const ASummary, APreview: string;
+      AUnverifiedCount: Integer; out AIncludeUnverified: Boolean): Boolean; overload;
   end;
 
 implementation
@@ -104,10 +110,11 @@ begin
   Position := poMainFormCenter;
   BorderStyle := bsDialog;
   ClientWidth := 700;
-  ClientHeight := 380;
+  ClientHeight := 412;
   BuildLayout;
 
   FEdtFind.Text := ARule.Find;
+  FEdtDeclaredIn.Text := ARule.DeclaredIn;
   FEdtReplace.Text := ARule.Replace;
   FEdtUses.Text := string.Join(', ', ARule.UsesToAdd);
   FEdtVarName.Text := ARule.LocalVarName;
@@ -142,6 +149,8 @@ begin
   Row('Find:',                              FEdtFind);
   Row('Replace:',                           FEdtReplace);
   Row('Uses (comma-separated):',            FEdtUses);
+  Row('Declared in unit (verify):',         FEdtDeclaredIn);
+  FEdtDeclaredIn.TextHint := 'optional - e.g. Vcl.Forms; empty = all matches must be the same symbol';
   Inc(Y, RowGap);
 
   Lbl := TLabel.Create(Self); Lbl.Parent := Self;
@@ -174,6 +183,7 @@ begin
   for S in string(FEdtUses.Text).Split([',']) do
     if Trim(S) <> '' then U := U + [Trim(S)];
   Result.UsesToAdd := U;
+  Result.DeclaredIn := Trim(FEdtDeclaredIn.Text);
   Result.LocalVarName := Trim(FEdtVarName.Text);
   Result.LocalVarType := Trim(FEdtVarType.Text);
   Result.LocalVarValue := Trim(FEdtVarValue.Text);
@@ -520,6 +530,11 @@ begin
   FBtnCancel.Anchors := [akRight, akTop];
   FBtnCancel.Caption := 'Cancel'; FBtnCancel.Cancel := True;
   FBtnCancel.ModalResult := mrCancel;
+  FChkUnverified := TCheckBox.Create(Self); FChkUnverified.Parent := PnlBottom;
+  FChkUnverified.SetBounds(8, 12, ClientWidth - 250, 20);
+  FChkUnverified.Anchors := [akLeft, akTop, akRight];
+  FChkUnverified.Checked := False;
+  FChkUnverified.Visible := False;
 
   FMemo := TMemo.Create(Self); FMemo.Parent := Self;
   FMemo.Align := alClient;
@@ -528,6 +543,28 @@ begin
   FMemo.WordWrap := False;
   FMemo.Font.Name := 'Consolas';
   FMemo.Font.Size := 10;
+end;
+
+class function TSemanticReplacePreviewDialog.Confirm(AOwner: TComponent;
+  const ASummary, APreview: string; AUnverifiedCount: Integer;
+  out AIncludeUnverified: Boolean): Boolean;
+var
+  Dlg: TSemanticReplacePreviewDialog;
+begin
+  AIncludeUnverified := False;
+  Dlg := TSemanticReplacePreviewDialog.CreateDialog(AOwner, ASummary, APreview);
+  try
+    if AUnverifiedCount > 0 then
+    begin
+      Dlg.FChkUnverified.Caption := Format('Also replace the %d occurrence(s) ' +
+        'DelphiLSP could not verify (e.g. inactive {$IFDEF} branches)', [AUnverifiedCount]);
+      Dlg.FChkUnverified.Visible := True;
+    end;
+    Result := Dlg.ShowModal = mrOk;
+    AIncludeUnverified := Result and Dlg.FChkUnverified.Visible and Dlg.FChkUnverified.Checked;
+  finally
+    Dlg.Free;
+  end;
 end;
 
 class function TSemanticReplacePreviewDialog.Confirm(AOwner: TComponent;

@@ -587,6 +587,20 @@ const
     '"line":{"type":"integer","description":"Only fixes anchored to this ' +
     '1-based line."},' + RefreshProp + ',' + InstanceProp + '}}},' +
 
+    '{"name":"apply_quick_fixes","description":"Applies SEVERAL quick fixes of one unit in one ' +
+    'go: every fix of a kind (\"remove_var\", \"insert_semi\", ... - the kind names get_quick_f' +
+    'ixes reports) or a list of fix ids. Applied bottom-up with the uses-clause fixes last; a f' +
+    'ix whose line moved away while the batch ran is skipped, never applied elsewhere. Refused ' +
+    'per fix (listed in not_applied): add_unit with several candidate units or a unit only on t' +
+    'he browsing path, remove_private (may need a confirmation in the IDE). Call get_quick_fixe' +
+    's for the file first; all its fix ids expire afterwards.","inputSchema":{"type":"object","' +
+    'properties":{"file":{"type":"string","description":"Absolute path of the unit."},"kind":{"' +
+    'type":"string","description":"Apply every fix of this kind, e.g. \"remove_var\"."},"fix_id' +
+    's":{"type":"array","items":{"type":"string"},"description":"Apply these fixes (ids from ge' +
+    't_quick_fixes)."},"instance":{"type":"integer","description":"Process id of the IDE to use' +
+    '. Normally omitted - the IDE is chosen automatically (see ide_instances)."}},"required":["' +
+    'file"]}}' +
+    ',' +
     '{"name":"apply_quick_fix",' +
     '"description":"Applies one fix from get_quick_fixes to the IDE editor ' +
     'buffer (the file is NOT saved). Fails when the buffer changed since ' +
@@ -779,6 +793,35 @@ const
     'itted - the IDE is chosen automatically (see ide_instances)."}},"required":["file","line",' +
     '"column"]}}' +
     ',' +
+    '{"name":"semantic_replace","description":"Semantic replace with the rules of <project root' +
+    '>\\semantic-replace.json (find/replace of dotted identifier paths, comment- and string-awa' +
+    're, uses units added, optional local-var hoisting). Every match is VERIFIED through Delphi' +
+    'LSP (the declaration of the last identifier): with a rule''s declaredIn it must be declared' +
+    ' in that unit, otherwise all matches of a rule must lead to the same declaration (the most' +
+    ' frequent one). Matches of another symbol are never replaced; matches DelphiLSP cannot res' +
+    'olve (inactive IFDEF branch) only with include_unverified. Without apply it only reports."' +
+    ',"inputSchema":{"type":"object","properties":{"files":{"type":"array","items":{"type":"str' +
+    'ing"},"description":"Units to process (default: all project units)."},"apply":{"type":"boo' +
+    'lean","description":"Replace (default false = report)."},"include_unverified":{"type":"boo' +
+    'lean","description":"Also replace matches DelphiLSP gave no answer for (default false)."},' +
+    '"max":{"type":"integer","description":"Max match rows in the result (default 100)."},"inst' +
+    'ance":{"type":"integer","description":"Process id of the IDE to use. Normally omitted - th' +
+    'e IDE is chosen automatically (see ide_instances)."}}}}' +
+    ',' +
+    '{"name":"move_to_new_unit","description":"Moves the declaration at a position (type, class' +
+    ' incl. its method implementations, routine, const, var) into a NEW unit: creates <new_unit' +
+    '>.pas (next to the file, or at the given path), adds it to the project, moves the code, ad' +
+    'ds the needed uses (the source unit goes into the new unit''s implementation uses when only' +
+    ' the moved implementation needs it) and updates the uses of the units using the symbol. Re' +
+    'fused when the declaration itself needs identifiers of the source unit (circular unit refe' +
+    'rence) - nothing is created then.","inputSchema":{"type":"object","properties":{"file":{"t' +
+    'ype":"string","description":"Absolute path of the unit."},"line":{"type":"integer","descri' +
+    'ption":"1-based line of the identifier."},"column":{"type":"integer","description":"1-base' +
+    'd column."},"new_unit":{"type":"string","description":"Name of the new unit (e.g. \"Custom' +
+    'er.List\") or a full path."},"instance":{"type":"integer","description":"Process id of the' +
+    ' IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}},"r' +
+    'equired":["file","line","column","new_unit"]}}' +
+    ',' +
     '{"name":"expand_includes","description":"Writes the content of every {$I}/{$INCLUDE} f' +
     'ile IN PLACE into the including source (for debugging), framed by marker comments that ke' +
     'ep the original directive (// >>> include begin: ... / // <<< include end: ...). Nested in' +
@@ -950,6 +993,8 @@ begin
     '(the IDE plugin''s rename incl. form files), uses_path / uses_cycles, ' +
     'safe_delete (check that nothing uses a symbol, then delete it), ' +
     'change_signature (add / remove / reorder / rename parameters incl. every call), ' +
+    'semantic_replace (rule-based replacements, every match verified by DelphiLSP), ' +
+    'move_to_new_unit, apply_quick_fixes (all fixes of a kind in one go), ' +
     'expand_includes (include files written into their units for debugging), ' +
     'convert_properties (field access <-> getter/setter), ' +
     'debug_consistency, blame / commit_info. The lsp_* tools talk to the ' +

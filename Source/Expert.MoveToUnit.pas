@@ -131,7 +131,18 @@ type
       const ASourceFile: string;
       const ARangesToScan: TArray<TPoint>;
       const AInSourceMovedRanges: TArray<TPoint>;
-      const ASourceUnit, ATargetUnit: string): TArray<string>;
+      const ASourceUnit, ATargetUnit: string): TArray<string>; overload;
+    /// <summary>As above; ASourceRefs receives the identifiers that are
+    ///  declared in the SOURCE unit itself (outside the moved ranges) -
+    ///  "Move to new unit" needs to know them.</summary>
+    class function CollectRequiredUnits(AClient: TLspClient;
+      const ASourceFile: string;
+      const ARangesToScan: TArray<TPoint>;
+      const AInSourceMovedRanges: TArray<TPoint>;
+      const ASourceUnit, ATargetUnit: string;
+      out ASourceRefs: TArray<string>): TArray<string>; overload;
+    class function ApplyPlanEx(const APlan: TMovePlan; ANewUnit: Boolean): Boolean;
+    class function LspClientFor(const ASourceFile: string): TLspClient;
   public
     /// <summary>Build a plan describing the move. ProblemDetail is set
     ///  if the move cannot be performed; returns False in that case.</summary>
@@ -144,7 +155,23 @@ type
     class function Execute(const ASymbol: string;
       const ASourceFile, ATargetFile: string;
       const AContext: TEditorContext): Boolean;
+    /// <summary>"Move to NEW unit": creates ANewFile (an empty unit, UTF-8
+    ///  with BOM, CRLF), refuses BEFORE any edit when the declaration
+    ///  itself needs identifiers of the source unit (the new unit would
+    ///  have to use the source in its interface while the source uses the
+    ///  new unit - a circular unit reference), adds the file to the active
+    ///  project and moves the symbol there. Identifiers of the source that
+    ///  only the moved IMPLEMENTATION needs put the source unit into the
+    ///  new unit's implementation uses. AError says why not.</summary>
+    class function ExecuteToNewUnit(const ASymbol, ASourceFile, ANewFile: string;
+      out AError: string): Boolean;
   end;
+
+/// <summary>Text of an empty unit AUnitName (CRLF line breaks).</summary>
+function EmptyUnitText(const AUnitName: string): string;
+
+/// <summary>'' when AName is a valid (dotted) unit name, else why not.</summary>
+function CheckNewUnitName(const AName: string): string;
 
 implementation
 
@@ -1392,6 +1419,19 @@ class function TLspMoveToUnit.CollectRequiredUnits(AClient: TLspClient;
   const AInSourceMovedRanges: TArray<TPoint>;
   const ASourceUnit, ATargetUnit: string): TArray<string>;
 var
+  Refs: TArray<string>;
+begin
+  Result := CollectRequiredUnits(AClient, ASourceFile, ARangesToScan,
+    AInSourceMovedRanges, ASourceUnit, ATargetUnit, Refs);
+end;
+
+class function TLspMoveToUnit.CollectRequiredUnits(AClient: TLspClient;
+  const ASourceFile: string;
+  const ARangesToScan: TArray<TPoint>;
+  const AInSourceMovedRanges: TArray<TPoint>;
+  const ASourceUnit, ATargetUnit: string;
+  out ASourceRefs: TArray<string>): TArray<string>;
+var
   Src: string;
   Clean: string;
   Lines: TArray<string>;
@@ -1412,6 +1452,7 @@ var
   end;
 
 begin
+  ASourceRefs := nil;
   Src := ReadFile(ASourceFile);
   Clean := StripCommentsAndStringsKeepNewlines(Src);
   Lines := SplitLines(Clean);
@@ -1499,6 +1540,9 @@ begin
                   P := Q;
                   Continue;
                 end;
+                // declared in the SOURCE unit and staying there
+                if SameText(ExpandFileName(DefPath), ExpandFileName(ASourceFile)) then
+                  ASourceRefs := ASourceRefs + [Tok];
                 DefUnit := ChangeFileExt(ExtractFileName(DefPath), '');
                 if (DefUnit <> '')
                   and not Seen.ContainsKey('U:' + UpperCase(DefUnit)) then
@@ -1622,6 +1666,26 @@ begin
 end;
 
 class function TLspMoveToUnit.ApplyPlan(const APlan: TMovePlan): Boolean;
+begin
+  Result := ApplyPlanEx(APlan, False);
+end;
+
+class function TLspMoveToUnit.LspClientFor(const ASourceFile: string): TLspClient;
+begin
+  Result := nil;
+  try
+    var DelphiLspJson := Editor.FindDelphiLspJson;
+    var RootPath := Editor.GetProjectRoot;
+    if RootPath = '' then RootPath := ExtractFilePath(ASourceFile);
+    var ProjFile := Editor.GetCurrentProjectDproj;
+    if (DelphiLspJson <> '') and (ProjFile <> '') then
+      Result := TLspManager.Instance.GetClient(RootPath, ProjFile, DelphiLspJson);
+  except
+    Result := nil;
+  end;
+end;
+
+class function TLspMoveToUnit.ApplyPlanEx(const APlan: TMovePlan; ANewUnit: Boolean): Boolean;
 var
   TargetUnit, SourceUnit: string;
   C: string;
@@ -1643,6 +1707,7 @@ begin
     var Client: TLspClient := nil;
     var DeclUnits: TArray<string>;
     var ImplUnits: TArray<string>;
+    var ImplSourceRefs: TArray<string> := nil;
     try
       var DelphiLspJson := Editor.FindDelphiLspJson;
       var RootPath := Editor.GetProjectRoot;
@@ -1674,7 +1739,7 @@ begin
       // don't promote private dependencies into the public surface).
       // Filter out ones already in DeclUnits later.
       ImplUnits := CollectRequiredUnits(Client, APlan.SourceFile,
-        ImplRange, Moved, SourceUnit, TargetUnit);
+        ImplRange, Moved, SourceUnit, TargetUnit, ImplSourceRefs);
     end;
 
     // 1) Add declaration + implementation blocks to TARGET first.
@@ -1697,6 +1762,10 @@ begin
       end;
       EnsureImplementationUses(APlan.TargetFile, ImplOnly);
     end;
+    // a NEW unit whose moved implementation uses what stays in the source:
+    // the source goes into ITS implementation uses (no interface cycle)
+    if ANewUnit and (Length(ImplSourceRefs) > 0) then
+      EnsureImplementationUses(APlan.TargetFile, [SourceUnit]);
 
     // 2) Remove declaration + implementation blocks from SOURCE - but only
     //    after the TARGET provably holds them. The removal is the one step
@@ -1760,6 +1829,99 @@ begin
   except
     on E: Exception do
       MessageDlg('Move failed: ' + E.Message, mtError, [mbOK], 0);
+  end;
+end;
+
+function EmptyUnitText(const AUnitName: string): string;
+begin
+  Result := 'unit ' + AUnitName + ';' + #13#10 + #13#10 + 'interface' + #13#10 + #13#10 +
+    'implementation' + #13#10 + #13#10 + 'end.' + #13#10;
+end;
+
+function CheckNewUnitName(const AName: string): string;
+begin
+  Result := '';
+  if AName = '' then Exit('enter a unit name');
+  for var Part in AName.Split(['.']) do
+  begin
+    if Part = '' then Exit('empty part in the dotted name');
+    if not (CharInSet(Part[1], ['A'..'Z', 'a'..'z', '_'])) then
+      Exit('"' + Part + '" does not start with a letter');
+    for var Ch in Part do
+      if not CharInSet(Ch, ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+        Exit('"' + Ch + '" is not allowed in a unit name');
+  end;
+end;
+
+class function TLspMoveToUnit.ExecuteToNewUnit(const ASymbol, ASourceFile,
+  ANewFile: string; out AError: string): Boolean;
+var
+  Plan: TMovePlan;
+begin
+  Result := False;
+  AError := '';
+  var UnitName := ChangeFileExt(ExtractFileName(ANewFile), '');
+  var NameProblem := CheckNewUnitName(UnitName);
+  if NameProblem <> '' then
+  begin
+    AError := NameProblem;
+    Exit;
+  end;
+  if FileExists(ANewFile) then
+  begin
+    AError := ANewFile + ' already exists - use "Move to unit..." to move into it';
+    Exit;
+  end;
+  if not DirectoryExists(ExtractFileDir(ANewFile)) then
+  begin
+    AError := 'the folder does not exist: ' + ExtractFileDir(ANewFile);
+    Exit;
+  end;
+  Editor.SaveAllFiles;
+  TDelphiFileEncoding.WriteAll(ANewFile, EmptyUnitText(UnitName), TEncoding.UTF8);
+  var Keep := False;
+  try
+    if not BuildPlan(ASymbol, ASourceFile, ANewFile, Plan) then
+    begin
+      AError := Plan.ProblemDetail;
+      if AError = '' then AError := 'the declaration of ' + ASymbol + ' was not found';
+      Exit;
+    end;
+    // the declaration must not need the source unit (circular reference)
+    var Client := LspClientFor(ASourceFile);
+    if Client <> nil then
+    begin
+      var DeclRange: TArray<TPoint> := [Point(Plan.DeclStartLine, Plan.DeclEndLine)];
+      var Moved := DeclRange;
+      for var K := 0 to High(Plan.ImplBlocks) do
+        Moved := Moved + [Point(Plan.ImplStartLines[K], Plan.ImplEndLines[K])];
+      var Refs: TArray<string>;
+      CollectRequiredUnits(Client, ASourceFile, DeclRange, Moved,
+        UnitNameOfFile(ASourceFile), UnitName, Refs);
+      if Length(Refs) > 0 then
+      begin
+        AError := Format('the declaration of %s uses %s from %s. The new unit would ' +
+          'need %s in its interface uses while %s uses the new unit - a circular ' +
+          'unit reference. Move those together (one after the other into the ' +
+          'same new unit) or move %s into an existing unit.',
+          [ASymbol, string.Join(', ', Refs), UnitNameOfFile(ASourceFile),
+           UnitNameOfFile(ASourceFile), UnitNameOfFile(ASourceFile), ASymbol]);
+        Exit;
+      end;
+    end;
+    Keep := True;
+    if not Editor.AddFileToActiveProject(ANewFile) then
+      AError := 'moved, but ' + ExtractFileName(ANewFile) + ' could not be added to ' +
+        'the project - add it yourself';
+    Result := ApplyPlanEx(Plan, True);
+    if not Result and (AError = '') then AError := 'the move could not be applied';
+  finally
+    // nothing happened: the empty file must not stay behind
+    if not Keep then
+      try
+        System.SysUtils.DeleteFile(ANewFile);
+      except
+      end;
   end;
 end;
 

@@ -46,6 +46,7 @@ uses
   Expert.PropertyConvert in '..\Source\Expert.PropertyConvert.pas',
   Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
   Expert.ReferenceKind in '..\Source\Expert.ReferenceKind.pas',
+  Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
   Test.UserIdeas13 in 'Test.UserIdeas13.pas',
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',

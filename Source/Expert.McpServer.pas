@@ -777,6 +777,124 @@ begin
   Result := OkResult(Res);
 end;
 
+// Several fixes of one file in one go: every fix of a KIND ("remove_var")
+// or a list of ids. Same rules as apply_quick_fix - what would need a
+// dialog in the IDE is refused, per fix, with the reason.
+function ToolApplyQuickFixes(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Kind, Err: string;
+  Ids: TArray<string>;
+  Res: TJSONObject;
+begin
+  if AArgs = nil then Exit(ErrResult('argument "file" is required'));
+  F := AArgs.GetValue<string>('file', '');
+  Kind := AArgs.GetValue<string>('kind', '');
+  Ids := nil;
+  if AArgs.GetValue('fix_ids') is TJSONArray then
+    for var V in TJSONArray(AArgs.GetValue('fix_ids')) do
+      Ids := Ids + [V.Value];
+  if F = '' then Exit(ErrResult('argument "file" is required'));
+  if (Kind = '') and (Length(Ids) = 0) then
+    Exit(ErrResult('give "kind" (e.g. "remove_var", see get_quick_fixes) or "fix_ids"'));
+  F := ExpandFileName(F);
+
+  Res := nil;
+  var Msg := '';
+  var Ok := RunOnMain(
+    procedure
+    var
+      C, Report: string;
+      Fixes, Chosen: TArray<TQuickFix>;
+    begin
+      if not ReadContent(F, C) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      var Cur := DiagContentHash(C);
+      if not CachedFixes(F, Cur, Fixes) then
+      begin
+        Msg := 'no current fix list for this buffer state - call get_quick_fixes ' +
+          'for this file first (fix lists expire with every edit)';
+        Exit;
+      end;
+      Chosen := nil;
+      for var I := 0 to High(Fixes) do
+      begin
+        var Take := (Kind <> '') and SameText(FixKindName(Fixes[I].Kind), Kind);
+        for var Id in Ids do
+        begin
+          var H: Cardinal;
+          var Idx: Integer;
+          if ParseFixId(Id, H, Idx) and (H = Cur) and (Idx = I) then Take := True;
+        end;
+        if Take then Chosen := Chosen + [Fixes[I]];
+      end;
+      if Length(Chosen) = 0 then
+      begin
+        Msg := 'no fix of this file matches (kind "' + Kind + '", ' +
+          IntToStr(Length(Ids)) + ' id(s)) - ids expire with every edit';
+        Exit;
+      end;
+      var WasLoaded := LoadedModule(F) <> nil;
+      var Applied := ApplyQuickFixBatch(F, Chosen,
+        function(const AFix: TQuickFix): string
+        var
+          Path: string;
+        begin
+          Result := '';
+          if AFix.Kind = qfRemovePrivate then
+            Exit('removing a private member can delete a non-empty body, which ' +
+              'needs a confirmation in the IDE - use apply_quick_fix per member');
+          if (AFix.Kind = qfAddUnit) and (Length(AFix.UnitNames) = 1) then
+          begin
+            var Snap := TUnitIndex.Instance.Snapshot;
+            if (Snap <> nil) and Snap.TryGetUnitPath(AFix.UnitNames[0], Path) and
+               (CheckUnitAvailability(AFix.UnitNames[0], Path) = uaBrowsingOnly) then
+              Exit(AFix.UnitNames[0] + ' is only on the BROWSING path - the compiler ' +
+                'would not find it');
+          end;
+        end, Report);
+      var SavedToDisk := False;
+      if not WasLoaded then
+      begin
+        SavedToDisk := Applied > 0;
+        if not ReleaseHeadlessModule(F, SavedToDisk) then
+        begin
+          Msg := 'the fixes were applied but ' + F + ' could not be saved';
+          Exit;
+        end;
+      end;
+      var After := '';
+      ReadContent(F, After);
+      Res := TJSONObject.Create;
+      Res.AddPair('file', F);
+      Res.AddPair('selected', TJSONNumber.Create(Length(Chosen)));
+      Res.AddPair('applied', TJSONNumber.Create(Applied));
+      var Skipped := TJSONArray.Create;
+      for var L in Report.Split([sLineBreak]) do
+        if Trim(L) <> '' then Skipped.Add(L);
+      Res.AddPair('not_applied', Skipped);
+      Res.AddPair('revision', IntToHex(DiagContentHash(After), 8));
+      Res.AddPair('savedToDisk', TJSONBool.Create(SavedToDisk));
+      Res.AddPair('note', 'Applied bottom-up, uses-clause fixes last; a fix whose ' +
+        'line moved away is skipped, never applied elsewhere. Fix ids of this file ' +
+        'have expired - call get_quick_fixes again.');
+      if SavedToDisk then
+        Res.AddPair('saved', 'The file was not open in the IDE, so the changes ' +
+          'were written to DISK.')
+      else
+        Res.AddPair('saved', 'The editor buffer was changed and is NOT saved.');
+    end, False, AStop, Err);
+  if not Ok then Exit(ErrResult(Err));
+  if Msg <> '' then
+  begin
+    Res.Free;
+    Exit(ErrResult(Msg));
+  end;
+  Result := OkResult(Res);
+end;
+
 // ---------------------------------------------------------------------------
 //  Buffers: IDE editor buffers and in-memory scratch units
 // ---------------------------------------------------------------------------
@@ -1347,8 +1465,8 @@ end;
 // ---- per-tool statistics (tools window) ----------------------------------
 
 const
-  BuiltinTools: array[0..11] of string = ('get_diagnostics', 'get_quick_fixes',
-    'apply_quick_fix', 'buffer_open', 'buffer_read', 'buffer_edit',
+  BuiltinTools: array[0..12] of string = ('get_diagnostics', 'get_quick_fixes',
+    'apply_quick_fix', 'apply_quick_fixes', 'buffer_open', 'buffer_read', 'buffer_edit',
     'buffer_list', 'buffer_close', 'buffer_save', 'get_status',
     'scratch_analyze', 'scratch_close');
 
@@ -1477,6 +1595,7 @@ begin
     if Tool = 'get_diagnostics' then Result := ToolGetDiagnostics(Args, AStop)
     else if Tool = 'get_quick_fixes' then Result := ToolGetQuickFixes(Args, AStop)
     else if Tool = 'apply_quick_fix' then Result := ToolApplyQuickFix(Args, AStop)
+    else if Tool = 'apply_quick_fixes' then Result := ToolApplyQuickFixes(Args, AStop)
     else if Tool = 'buffer_open' then Result := ToolBufferOpen(Args, AStop)
     else if Tool = 'buffer_read' then Result := ToolBufferRead(Args, AStop)
     else if Tool = 'buffer_edit' then Result := ToolBufferEdit(Args, AStop)

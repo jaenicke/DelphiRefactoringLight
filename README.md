@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.3.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.3.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -592,6 +592,8 @@ DelphiRefactoringLight/
 ## Tests
 
 `Tests\` holds a DUnitX project (`DelphiRefactoringLightTests.dproj`) for the IDE-free layer: scanners, parsers, the `uses` editor, the quick-fix providers, file encoding and URI conversion. Neither the IDE nor DelphiLSP is needed. Run `Tests\run-tests.cmd` (Win32) or `Tests\run-tests.cmd Win64`; the exit code is 0 when every test passes.
+
+**Line endings and encoding**: every Delphi source is UTF-8 with BOM and uses CRLF. `.gitattributes` pins CRLF on checkout for sources, projects, scripts and documents (text form files only when they are not binary; `.res` & co are binary), independent of your `core.autocrlf`. The test `TRepoHygieneTests` fails when a source without BOM or with LF line endings appears. LF-only sources are not cosmetic: the debugger can put breakpoints on the wrong lines.
 
 ## Contributors
 

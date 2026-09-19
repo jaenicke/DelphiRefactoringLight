@@ -1,0 +1,52 @@
+# Line endings and binary files (issue #11, repository hygiene).
+#
+# The repository stores text normalized (LF); every checkout gets CRLF for
+# the Delphi and Windows files below - independent of the committer's
+# core.autocrlf. LF-only sources are not cosmetic: the debugger can put
+# breakpoints on the wrong lines (the plugin's own "Debug consistency" check
+# reports them for exactly that reason).
+#
+# Encoding: the sources are UTF-8 WITH BOM. There is deliberately no
+# working-tree-encoding here - UTF-8 to UTF-8 would convert nothing; the BOM
+# and the CRLF state are guarded by the DUnitX test TRepoHygieneTests
+# (Tests\Test.RepoHygiene.pas).
+
+# anything not listed: Git decides text/binary, line endings follow autocrlf
+*            text=auto
+
+# Delphi sources and projects
+*.pas        text eol=crlf
+*.inc        text eol=crlf
+*.dpr        text eol=crlf
+*.dpk        text eol=crlf
+*.dproj      text eol=crlf
+*.groupproj  text eol=crlf
+*.dof        text eol=crlf
+*.cfg        text eol=crlf
+
+# form files: TEXT forms get CRLF, a BINARY form (NUL bytes) must never be
+# converted - text=auto lets Git look at the content first
+*.dfm        text=auto eol=crlf
+*.fmx        text=auto eol=crlf
+
+# scripts and documents
+*.cmd        text eol=crlf
+*.bat        text eol=crlf
+*.ps1        text eol=crlf
+*.xml        text eol=crlf
+*.md         text eol=crlf
+*.txt        text eol=crlf
+*.json       text eol=crlf
+
+# binaries
+*.res        binary
+*.dcu        binary
+*.dcp        binary
+*.bpl        binary
+*.exe        binary
+*.dll        binary
+*.ico        binary
+*.png        binary
+*.bmp        binary
+*.jpg        binary
+*.zip        binary

@@ -134,6 +134,7 @@ type
     procedure OnExtractVariable(Sender: TObject);
     procedure OnWrapTryFinally(Sender: TObject);
     procedure OnSafeDelete(Sender: TObject);
+    procedure OnChangeSignature(Sender: TObject);
     procedure OnConvertProperties(Sender: TObject);
     procedure OnExpandIncludesCurrent(Sender: TObject);
     procedure OnExpandIncludesSelected(Sender: TObject);
@@ -235,7 +236,7 @@ uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete, Expert.IncludeExpander,
-  Expert.PropertyConvertWizard;
+  Expert.PropertyConvertWizard, Expert.ChangeSignature;
 
 
 
@@ -434,6 +435,7 @@ begin
   Plain(Root, 'Extract variable...',      OnExtractVariable,      REQ_EDITOR);
   Plain(Root, 'Wrap in try..finally',     OnWrapTryFinally,       REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
+  Plain(Root, 'Change signature...',      OnChangeSignature,      REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
   Plain(Root, 'Safe delete...',           OnSafeDelete,           REQ_EDITOR);
   Plain(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties, REQ_EDITOR);
@@ -1537,6 +1539,11 @@ end;
 procedure TContextMenuInstaller.OnSafeDelete(Sender: TObject);
 begin
   SafeDeleteAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnChangeSignature(Sender: TObject);
+begin
+  ChangeSignatureAtCursor;
 end;
 
 procedure TContextMenuInstaller.OnConvertProperties(Sender: TObject);

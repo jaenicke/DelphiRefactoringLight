@@ -73,6 +73,11 @@ function ApplySafeDeleteEdits(const ALines: TArray<string>;
 ///  references. Deliberately text-level: a form binds by NAME.</summary>
 function FormTextMentions(const AText, AName: string): TArray<Integer>;
 
+/// <summary>Words after the signature's ';' on the header's last line
+///  AHdrEnd (+ the following lines that only hold directives):
+///  ' virtual; overload;' - test with a whole-word search.</summary>
+function HeaderDirectives(const ALines: TArray<string>; AStart, AHdrEnd: Integer): string;
+
 /// <summary>Human-readable kind ("method", "field", ...).</summary>
 function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 

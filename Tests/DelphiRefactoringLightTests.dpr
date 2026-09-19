@@ -44,10 +44,12 @@ uses
   Expert.IncludeExpansion in '..\Source\Expert.IncludeExpansion.pas',
   Expert.InterfaceLinks in '..\Source\Expert.InterfaceLinks.pas',
   Expert.PropertyConvert in '..\Source\Expert.PropertyConvert.pas',
+  Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
   Test.UserIdeas13 in 'Test.UserIdeas13.pas',
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
-  Test.Issue11 in 'Test.Issue11.pas';
+  Test.Issue11 in 'Test.Issue11.pas',
+  Test.ChangeSignature in 'Test.ChangeSignature.pas';
 
 var
   Runner: ITestRunner;

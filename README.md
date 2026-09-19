@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.3.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.4.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -16,6 +16,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | *(menu only)*          | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
 | *(menu only)*          | **Convert properties** &mdash; switch the selected properties between direct field access and getter / setter methods, in both directions |
 | *(menu only)*          | **Expand include files** &mdash; write the content of `{$I}` files into their units (current unit, selected units, a directory or the whole project) so the code can be debugged where it runs |
+| *(menu only)*          | **Change signature** &mdash; add, remove, reorder or rename parameters, change their type, modifier or default value; every header of the method's family (interfaces, implementing classes, overrides) and every call site verified via DelphiLSP change with it |
 | *(menu only)*          | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
@@ -132,6 +133,14 @@ In the last three weeks I tested with big projects and used it myself in real li
 - **Extract variable**: select an expression on one line; the plugin proposes a name (`Foo.Bar.Count` &rarr; `LCount`), declares `var LCount := Foo.Bar.Count;` right before the **statement** that contains it and replaces the selection. Deliberately never at the routine's `begin`, and refused where even the statement start would change the meaning: after a short-circuit `and`/`or` (`if Assigned(X) and (X.Foo > 0)` would dereference nil), in a loop condition, in a branch or loop body on the same line, as the only statement of a `then`/`else`/`do` branch, on a `case` branch, inside a `with`, or when the name is already used in the routine. Uses Delphi's inline variables (10.3+).
 - **Wrap in try..finally**: select complete statements; they move into a `try` block, and the `finally` part is inferred from the statement right before them &mdash; `X := TFoo.Create` &rarr; `X.Free`, `X.BeginUpdate` &rarr; `X.EndUpdate`, `X.Enter`/`Acquire`/`Lock` &rarr; `Leave`/`Release`/`Unlock`, `TMonitor.Enter(X)` &rarr; `TMonitor.Exit(X)`, otherwise a TODO comment. Only wrapper lines are added, so a wrong guess is a compile error, never silent damage. Selections with an unbalanced `begin`/`try`/`case`..`end` are refused.
 - Both write through the editor (undoable) and are not saved.
+
+### Change signature (menu only)
+Put the caret on a method or routine - its declaration, implementation or any call - and choose **Change signature...**. The dialog shows the parameters in a grid: edit modifier, name, type and default value, **Add** a parameter (with the value existing calls should pass, unless it has a default), **Remove** one, or move them **up / down**. The preview below updates as you type and lists every edit with the resulting line.
+- **The whole family changes together**: declaration and implementation; for a class method the interface methods it implements and the other classes implementing them; for an interface method every implementing class; for a `virtual` / `override` method the whole override chain (a descendant that hides the method without `override` is left alone and named).
+- **Calls** are found like in Safe delete: every whole-word occurrence is asked where it leads, only those DelphiLSP attributes to the family are changed. Arguments are reordered, values for new parameters inserted, and a default value a call relied on is written out when the parameter moves or its default changes. A call without parentheses (`Obj.Foo;`) gets them when it needs arguments now. `inherited Foo(...)` inside an override passes the new parameters on by name. An occurrence DelphiLSP cannot resolve (inactive `{$IFDEF}` branch) is listed as NOT VERIFIED and left for you.
+- **Renamed parameters** are followed into the method bodies (not after a `.`, not in comments or strings); a parameter that has a different name in another implementing class keeps it there.
+- **Refused**, with the place: overloaded and `message` methods, event handlers bound in a form file, a method used as a method reference (`OnClick := Foo`, `@Foo`) or as a property accessor when the change is more than a rename, a removed parameter still used in a body, a new name that already means something in a body, a parameter list that contains a comment or directive, headers whose parameter counts already differ, declarations in the RTL / VCL. The result type is not changed.
+- **Apply** re-checks that none of the touched files changed since the analysis, then writes all of them (open units in the editor, undoable, not saved; closed units on disk). The MCP tool `change_signature` does the same for Claude Code: without `params` it reports parameters, family and calls, with `params` the plan, `apply=true` writes it.
 
 ### Safe delete (menu only)
 Put the caret on a symbol - its declaration or any use - and choose **Safe delete...**. The plugin deletes the declaration (and the implementation of a method or routine) only after proving that **nothing uses it**:
@@ -494,6 +503,8 @@ DelphiRefactoringLight/
 |   |-- Expert.FindImplementationsWizard.pas # Find-implementations wizard
 |   |-- Expert.SafeDeletePlan.pas            # Safe delete: what would be removed, vetoes (pure)
 |   |-- Expert.SafeDelete.pas                # Safe delete: usage check via DelphiLSP, dialog, MCP tool
+|   |-- Expert.SignatureEdit.pas             # Change signature: parameter / argument lists, call classification, the plan (pure)
+|   |-- Expert.ChangeSignature.pas           # Change signature: family, verified calls, dialog, MCP tool
 |   |-- Expert.SignatureCheck.pas            # Signature collection / normalization
 |   |-- Expert.SignatureCheckDialog.pas      # Align-signature dialog
 |   |-- Expert.SignatureCheckWizard.pas      # Align-signature wizard

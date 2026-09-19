@@ -350,7 +350,7 @@ begin
     S.Free;
   end;
   if Length(Toks) = 0 then Exit;
-  var I := 0;
+  var I: Integer;
   if Toks[0].IsWord('class') then
   begin
     Result.Refuse := 'class property - not supported';

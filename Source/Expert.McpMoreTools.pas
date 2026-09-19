@@ -608,7 +608,7 @@ begin
     IncCtx.RegisterFiles(Ctx.ScopeFiles);
     var Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
     var DeclFile := '';
-    var DeclLine := -1;
+    var DeclLine: Integer;
     if Length(Decl) > 0 then
     begin
       DeclFile := ExpandFileName(TLspUri.FileUriToPath(Decl[0].Uri));

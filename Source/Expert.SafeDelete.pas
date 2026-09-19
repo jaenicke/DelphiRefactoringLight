@@ -33,7 +33,7 @@ unit Expert.SafeDelete;
 interface
 
 uses
-  System.SysUtils, System.Classes, Lsp.Client, Expert.SafeDeletePlan;
+  System.SysUtils, System.Classes, System.Types, Lsp.Client, Expert.SafeDeletePlan;
 
 type
   TSafeDeleteFindingKind = (sfUse, sfUnverified, sfOther, sfForm, sfNote);
@@ -86,10 +86,27 @@ function ApplySafeDelete(const ARes: TSafeDeleteResult; out AError: string): Boo
 /// <summary>Editor entry point (menu "Safe delete...").</summary>
 procedure SafeDeleteAtCursor;
 
+// ---- shared with Expert.ChangeSignature -------------------------------------
+
+/// <summary>The identifier at / directly left of (ALine0, ACol0);
+///  AStartCol0 = its first column. '' when there is none.</summary>
+function IdentifierAtPos(const ALines: TArray<string>; ALine0, ACol0: Integer;
+  out AStartCol0: Integer): string;
+
+/// <summary>Whole-word occurrences of AWord in CODE of ALines[AFirst..ALast]
+///  (comments / strings masked): X = column, Y = line, 0-based.</summary>
+procedure CodeWordHits(const ALines: TArray<string>; const AWord: string;
+  AFirst, ALast: Integer; var AOut: TArray<TPoint>);
+
+/// <summary>Main thread: the buffer at the position, the project scope, the
+///  open buffers (captured for a worker) and the DelphiLSP client.</summary>
+function GatherScanInput(const AFile: string; ALine0, ACol0: Integer;
+  out AIn: TSafeDeleteInput; out AError: string): Boolean;
+
 implementation
 
 uses
-  Winapi.Windows, System.Types, System.Math, System.StrUtils, System.IOUtils, System.JSON, System.SyncObjs,
+  Winapi.Windows, System.Math, System.StrUtils, System.IOUtils, System.JSON, System.SyncObjs,
   System.Generics.Collections, System.Character,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.AutoImport, Expert.UsesEditor,
@@ -110,7 +127,7 @@ const
   FindingKindText: array[TSafeDeleteFindingKind] of string =
     ('USED', 'NOT VERIFIABLE', 'other symbol', 'FORM FILE', 'note');
 
-function IdentifierAt(const ALines: TArray<string>; ALine0, ACol0: Integer;
+function IdentifierAtPos(const ALines: TArray<string>; ALine0, ACol0: Integer;
   out AStartCol0: Integer): string;
 var
   S: string;
@@ -136,7 +153,7 @@ end;
 
 // Whole-word occurrences of AWord in CODE (comments / strings masked):
 // (line, col) pairs, 0-based.
-procedure WordHits(const ALines: TArray<string>; const AWord: string;
+procedure CodeWordHits(const ALines: TArray<string>; const AWord: string;
   AFirst, ALast: Integer; var AOut: TArray<TPoint>);
 var
   M: TArray<string>;
@@ -300,7 +317,7 @@ begin
   Src := TContentSource.Create(AIn);
   try
     StartLines := SplitContentLines(AIn.Content);
-    Res.Identifier := IdentifierAt(StartLines, AIn.Line0, AIn.Col0, IdentCol);
+    Res.Identifier := IdentifierAtPos(StartLines, AIn.Line0, AIn.Col0, IdentCol);
     if Res.Identifier = '' then
     begin
       Res.Error := 'there is no identifier at the caret';
@@ -417,9 +434,9 @@ begin
       var Hits: TArray<TPoint> := nil;
       var IsDecl := SameText(ExpandFileName(F), Res.DeclFile);
       if Res.Symbol.LocalFirst >= 0 then
-        WordHits(Lines, Res.Identifier, Res.Symbol.LocalFirst, Res.Symbol.LocalLast, Hits)
+        CodeWordHits(Lines, Res.Identifier, Res.Symbol.LocalFirst, Res.Symbol.LocalLast, Hits)
       else
-        WordHits(Lines, Res.Identifier, 0, High(Lines), Hits);
+        CodeWordHits(Lines, Res.Identifier, 0, High(Lines), Hits);
       for var H in Hits do
       begin
         if IsDecl and InEdits(H.Y) then Continue;   // deleted with it
@@ -572,7 +589,7 @@ end;
 //  Main-thread input
 // ---------------------------------------------------------------------------
 
-function GatherInput(const AFile: string; ALine0, ACol0: Integer;
+function GatherScanInput(const AFile: string; ALine0, ACol0: Integer;
   out AIn: TSafeDeleteInput; out AError: string): Boolean;
 begin
   Result := False;
@@ -807,7 +824,7 @@ begin
     Exit;
   end;
   Editor.SaveAllFiles;   // the scan reads closed files from disk
-  if not GatherInput(Ctx.FileName, Ctx.Line - 1, Ctx.Column - 1, Inp, Err) then
+  if not GatherScanInput(Ctx.FileName, Ctx.Line - 1, Ctx.Column - 1, Inp, Err) then
   begin
     ShowThemedMessage('Safe delete: ' + Err);
     Exit;
@@ -940,7 +957,7 @@ begin
     var
       E: string;
     begin
-      Ok := GatherInput(F, L1 - 1, C1 - 1, Inp, E);
+      Ok := GatherScanInput(F, L1 - 1, C1 - 1, Inp, E);
       if not Ok then GatherErr := E;
     end, True, AStop, Err) then Exit(McpErr(Err));
   if not Ok then Exit(McpErr(GatherErr));

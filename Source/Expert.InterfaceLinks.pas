@@ -80,6 +80,12 @@ type
       AMember: string): TArray<TMemberLink>;
     /// <summary>The declaration of AName, if known.</summary>
     function FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
+    /// <summary>The virtual / override chain of AMember around the class
+    ///  AClassName: up through the ancestors as long as they declare the
+    ///  member (the topmost one introduces it), then every SCANNED class
+    ///  descending from that one which declares it again. The start class
+    ///  itself is part of the result.</summary>
+    function ClassHierarchyMembers(const AClassName, AMember: string): TArray<TMemberLink>;
   end;
 
 /// <summary>Type declarations in ALines (masked text is parsed, AFile only
@@ -455,6 +461,55 @@ begin
     var Link: TMemberLink;
     if MemberLink(D, AMember, Link) then Result := Result + [Link];
   end;
+end;
+
+function TTypeGraph.ClassHierarchyMembers(const AClassName, AMember: string): TArray<TMemberLink>;
+var
+  Root: TTypeDecl;
+  Link: TMemberLink;
+
+  // the class parent of ADecl (the first parent that is a known class)
+  function ClassParent(const ADecl: TTypeDecl; out AParent: TTypeDecl): Boolean;
+  begin
+    Result := False;
+    if Length(ADecl.Parents) = 0 then Exit;
+    Result := TryType(ADecl.Parents[0], AParent) and not AParent.IsInterface;
+  end;
+
+  // AName descends from Root (or is it)
+  function DescendsFromRoot(const ADecl: TTypeDecl): Boolean;
+  var
+    D, P: TTypeDecl;
+  begin
+    D := ADecl;
+    for var Depth := 0 to 32 do
+    begin
+      if SameText(D.Name, Root.Name) then Exit(True);
+      if not ClassParent(D, P) then Exit(False);
+      D := P;
+    end;
+    Result := False;
+  end;
+
+var
+  Cur, P: TTypeDecl;
+begin
+  Result := nil;
+  if not TryType(StripGenericAndUnit(AClassName), Cur) or Cur.IsInterface then Exit;
+  if not MemberLink(Cur, AMember, Link) then Exit;
+  Root := Cur;
+  for var Depth := 0 to 32 do
+  begin
+    if not ClassParent(Root, P) or not MemberLink(P, AMember, Link) then Break;
+    Root := P;
+  end;
+  // the scanned classes (plus the ancestors just loaded) below Root
+  var Classes: TArray<TTypeDecl> := nil;
+  for var D in FTypes.Values do
+    if not D.IsInterface then Classes := Classes + [D];
+  for var D in Classes do
+    if DescendsFromRoot(D) and MemberLink(D, AMember, Link) then
+      Result := Result + [Link];
 end;
 
 { TLinkedTargets }

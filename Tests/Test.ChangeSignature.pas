@@ -1,0 +1,278 @@
+﻿(*
+ * Copyright (c) 2026 Sebastian Jänicke (github.com/jaenicke)
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *)
+/// <summary>
+///  Change method signature (issue #11, suggestion 9 by Ian Branch): the
+///  pure half - parameter / argument lists, how an occurrence is used, the
+///  plan for a family of headers plus its calls, and the override chain.
+/// </summary>
+unit Test.ChangeSignature;
+
+interface
+
+uses
+  DUnitX.TestFramework;
+
+type
+  [TestFixture]
+  TChangeSignatureTests = class
+  public
+    [Test] procedure Arguments_ReorderAndDefaults;
+    [Test] procedure CallContext_Classifies;
+    [Test] procedure Plan_HeadersBodyAndCalls;
+    [Test] procedure Plan_BlocksWhatCannotFollow;
+    [Test] procedure Plan_InheritedCallPassesNewParameter;
+    [Test] procedure TypeGraph_OverrideChain;
+    [Test] procedure MemberDeclaration_AfterNestedClasses;
+  end;
+
+implementation
+
+uses
+  System.SysUtils, System.Types, System.IOUtils, Expert.SignatureEdit, Expert.InterfaceLinks,
+  Expert.UnitIndex;
+
+const
+  Src: array[0..18] of string = (
+    'unit U1;',
+    'interface',
+    'type',
+    '  TFoo = class',
+    '    procedure Bar(A: Integer; B: string = ''b'');',
+    '    function Get: Integer;',
+    '  end;',
+    'implementation',
+    'procedure TFoo.Bar(A: Integer; B: string);',
+    'begin',
+    '  Writeln(A, B, Self.A);',
+    '  if A > 0 then Bar(A - 1);',
+    'end;',
+    'function TFoo.Get: Integer;',
+    'begin',
+    '  Bar(1, ''x'');',
+    '  Result := 0;',
+    'end;',
+    'end.');
+
+function Content: string;
+begin
+  Result := string.Join(#13#10, Src);
+end;
+
+procedure Setup(out AHeaders: TArray<TSigHeader>; out ACalls: TArray<TSigCall>;
+  out ASources: TArray<TSigSource>);
+var
+  HD, HI: TSigHeader;
+  Why: string;
+begin
+  Assert.IsTrue(LocateSigHeader(Content, 4, 'Bar', True, HD, Why), Why);
+  Assert.IsTrue(LocateSigHeader(Content, 8, 'Bar', False, HI, Why), Why);
+  AHeaders := [HD, HI];
+  ACalls := LocateSigCalls(Content, [Point(Pos('Bar(', Src[11]) - 1, 11),
+    Point(Pos('Bar(', Src[15]) - 1, 15)], 3, 0);
+  SetLength(ASources, 1);
+  ASources[0].FilePath := 'U1.pas';
+  ASources[0].Content := Content;
+end;
+
+procedure TChangeSignatureTests.Arguments_ReorderAndDefaults;
+var
+  T, Note, Err: string;
+begin
+  var Old := ParseParamList('A: Integer; B: string = ''b''; C: Boolean = True');
+  Assert.AreEqual(3, Integer(Length(Old)));
+  var New_: TArray<TNewParam>;
+  SetLength(New_, 3);
+  New_[0].Param := Old[2]; New_[0].Param.DefaultText := ''; New_[0].OldIndex := 2;
+  New_[1].Param := Old[0]; New_[1].OldIndex := 0;
+  New_[2].Param := ParseParamList('D: Integer')[0]; New_[2].OldIndex := -1; New_[2].CallValue := '0';
+  Assert.AreEqual('', ValidateSignatureChange(Old, New_));
+  // C's default the call relied on is written out now
+  Assert.IsTrue(RewriteArguments(['X'], Old, New_, T, Note, Err), Err);
+  Assert.AreEqual('True, X, 0', T);
+  var S := 'Foo(TDictionary<string, Integer>.Create, a < b, ''x,y'')';
+  var Args := SplitArguments(S, 4, MatchingBracket(S, 4));
+  Assert.AreEqual(3, Integer(Length(Args)));
+  Assert.AreEqual('TDictionary<string, Integer>.Create', Args[0].Text);
+end;
+
+procedure TChangeSignatureTests.CallContext_Classifies;
+
+  function Ctx(const AText: string): TCallContext;
+  var
+    O, C: Integer;
+  begin
+    var P := Pos('Foo', AText);
+    Result := CallContextAt(AText, P, P + 2, O, C);
+  end;
+
+begin
+  Assert.IsTrue(Ctx('  Foo(1);') = ccArgs);
+  Assert.IsTrue(Ctx('  Obj.Foo;') = ccStatement);
+  Assert.IsTrue(Ctx('  inherited Foo;') = ccStatement);
+  Assert.IsTrue(Ctx('  if Foo then Exit;') = ccExpression);
+  Assert.IsTrue(Ctx('  Btn.OnClick := Foo;') = ccReference);
+  Assert.IsTrue(Ctx('  P := @Foo;') = ccReference);
+  Assert.IsTrue(Ctx('  property X: Integer read Foo;') = ccAccessor);
+end;
+
+procedure TChangeSignatureTests.Plan_HeadersBodyAndCalls;
+var
+  H: TArray<TSigHeader>;
+  C: TArray<TSigCall>;
+  S: TArray<TSigSource>;
+begin
+  Setup(H, C, S);
+  var New_: TArray<TNewParam>;
+  SetLength(New_, 3);
+  New_[0].Param := H[0].Params[0]; New_[0].Param.Name := 'Count'; New_[0].OldIndex := 0;
+  New_[1].Param := ParseParamList('C: Boolean')[0]; New_[1].OldIndex := -1; New_[1].CallValue := 'True';
+  New_[2].Param := H[0].Params[1]; New_[2].OldIndex := 1;
+  var Plan := PlanSignatureEdits(S, H, C, New_);
+  Assert.IsTrue(Plan.Ok, string.Join('|', Plan.Errors));
+  var Out_ := ApplySigEdits(Content, Plan.Edits, 0).Split([#10]);
+  Assert.AreEqual('    procedure Bar(Count: Integer; C: Boolean; B: string = ''b'');', Out_[4]);
+  Assert.AreEqual('procedure TFoo.Bar(Count: Integer; C: Boolean; B: string);', Out_[8]);
+  Assert.AreEqual('  Writeln(Count, B, Self.A);', Out_[10]);
+  Assert.AreEqual('  if Count > 0 then Bar(Count - 1, True);', Out_[11]);
+  Assert.AreEqual('  Bar(1, True, ''x'');', Out_[15]);
+end;
+
+procedure TChangeSignatureTests.Plan_BlocksWhatCannotFollow;
+var
+  H: TArray<TSigHeader>;
+  C: TArray<TSigCall>;
+  S: TArray<TSigSource>;
+begin
+  Setup(H, C, S);
+  // removing A - the body still uses it
+  var New_: TArray<TNewParam>;
+  SetLength(New_, 1);
+  New_[0].Param := H[0].Params[1]; New_[0].OldIndex := 1;
+  var Plan := PlanSignatureEdits(S, H, C, New_);
+  Assert.IsFalse(Plan.Ok);
+  Assert.IsTrue(Pos('still used', string.Join('|', Plan.Errors)) > 0);
+  // a method reference blocks a real change, not a rename
+  var Ref := C[1];
+  Ref.Context := ccReference;
+  New_ := UnchangedSignature(H[0].Params);
+  New_[0].Param.TypeText := 'Int64';
+  Plan := PlanSignatureEdits(S, H, [C[0], Ref], New_);
+  Assert.IsTrue(Pos('method reference', string.Join('|', Plan.Errors)) > 0);
+  New_ := UnchangedSignature(H[0].Params);
+  New_[1].Param.Name := 'Text';
+  Plan := PlanSignatureEdits(S, H, [C[0], Ref], New_);
+  Assert.IsTrue(Plan.Ok, string.Join('|', Plan.Errors));
+  // a comment inside a parameter list is left to the user
+  var HX: TSigHeader;
+  var Why: string;
+  Assert.IsFalse(LocateSigHeader('procedure Foo(A: Integer { n });', 0, 'Foo', True, HX, Why));
+end;
+
+procedure TChangeSignatureTests.Plan_InheritedCallPassesNewParameter;
+begin
+    // "inherited Go(...)" in an override hands the new parameter on
+    var ISrc := string.Join(#13#10, ['unit U2;', 'interface', 'type', '  TBase = class',
+      '    function Go(Count: Integer): Integer; virtual;', '  end;', '  TChild = class(TBase)',
+      '    function Go(Count: Integer): Integer; override;', '  end;', 'implementation',
+      'function TBase.Go(Count: Integer): Integer;', 'begin', '  Result := Count;', 'end;',
+      'function TChild.Go(Count: Integer): Integer;', 'begin',
+      '  Result := inherited Go(Count) + 1;', 'end;', 'end.']);
+    var IH: TArray<TSigHeader>;
+    SetLength(IH, 4);
+    var IWhy: string;
+    var IOk := LocateSigHeader(ISrc, 4, 'Go', True, IH[0], IWhy) and
+      LocateSigHeader(ISrc, 7, 'Go', True, IH[1], IWhy) and
+      LocateSigHeader(ISrc, 10, 'Go', False, IH[2], IWhy) and
+      LocateSigHeader(ISrc, 14, 'Go', False, IH[3], IWhy);
+    var ILines := ISrc.Replace(#13#10, #10).Split([#10]);
+    var ICalls := LocateSigCalls(ISrc, [Point(Pos('Go(', ILines[16]) - 1, 16)], 2, 0);
+    var ISources: TArray<TSigSource>;
+    SetLength(ISources, 1);
+    ISources[0].FilePath := 'U2.pas';
+    ISources[0].Content := ISrc;
+    var INew: TArray<TNewParam>;
+    SetLength(INew, 2);
+    INew[0].Param := IH[0].Params[0]; INew[0].Param.Name := 'N'; INew[0].OldIndex := 0;
+    INew[1].Param := ParseParamList('Scale: Integer = 1')[0]; INew[1].OldIndex := -1;
+    var IPlan := PlanSignatureEdits(ISources, IH, ICalls, INew);
+    var IOut := ApplySigEdits(ISrc, IPlan.Edits, 0).Split([#10]);
+  Assert.IsTrue(IOk, IWhy);
+  Assert.IsTrue(IPlan.Ok, string.Join('|', IPlan.Errors));
+  Assert.AreEqual('  Result := inherited Go(N, Scale) + 1;', IOut[16]);
+  Assert.AreEqual('  Result := N;', IOut[12]);
+  Assert.AreEqual('    function Go(N: Integer; Scale: Integer = 1): Integer; override;', IOut[7]);
+end;
+
+procedure TChangeSignatureTests.TypeGraph_OverrideChain;
+begin
+  var Dir := TPath.Combine(TPath.GetTempPath, 'rl_dunitx_chain');
+  TDirectory.CreateDirectory(Dir);
+  var F := TPath.Combine(Dir, 'UC.pas');
+  TFile.WriteAllText(F, string.Join(#13#10, [
+    'unit UC;',
+    'interface',
+    'type',
+    '  TBase = class',
+    '    procedure Run(A: Integer); virtual;',
+    '  end;',
+    '  TMid = class(TBase)',
+    '    procedure Run(A: Integer); override;',
+    '  end;',
+    '  TLeaf = class(TMid)',
+    '    procedure Run(A: Integer); override;',
+    '  end;',
+    '  TOther = class',
+    '    procedure Run(A: Integer); virtual;',
+    '  end;',
+    'implementation',
+    'procedure TBase.Run(A: Integer); begin end;',
+    'procedure TMid.Run(A: Integer); begin end;',
+    'procedure TLeaf.Run(A: Integer); begin end;',
+    'procedure TOther.Run(A: Integer); begin end;',
+    'end.']));
+  try
+    var G := TTypeGraph.Create([F], nil, False);
+    try
+      // from the middle: up to the introducing class, down to every override
+      var L := G.ClassHierarchyMembers('TMid', 'Run');
+      var Names := '';
+      for var X in L do Names := Names + X.TypeName + ';';
+      Assert.AreEqual(3, Integer(Length(L)), Names);
+      Assert.IsTrue(Pos('TBase;', Names) > 0, Names);
+      Assert.IsTrue(Pos('TLeaf;', Names) > 0, Names);
+      Assert.IsTrue(Pos('TOther', Names) = 0, Names);
+      for var X in L do
+        Assert.IsTrue(X.ImplLine > 0, X.TypeName + ' has no implementation line');
+    finally
+      G.Free;
+    end;
+  finally
+    TDirectory.Delete(Dir, True);
+  end;
+end;
+
+procedure TChangeSignatureTests.MemberDeclaration_AfterNestedClasses;
+begin
+  // members after NESTED classes (change signature on TUnitIndex.Search)
+  var NSrc := string.Join(#13#10, ['unit N;', 'interface', 'type', '  TOuter = class',
+    '  private type', '    TInner = class', '      procedure Run;', '    end;',
+    '    TWorker = class(TThread)', '    protected', '      procedure Execute; override;',
+    '    end;', '    TFwd = class;', '    TMeta = class of TObject;', '  public',
+    '    class procedure Make;', '    function Search(const S: string): Integer;', '  end;',
+    'implementation', 'end.']);
+  Assert.AreEqual(16, FindMemberDeclarationLine(NSrc, 'TOuter', 'Search'));
+  Assert.AreEqual(15, FindMemberDeclarationLine(NSrc, 'TOuter', 'Make'));
+  Assert.AreEqual(-1, FindMemberDeclarationLine(NSrc, 'TOuter', 'Execute'));
+  Assert.AreEqual(-1, FindMemberDeclarationLine(NSrc, 'TOuter', 'Run'));
+  Assert.AreEqual(6, FindMemberDeclarationLine(NSrc, 'TInner', 'Run'));
+end;
+
+initialization
+  TDUnitX.RegisterTestFixture(TChangeSignatureTests);
+
+end.

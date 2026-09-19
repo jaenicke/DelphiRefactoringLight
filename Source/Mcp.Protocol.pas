@@ -754,6 +754,31 @@ const
     'of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances).' +
     '"}},"required":["file","line","column"]}}' +
     ',' +
+    '{"name":"change_signature","description":"Change method signature of the method / routine ' +
+    'at a position: add, remove, reorder or rename parameters, change type, modifier or default' +
+    ' value. The whole FAMILY changes together (declaration + implementation, interface methods' +
+    ' and every implementing class, the virtual/override chain) and every call site DelphiLSP v' +
+    'erifies is rewritten (arguments reordered, values for new parameters inserted, defaults th' +
+    'e calls relied on written out); renamed parameters are followed into the bodies. Blocked: ' +
+    'overloaded / message methods, event handlers bound in a form, method references and proper' +
+    'ty accessors when the change is more than a rename, removed parameters still used in a bod' +
+    'y. Without params it only reports the current parameters, the family and the calls. With p' +
+    'arams it returns the plan (errors, warnings, edits with the resulting lines); apply=true w' +
+    'rites it (open units in the IDE buffer, not saved; closed units on disk).","inputSchema":{' +
+    '"type":"object","properties":{"file":{"type":"string","description":"Absolute path of the ' +
+    'unit."},"line":{"type":"integer","description":"1-based line of the method name (a call or' +
+    ' the declaration)."},"column":{"type":"integer","description":"1-based column."},"params":' +
+    '{"type":"array","description":"The NEW parameter list in order. Each item: name, type, mod' +
+    'ifier (const/var/out/constref), default, from (the OLD parameter it replaces - omit for a ' +
+    'new parameter; an old parameter keeps type/modifier/default unless given), value (new para' +
+    'meters only: the argument existing calls get).","items":{"type":"object","properties":{"na' +
+    'me":{"type":"string"},"type":{"type":"string"},"modifier":{"type":"string"},"default":{"ty' +
+    'pe":"string"},"from":{"type":"string"},"value":{"type":"string"}},"required":["name"]}},"a' +
+    'pply":{"type":"boolean","description":"Apply the plan when it has no errors (default false' +
+    ')."},"instance":{"type":"integer","description":"Process id of the IDE to use. Normally om' +
+    'itted - the IDE is chosen automatically (see ide_instances)."}},"required":["file","line",' +
+    '"column"]}}' +
+    ',' +
     '{"name":"expand_includes","description":"Writes the content of every {$I}/{$INCLUDE} f' +
     'ile IN PLACE into the including source (for debugging), framed by marker comments that ke' +
     'ep the original directive (// >>> include begin: ... / // <<< include end: ...). Nested in' +
@@ -924,6 +949,7 @@ begin
     'find_references / find_implementations, rename_preview + rename_apply ' +
     '(the IDE plugin''s rename incl. form files), uses_path / uses_cycles, ' +
     'safe_delete (check that nothing uses a symbol, then delete it), ' +
+    'change_signature (add / remove / reorder / rename parameters incl. every call), ' +
     'expand_includes (include files written into their units for debugging), ' +
     'convert_properties (field access <-> getter/setter), ' +
     'debug_consistency, blame / commit_info. The lsp_* tools talk to the ' +

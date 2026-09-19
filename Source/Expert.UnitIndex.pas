@@ -1488,6 +1488,35 @@ var
     if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
   end;
 
+  // A NESTED class / interface / object with a body ("TInner = class",
+  // "type TWorker = class(TThread)") - its 'end' must not close the outer
+  // type. Only the 'Name = keyword' form: 'class procedure' is a
+  // modifier; 'class of', forward declarations and bodyless
+  // "TFoo = class(TBar);" open nothing. RECORD is counted separately.
+  function NestedClassOpener(const AUpper: string; out AName: string): Boolean;
+  var
+    S, Rhs: string;
+    P: Integer;
+  begin
+    Result := False;
+    AName := '';
+    S := AUpper;
+    if StartsWithWord(S, 'TYPE') then S := TrimLeft(Copy(S, 5, MaxInt));
+    P := Pos('=', S);
+    if P < 2 then Exit;
+    var Name := Trim(Copy(S, 1, P - 1));
+    var LT := Pos('<', Name);
+    if LT > 0 then Name := Trim(Copy(Name, 1, LT - 1));
+    if not IsIdentifier(Name) then Exit;
+    AName := Name;
+    Rhs := TrimLeft(Copy(S, P + 1, MaxInt));
+    if StartsWithWord(Rhs, 'PACKED') then Rhs := TrimLeft(Copy(Rhs, 7, MaxInt));
+    if not ((StartsWithWord(Rhs, 'CLASS') and not StartsWithWord(TrimLeft(Copy(Rhs, 6, MaxInt)), 'OF'))
+      or StartsWithWord(Rhs, 'INTERFACE') or StartsWithWord(Rhs, 'DISPINTERFACE')
+      or StartsWithWord(Rhs, 'OBJECT')) then Exit;
+    Result := not (Rhs.EndsWith(';') and (CountWord(Rhs, 'END') = 0));
+  end;
+
 begin
   Result := -1;
   if (AContent = '') or not IsIdentifier(ATypeName) or not IsIdentifier(AMemberName) then Exit;
@@ -1498,11 +1527,18 @@ begin
   Depth := 0;
   Best := -1;
   BestScore := 0;
+  var AfterOpener := False;
+  var OpenParens := 0;
+  var InBrace := False;     // inside a { } comment that spans lines
+  var InStarCmt := False;   // inside a (* *) comment that spans lines
   for I := 0 to High(Lines) do
   begin
     L := Clean(Lines[I]);
     if L = '' then Continue;
     U := UpperCase(L);
+    // compiler directives between two headers ({$IF} ... {$ELSE} ...)
+    // keep the "right after a header" state
+    if U.StartsWith('{$') or U.StartsWith('(*$') then Continue;
 
     if not InBody then
     begin
@@ -1529,14 +1565,76 @@ begin
       if Rest.EndsWith(';') and (CountWord(Rest, 'END') = 0) then Continue;  // forward
       InBody := True;
       Depth := 1;
+      AfterOpener := True;
       Continue;
     end;
 
-    // Inside the body: track nesting. Only RECORD opens a further level
-    // here - counting CLASS would misfire on "class procedure".
+    // Inside the body: track nesting. RECORD anywhere opens a level, a
+    // nested class / interface only in its 'Name = class' form (counting
+    // the word CLASS would misfire on "class procedure"). Only lines that
+    // START at the type's own level can declare its members - a nested
+    // TWorker.Execute is not TOuter.Execute (and before nested classes
+    // were counted, their 'end;' closed the outer body early: the members
+    // after a "private type TInner = class ... end;" block were never
+    // found - change signature on TUnitIndex.Search, 2026-09).
+    var DepthBefore := Depth;
     Depth := Depth + CountWord(StripAngleSpans(U), 'RECORD')
              - CountWord(StripAngleSpans(U), 'END');
+    // the other branch of a conditional declaration opens nothing:
+    // Vcl.Controls declares "{$IF ...} TControl = class(TComponent,
+    // IControl) {$ELSE} TControl = class(TComponent)" - the second header
+    // either follows the first DIRECTLY, or (TWinControl) after a few
+    // members of the first branch, but then with the type's OWN name,
+    // which no nested type can have
+    var OpenerName: string;
+    var Opener := NestedClassOpener(U, OpenerName);
+    if Opener and not AfterOpener and not SameText(OpenerName, ATypeName) then Inc(Depth);
+    AfterOpener := Opener;
     if Depth <= 0 then Break;
+    // a continuation line of a WRAPPED parameter list ("    ItemRect:
+    // TRect); virtual;") looks like a field declaration - it is none
+    var InParens := OpenParens > 0;
+    // brackets in CODE only: strings, // and { } / (* *) comments (which
+    // may span lines) are skipped - one pass over the raw line, no masking
+    // of the whole file per call
+    begin
+      var Raw := Lines[I];
+      var K := 1;
+      while K <= Length(Raw) do
+      begin
+        var Ch := Raw[K];
+        if InBrace then
+        begin
+          if Ch = '}' then InBrace := False;
+        end
+        else if InStarCmt then
+        begin
+          if (Ch = '*') and (K < Length(Raw)) and (Raw[K + 1] = ')') then
+          begin
+            InStarCmt := False;
+            Inc(K);
+          end;
+        end
+        else if Ch = '{' then InBrace := True
+        else if (Ch = '(') and (K < Length(Raw)) and (Raw[K + 1] = '*') then
+        begin
+          InStarCmt := True;
+          Inc(K);
+        end
+        else if (Ch = '/') and (K < Length(Raw)) and (Raw[K + 1] = '/') then
+          Break
+        else if Ch = '''' then
+        begin
+          Inc(K);
+          while (K <= Length(Raw)) and (Raw[K] <> '''') do Inc(K);
+        end
+        else if Ch = '(' then Inc(OpenParens)
+        else if (Ch = ')') and (OpenParens > 0) then Dec(OpenParens);
+        Inc(K);
+      end;
+    end;
+    if InParens then Continue;
+    if DepthBefore <> 1 then Continue;
 
     // Member declaration forms. The declared NAME is the first
     // identifier after the keyword - searching the whole line would

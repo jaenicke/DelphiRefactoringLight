@@ -53,6 +53,9 @@ var
 
 implementation
 
+
+uses
+  Expert.PascalScanner;
 {$IFNDEF STANDALONE_BUILD}
 { TLspFindReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
   Only compiled into the IDE plugin; the standalone build does not

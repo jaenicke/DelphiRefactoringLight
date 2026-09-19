@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.2.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.2.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -460,7 +460,8 @@ DelphiRefactoringLight/
 |   |-- Expert.CompletionPopup.pas           # Owner-drawn popup
 |   |-- Expert.ExtractMethod.pas             # Extract-method logic
 |   |-- Expert.ExtractMethodDialog.pas       # Progress / preview dialog
-|   |-- Expert.SelectionValidator.pas        # Pascal tokenizer + validation
+|   |-- Expert.PascalScanner.pas             # The shared Pascal lexer + identifier / comment / string helpers
+|   |-- Expert.SelectionValidator.pas        # Extract Method: selection validation
 |   |-- Expert.FindReferencesWizard.pas      # Find-references logic
 |   |-- Expert.FindReferencesDialog.pas      # Results dialog with list view
 |   |-- Expert.ImplementationFinder.pas      # Shared impl finder (rename + find-impl)
@@ -552,6 +553,7 @@ DelphiRefactoringLight/
 - **Inactive `{$IFDEF}`-region tracking**: `TLspClient` parses every `publishDiagnostics` notification, filters for `source = "DelphiLSP"` + `tag = Unnecessary` (or `code = H2655`/`H2656`), and stores the resulting line-range table per file. `IsLineInactive(file, line)` is a direct lookup. `HasReceivedDiagnostics(file)` tells callers whether a `False` from `IsLineInactive` means "verified active" or "no data".
 - **LSP-driven type-to-unit resolution** (Extract Interface): for each type identifier referenced by the chosen interface members, the engine collects the line of the member that introduced it, then runs `textDocument/definition` on that exact column (a localised search inside `[M.LineStart, M.LineStart+3]` avoids the off-by-line bugs that a whole-file scan would hit on mixed line endings or duplicated identifiers like `TForm` inside `TForm11`). The resulting target-file path is mapped back to a unit name. Partial-failure mode: when LSP cannot resolve every type (often because the source unit itself has compile errors), the result is unioned with the source unit's own interface-uses so the new / extended interface unit still compiles. A diagnostic dialog after the run reports `<resolved>/<attempted>` and the LSP error if any.
 - **Single-pass comment- and string-aware scanner** (Semantic Replace): one state machine walks the source text from start to end with five states (code / line-comment / brace-comment / paren-star-comment / string), so matches inside strings and comments are skipped without a separate tokenisation pass. The same routine emits matches for ALL rules at once (whole-identifier-bounded), which keeps the per-file cost linear in the file size regardless of rule count. A second comment-aware pass discovers routine bodies (`procedure` / `function` / `constructor` / `destructor` plus matching `end;` with proper nesting), so the local-var hoisting decision can be made per-routine.
+- **One shared Pascal lexer** (`Expert.PascalScanner`): token kinds with line/column, comments and `{$...}` directives on request, Delphi 12 multi-line strings (`'''` ... `'''`) as one token, char literals (`#13`, `#$0D`), numbers with `$`/`%`/`_`/exponent (and `1..5` as a range, not a float), `&`-escaped identifiers and Unicode identifiers. The same unit supplies `IsIdentStart`/`IsIdentChar`/`IsIdentifier`, `StripLineComment` (string-aware: a `'http://...'` literal stays intact) and `MaskCommentsAndStrings`, which blanks comments, directives and strings while keeping every position. Before, about twenty private copies of these helpers gave different answers (suggestion from issue #11).
 - **`IOTAEditWriter`** instead of `InsertText`: byte-precise edits without IDE auto-indent interference.
 - **`Module.Refresh(False)`** instead of `True`: reloads the form module without discarding in-editor changes.
 - **PID-based restart hint**: a marker file in `%TEMP%` stores the process ID; if it matches the current IDE, the package was re-installed during the running session and a restart hint is shown.

@@ -36,7 +36,7 @@ uses
   Expert.ImplementationFinder, Expert.FindReferencesDialog, Expert.ScopeFiles,
   Expert.UsesGraph, Expert.DebugConsistency, Expert.DebugConsistencyDialog,
   Expert.VcsBlame, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
-  Expert.PluginSettings, Lsp.Client, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
+  Expert.PluginSettings, Lsp.Client, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner;
 
 // ---------------------------------------------------------------------------
 //  Helpers
@@ -60,11 +60,6 @@ begin
   if AArgs <> nil then Result := AArgs.GetValue<Boolean>(AName, ADefault);
 end;
 
-function IsIdentCh(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
-
 function SplitLines(const S: string): TArray<string>;
 begin
   Result := S.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
@@ -85,14 +80,14 @@ begin
   if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
   S := Lines[ALine0];
   P := ACol0 + 1;   // 1-based
-  if (P > Length(S)) or not IsIdentCh(S[P]) then
-    if (P - 1 >= 1) and (P - 1 <= Length(S)) and IsIdentCh(S[P - 1]) then
+  if (P > Length(S)) or not IsIdentChar(S[P]) then
+    if (P - 1 >= 1) and (P - 1 <= Length(S)) and IsIdentChar(S[P - 1]) then
       Dec(P)
     else
       Exit;
   Q := P;
-  while (P > 1) and IsIdentCh(S[P - 1]) do Dec(P);
-  while (Q < Length(S)) and IsIdentCh(S[Q + 1]) do Inc(Q);
+  while (P > 1) and IsIdentChar(S[P - 1]) do Dec(P);
+  while (Q < Length(S)) and IsIdentChar(S[Q + 1]) do Inc(Q);
   Result := Copy(S, P, Q - P + 1);
   if (Result <> '') and Result[1].IsDigit then Exit('');
   AStartCol0 := P - 1;
@@ -507,10 +502,10 @@ begin
             Continue;
           end;
       end;
-      if IsIdentCh(S[I]) and ((I = 1) or not IsIdentCh(S[I - 1])) then
+      if IsIdentChar(S[I]) and ((I = 1) or not IsIdentChar(S[I - 1])) then
       begin
         var J := I;
-        while (J <= Length(S)) and IsIdentCh(S[J]) do Inc(J);
+        while (J <= Length(S)) and IsIdentChar(S[J]) do Inc(J);
         if SameText(Copy(S, I, J - I), AWord) then
         begin
           var It: TFindReferenceItem;

@@ -92,7 +92,7 @@ uses
   System.SysUtils, System.IOUtils, System.Classes, System.SyncObjs,
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
-  Expert.WorkerLatch, Expert.Version, System.RegularExpressions;
+  Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions;
 
 const
   NL = sLineBreak;

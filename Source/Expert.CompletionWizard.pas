@@ -110,7 +110,7 @@ implementation
 uses
   System.Generics.Collections, System.StrUtils, System.Math, System.IOUtils,
   Delphi.FileEncoding, Expert.UnitIndex, Expert.DialogHelper, Lsp.Uri,
-  Expert.WorkerLatch;
+  Expert.WorkerLatch, Expert.PascalScanner;
 
 var
   GGenNote: string = 'no completion call yet';   // main thread only
@@ -871,7 +871,7 @@ begin
     function(AValue: string): string
     begin
       Result := '';
-      if not IsPascalIdentifier(AValue) then
+      if not IsIdentifier(AValue) then
         Exit('not a valid identifier');
       var P := PlanEventHandler(Lines, CaretLine0, AValue, Info);
       if not P.Ok then Result := P.Reason;

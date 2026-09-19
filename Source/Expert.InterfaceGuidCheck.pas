@@ -64,7 +64,7 @@ implementation
 
 uses
   System.IOUtils, System.StrUtils,
-  Expert.EditorHelperIntf, Delphi.FileEncoding;
+  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.PascalScanner;
 
 function SplitLines(const AContent: string): TArray<string>;
 begin
@@ -101,15 +101,6 @@ begin
   P2 := PosEx('}'']', ALine, P1);
   if P2 = 0 then Exit;
   Result := Copy(ALine, P1 + 2, P2 - P1 - 1);  // {....}
-end;
-
-function StripLineComment(const ALine: string): string;
-var
-  P: Integer;
-begin
-  Result := ALine;
-  P := Pos('//', Result);
-  if P > 0 then Result := Copy(Result, 1, P - 1);
 end;
 
 class function TInterfaceGuidChecker.ScanSingleFile(

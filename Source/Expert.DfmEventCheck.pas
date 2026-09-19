@@ -239,7 +239,7 @@ implementation
 uses
   System.IOUtils, System.StrUtils, System.Math,
   Expert.EditorHelperIntf, Expert.UsesEditor, Delphi.FileEncoding,
-  Expert.LspManager, Lsp.Uri, Lsp.Protocol;
+  Expert.LspManager, Lsp.Uri, Lsp.Protocol, Expert.PascalScanner;
 
 // Unit name (possibly dotted, e.g. "Vcl.Controls") declared by AFile, or ''.
 function ReadUnitNameOf(const AFile: string): string;
@@ -438,17 +438,6 @@ begin
   end;
 end;
 
-function IsIdent(const S: string): Boolean;
-var
-  I: Integer;
-begin
-  Result := S <> '';
-  for I := 1 to Length(S) do
-    if not CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
-      Exit(False);
-  if CharInSet(S[1], ['0'..'9']) then Result := False;
-end;
-
 { ---------------- Event signature table ----------------
   Signatures are normalized as pipe-separated entries, one per
   parameter, each "[var |out ]TypeName" (const dropped - it does not
@@ -548,30 +537,6 @@ end;
 ///  and any brace / (* *) comments. Makes conditional parameter types
 ///  ("{$if CompilerVersion >= 36}TVTDragDataObject{$else}IDataObject
 ///  {$ifend}") comparable to the concrete type the compiler picked.</summary>
-function StripLineComment(const L: string): string;
-// Remove a trailing "// ..." comment from a single source line, honouring
-// single-quoted string literals so a '//' inside a default value stays.
-// Must be applied per line BEFORE lines are joined into one signature
-// string, otherwise a mid-signature comment would swallow the real
-// parameters that follow on the next line.
-var
-  I, N: Integer;
-  InStr: Boolean;
-begin
-  N := Length(L);
-  InStr := False;
-  I := 1;
-  while I <= N do
-  begin
-    if L[I] = '''' then
-      InStr := not InStr
-    else if (not InStr) and (L[I] = '/') and (I < N) and (L[I + 1] = '/') then
-      Exit(TrimRight(Copy(L, 1, I - 1)));
-    Inc(I);
-  end;
-  Result := L;
-end;
-
 type
   TParamSpec = record
     Modifier, Name, Typ: string;   // e.g. "const", "aErrCode", "Integer"
@@ -894,7 +859,7 @@ begin
   EqPos := Pos('=', S);
   if EqPos = 0 then Exit;
   AName := Trim(Copy(S, 1, EqPos - 1));
-  if not IsIdent(AName) then Exit;
+  if not IsIdentifier(AName) then Exit;
   Rest := Trim(Copy(S, EqPos + 1, MaxInt));
   if not StartsText('class', Rest) then Exit;
   AfterKw := Copy(Rest, 6, MaxInt);
@@ -1018,7 +983,7 @@ begin
           if CPos > 0 then MName := Trim(Copy(MName, 1, CPos - 1));
           Params := '';
         end;
-        if IsIdent(MName) and not AMethods.ContainsKey(UpperCase(MName)) then
+        if IsIdentifier(MName) and not AMethods.ContainsKey(UpperCase(MName)) then
           AMethods.Add(UpperCase(MName),
             TPair<Integer, string>.Create(I + 1, NormalizeParams(Params)));
         I := J;
@@ -1465,7 +1430,7 @@ begin
             // not True/False/nil, no dots).
             var DotPos := LastDelimiter('.', PropName);
             if DotPos > 0 then PropName := Copy(PropName, DotPos + 1, MaxInt);
-            if StartsText('On', PropName) and IsIdent(PropValue)
+            if StartsText('On', PropName) and IsIdentifier(PropValue)
                and not SameText(PropValue, 'True') and not SameText(PropValue, 'False')
                and not SameText(PropValue, 'nil') then
             begin
@@ -1840,7 +1805,7 @@ begin
             var Lhs := Trim(Copy(L, 1, EqP - 1));
             var Rhs := Trim(Copy(L, EqP + 1, MaxInt));
             if Rhs.EndsWith(';') then Rhs := Trim(Copy(Rhs, 1, Length(Rhs) - 1));
-            if IsIdent(Lhs) and IsIdent(Rhs) then
+            if IsIdentifier(Lhs) and IsIdentifier(Rhs) then
             begin
               var DotP := LastDelimiter('.', Rhs);
               if DotP > 0 then Rhs := Copy(Rhs, DotP + 1, MaxInt);

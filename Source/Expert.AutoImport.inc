@@ -401,7 +401,7 @@ uses
   Expert.EditorHelperIntf, Expert.UnitAvailability, Expert.DiagStore,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
   Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
-  Delphi.FileEncoding;
+  Delphi.FileEncoding, Expert.PascalScanner;
 
 type
   TMissingIdent = record
@@ -733,17 +733,6 @@ begin
   Result := S[Length(S)] <> '.';
 end;
 
-function IsBareIdent(const S: string): Boolean;
-var
-  I: Integer;
-begin
-  Result := (S <> '') and not CharInSet(S[1], ['0'..'9']);
-  if Result then
-    for I := 1 to Length(S) do
-      if not CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
-        Exit(False);
-end;
-
 function IdentDeclaredInFile(const AContent, AIdent: string): Boolean;
 var
   Lines: TArray<string>;
@@ -835,7 +824,7 @@ begin
   Result := FirstQuoted(D.Message);
   LtP := Pos('<', Result);
   if LtP > 0 then Result := Copy(Result, 1, LtP - 1);
-  if not IsBareIdent(Result) then Result := '';
+  if not IsIdentifier(Result) then Result := '';
 
   TokTxt := '';
   if TokenAt(LnTxt, D.Range.Start.Character + 1, False, TCol0, TLen) then
@@ -1666,7 +1655,7 @@ var
       if D.Message[I] = '''' then Inc(QCnt);
     if QCnt <> 2 then Exit;
     Tok := FirstQuoted(D.Message);
-    if not IsBareIdent(Tok) then Exit;
+    if not IsIdentifier(Tok) then Exit;
 
     L0 := D.Range.Start.Line;
     C0 := D.Range.Start.Character;
@@ -3198,7 +3187,7 @@ var
 begin
   Result := False;
   AInfo := Default(TPrivateMember);
-  if (AContent = '') or not IsBareIdent(AName) then Exit;
+  if (AContent = '') or not IsIdentifier(AName) then Exit;
   Lines := SplitContentLines(AContent);
   if (ADeclLine0 < 0) or (ADeclLine0 > High(Lines)) then Exit;
   UName := UpperCase(AName);
@@ -4305,7 +4294,7 @@ begin
   P := LastDelimiter('.', Result);
   if P > 0 then Result := Copy(Result, P + 1, MaxInt);
   Result := Trim(Result);
-  if not IsBareIdent(Result) then Result := '';
+  if not IsIdentifier(Result) then Result := '';
 end;
 
 // ALine without its comments ({ }, (* *), //); string literals stay, so a

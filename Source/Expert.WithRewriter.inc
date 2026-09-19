@@ -289,7 +289,7 @@ function UsesContains(const AClause: TUsesClauseLocation;
 implementation
 
 uses
-  System.IOUtils, System.Character, System.StrUtils;
+  System.IOUtils, System.Character, System.StrUtils, Expert.PascalScanner;
 
 { Helpers: 1-based <-> string-index, line slicing }
 
@@ -360,17 +360,7 @@ begin
   Result := Copy(FSrc, IStart, IEnd - IStart + 1);
 end;
 
-{ Helpers: identifier classification }
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := (C = '_') or C.IsLetter;
-end;
-
-function IsIdentCont(C: Char): Boolean; inline;
-begin
-  Result := (C = '_') or C.IsLetterOrDigit;
-end;
+{ Helpers: multi-line string literals }
 
 /// <summary>At ASource[AI] = '''': when this opens a Delphi 12+ MULTI-LINE
 ///  string (an odd run of >= 3 quotes followed only by blanks up to the
@@ -612,11 +602,11 @@ begin
     S := Copy(S, 1, Length(S) - 1).TrimRight;
   // Walk back to find the end of the last ident-like run.
   I := Length(S);
-  while (I >= 1) and not IsIdentCont(S[I]) do Dec(I);
+  while (I >= 1) and not IsIdentChar(S[I]) do Dec(I);
   if I >= 1 then
   begin
     J := I;
-    while (J >= 1) and IsIdentCont(S[J]) do Dec(J);
+    while (J >= 1) and IsIdentChar(S[J]) do Dec(J);
     Inc(J);
     if (J <= I) and IsIdentStart(S[J]) then
     begin
@@ -648,7 +638,7 @@ begin
     begin
       if not IsIdentStart(Trimmed[I]) then Exit(False);
       Inc(I);
-      while (I <= Length(Trimmed)) and IsIdentCont(Trimmed[I]) do Inc(I);
+      while (I <= Length(Trimmed)) and IsIdentChar(Trimmed[I]) do Inc(I);
       ExpectIdent := False;
     end
     else
@@ -765,7 +755,7 @@ begin
 
   ATypeNameCol1 := I;
   var Start := I;
-  while (I <= N) and IsIdentCont(ALine[I]) do Inc(I);
+  while (I <= N) and IsIdentChar(ALine[I]) do Inc(I);
   Result := Copy(ALine, Start, I - Start);
 end;
 
@@ -786,7 +776,7 @@ begin
   if (I <= Length(ALine)) and IsIdentStart(ALine[I]) then
   begin
     var Q := I;
-    while (Q <= Length(ALine)) and IsIdentCont(ALine[Q]) do Inc(Q);
+    while (Q <= Length(ALine)) and IsIdentChar(ALine[Q]) do Inc(Q);
     Word := UpperCase(Copy(ALine, I, Q - I));
     if Word = 'CLASS' then
     begin
@@ -795,7 +785,7 @@ begin
       if (I <= Length(ALine)) and IsIdentStart(ALine[I]) then
       begin
         Q := I;
-        while (Q <= Length(ALine)) and IsIdentCont(ALine[Q]) do Inc(Q);
+        while (Q <= Length(ALine)) and IsIdentChar(ALine[Q]) do Inc(Q);
         Word := UpperCase(Copy(ALine, I, Q - I));
       end
       else
@@ -847,7 +837,7 @@ var
     SkipWS;
     if (I > N) or not IsIdentStart(ALine[I]) then Exit;
     Start := I;
-    while (I <= N) and IsIdentCont(ALine[I]) do Inc(I);
+    while (I <= N) and IsIdentChar(ALine[I]) do Inc(I);
     Result := Copy(ALine, Start, I - Start);
   end;
 
@@ -926,7 +916,7 @@ begin
 
   // Read the candidate identifier.
   var Start := I;
-  while (I <= N) and IsIdentCont(ALine[I]) do Inc(I);
+  while (I <= N) and IsIdentChar(ALine[I]) do Inc(I);
   var Candidate := Copy(ALine, Start, I - Start);
 
   // Reject keywords that introduce a real type body. The caller should
@@ -992,10 +982,10 @@ begin
   // relative to the original line.
   var LastIdentStart: Integer;
   var P := Length(Inner);
-  while (P >= 1) and not IsIdentCont(Inner[P]) do Dec(P);
+  while (P >= 1) and not IsIdentChar(Inner[P]) do Dec(P);
   if P < 1 then Exit;
   var EndP := P;
-  while (P >= 1) and IsIdentCont(Inner[P]) do Dec(P);
+  while (P >= 1) and IsIdentChar(Inner[P]) do Dec(P);
   Inc(P);
   if (P > EndP) or not IsIdentStart(Inner[P]) then Exit;
   Result := Copy(Inner, P, EndP - P + 1);
@@ -1018,10 +1008,10 @@ begin
   // Walk back from ScanEnd to find the last ident token in the
   // original line.
   var QQ := ScanEnd;
-  while (QQ >= ScanStart) and not IsIdentCont(ALine[QQ]) do Dec(QQ);
+  while (QQ >= ScanStart) and not IsIdentChar(ALine[QQ]) do Dec(QQ);
   if QQ < ScanStart then Exit;
   var EndQ := QQ;
-  while (QQ >= ScanStart) and IsIdentCont(ALine[QQ]) do Dec(QQ);
+  while (QQ >= ScanStart) and IsIdentChar(ALine[QQ]) do Dec(QQ);
   Inc(QQ);
   AParentCol1 := QQ;
   Result := Copy(ALine, QQ, EndQ - QQ + 1);
@@ -1071,7 +1061,7 @@ begin
     begin
       if not IsIdentStart(LineText[P]) then Break;
       var QQ := P;
-      while (QQ <= N) and IsIdentCont(LineText[QQ]) do Inc(QQ);
+      while (QQ <= N) and IsIdentChar(LineText[QQ]) do Inc(QQ);
       var Word := UpperCase(Copy(LineText, P, QQ - P));
       if (Word = 'CLASS') or (Word = 'STRICT') or (Word = 'PROPERTY')
         or (Word = 'FUNCTION') or (Word = 'PROCEDURE')
@@ -1087,7 +1077,7 @@ begin
     // Read the member name.
     if (P > N) or not IsIdentStart(LineText[P]) then Continue;
     var NameStart := P;
-    while (P <= N) and IsIdentCont(LineText[P]) do Inc(P);
+    while (P <= N) and IsIdentChar(LineText[P]) do Inc(P);
     var Name := Copy(LineText, NameStart, P - NameStart);
     if not SameText(Name, AMemberName) then Continue;
 
@@ -1107,7 +1097,7 @@ begin
 
     if (P > N) or not IsIdentStart(LineText[P]) then Continue;
     var TypeStart := P;
-    while (P <= N) and IsIdentCont(LineText[P]) do Inc(P);
+    while (P <= N) and IsIdentChar(LineText[P]) do Inc(P);
 
     // Follow dotted type names: take the LAST identifier as the type
     // proper (so 'Vcl.Graphics.TCanvas' yields 'TCanvas').
@@ -1117,7 +1107,7 @@ begin
     begin
       Inc(P);
       LastSegStart := P;
-      while (P <= N) and IsIdentCont(LineText[P]) do Inc(P);
+      while (P <= N) and IsIdentChar(LineText[P]) do Inc(P);
     end;
     Result := Copy(LineText, LastSegStart, P - LastSegStart);
     ATypeLine := L;
@@ -1182,7 +1172,7 @@ var
     Result := '';
     if (I > N) or not IsIdentStart(ASource[I]) then Exit;
     Start := I;
-    while (I <= N) and IsIdentCont(ASource[I]) do Inc(I);
+    while (I <= N) and IsIdentChar(ASource[I]) do Inc(I);
     Result := Copy(ASource, Start, I - Start);
   end;
 
@@ -1296,7 +1286,7 @@ var
     if IsIdentStart(ASource[I]) then
     begin
       var Start := I;
-      while (I <= N) and IsIdentCont(ASource[I]) do
+      while (I <= N) and IsIdentChar(ASource[I]) do
       begin
         Inc(I); Inc(Col);
       end;
@@ -1691,7 +1681,7 @@ begin
         TokenStart := I;
         TokenStartLine := Line;
         TokenStartCol := Col;
-        while (I <= N) and IsIdentCont(ASource[I]) do
+        while (I <= N) and IsIdentChar(ASource[I]) do
         begin
           Inc(I); Inc(Col);
         end;
@@ -1913,7 +1903,7 @@ begin
       if IsIdentStart(Upper[P]) then
       begin
         var Q := P;
-        while (Q <= Length(Upper)) and IsIdentCont(Upper[Q]) do Inc(Q);
+        while (Q <= Length(Upper)) and IsIdentChar(Upper[Q]) do Inc(Q);
         var Word := Copy(Upper, P, Q - P);
         if (Word = 'RECORD') or (Word = 'CASE') or (Word = 'TRY')
           or (Word = 'BEGIN') or (Word = 'ASM') then
@@ -2113,7 +2103,7 @@ begin
         var IdStart := I;
         var IdStartCol := Col;
         var IdStartLine := Line;
-        while (I <= N) and IsIdentCont(ASource[I]) do
+        while (I <= N) and IsIdentChar(ASource[I]) do
         begin
           Inc(I); Inc(Col);
         end;
@@ -2268,7 +2258,7 @@ begin
         if IsIdentStart(Upper[P]) then
         begin
           Q := P;
-          while (Q <= Length(Upper)) and IsIdentCont(Upper[Q]) do Inc(Q);
+          while (Q <= Length(Upper)) and IsIdentChar(Upper[Q]) do Inc(Q);
           Word := Copy(Upper, P, Q - P);
           if not HadFirstWord then
           begin
@@ -2299,7 +2289,7 @@ begin
               if (P <= Length(Line)) and IsIdentStart(Line[P]) then
               begin
                 Q := P;
-                while (Q <= Length(Line)) and IsIdentCont(Line[Q]) do Inc(Q);
+                while (Q <= Length(Line)) and IsIdentChar(Line[Q]) do Inc(Q);
                 List.Add(Copy(Line, P, Q - P));
               end;
               Break;
@@ -2312,7 +2302,7 @@ begin
               if (P <= Length(Line)) and IsIdentStart(Line[P]) then
               begin
                 Q := P;
-                while (Q <= Length(Line)) and IsIdentCont(Line[Q]) do Inc(Q);
+                while (Q <= Length(Line)) and IsIdentChar(Line[Q]) do Inc(Q);
                 List.Add(Copy(Line, P, Q - P));
               end;
               Break;
@@ -2447,7 +2437,7 @@ begin
         if Stripped.StartsWith(Pointee, True) then
         begin
           var After := Copy(Stripped, Length(Pointee) + 1, MaxInt);
-          if (After = '') or not IsIdentCont(After[1]) then
+          if (After = '') or not IsIdentChar(After[1]) then
           begin
             var AfterT := TrimLeft(After);
             if (AfterT <> '') and (AfterT[1] = '=') then
@@ -2835,7 +2825,7 @@ begin
     begin
       var AfterAs := Trim(Copy(ExprT, AsPos + 4, MaxInt));
       var EndP := 1;
-      while (EndP <= Length(AfterAs)) and IsIdentCont(AfterAs[EndP]) do
+      while (EndP <= Length(AfterAs)) and IsIdentChar(AfterAs[EndP]) do
         Inc(EndP);
       if EndP > 1 then
         Result.TypeName := Copy(AfterAs, 1, EndP - 1);
@@ -2911,7 +2901,7 @@ begin
       begin
         // LHS-Identifier extrahieren (vor dem ersten Whitespace/'=').
         var LhsEnd := 1;
-        while (LhsEnd <= Length(Trim1)) and IsIdentCont(Trim1[LhsEnd]) do
+        while (LhsEnd <= Length(Trim1)) and IsIdentChar(Trim1[LhsEnd]) do
           Inc(LhsEnd);
         if LhsEnd > 1 then
         begin
@@ -3051,7 +3041,7 @@ begin
           begin
             // word-boundary: nach Pointee muss Nicht-Ident-Char kommen.
             var After := Copy(Stripped, Length(Pointee) + 1, MaxInt);
-            if (After = '') or not IsIdentCont(After[1]) then
+            if (After = '') or not IsIdentChar(After[1]) then
             begin
               // '=' nach optionalem Whitespace?
               var AfterTrim := TrimLeft(After);

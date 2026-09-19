@@ -53,7 +53,7 @@ uses
   {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
   Expert.EditorHelperIntf, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
   Expert.DialogHelper, Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
-  Delphi.FileEncoding;
+  Delphi.FileEncoding, Expert.PascalScanner;
 
 function StringListToArray(ASL: TStringList): TArray<string>;
 var
@@ -121,20 +121,6 @@ begin
   Editor.AddFileToActiveProject(AFile);
 end;
 
-function IsIdentCh(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
-
-function StripLineCommentLocal(const ALine: string): string;
-var
-  P: Integer;
-begin
-  Result := ALine;
-  P := Pos('//', Result);
-  if P > 0 then Result := Copy(Result, 1, P - 1);
-end;
-
 function IsPrimitiveType(const AUpper: string): Boolean;
 begin
   Result :=
@@ -167,7 +153,7 @@ begin
       Inc(I);
       while (I <= Length(ASig)) and (ASig[I] = ' ') do Inc(I);
       Start := I;
-      while (I <= Length(ASig)) and (IsIdentCh(ASig[I]) or (ASig[I] = '.')) do Inc(I);
+      while (I <= Length(ASig)) and (IsIdentChar(ASig[I]) or (ASig[I] = '.')) do Inc(I);
       if I > Start then
       begin
         Ident := Copy(ASig, Start, I - Start);
@@ -321,9 +307,9 @@ begin
         begin
           P := PosEx(Tn, L, P);
           if P = 0 then Break;
-          var BeforeOK := (P = 1) or not IsIdentCh(L[P - 1]);
+          var BeforeOK := (P = 1) or not IsIdentChar(L[P - 1]);
           var AfterOK := (P + Length(Tn) - 1 >= Length(L))
-            or not IsIdentCh(L[P + Length(Tn)]);
+            or not IsIdentChar(L[P + Length(Tn)]);
           if BeforeOK and AfterOK then
           begin
             FoundLine := I;
@@ -1002,7 +988,7 @@ procedure ApplyAddToExisting(const AInfo: TExtractInterfaceInfo;
       var FoundEnd: Integer := -1;
       for I := AFilteredInfo.ExistingDeclLine to High(ExistingLines) do
       begin
-        var U := UpperCase(StripLineCommentLocal(ExistingLines[I]));
+        var U := UpperCase(StripLineComment(ExistingLines[I]));
         var P := 1;
         while P <= Length(U) do
         begin
@@ -1173,7 +1159,7 @@ begin
     var FoundEnd: Integer := -1;
     for I := AInfo.ExistingDeclLine - 1 + 1 to High(ExistingLines) do
     begin
-      var U := UpperCase(StripLineCommentLocal(ExistingLines[I]));
+      var U := UpperCase(StripLineComment(ExistingLines[I]));
       var P := 1;
       while P <= Length(U) do
       begin
@@ -1416,7 +1402,7 @@ begin
 
   for I := 0 to High(ALines) do
   begin
-    Trimmed := Trim(StripLineCommentLocal(ALines[I]));
+    Trimmed := Trim(StripLineComment(ALines[I]));
     Upper := UpperCase(Trimmed);
     if not (StartsText('PROCEDURE ', Upper) or
             StartsText('FUNCTION ', Upper) or
@@ -1428,7 +1414,7 @@ begin
     BeginLine := -1;
     for J := I + 1 to High(ALines) do
     begin
-      Upper := UpperCase(Trim(StripLineCommentLocal(ALines[J])));
+      Upper := UpperCase(Trim(StripLineComment(ALines[J])));
       if (Upper = 'BEGIN') or StartsText('BEGIN ', Upper) then
       begin
         BeginLine := J; Break;
@@ -1441,7 +1427,7 @@ begin
     EndLine := -1;
     for J := BeginLine + 1 to High(ALines) do
     begin
-      Trimmed := Trim(StripLineCommentLocal(ALines[J]));
+      Trimmed := Trim(StripLineComment(ALines[J]));
       Upper := UpperCase(Trimmed);
       while (Upper <> '') and (Upper[Length(Upper)] = ';') do
         Upper := Trim(Copy(Upper, 1, Length(Upper) - 1));

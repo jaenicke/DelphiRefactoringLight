@@ -192,8 +192,6 @@ function SuggestHandlerName(const ACtx: TGenContext; const AParamName: string): 
 function PlanEventHandler(const ALines: TArray<string>; ACaretLine0: Integer;
   const AName: string; const AInfo: TProcTypeInfo): TGenPlan;
 
-function IsPascalIdentifier(const S: string): Boolean;
-
 /// <summary>Indices into ACandidates (unit names), most visible first:
 ///  units named in AUses in REVERSE order (the last used unit wins), then
 ///  the rest in their original order. 'SysUtils' matches 'System.SysUtils'.</summary>
@@ -214,27 +212,7 @@ function MakeIndexTypeSource(const ALookup: TFunc<string, TArray<TFindUnitHit>>;
 implementation
 
 uses
-  System.StrUtils, System.Character, System.Math, Expert.DfmRename, Expert.UsesGraph;
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetter or (C = '_');
-end;
-
-function IsPascalIdentifier(const S: string): Boolean;
-var
-  I: Integer;
-begin
-  Result := (S <> '') and IsIdentStart(S[1]);
-  if Result then
-    for I := 2 to Length(S) do
-      if not IsIdentChar(S[I]) then Exit(False);
-end;
+  System.StrUtils, System.Character, System.Math, Expert.DfmRename, Expert.UsesGraph, Expert.PascalScanner;
 
 function LeadingSpaces(const S: string): string;
 var
@@ -813,7 +791,7 @@ begin
   Outer := Copy(Outer, 1, P - 1);
   P := LastDelimiter('.', Outer);     // Unit.TOuter -> TOuter
   if P > 0 then Outer := Copy(Outer, P + 1, MaxInt);
-  if IsPascalIdentifier(Outer) then
+  if IsIdentifier(Outer) then
     Result := TryDecls(ASource(Outer, AContextFile));
 end;
 
@@ -1214,7 +1192,7 @@ begin
     else
       Result := 'HandleEvent';
   end;
-  if not IsPascalIdentifier(Result) then Result := 'HandleEvent';
+  if not IsIdentifier(Result) then Result := 'HandleEvent';
 end;
 
 function PlanEventHandler(const ALines: TArray<string>; ACaretLine0: Integer;
@@ -1225,7 +1203,7 @@ var
 begin
   Result := Default(TGenPlan);
   Content := string.Join(sLineBreak, ALines);
-  if not IsPascalIdentifier(AName) then
+  if not IsIdentifier(AName) then
   begin
     Result.Reason := Format('"%s" is not a valid identifier', [AName]);
     Exit;

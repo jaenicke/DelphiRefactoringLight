@@ -244,15 +244,6 @@ function ExpandIncludeDirectives(const AText, ABaseDir: string;
 ///  symbol when the LSP has no definition for it (index fallback).</summary>
 function FindDeclarationLine(const AContent, AIdent: string): Integer;
 
-/// <summary>ALines with every character inside a comment ({ }, (* *), //)
-///  or a string literal replaced by a blank - line count and every line's
-///  LENGTH unchanged, so positions stay valid. The comment state is carried
-///  ACROSS lines: a word on the 3rd line of a multi-line { ... } comment is
-///  masked (the old per-line check only looked at the line itself and took
-///  it for code - Find References / Rename then listed it, forum report
-///  2026-09). A character is code exactly when Masked[L][C] = ALines[L][C]
-///  for a non-blank character.</summary>
-function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 
 /// <summary>0-based lines on which AWord occurs as a whole identifier in
 ///  CODE (comments and strings masked, case-insensitive; a '&amp;'-escaped
@@ -312,7 +303,7 @@ implementation
 uses
   System.IOUtils, System.StrUtils, System.Win.Registry, System.Types,
   System.Generics.Defaults, System.Math, Winapi.Windows,
-  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.ResourceMonitor;
+  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.ResourceMonitor, Expert.PascalScanner;
 
 const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
@@ -328,7 +319,7 @@ const
   // seeing "TcxButton / TStringGrid unknown" - which made uses-cleanup
   // offer units in use for REMOVAL, and left add-unit and "find original
   // symbol" blind for those types.
-  IndexParserVersion = '11';
+  IndexParserVersion = '12';
   //  10: enum members under {$SCOPEDENUMS ON} are not indexed - they are
   //      only reachable qualified ("TEnum.Test"); the tester got "add
   //      Winapi.Networking.NetworkOperators" for an undeclared Test
@@ -346,25 +337,6 @@ const
 // ---------------------------------------------------------------------------
 //  Lexical helpers
 // ---------------------------------------------------------------------------
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '_']);
-end;
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-end;
-
-function IsIdent(const S: string): Boolean;
-var I: Integer;
-begin
-  Result := (S <> '') and IsIdentStart(S[1]);
-  if Result then
-    for I := 2 to Length(S) do
-      if not IsIdentChar(S[I]) then Exit(False);
-end;
 
 // Removes comments/directives and blanks string literals from one line,
 // carrying the block-comment state (0 none, 1 '{', 2 '(*') across lines.
@@ -477,7 +449,7 @@ begin
   for Nm in ANames.Split([',']) do
   begin
     var N := Trim(Nm);
-    if IsIdent(N) then AList.Add(N);
+    if IsIdentifier(N) then AList.Add(N);
   end;
 end;
 
@@ -659,7 +631,7 @@ var
     Result := False;
     P := Pos('=', AUpperTrimmed);
     if P < 2 then Exit;
-    if not IsIdent(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
+    if not IsIdentifier(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
     Rhs := TrimLeft(Copy(AUpperTrimmed, P + 1, MaxInt));
     if StartsWithWord(Rhs, 'PACKED') then Rhs := TrimLeft(Copy(Rhs, 7, MaxInt));
     if StartsWithWord(Rhs, 'CLASS') and not Rhs.StartsWith('CLASS OF') then
@@ -679,7 +651,7 @@ var
     Result := False;
     P := Pos('=', AUpperTrimmed);
     if P < 2 then Exit;
-    if not IsIdent(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
+    if not IsIdentifier(Trim(Copy(AUpperTrimmed, 1, P - 1))) then Exit;
     Rhs := TrimLeft(Copy(AUpperTrimmed, P + 1, MaxInt));
     if StartsWithWord(Rhs, 'PACKED') then Rhs := TrimLeft(Copy(Rhs, 7, MaxInt));
     if StartsWithWord(Rhs, 'CLASS') then
@@ -710,7 +682,7 @@ var
       var Eq := Pos('=', MM);
       if Eq > 0 then MM := Trim(Copy(MM, 1, Eq - 1))
       else if Sp > 0 then MM := Trim(Copy(MM, 1, Sp - 1));
-      if IsIdent(MM) then Idents.Add(MM);
+      if IsIdentifier(MM) then Idents.Add(MM);
     end;
   end;
 
@@ -886,7 +858,7 @@ begin
         for var K := 1 to Length(Rest) do
           if CharInSet(Rest[K], ['(', ':', ';', ' ', #9, '<']) then begin CutP := K; Break; end;
         var Nm := Trim(Copy(Rest, 1, CutP - 1));
-        if IsIdent(Nm) then
+        if IsIdentifier(Nm) then
         begin
           // Generic routine: keep the marker (see the type branch below).
           if (CutP <= Length(Rest)) and (Rest[CutP] = '<') then
@@ -924,7 +896,7 @@ begin
                 IsGenericDecl := True;
               end;
               // Guard against "A = B" continuation lines with commas etc.
-              if IsIdent(Name) then
+              if IsIdentifier(Name) then
               begin
                 if IsGenericDecl then
                   Idents.Add(Name + '<')
@@ -982,7 +954,7 @@ begin
             for var K := 1 to Length(Tr) do
               if CharInSet(Tr[K], ['=', ':']) then begin Cut := K; Break; end;
             var Nm := Trim(Copy(Tr, 1, Cut - 1));
-            if IsIdent(Nm) then Idents.Add(Nm);
+            if IsIdentifier(Nm) then Idents.Add(Nm);
           end;
         secVar:
           begin
@@ -1371,86 +1343,6 @@ begin
   end;
 end;
 
-function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
-var
-  Block: Integer;   // 0 code, 1 inside { }, 2 inside (* *)
-begin
-  SetLength(Result, Length(ALines));
-  Block := 0;
-  for var L := 0 to High(ALines) do
-  begin
-    var S := ALines[L];
-    var M := S;   // copy-on-write: only lines with comments get a new string
-    var N := Length(S);
-    var I := 1;
-    var InStr := False;   // Delphi string literals never span lines
-    while I <= N do
-    begin
-      if Block = 1 then
-      begin
-        if S[I] = '}' then Block := 0;
-        M[I] := ' ';
-        Inc(I);
-        Continue;
-      end;
-      if Block = 2 then
-      begin
-        if (S[I] = '*') and (I < N) and (S[I + 1] = ')') then
-        begin
-          M[I] := ' '; M[I + 1] := ' ';
-          Block := 0;
-          Inc(I, 2);
-          Continue;
-        end;
-        M[I] := ' ';
-        Inc(I);
-        Continue;
-      end;
-      if InStr then
-      begin
-        if S[I] = '''' then InStr := False;   // '' = two literals, same result
-        M[I] := ' ';
-        Inc(I);
-        Continue;
-      end;
-      case S[I] of
-        '{':
-          begin
-            Block := 1;
-            M[I] := ' ';
-            Inc(I);
-          end;
-        '(':
-          if (I < N) and (S[I + 1] = '*') then
-          begin
-            Block := 2;
-            M[I] := ' '; M[I + 1] := ' ';
-            Inc(I, 2);
-          end
-          else
-            Inc(I);
-        '/':
-          if (I < N) and (S[I + 1] = '/') then
-          begin
-            for var K := I to N do M[K] := ' ';
-            Break;
-          end
-          else
-            Inc(I);
-        '''':
-          begin
-            InStr := True;
-            M[I] := ' ';
-            Inc(I);
-          end;
-      else
-        Inc(I);
-      end;
-    end;
-    Result[L] := M;
-  end;
-end;
-
 function FindDeclarationLine(const AContent, AIdent: string): Integer;
 var
   Lines: TArray<string>;
@@ -1476,7 +1368,7 @@ var
 
 begin
   Result := -1;
-  if (AContent = '') or not IsIdent(AIdent) then Exit;
+  if (AContent = '') or not IsIdentifier(AIdent) then Exit;
   Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
   UIdent := UpperCase(AIdent);
 
@@ -1704,7 +1596,7 @@ var
 
 begin
   Result := -1;
-  if (AContent = '') or not IsIdent(ATypeName) or not IsIdent(AMemberName) then Exit;
+  if (AContent = '') or not IsIdentifier(ATypeName) or not IsIdentifier(AMemberName) then Exit;
   Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
   UMember := UpperCase(AMemberName);
 

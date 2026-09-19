@@ -105,17 +105,7 @@ function ClassMatchesType(AParents: TDictionary<string, string>;
 implementation
 
 uses
-  System.IOUtils, System.StrUtils, System.Character, System.Generics.Defaults;
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetter or (C = '_');
-end;
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
+  System.IOUtils, System.StrUtils, System.Character, System.Generics.Defaults, Expert.PascalScanner;
 
 // Reads an identifier starting at 1-based P; returns it and moves P behind.
 function ReadIdent(const S: string; var P: Integer): string;

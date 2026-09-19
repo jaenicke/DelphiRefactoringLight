@@ -262,28 +262,9 @@ type
 implementation
 
 uses
-  System.StrUtils, System.Character, System.Math, Winapi.ActiveX, Winapi.Windows;
+  System.StrUtils, System.Character, System.Math, Winapi.ActiveX, Winapi.Windows, Expert.PascalScanner;
 
 { ---------- helpers ---------- }
-
-function StripLineComment(const ALine: string): string;
-var
-  P: Integer;
-begin
-  Result := ALine;
-  P := Pos('//', Result);
-  if P > 0 then Result := Copy(Result, 1, P - 1);
-end;
-
-function IsIdent(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetter or (C = '_');
-end;
 
 function FirstWordUpper(const ALine: string; out APosAfter: Integer): string;
 var
@@ -296,7 +277,7 @@ begin
   if I > Length(ALine) then Exit;
   if not IsIdentStart(ALine[I]) then Exit;
   J := I;
-  while (J <= Length(ALine)) and IsIdent(ALine[J]) do Inc(J);
+  while (J <= Length(ALine)) and IsIdentChar(ALine[J]) do Inc(J);
   Result := UpperCase(Copy(ALine, I, J - I));
   APosAfter := J;
 end;
@@ -312,7 +293,7 @@ begin
   while (I <= Length(ALine)) and ALine[I].IsWhiteSpace do Inc(I);
   if (I > Length(ALine)) or not IsIdentStart(ALine[I]) then Exit;
   AEndPos := I;
-  while (AEndPos <= Length(ALine)) and IsIdent(ALine[AEndPos]) do Inc(AEndPos);
+  while (AEndPos <= Length(ALine)) and IsIdentChar(ALine[AEndPos]) do Inc(AEndPos);
   Result := Copy(ALine, I, AEndPos - I);
 end;
 
@@ -463,7 +444,7 @@ begin
       if IsIdentStart(Upper[Pos_]) then
       begin
         var Q := Pos_;
-        while (Q <= Length(Upper)) and IsIdent(Upper[Q]) do Inc(Q);
+        while (Q <= Length(Upper)) and IsIdentChar(Upper[Q]) do Inc(Q);
         var W := Copy(Upper, Pos_, Q - Pos_);
         if (W = 'RECORD') then
           Inc(Depth)
@@ -593,7 +574,7 @@ begin
         var AfterKw := Pos(' ', TrimmedAcc);
         var NameStart := AfterKw + 1;
         var NameEnd := NameStart;
-        while (NameEnd <= Length(TrimmedAcc)) and IsIdent(TrimmedAcc[NameEnd]) do Inc(NameEnd);
+        while (NameEnd <= Length(TrimmedAcc)) and IsIdentChar(TrimmedAcc[NameEnd]) do Inc(NameEnd);
         var MName := Copy(TrimmedAcc, NameStart, NameEnd - NameStart);
         if After = 0 then ; // silence hint
 
@@ -662,7 +643,7 @@ begin
           var Idx: Integer := KP + Length(KW);
           while (Idx <= Length(KU)) and (KU[Idx] = ' ') do Inc(Idx);
           var Start: Integer := Idx;
-          while (Idx <= Length(KU)) and (IsIdent(KU[Idx]) or (KU[Idx] = '.')) do Inc(Idx);
+          while (Idx <= Length(KU)) and (IsIdentChar(KU[Idx]) or (KU[Idx] = '.')) do Inc(Idx);
           var W: string := Copy(KU, Start, Idx - Start);
           var Field: Boolean := (W <> '') and
             not StartsText('GET', W) and not StartsText('SET', W);
@@ -1200,7 +1181,7 @@ begin
                 if IsIdentStart(LineU[Pos_]) then
                 begin
                   var Q := Pos_;
-                  while (Q <= Length(LineU)) and IsIdent(LineU[Q]) do Inc(Q);
+                  while (Q <= Length(LineU)) and IsIdentChar(LineU[Q]) do Inc(Q);
                   var W := Copy(LineU, Pos_, Q - Pos_);
                   if (W = 'RECORD') and (J > I) then Inc(Depth)
                   else if (W = 'END') then

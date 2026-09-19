@@ -90,6 +90,9 @@ var
 
 implementation
 
+
+uses
+  Expert.PascalScanner;
 {$IFNDEF STANDALONE_BUILD}
 { TLspFindUnitReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
   Only compiled into the IDE plugin; the standalone build does not
@@ -396,11 +399,6 @@ begin
   end;
 end;
 
-function IsPascalIdentChar(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-end;
-
 function ExtractUsedUnitNames(const ASource: string): TArray<string>;
 // Returns every identifier from every uses clause in ASource.
 // Dotted names (System.SysUtils) are kept as one entry. The "in '...'"
@@ -422,8 +420,8 @@ begin
       if P = 0 then Break;
 
       // word-boundary check
-      if ((P > 1) and IsPascalIdentChar(Lower[P - 1])) or
-         ((P + 4 <= Length(Lower)) and IsPascalIdentChar(Lower[P + 4])) then
+      if ((P > 1) and IsIdentChar(Lower[P - 1])) or
+         ((P + 4 <= Length(Lower)) and IsIdentChar(Lower[P + 4])) then
       begin
         Inc(P);
         Continue;
@@ -834,7 +832,7 @@ begin
         var DotPos2 := LastDelimiter('.', Bare);
         if DotPos2 > 0 then Bare := Copy(Bare, DotPos2 + 1, MaxInt);
         Bare := Trim(Bare);
-        if (Bare = '') or not IsPascalIdentChar(Bare[1]) then Continue;
+        if (Bare = '') or not IsIdentChar(Bare[1]) then Continue;
         // skip section markers ("interface", "implementation", "uses")
         // and the unit's own name.
         if SameText(Bare, 'interface') or SameText(Bare, 'implementation') or

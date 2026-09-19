@@ -55,6 +55,7 @@ uses
   Expert.MoveToUnitDialog in '..\Source\Expert.MoveToUnitDialog.pas',
   Expert.RestartHint in '..\Source\Expert.RestartHint.pas',
   Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
+  Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
   Expert.UnitReferencesDialog in '..\Source\Expert.UnitReferencesDialog.pas',

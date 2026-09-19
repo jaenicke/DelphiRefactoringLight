@@ -79,13 +79,8 @@ function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 implementation
 
 uses
-  System.Classes, System.StrUtils, System.Math, Expert.AutoImport, Expert.UsesEditor,
-  Expert.UnitIndex;
-
-function IsIdentCh(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-end;
+  System.Classes, System.StrUtils, System.Math, Expert.AutoImport,
+  Expert.UnitIndex, Expert.PascalScanner;
 
 function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 begin
@@ -117,7 +112,7 @@ var
 begin
   T := TrimLeft(S);
   I := 1;
-  while (I <= Length(T)) and IsIdentCh(T[I]) do Inc(I);
+  while (I <= Length(T)) and IsIdentChar(T[I]) do Inc(I);
   Result := UpperCase(Copy(T, 1, I - 1));
 end;
 
@@ -377,7 +372,7 @@ begin
     var I := 10;
     while (I <= Length(T)) and CharInSet(T[I], [' ', #9]) do Inc(I);
     var S := I;
-    while (I <= Length(T)) and IsIdentCh(T[I]) do Inc(I);
+    while (I <= Length(T)) and IsIdentChar(T[I]) do Inc(I);
     Exit(SameText(Copy(T, S, I - S), AName));
   end;
   for var N in SplitDeclNames(ALine, NS, Sep, IsEq) do
@@ -671,7 +666,7 @@ begin
     while P > 0 do
     begin
       E := P + Length(W);
-      if ((P = 1) or not IsIdentCh(U[P - 1])) and ((E > Length(U)) or not IsIdentCh(U[E])) then
+      if ((P = 1) or not IsIdentChar(U[P - 1])) and ((E > Length(U)) or not IsIdentChar(U[E])) then
       begin
         Result := Result + [L];
         Break;

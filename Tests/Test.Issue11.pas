@@ -35,13 +35,18 @@ type
     [Test] procedure SafeDelete_MethodDeclarationAndBody;
     [Test] procedure SafeDelete_VetoesDispatchAndPublished;
     [Test] procedure SafeDelete_DataDeclarations;
+    [Test] procedure Scanner_TokensAndPositions;
+    [Test] procedure Scanner_MultiLineStringIsOneToken;
+    [Test] procedure Scanner_UnicodeIdentifiersAndEscapes;
+    [Test] procedure Scanner_StripAndMask;
   end;
 
 implementation
 
 uses
   System.SysUtils, Expert.SignatureCheck, Expert.WithScanner, Expert.UnitIndex,
-  Expert.AutoImport, Expert.StatementRefactor, Expert.SafeDeletePlan;
+  Expert.AutoImport, Expert.StatementRefactor, Expert.SafeDeletePlan,
+  Expert.PascalScanner;
 
 const
   SafeDemo: array[0..28] of string = (
@@ -285,6 +290,84 @@ begin
   var Hits := FormTextMentions('object B: TButton'#13#10'  OnClick = UnusedClick', 'UnusedClick');
   Assert.AreEqual<Integer>(1, Length(Hits));
   Assert.AreEqual(1, Hits[0]);
+end;
+
+function ScanAll(const AText: string; AComments: Boolean = False): TArray<TPasToken>;
+var
+  S: TPascalScanner;
+  T: TPasToken;
+begin
+  Result := nil;
+  S := TPascalScanner.Create(AText, AComments, AComments);
+  try
+    while S.Next(T) do Result := Result + [T];
+  finally
+    S.Free;
+  end;
+end;
+
+procedure TIssue11Tests.Scanner_TokensAndPositions;
+begin
+  var T := ScanAll('X := A[1..5];'#13#10'  Y := $FF + 1.5e3; // c');
+  Assert.AreEqual<Integer>(15, Length(T));
+  Assert.IsTrue(T[1].IsSymbol(':='));
+  Assert.AreEqual('1', T[4].Text, '"1..5" is a range, not a float');
+  Assert.IsTrue(T[5].IsSymbol('..'));
+  Assert.AreEqual(1, T[9].Line);
+  Assert.AreEqual(2, T[9].Col);
+  Assert.AreEqual('$FF', T[11].Text);
+  Assert.AreEqual<Integer>(Ord(ptNumber), Ord(T[13].Kind));
+  var C := ScanAll('{$IFDEF X}a (* b *) // c', True);
+  Assert.AreEqual<Integer>(Ord(ptDirective), Ord(C[0].Kind));
+  Assert.AreEqual<Integer>(Ord(ptComment), Ord(C[2].Kind));
+  Assert.AreEqual<Integer>(Ord(ptComment), Ord(C[3].Kind));
+end;
+
+procedure TIssue11Tests.Scanner_MultiLineStringIsOneToken;
+begin
+  var T := ScanAll('S := '''''''#13#10'  begin end'#13#10'  '''''';'#13#10'X');
+  Assert.AreEqual<Integer>(5, Length(T), 'begin/end inside the literal are no tokens');
+  Assert.AreEqual<Integer>(Ord(ptString), Ord(T[2].Kind));
+  Assert.IsTrue(T[3].IsSymbol(';'));
+  Assert.AreEqual(2, T[3].Line);
+  Assert.AreEqual(3, MultiLineStringOpener('x := ''''''', 6));
+  Assert.AreEqual(0, MultiLineStringOpener('''''''x', 1));
+end;
+
+procedure TIssue11Tests.Scanner_UnicodeIdentifiersAndEscapes;
+var
+  S: TPascalScanner;
+  Tok, All: string;
+begin
+  Assert.IsTrue(IsIdentifier('Größe'));
+  Assert.IsTrue(IsIdentifier('_x1'));
+  Assert.IsFalse(IsIdentifier('1x'));
+  Assert.IsFalse(IsIdentifier('a.b'));
+  var T := ScanAll('&begin Größe');
+  Assert.AreEqual<Integer>(2, Length(T));
+  Assert.IsFalse(T[0].IsWord('begin'), 'an escaped identifier is not the keyword');
+  Assert.AreEqual('Größe', T[1].Text);
+  // the selection validator's stream
+  All := '';
+  S := TPascalScanner.Create('if a(x, ''s'') then c[1] := 2; (.x.)');
+  try
+    while S.NextToken(Tok) do All := All + Tok + ' ';
+  finally
+    S.Free;
+  end;
+  Assert.AreEqual('IF A ( X ) THEN C [ ] ; [ X ] ', All);
+end;
+
+procedure TIssue11Tests.Scanner_StripAndMask;
+begin
+  Assert.AreEqual('  Url = ''http://x'';', StripLineComment('  Url = ''http://x''; // note'));
+  Assert.AreEqual('  X := 1;', StripLineComment('  X := 1;'));
+  var M := MaskCommentsAndStrings(TArray<string>.Create(
+    'A := ''x''; { c', 'still } B', 'S := ''''''', '  Name', '  ''''''; C // d'));
+  Assert.AreEqual('A :=    ;    ', M[0]);
+  Assert.AreEqual('        B', M[1]);
+  Assert.AreEqual('      ', M[3], 'content of a multi-line string');
+  Assert.AreEqual('     ; C     ', M[4]);
 end;
 
 initialization

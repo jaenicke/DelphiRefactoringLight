@@ -118,7 +118,7 @@ type
 implementation
 
 uses
-  System.Character, System.IOUtils, System.Generics.Collections;
+  System.Character, System.IOUtils, System.Generics.Collections, Expert.PascalScanner;
 
 type
   /// <summary>Cursor over the source string with 1-based line/col tracking.</summary>
@@ -189,16 +189,6 @@ begin
 end;
 
 { Lexical helpers }
-
-function IsIdentStart(C: Char): Boolean; inline;
-begin
-  Result := (C = '_') or C.IsLetter;
-end;
-
-function IsIdentCont(C: Char): Boolean; inline;
-begin
-  Result := (C = '_') or C.IsLetterOrDigit;
-end;
 
 /// <summary>Skips one whitespace/comment token if at one. Returns True
 ///  when something was skipped. Strings are NOT skipped here — the
@@ -356,7 +346,7 @@ begin
   AStart := Cur.Pos;
   SB := TStringBuilder.Create;
   try
-    while (not Cur.Eof) and IsIdentCont(Cur.Peek) do
+    while (not Cur.Eof) and IsIdentChar(Cur.Peek) do
     begin
       SB.Append(Cur.Peek);
       Cur.Advance;

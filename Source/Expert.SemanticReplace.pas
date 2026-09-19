@@ -113,6 +113,9 @@ type
 
 implementation
 
+
+uses
+  Expert.PascalScanner;
 const
   CExampleJson =
     '{' + sLineBreak +
@@ -283,11 +286,6 @@ begin
 end;
 
 { ---- internals ---- }
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
 
 /// <summary>One-pass comment/string-aware scanner. Calls AOnMatch for
 ///  every whole-identifier occurrence of any Rule.Find.</summary>

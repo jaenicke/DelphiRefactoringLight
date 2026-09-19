@@ -142,6 +142,7 @@
         <DCCReference Include="..\Source\Expert.MoveToUnitDialog.pas"/>
         <DCCReference Include="..\Source\Expert.RestartHint.pas"/>
         <DCCReference Include="..\Source\Expert.SelectionValidator.pas"/>
+        <DCCReference Include="..\Source\Expert.PascalScanner.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheckDialog.pas"/>
         <DCCReference Include="..\Source\Expert.UnitReferencesDialog.pas"/>

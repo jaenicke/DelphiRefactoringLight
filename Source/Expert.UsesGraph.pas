@@ -209,7 +209,14 @@ implementation
 
 uses
   System.IOUtils, System.StrUtils, System.Math, System.Generics.Defaults,
-  Expert.EditorHelperIntf, Delphi.FileEncoding;
+  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.PascalScanner;
+
+// A unit name is identifiers joined by dots.
+function IsDottedNameChar(C: Char): Boolean;
+begin
+  Result := (C = '.') or IsIdentChar(C);
+end;
+
 
 function ReadFileContent(const AFile: string; out AContent: string): Boolean;
 begin
@@ -222,11 +229,6 @@ begin
   except
     Result := False;
   end;
-end;
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']);
 end;
 
 class function TUsesGraphAnalyzer.ParseUsesEntries(
@@ -383,9 +385,9 @@ begin
       UsesPos := Pos('USES', U);
       while UsesPos > 0 do
       begin
-        var BeforeOk := (UsesPos = 1) or not IsIdentChar(U[UsesPos - 1]);
+        var BeforeOk := (UsesPos = 1) or not IsDottedNameChar(U[UsesPos - 1]);
         var AfterIdx := UsesPos + 4;
-        var AfterOk := (AfterIdx > Length(U)) or not IsIdentChar(U[AfterIdx]);
+        var AfterOk := (AfterIdx > Length(U)) or not IsDottedNameChar(U[AfterIdx]);
         if BeforeOk and AfterOk then
         begin
           Collecting := not ConsumeUsesText(Copy(L, AfterIdx, MaxInt));

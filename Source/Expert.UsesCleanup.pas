@@ -67,7 +67,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.DialogHelper,
-  Expert.IdeThemes, Expert.ListViewSort;
+  Expert.IdeThemes, Expert.ListViewSort, Expert.PascalScanner;
 
 // ---------------------------------------------------------------------------
 //  Analysis

@@ -76,12 +76,7 @@ implementation
 uses
   System.Classes, System.StrUtils, System.Math, Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.UsesEditor,
-  Expert.AutoImport, Expert.WithScanner, Expert.DialogHelper;
-
-function IsIdentChar(C: Char): Boolean; inline;
-begin
-  Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-end;
+  Expert.AutoImport, Expert.WithScanner, Expert.DialogHelper, Expert.PascalScanner;
 
 function LeadingBlanks(const S: string): string;
 var

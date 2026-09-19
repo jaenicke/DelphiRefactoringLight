@@ -32,10 +32,6 @@ function UnitInUsesText(const AContent, AUnit: string): Boolean;
 function UnitInUsesSection(const AContent, AUnit: string;
   ASection: TUsesSection): Boolean;
 
-/// <summary>Cuts a trailing '//' comment off a source line
-///  (string-literal aware). Shared helper for line-level Pascal parsing.</summary>
-function StripLineComment(const L: string): string;
-
 /// <summary>Adds AUnit to the requested section's uses clause of AFilePath
 ///  (creating the clause if the section has none). Returns True if the file
 ///  was changed; False if AUnit was already reachable or on error.
@@ -71,7 +67,7 @@ implementation
 
 uses
   System.SysUtils, System.IOUtils, System.Math,
-  Expert.EditorHelperIntf, Expert.UnitIndex;
+  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.PascalScanner;
 
 // Comment/string-MASKED copy of SL: same line count, same line lengths,
 // but comments ({ }, (* *), //), compiler directives and string literals
@@ -237,25 +233,6 @@ begin
   finally
     Orig.Free;
   end;
-end;
-
-function StripLineComment(const L: string): string;
-var
-  I, N: Integer;
-  InStr: Boolean;
-begin
-  N := Length(L);
-  InStr := False;
-  I := 1;
-  while I <= N do
-  begin
-    if L[I] = '''' then
-      InStr := not InStr
-    else if (not InStr) and (L[I] = '/') and (I < N) and (L[I + 1] = '/') then
-      Exit(TrimRight(Copy(L, 1, I - 1)));
-    Inc(I);
-  end;
-  Result := L;
 end;
 
 function TokenEquals(const ALine, AUnit: string): Boolean;

@@ -95,7 +95,7 @@ uses
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.AutoImport, Expert.UsesEditor,
   Expert.ScopeFiles, Expert.LspManager, Expert.DiagStore, Expert.DialogHelper,
   Expert.IdeThemes, Expert.ListViewSort, Expert.WorkerLatch, Expert.McpServer,
-  Expert.McpLspTools, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
+  Expert.McpLspTools, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner;
 
 type
   TCand = record
@@ -109,11 +109,6 @@ const
   FindingKindText: array[TSafeDeleteFindingKind] of string =
     ('USED', 'NOT VERIFIABLE', 'other symbol', 'FORM FILE', 'note');
 
-function IsIdentCh(C: Char): Boolean; inline;
-begin
-  Result := C.IsLetterOrDigit or (C = '_');
-end;
-
 function IdentifierAt(const ALines: TArray<string>; ALine0, ACol0: Integer;
   out AStartCol0: Integer): string;
 var
@@ -125,14 +120,14 @@ begin
   if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
   S := ALines[ALine0];
   P := ACol0 + 1;
-  if (P > Length(S)) or not IsIdentCh(S[P]) then
-    if (P - 1 >= 1) and (P - 1 <= Length(S)) and IsIdentCh(S[P - 1]) then
+  if (P > Length(S)) or not IsIdentChar(S[P]) then
+    if (P - 1 >= 1) and (P - 1 <= Length(S)) and IsIdentChar(S[P - 1]) then
       Dec(P)
     else
       Exit;
   Q := P;
-  while (P > 1) and IsIdentCh(S[P - 1]) do Dec(P);
-  while (Q < Length(S)) and IsIdentCh(S[Q + 1]) do Inc(Q);
+  while (P > 1) and IsIdentChar(S[P - 1]) do Dec(P);
+  while (Q < Length(S)) and IsIdentChar(S[Q + 1]) do Inc(Q);
   Result := Copy(S, P, Q - P + 1);
   if (Result <> '') and Result[1].IsDigit then Exit('');
   AStartCol0 := P - 1;
@@ -156,7 +151,7 @@ begin
     while P > 0 do
     begin
       E := P + Length(W);
-      if ((P = 1) or not IsIdentCh(U[P - 1])) and ((E > Length(U)) or not IsIdentCh(U[E])) then
+      if ((P = 1) or not IsIdentChar(U[P - 1])) and ((E > Length(U)) or not IsIdentChar(U[E])) then
         AOut := AOut + [Point(P - 1, L)];
       P := Pos(W, U, P + Length(W));
     end;

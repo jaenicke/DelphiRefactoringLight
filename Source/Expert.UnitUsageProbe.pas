@@ -65,7 +65,7 @@ implementation
 
 uses
   System.Classes, System.IOUtils, System.Threading, System.SyncObjs,
-  System.Diagnostics, System.Generics.Collections, Expert.EditorHelperIntf;
+  System.Diagnostics, System.Generics.Collections, Expert.EditorHelperIntf, Expert.PascalScanner;
 
 function IsIdentByte(B: Byte): Boolean; inline;
 begin
@@ -119,11 +119,6 @@ end;
 function TextReferencesUnit(const AContent, AUnitName: string): Boolean;
 var
   N, M, I, J: Integer;
-
-  function IsIdentChar(C: Char): Boolean;
-  begin
-    Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
-  end;
 
 begin
   Result := False;

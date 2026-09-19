@@ -172,6 +172,9 @@ var
 
 implementation
 
+
+uses
+  Expert.PascalScanner;
 // True when the identifier at (ALine0, ACol0) directly follows a declaring
 // keyword - 'procedure X', 'class function X', 'constructor X',
 // 'destructor X', 'property X' - i.e. the caret is ON a declaration.

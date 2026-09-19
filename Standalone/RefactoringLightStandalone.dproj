@@ -145,6 +145,9 @@
         <DCCReference Include="..\Source\Expert.PascalScanner.pas"/>
         <DCCReference Include="..\Source\Expert.IncludeExpansion.pas"/>
         <DCCReference Include="..\Source\Expert.InterfaceLinks.pas"/>
+        <DCCReference Include="..\Source\Expert.SafeDeletePlan.pas"/>
+        <DCCReference Include="..\Source\Expert.SignatureEdit.pas"/>
+        <DCCReference Include="..\Source\Expert.ReferenceKind.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheckDialog.pas"/>
         <DCCReference Include="..\Source\Expert.UnitReferencesDialog.pas"/>

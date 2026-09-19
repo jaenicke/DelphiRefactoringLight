@@ -72,6 +72,7 @@ type
     FPosLock: TCriticalSection;
     FLastPosFile: string;                        // file of the last position request
     FDocLines: TDictionary<string, Integer>;     // UPPER path -> lines last sent
+    FDocHash: TDictionary<string, Cardinal>;     // UPPER path -> hash of the text last sent
     // UPPER file NAME -> full path of every document sent to the server
     // ('' when two different paths share the name) - see ResolveBareUris
     FKnownFiles: TDictionary<string, string>;
@@ -154,6 +155,25 @@ type
     ///  content before it starts and pass it here.</summary>
     procedure RefreshDocumentWith(const AFilePath, AContent: string);
     procedure OpenDocumentWith(const AFilePath, AContent: string);
+
+    /// <summary>Hands AContent to the session ONLY when it differs from the
+    ///  text last sent for this file (every send goes through
+    ///  OpenDocumentWith, which records it). True = it was sent, i.e.
+    ///  DelphiLSP analyses the unit again and answers NOTHING in it until
+    ///  that is done - wait with WaitFileAnalysed. MEASURED: re-sending an
+    ///  UNCHANGED unit (the old RefreshDocument habit) costs a full
+    ///  re-analysis, 12 s for a big unit, and queries in between answer
+    ///  null.</summary>
+    function SyncDocumentWith(const AFilePath, AContent: string): Boolean;
+    /// <summary>SyncDocumentWith with the live content (editor buffer on
+    ///  the main thread, else disk).</summary>
+    function SyncDocument(const AFilePath: string): Boolean;
+    /// <summary>Waits until DelphiLSP pushed diagnostics for AFilePath again
+    ///  (its per-file version moved past ABefore - take it BEFORE sending).
+    ///  AKeepWaiting is called between the polls (pump messages there;
+    ///  return False to give up). False on timeout / give-up.</summary>
+    function WaitFileAnalysed(const AFilePath: string; ABefore: Integer;
+      ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean> = nil): Boolean;
 
     /// <summary>Checks whether a rename is possible at the position.</summary>
     function PrepareRename(const AFilePath: string; ALine, ACol: Integer): TLspPrepareRenameResult;
@@ -301,6 +321,19 @@ type
 
 implementation
 
+// FNV-1a over the UTF-16 code units - identifies the text last sent per
+// document (SyncDocumentWith); the Lsp units stay free of Expert.* units
+function ContentHash(const S: string): Cardinal;
+begin
+  Result := 2166136261;
+  for var I := 1 to Length(S) do
+  begin
+    Result := Result xor Ord(S[I]);
+    // in 64 bit (< 2^57), so no {$Q} juggling that could leak into the unit
+    Result := Cardinal((UInt64(Result) * 16777619) and $FFFFFFFF);
+  end;
+end;
+
 { ELspError }
 
 constructor ELspError.Create(ACode: Integer; const AMsg: string);
@@ -418,6 +451,7 @@ begin
   FInactiveRangesLock := TCriticalSection.Create;
   FPosLock := TCriticalSection.Create;
   FDocLines := TDictionary<string, Integer>.Create;
+  FDocHash := TDictionary<string, Cardinal>.Create;
   FKnownFiles := TDictionary<string, string>.Create;
   FAutoCompleteUnits := True;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
@@ -457,6 +491,7 @@ begin
   FPending.Free;
   FPendingLock.Free;
   FreeAndNil(FDocLines);
+  FreeAndNil(FDocHash);
   FreeAndNil(FKnownFiles);
   FreeAndNil(FPosLock);
   FInactiveRanges.Free;
@@ -962,6 +997,7 @@ begin
   FPosLock.Enter;
   try
     FDocLines.AddOrSetValue(UpperCase(AbsPath), Lines);
+    FDocHash.AddOrSetValue(UpperCase(AbsPath), ContentHash(Content));
     var NameKey := UpperCase(ExtractFileName(AbsPath));
     var Known: string;
     if not FKnownFiles.TryGetValue(NameKey, Known) then
@@ -990,11 +1026,49 @@ var
   AbsPath: string;
 begin
   AbsPath := ExpandFileName(AFilePath);
+  FPosLock.Enter;
+  try
+    FDocHash.Remove(UpperCase(AbsPath));
+  finally
+    FPosLock.Leave;
+  end;
   TextDocObj := TJSONObject.Create;
   TextDocObj.AddPair('uri', TLspUri.PathToFileUri(AbsPath));
   Params := TJSONObject.Create;
   Params.AddPair('textDocument', TextDocObj);
   SendNotification('textDocument/didClose', Params);
+end;
+
+function TLspClient.SyncDocumentWith(const AFilePath, AContent: string): Boolean;
+var
+  Old: Cardinal;
+begin
+  var Key := UpperCase(ExpandFileName(AFilePath));
+  var H := ContentHash(AContent);
+  FPosLock.Enter;
+  try
+    Result := not (FDocHash.TryGetValue(Key, Old) and (Old = H));
+  finally
+    FPosLock.Leave;
+  end;
+  if Result then RefreshDocumentWith(AFilePath, AContent);
+end;
+
+function TLspClient.SyncDocument(const AFilePath: string): Boolean;
+begin
+  Result := SyncDocumentWith(AFilePath, ReadLiveContent(AFilePath));
+end;
+
+function TLspClient.WaitFileAnalysed(const AFilePath: string; ABefore: Integer;
+  ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean>): Boolean;
+begin
+  var Deadline := GetTickCount64 + ATimeoutMs;
+  repeat
+    if GetFileDiagnosticsVersion(AFilePath) <> ABefore then Exit(True);
+    if Assigned(AKeepWaiting) and not AKeepWaiting() then Exit(False);
+    Sleep(50);
+  until GetTickCount64 > Deadline;
+  Result := False;
 end;
 
 procedure TLspClient.RefreshDocument(const AFilePath: string);

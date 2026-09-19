@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.4.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.5.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -13,11 +13,11 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+G`     | **Find original symbol** &mdash; jump to the declaration via the plugin's own LSP session, as a reliable alternative to `Ctrl+Click` (which is flaky in Delphi 13.1). Based on PR&nbsp;#9 by Dumach; rebind to plain `Ctrl+G` in *Tools &rarr; Options &rarr; Refactoring Light* if you prefer the PR's original chord (the default avoids shadowing the IDE's own `Ctrl+G`) |
 | `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP                                                                                                |
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method                                                                                 |
-| *(menu only)*          | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
-| *(menu only)*          | **Convert properties** &mdash; switch the selected properties between direct field access and getter / setter methods, in both directions |
+| `Ctrl+Alt+Shift+V` / `T` | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** (`T`) with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
+| `Ctrl+Alt+Shift+P`     | **Convert properties** &mdash; switch the selected properties between direct field access and getter / setter methods, in both directions |
 | *(menu only)*          | **Expand include files** &mdash; write the content of `{$I}` files into their units (current unit, selected units, a directory or the whole project) so the code can be debugged where it runs |
-| *(menu only)*          | **Change signature** &mdash; add, remove, reorder or rename parameters, change their type, modifier or default value; every header of the method's family (interfaces, implementing classes, overrides) and every call site verified via DelphiLSP change with it |
-| *(menu only)*          | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
+| `Ctrl+Alt+Shift+S`     | **Change signature** &mdash; add, remove, reorder or rename parameters, change their type, modifier or default value; every header of the method's family (interfaces, implementing classes, overrides) and every call site verified via DelphiLSP change with it |
+| `Ctrl+Alt+Shift+D`     | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
@@ -58,7 +58,8 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Reads the identifier under the cursor.
 - Tries `textDocument/references` on the LSP server first.
 - If that returns nothing (or the server does not support it), falls back to the same strategy as Rename: project-wide text search plus per-candidate verification via `textDocument/definition`.
-- Shows the results in a dialog (file, line, column, line preview, note).
+- Shows the results in a dialog (file, line, column, **kind**, line preview, note). The **Kind** column says how the symbol is used at each place: *Declaration*, *Implementation*, *Call*, *Inherited call*, *Write*, *Read*, *Method reference*, *Address (@)*, *Property accessor*, *Type use* or *Uses clause*. The symbol's own kind (procedure, function, data, type) decides the ambiguous shapes: `X := Foo;` is a call of a function, a method reference of a procedure and a read of a variable. The MCP tool `find_references` returns the same value as `kind`.
+- An occurrence DelphiLSP gives **no answer** for (an inactive `{$IFDEF}` branch, say) is listed marked *UNVERIFIED* instead of being dropped. Rename works the same way: such occurrences are shown as *UNVERIFIED - not renamed*, never skipped without a trace.
 - **Interfaces**: for a class method that implements an interface method, the declaration in the interface counts as a use &mdash; also when the interface is never called &mdash; and calls through the interface are found ("declared in interface IFoo", "call via interface IFoo"). Interface inheritance is followed (`IFoo = interface(IBase)`). For an interface method it works the other way round: the implementing classes' methods and the calls on them ("implemented by TFoo", "call via class TFoo").
 - **Double-click** or **Enter** jumps to the location.
 
@@ -129,12 +130,12 @@ In the last three weeks I tested with big projects and used it myself in real li
 - **Apply selected**, **Apply all** or **Close**. Applied edits go through `IOTAEditWriter` so they are individually undoable in the IDE.
 - v1 limitations: nested `with`-statements inside the body are flagged as multi-target / manual review.
 
-### Extract variable / Wrap in try..finally (menu only)
+### Extract variable / Wrap in try..finally (`Ctrl+Alt+Shift+V` / `Ctrl+Alt+Shift+T`)
 - **Extract variable**: select an expression on one line; the plugin proposes a name (`Foo.Bar.Count` &rarr; `LCount`), declares `var LCount := Foo.Bar.Count;` right before the **statement** that contains it and replaces the selection. Deliberately never at the routine's `begin`, and refused where even the statement start would change the meaning: after a short-circuit `and`/`or` (`if Assigned(X) and (X.Foo > 0)` would dereference nil), in a loop condition, in a branch or loop body on the same line, as the only statement of a `then`/`else`/`do` branch, on a `case` branch, inside a `with`, or when the name is already used in the routine. Uses Delphi's inline variables (10.3+).
 - **Wrap in try..finally**: select complete statements; they move into a `try` block, and the `finally` part is inferred from the statement right before them &mdash; `X := TFoo.Create` &rarr; `X.Free`, `X.BeginUpdate` &rarr; `X.EndUpdate`, `X.Enter`/`Acquire`/`Lock` &rarr; `Leave`/`Release`/`Unlock`, `TMonitor.Enter(X)` &rarr; `TMonitor.Exit(X)`, otherwise a TODO comment. Only wrapper lines are added, so a wrong guess is a compile error, never silent damage. Selections with an unbalanced `begin`/`try`/`case`..`end` are refused.
 - Both write through the editor (undoable) and are not saved.
 
-### Change signature (menu only)
+### Change signature (`Ctrl+Alt+Shift+S`)
 Put the caret on a method or routine - its declaration, implementation or any call - and choose **Change signature...**. The dialog shows the parameters in a grid: edit modifier, name, type and default value, **Add** a parameter (with the value existing calls should pass, unless it has a default), **Remove** one, or move them **up / down**. The preview below updates as you type and lists every edit with the resulting line.
 - **The whole family changes together**: declaration and implementation; for a class method the interface methods it implements and the other classes implementing them; for an interface method every implementing class; for a `virtual` / `override` method the whole override chain (a descendant that hides the method without `override` is left alone and named).
 - **Calls** are found like in Safe delete: every whole-word occurrence is asked where it leads, only those DelphiLSP attributes to the family are changed. Arguments are reordered, values for new parameters inserted, and a default value a call relied on is written out when the parameter moves or its default changes. A call without parentheses (`Obj.Foo;`) gets them when it needs arguments now. `inherited Foo(...)` inside an override passes the new parameters on by name. An occurrence DelphiLSP cannot resolve (inactive `{$IFDEF}` branch) is listed as NOT VERIFIED and left for you.
@@ -142,7 +143,7 @@ Put the caret on a method or routine - its declaration, implementation or any ca
 - **Refused**, with the place: overloaded and `message` methods, event handlers bound in a form file, a method used as a method reference (`OnClick := Foo`, `@Foo`) or as a property accessor when the change is more than a rename, a removed parameter still used in a body, a new name that already means something in a body, a parameter list that contains a comment or directive, headers whose parameter counts already differ, declarations in the RTL / VCL. The result type is not changed.
 - **Apply** re-checks that none of the touched files changed since the analysis, then writes all of them (open units in the editor, undoable, not saved; closed units on disk). The MCP tool `change_signature` does the same for Claude Code: without `params` it reports parameters, family and calls, with `params` the plan, `apply=true` writes it.
 
-### Safe delete (menu only)
+### Safe delete (`Ctrl+Alt+Shift+D`)
 Put the caret on a symbol - its declaration or any use - and choose **Safe delete...**. The plugin deletes the declaration (and the implementation of a method or routine) only after proving that **nothing uses it**:
 - Every whole-word occurrence in the project scope (comments and strings excluded) is asked where it leads. Only an occurrence DelphiLSP attributes to a **different** symbol is harmless. One that leads to the declaration is a use, and one DelphiLSP **cannot resolve** counts as a use, too &mdash; that is what a call in an inactive `{$IFDEF}` branch looks like, and deleting the declaration would break the other configuration.
 - Form files (`.dfm` / `.fmx`) bind event handlers and components by name, so any mention there blocks.
@@ -150,7 +151,7 @@ Put the caret on a symbol - its declaration or any use - and choose **Safe delet
 - Supported: methods of classes, records and interfaces, free and nested routines, fields, properties, unit-level and local variables and constants (one name out of `A, B, C: Integer` is removed on its own), single-line types. A `///` doc comment directly above goes with it, and so does a `var` / `const` keyword that would be left without declarations.
 - The dialog lists what will be deleted and every occurrence with its verdict; **Delete** is enabled only when the check passed. The edit goes through the editor (undoable) and is not saved. Code outside the project scope (other projects using the unit) is not seen &mdash; the dialog says so.
 
-### Convert properties (menu only)
+### Convert properties (`Ctrl+Alt+Shift+P`)
 Select the property declarations (or put the caret on one) and choose **Convert properties (field / getter, setter)...**. The dialog lists every selected property with what will happen or why not:
 - **Field access &rarr; getter / setter** (getter, setter or both): `property Name: string read FName write FName;` becomes `read GetName write SetName`; `function GetName: string;` / `procedure SetName(const Value: string);` go into the private section (a new one is created before the first visibility keyword, so no other member changes its visibility), the implementations (`Result := FName;` / `FName := Value;`) after the class's last method.
 - **Getter / setter &rarr; field access**: only for TRIVIAL accessors (`Result := FName;`, `Exit(FName);`, `FName := Value;`), which are then removed. Kept, with the reason shown, when the accessor is used anywhere else (for a non-private one: in any file of the project), or is `virtual` / `override` / `overload` / `message`.

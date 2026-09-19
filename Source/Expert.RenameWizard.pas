@@ -19,7 +19,8 @@ uses
   Expert.UnitIndex, Expert.UnitUsageProbe, Expert.ScopeFiles, Expert.DfmRename,
   Expert.IncludeExpansion,
   Lsp.Uri, Lsp.Protocol,
-  Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding, Expert.UsesEditor;
+  Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding, Expert.UsesEditor,
+  Expert.SafeDeletePlan;
 
 type
   TRenameCandidate = record
@@ -99,6 +100,7 @@ type
     /// <summary>Hits in include files DelphiLSP gave no answer for: NOT
     ///  renamed, but listed in the preview (never dropped silently).</summary>
     FUnverified: TArray<TRenameCandidate>;
+    FUnverifiedWhy: TArray<string>;   // parallel to FUnverified
     FDiagLog: string;
     /// <summary>True when the dialog was opened for a unit rename
     ///  (triggered by the IDE module notifier). In that mode the preview
@@ -179,7 +181,7 @@ implementation
 
 
 uses
-  Expert.PascalScanner, Expert.IdentifierCheck;
+  Winapi.Windows, Expert.PascalScanner, Expert.IdentifierCheck;
 // True when the identifier at (ALine0, ACol0) directly follows a declaring
 // keyword - 'procedure X', 'class function X', 'constructor X',
 // 'destructor X', 'property X' - i.e. the caret is ON a declaration.
@@ -457,7 +459,7 @@ begin
       try
         var Client := TLspManager.Instance.GetClient(FContext.ProjectRoot, FContext.ProjectFile, Editor.FindDelphiLspJson);
         for var F in AffectedFiles do
-          Client.RefreshDocument(F);
+          Client.SyncDocument(F);   // sends only what really changed
       except
         // LSP refresh is best-effort
       end;
@@ -1079,14 +1081,26 @@ begin
     // INCLUDING unit, sent expanded (Expert.IncludeExpansion); freeing the
     // context sends the original text again.
     FUnverified := nil;
+    FUnverifiedWhy := nil;
     IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
     IncCtx.RegisterFiles(ProjFiles);
 
-    // Refresh document (didClose+didOpen when LSP is already running,
-    // just didOpen on first start - so LSP always has current file content).
-    // An include file is no unit - the include context serves it.
+    // Hand the current content to DelphiLSP when it changed since the last
+    // send, and wait for the unit's analysis then (see VerifyWithLsp for
+    // why a blind re-open + fixed sleep loses answers). An include file is
+    // no unit - the include context serves it.
     if not IncCtx.OwnsDocument(FContext.FileName) then
-      Client.RefreshDocument(FContext.FileName);
+    begin
+      var StartBefore := Client.GetFileDiagnosticsVersion(FContext.FileName);
+      if Client.SyncDocument(FContext.FileName) and WasRunning then
+        Client.WaitFileAnalysed(FContext.FileName, StartBefore, 30000,
+          function: Boolean
+          begin
+            FHost.SetStatus('Waiting for DelphiLSP to analyse ' +
+              ExtractFileName(FContext.FileName) + '...');
+            Result := not FHost.ScanCancelled;
+          end);
+    end;
 
     // On first start, wait for readiness
     if not WasRunning then
@@ -1104,9 +1118,7 @@ begin
         except end;
         Sleep(1000);
       end;
-    end
-    else
-      Sleep(500);
+    end;
 
     // Phase 2b: find declaration
     FHost.SetStatus('Finding declaration...');
@@ -1317,7 +1329,11 @@ begin
       PI.FilePath := U.FilePath;
       PI.Line := U.Line;
       PI.Col := U.Col;
-      PI.Kind := 'UNVERIFIED - not renamed (include file)';
+      PI.Kind := 'UNVERIFIED - not renamed';
+      for var K := 0 to High(FUnverified) do
+        if (FUnverified[K].FilePath = U.FilePath) and (FUnverified[K].Line = U.Line) and
+           (FUnverified[K].Col = U.Col) and (K <= High(FUnverifiedWhy)) then
+          PI.Kind := 'UNVERIFIED - not renamed (' + FUnverifiedWhy[K] + ')';
       try
         var UL := ReadDelphiFileLines(U.FilePath);
         if (U.Line >= 0) and (U.Line <= High(UL)) then PI.OriginalLine := UL[U.Line];
@@ -1378,8 +1394,8 @@ begin
     FHost.SetDetailsText(TrimLeft(ScopeWarn) + sLineBreak + Conflict + sLineBreak +
       sLineBreak + FDiagLog);
     if Length(FUnverified) > 0 then
-      ScopeWarn := ScopeWarn + Format('  WARNING: %d occurrence(s) in include files ' +
-        'could not be verified and are NOT renamed - check them (UNVERIFIED rows).',
+      ScopeWarn := ScopeWarn + Format('  WARNING: %d occurrence(s) could not be ' +
+        'verified by DelphiLSP and are NOT renamed - check them (UNVERIFIED rows).',
         [Length(FUnverified)]);
     FHost.EnableRename(Length(FEdit.FileEdits) > 0);
     FHost.SetStatus(Format('Done: %d change(s) in %d file(s).%s',
@@ -1756,12 +1772,43 @@ function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandida
   const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
 var
   FileMap: TDictionary<string, TList<TLspTextEdit>>;
+  Synced: TDictionary<string, Boolean>;
+  LineCache: TDictionary<string, TArray<string>>;
   LastOpenedFile: string;
   VerifiedCount, SkippedCount, I: Integer;
   C: TRenameCandidate;
   TextEdit: TLspTextEdit;
+
+  function CandidateLine(const AC: TRenameCandidate): string;
+  var
+    L: TArray<string>;
+  begin
+    Result := '';
+    if not LineCache.TryGetValue(UpperCase(AC.FilePath), L) then
+    begin
+      var Content: string;
+      if not ((Editor <> nil) and Editor.ReadEditorContent(AC.FilePath, Content)) then
+        try
+          Content := ReadDelphiFile(AC.FilePath);
+        except
+          Content := '';
+        end;
+      L := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+      LineCache.Add(UpperCase(AC.FilePath), L);
+    end;
+    if (AC.Line >= 0) and (AC.Line <= High(L)) then Result := L[AC.Line];
+  end;
+
+  procedure Unverified(const AC: TRenameCandidate; const AWhy: string);
+  begin
+    FUnverified := FUnverified + [AC];
+    FUnverifiedWhy := FUnverifiedWhy + [AWhy];
+  end;
+
 begin
   FileMap := TDictionary<string, TList<TLspTextEdit>>.Create;
+  Synced := TDictionary<string, Boolean>.Create;
+  LineCache := TDictionary<string, TArray<string>>.Create;
   try
     LastOpenedFile := '';
     VerifiedCount := 0;
@@ -1777,23 +1824,55 @@ begin
       if (I mod 3 = 0) then
         FHost.SetStatus(Format('Verifying %d/%d (ok:%d skip:%d)', [I + 1, Length(ACandidates), VerifiedCount, SkippedCount]));
 
-      // Open file on the LSP - unless the include context serves it (an
-      // include file, or a unit currently sent expanded)
-      if not SameText(C.FilePath, LastOpenedFile) then
+      // Hand the file to DelphiLSP - ONLY when its content changed since it
+      // was last sent, and then WAIT until the unit is analysed. The old
+      // code re-opened every file on each switch and waited a fixed 300 ms:
+      // a re-open restarts DelphiLSP's analysis (seconds for a big unit),
+      // every query before it is done answers null, and null was SKIP -
+      // real occurrences silently dropped out of the rename.
+      // An include file / a unit sent expanded is served by the include
+      // context instead.
+      var FirstInFile := not Synced.ContainsKey(UpperCase(C.FilePath));
+      if FirstInFile then
       begin
+        Synced.Add(UpperCase(C.FilePath), True);
         if not AIncludes.OwnsDocument(C.FilePath) then
         begin
-          AClient.RefreshDocument(C.FilePath);
-          Sleep(300);
+          var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
+          if AClient.SyncDocument(C.FilePath) then
+          begin
+            var Name := ExtractFileName(C.FilePath);
+            FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+            if not AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
+              function: Boolean
+              begin
+                FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                Result := not FHost.ScanCancelled;
+              end) then
+              FDiagLog := FDiagLog + '  ' + Name + ': no analysis result within 30 s' + sLineBreak;
+          end;
         end;
-        LastOpenedFile := C.FilePath;
       end;
+      LastOpenedFile := C.FilePath;
 
       var Matches := False;
       var DiagLine := Format('  [%d] %s:%d:%d => ', [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
 
       try
         var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+        // an EMPTY answer is retried briefly (the unit may still be in
+        // analysis), a wrong one never
+        if (Length(Defs) = 0) and not ATargets.Contains(C.FilePath, C.Line) then
+        begin
+          var Dl := GetTickCount64 + UInt64(IfThen(FirstInFile, 3000, 600));
+          while (Length(Defs) = 0) and (GetTickCount64 < Dl) and not FHost.ScanCancelled do
+          begin
+            Sleep(150);
+            FHost.SetStatus(Format('Verifying %d/%d (ok:%d skip:%d) - waiting for an answer',
+              [I + 1, Length(ACandidates), VerifiedCount, SkippedCount]));
+            Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+          end;
+        end;
 
         // The candidate IS one of the symbol's positions (declaration /
         // implementation of the symbol or of an implementing class - see
@@ -1808,10 +1887,20 @@ begin
         else if (Length(Defs) = 0) and IsIncludeFile(C.FilePath) then
         begin
           DiagLine := DiagLine + 'null in an include file -> UNVERIFIED (listed, not renamed)';
-          FUnverified := FUnverified + [C];
+          Unverified(C, 'include file');
         end
+        else if (Length(Defs) = 0) and LineDeclaresName(CandidateLine(C), AOldName) then
+          // DelphiLSP answers nothing AT a declaration; this one is not a
+          // position of the symbol, so it declares ANOTHER symbol
+          DiagLine := DiagLine + 'null at another declaration -> SKIP (other symbol)'
         else if Length(Defs) = 0 then
-          DiagLine := DiagLine + 'null -> SKIP'
+        begin
+          // was a silent SKIP: a real occurrence DelphiLSP did not resolve
+          // (inactive {$IFDEF} branch, unit still in analysis) must be
+          // SHOWN, never dropped without a trace
+          DiagLine := DiagLine + 'null -> UNVERIFIED (listed, not renamed)';
+          Unverified(C, 'no answer from DelphiLSP');
+        end
         else
         begin
           var DefPath := TLspUri.FileUriToPath(Defs[0].Uri);
@@ -1880,6 +1969,8 @@ begin
     for var Pair in FileMap do
       Pair.Value.Free;
   finally
+    LineCache.Free;
+    Synced.Free;
     FileMap.Free;
   end;
 end;

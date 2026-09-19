@@ -189,6 +189,7 @@ begin
     O.AddPair('line', TJSONNumber.Create(It.Line + 1));
     O.AddPair('column', TJSONNumber.Create(It.Col + 1));
     O.AddPair('text', Trim(It.Preview));
+    if It.Kind <> '' then O.AddPair('kind', It.Kind);
     if It.Relation <> '' then O.AddPair('relation', It.Relation);
     if It.Note <> '' then O.AddPair('note', It.Note);
     Result.Add(O);
@@ -755,6 +756,11 @@ begin
             U.Note := 'UNVERIFIED - no answer inside this include file';
             Verified := Verified + [U];
           end
+          else if (Length(D) = 0) and LineDeclaresName(Cd.Preview, Ctx.Identifier) then
+            // DelphiLSP answers nothing AT a declaration - one that is no
+            // position of the symbol declares another symbol (not a sign of
+            // a silent unit, so no DCU hint for it)
+            Answer := 'another declaration of the name (DelphiLSP answers nothing at declarations)'
           else if Length(D) = 0 then
             Answer := 'no answer from DelphiLSP'
           else
@@ -819,6 +825,21 @@ begin
     end;
   end;
 
+  // how each hit uses the symbol ("kind"); buffers are read on the main
+  // thread, one call per file
+  AssignReferenceKinds(Items, Ctx.Identifier, DeclFileOut, DeclLineOut,
+    function(AFile: string): string
+    var
+      C, E: string;
+    begin
+      C := '';
+      if not McpRunOnMain(
+        procedure
+        begin
+          if not McpReadContent(AFile, C) then C := '';
+        end, True, AStop, E) then C := '';
+      Result := C;
+    end);
   var Res := TJSONObject.Create;
   Res.AddPair('identifier', Ctx.Identifier);
   Res.AddPair('method', Method);

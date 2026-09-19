@@ -24,7 +24,9 @@ uses
   Vcl.Menus;
 
 type
-  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit, skFindOriginal);
+  TShortcutKind = (skRename, skCompletion, skExtract, skFindRef, skFindImp, skAlign, skRemoveWith, skUnitRefs, skMoveToUnit, skFindOriginal,
+    // issue #11 ("more shortcut kinds"): the refactorings that were menu-only
+    skChangeSignature, skSafeDelete, skExtractVariable, skWrapTryFinally, skConvertProperties);
 
   TShortcutChangedProc = procedure of object;
 
@@ -103,13 +105,20 @@ const
     // Deliberately NOT plain Ctrl+G (the PR's original choice): our
     // key binding captures the chord globally and would shadow the IDE's
     // own Ctrl+G (goto line). Rebind in Tools > Options if preferred.
-    TShortCut(vkG     or scAlt or scCtrl or scShift)
+    TShortCut(vkG     or scAlt or scCtrl or scShift),
+    TShortCut(vkS     or scAlt or scCtrl or scShift),   // change Signature
+    TShortCut(vkD     or scAlt or scCtrl or scShift),   // safe Delete
+    TShortCut(vkV     or scAlt or scCtrl or scShift),   // extract Variable
+    TShortCut(vkT     or scAlt or scCtrl or scShift),   // wrap in Try..finally
+    TShortCut(vkP     or scAlt or scCtrl or scShift)    // convert Properties
   );
 
   ValueNames: array[TShortcutKind] of string = (
     'Rename', 'Completion', 'ExtractMethod',
     'FindReferences', 'FindImplementations', 'AlignSignature',
-    'RemoveWith', 'UnitReferences', 'MoveToUnit', 'FindOriginalSymbol'
+    'RemoveWith', 'UnitReferences', 'MoveToUnit', 'FindOriginalSymbol',
+    'ChangeSignature', 'SafeDelete', 'ExtractVariable', 'WrapTryFinally',
+    'ConvertProperties'
   );
 
   DisplayNames: array[TShortcutKind] of string = (
@@ -122,7 +131,12 @@ const
     'Remove with (project-wide)',
     'Find unit references (project-wide)',
     'Move to unit (project-wide)',
-    'Find original symbol (go to declaration)'
+    'Find original symbol (go to declaration)',
+    'Change signature',
+    'Safe delete',
+    'Extract variable',
+    'Wrap in try..finally',
+    'Convert properties'
   );
 
 { TExpertsShortCut }

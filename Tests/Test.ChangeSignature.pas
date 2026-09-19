@@ -28,13 +28,14 @@ type
     [Test] procedure Plan_InheritedCallPassesNewParameter;
     [Test] procedure TypeGraph_OverrideChain;
     [Test] procedure MemberDeclaration_AfterNestedClasses;
+    [Test] procedure ReferenceKinds_Classified;
   end;
 
 implementation
 
 uses
   System.SysUtils, System.Types, System.IOUtils, Expert.SignatureEdit, Expert.InterfaceLinks,
-  Expert.UnitIndex;
+  Expert.UnitIndex, Expert.ReferenceKind, Expert.PascalScanner;
 
 const
   Src: array[0..18] of string = (
@@ -270,6 +271,110 @@ begin
   Assert.AreEqual(-1, FindMemberDeclarationLine(NSrc, 'TOuter', 'Execute'));
   Assert.AreEqual(-1, FindMemberDeclarationLine(NSrc, 'TOuter', 'Run'));
   Assert.AreEqual(6, FindMemberDeclarationLine(NSrc, 'TInner', 'Run'));
+end;
+
+procedure TChangeSignatureTests.ReferenceKinds_Classified;
+begin
+  var KSrc := string.Join(#13#10, [
+    'unit K;',                                            // 0
+    'interface',                                          // 1
+    'uses',                                               // 2
+    '  System.SysUtils, KUnit;',                          // 3
+    'type',                                               // 4
+    '  TFoo = class(TBase)',                              // 5
+    '    FCount: Integer;',                               // 6
+    '    procedure Run(A: Integer);',                     // 7
+    '    function Get: Integer;',                         // 8
+    '    property Count: Integer read FCount write FCount;', // 9
+    '  end;',                                             // 10
+    'const',                                              // 11
+    '  cRed = 1;',                                        // 12
+    'implementation',                                     // 13
+    'procedure TFoo.Run(A: Integer);',                    // 14
+    'var',                                                // 15
+    '  X: TFoo;',                                         // 16
+    'begin',                                              // 17
+    '  FCount := A;',                                     // 18
+    '  X := Self; X.Run(1);',                             // 19
+    '  inherited Run(A);',                                // 20
+    '  if Get > 0 then Inc(FCount);',                     // 21
+    '  case A of',                                        // 22
+    '    cRed: Run(3);',                                  // 23
+    '  end;',                                             // 24
+    '  P := @Run; OnDone := Run; Y := Get;',              // 25
+    '  Run;',                                             // 26
+    'end;',                                               // 27
+    'end.']);                                             // 28
+  var KLines := KSrc.Replace(#13#10, #10).Split([#10]);
+  // the kind of the N-th (1-based) whole-word occurrence of AWord on ALine
+  var KindAt := function(ALine: Integer; const AWord: string; ANth: Integer;
+    ASym: TRefSymbolKind): string
+    begin
+      Result := '?';
+      var S := KLines[ALine];
+      var Hit := 0;
+      for var P := 1 to Length(S) - Length(AWord) + 1 do
+        if (Copy(S, P, Length(AWord)) = AWord) and ((P = 1) or not IsIdentChar(S[P - 1])) and
+           ((P + Length(AWord) > Length(S)) or not IsIdentChar(S[P + Length(AWord)])) then
+        begin
+          Inc(Hit);
+          if Hit = ANth then
+          begin
+            var R := ClassifyReferences(KSrc, [Point(P - 1, ALine)], Length(AWord), ASym);
+            Exit(RefKindText(R[0]));
+          end;
+        end;
+    end;
+  var KExpect: TArray<TArray<string>> := [
+    // line, word, nth, symbol kind, expected
+    ['6', 'FCount', '1', 'D', 'Declaration'],
+    ['9', 'FCount', '1', 'D', 'Property accessor'],
+    ['9', 'FCount', '2', 'D', 'Property accessor'],
+    ['18', 'FCount', '1', 'D', 'Write'],
+    ['21', 'FCount', '1', 'D', 'Read'],
+    ['7', 'Run', '1', 'P', 'Declaration'],
+    ['14', 'Run', '1', 'P', 'Implementation'],
+    ['19', 'Run', '1', 'P', 'Call'],
+    ['20', 'Run', '1', 'P', 'Inherited call'],
+    ['23', 'Run', '1', 'P', 'Call'],
+    ['25', 'Run', '1', 'P', 'Method reference'],
+    ['25', 'Run', '2', 'P', 'Method reference'],
+    ['26', 'Run', '1', 'P', 'Call'],
+    ['8', 'Get', '1', 'F', 'Declaration'],
+    ['21', 'Get', '1', 'F', 'Call'],
+    ['25', 'Get', '1', 'F', 'Call'],
+    ['12', 'cRed', '1', 'D', 'Declaration'],
+    ['23', 'cRed', '1', 'D', 'Read'],
+    ['5', 'TFoo', '1', 'T', 'Declaration'],
+    ['14', 'TFoo', '1', 'T', 'Type use'],
+    ['16', 'TFoo', '1', 'T', 'Type use'],
+    ['5', 'TBase', '1', 'T', 'Type use'],
+    ['3', 'KUnit', '1', 'U', 'Uses clause']];
+  var KFails := '';
+  for var X in KExpect do
+  begin
+    var Sym := rsUnknown;
+    case X[3][1] of
+      'D': Sym := rsData;
+      'P': Sym := rsProcedure;
+      'F': Sym := rsFunction;
+      'T': Sym := rsType;
+    end;
+    var Got := KindAt(StrToInt(X[0]), X[1], StrToInt(X[2]), Sym);
+    if Got <> X[4] then
+      KFails := KFails + Format(' %s@%s#%s=%s(want %s)', [X[1], X[0], X[2], Got, X[4]]);
+  end;
+  // the symbol's own kind from its declaration line
+  if SymbolKindFromDeclLine('    procedure Run(A: Integer);', 'Run') <> rsProcedure then KFails := KFails + ' sk-proc';
+  if SymbolKindFromDeclLine('    class function Get: Integer;', 'Get') <> rsFunction then KFails := KFails + ' sk-func';
+  if SymbolKindFromDeclLine('    FA, FCount: Integer;', 'FCount') <> rsData then KFails := KFails + ' sk-field';
+  if SymbolKindFromDeclLine('  TFoo = class(TBase)', 'TFoo') <> rsType then KFails := KFails + ' sk-class';
+  if SymbolKindFromDeclLine('  cRed = 1;', 'cRed') <> rsData then KFails := KFails + ' sk-const';
+  if SymbolKindFromDeclLine('  TMyInt = Integer;', 'TMyInt') <> rsType then KFails := KFails + ' sk-alias';
+  if SymbolKindFromDeclLine('  TKind = (kA, kB);', 'TKind') <> rsType then KFails := KFails + ' sk-enum';
+  if SymbolKindFromDeclLine('    property Count: Integer read FCount;', 'Count') <> rsData then KFails := KFails + ' sk-prop';
+  if SymbolKindFromDeclLine('procedure TFoo.Run(A: Integer);', 'Run') <> rsProcedure then KFails := KFails + ' sk-impl';
+  Assert.AreEqual('', KFails, 'reference kinds:' + KFails);
 end;
 
 initialization

@@ -64,11 +64,10 @@ uses
   Winapi.Windows, System.SysUtils, System.Classes, System.JSON,
   System.Generics.Collections, System.SyncObjs,
   Expert.McpServer, Expert.EditorHelperIntf, Expert.LspManager,
-  Expert.DiagStore, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
+  Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
 
 var
   GSyncLock: TCriticalSection = nil;
-  GSynced: TDictionary<string, Cardinal> = nil;   // file -> hash last sent
   GSentAt: TDictionary<string, UInt64> = nil;     // file -> tick of that send
 
 function ArgStr(AArgs: TJSONObject; const AName: string; const ADefault: string = ''): string;
@@ -89,27 +88,18 @@ begin
   if AArgs <> nil then Result := AArgs.GetValue<Boolean>(AName, ADefault);
 end;
 
-// Sends AContent unless the session already has exactly that content.
-// Keyed per client: after an LSP restart the new session knows no document.
+// Sends AContent unless the session already has exactly that content. The
+// CLIENT remembers what it last sent per document (TLspClient
+// .SyncDocumentWith) - shared with rename, safe delete, change signature
+// and the live checker, so no second cache can drift from what the session
+// really has; an LSP restart is a new client that knows no document.
 function SyncOne(AClient: TLspClient; const AFile, AContent: string): Boolean;
 begin
-  Result := False;
-  var H := DiagContentHash(AContent);
+  Result := AClient.SyncDocumentWith(AFile, AContent);
+  if not Result then Exit;
   var Key := UpperCase(AFile) + '|' + IntToHex(NativeInt(AClient), 8);
-  var Old: Cardinal;
-  var Send := True;
   GSyncLock.Enter;
   try
-    if GSynced.TryGetValue(Key, Old) and (Old = H) then Send := False;
-  finally
-    GSyncLock.Leave;
-  end;
-  if not Send then Exit;
-  AClient.RefreshDocumentWith(AFile, AContent);
-  Result := True;
-  GSyncLock.Enter;
-  try
-    GSynced.AddOrSetValue(Key, H);
     GSentAt.AddOrSetValue(Key, GetTickCount64);
   finally
     GSyncLock.Leave;
@@ -479,7 +469,6 @@ end;
 
 initialization
   GSyncLock := TCriticalSection.Create;
-  GSynced := TDictionary<string, Cardinal>.Create;
   GSentAt := TDictionary<string, UInt64>.Create;
   RegisterMcpTool('lsp_hover', ToolHover);
   RegisterMcpTool('lsp_definition', ToolDefinition);
@@ -491,7 +480,6 @@ initialization
   RegisterMcpTool('lsp_request', ToolLspRequest);
 
 finalization
-  FreeAndNil(GSynced);
   FreeAndNil(GSentAt);
   FreeAndNil(GSyncLock);
 

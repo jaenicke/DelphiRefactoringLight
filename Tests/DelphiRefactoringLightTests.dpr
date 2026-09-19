@@ -45,6 +45,7 @@ uses
   Expert.InterfaceLinks in '..\Source\Expert.InterfaceLinks.pas',
   Expert.PropertyConvert in '..\Source\Expert.PropertyConvert.pas',
   Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
+  Expert.ReferenceKind in '..\Source\Expert.ReferenceKind.pas',
   Test.UserIdeas13 in 'Test.UserIdeas13.pas',
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',

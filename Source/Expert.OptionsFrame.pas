@@ -62,6 +62,11 @@ type
     procedure ShortcutEditKeyPress(Sender: TObject; var Key: Char);
     procedure btnDefaultsClick(Sender: TObject);
   private
+    // rows for the kinds WITHOUT a designed edit (built in code, below the
+    // last designed row - see EnsureExtraRows)
+    FExtraEdits: array[TShortcutKind] of TEdit;
+    FExtraBuilt: Boolean;
+    procedure EnsureExtraRows;
     function EditFor(Kind: TShortcutKind): TEdit;
     procedure ApplyToEdit(Kind: TShortcutKind);
     procedure AdjustLayout;
@@ -103,8 +108,43 @@ begin
     skMoveToUnit: Result := edtMoveToUnit;
     skFindOriginal: Result := edtFindOriginal;
   else
-    Result := nil;
+    Result := FExtraEdits[Kind];
   end;
+end;
+
+// The kinds added after the page was designed get their label + edit in
+// CODE, in the same pattern as the last designed row (same column, same
+// 32 px row pitch at 96 dpi, same key handlers); the hint moves below
+// them. AdjustLayout then treats them exactly like the designed rows.
+// Excluded: skUnitRefs, which never had an edit on this page.
+procedure TLspOptionsFrame.EnsureExtraRows;
+const
+  RowPitch = 32;
+var
+  K: TShortcutKind;
+begin
+  if FExtraBuilt then Exit;
+  FExtraBuilt := True;
+  var Row := edtFindOriginal.Top + RowPitch;
+  var Tab := edtFindOriginal.TabOrder + 1;
+  for K := Succ(skFindOriginal) to High(TShortcutKind) do
+  begin
+    var L := TLabel.Create(Self);
+    L.Parent := grpShortcuts;
+    L.Left := lblFindOriginal.Left;
+    L.Top := Row + (lblFindOriginal.Top - edtFindOriginal.Top);
+    L.Caption := TExpertsShortCut.DisplayName(K) + ':';
+    var E := TEdit.Create(Self);
+    E.Parent := grpShortcuts;
+    E.SetBounds(edtFindOriginal.Left, Row, edtFindOriginal.Width, edtFindOriginal.Height);
+    E.TabOrder := Tab;
+    E.OnKeyDown := ShortcutEditKeyDown;
+    E.OnKeyPress := ShortcutEditKeyPress;
+    FExtraEdits[K] := E;
+    Inc(Row, RowPitch);
+    Inc(Tab);
+  end;
+  lblHint.Top := Row + (lblHint.Top - (edtFindOriginal.Top + RowPitch));
 end;
 
 procedure TLspOptionsFrame.ApplyToEdit(Kind: TShortcutKind);
@@ -161,6 +201,7 @@ begin
   // children. That is also what a tester's screenshot forced - the
   // "Restore defaults" button was placed after grpLsp while grpBlame
   // still sat at its designed position, so the button landed INSIDE it.
+  EnsureExtraRows;
   LineH := Abs(lblHint.Font.Height) + 4;
   Gap := 12;
 
@@ -259,6 +300,7 @@ procedure TLspOptionsFrame.LoadFromSettings;
 var
   K: TShortcutKind;
 begin
+  EnsureExtraRows;
   AdjustLayout;
   for K := Low(TShortcutKind) to High(TShortcutKind) do
     ApplyToEdit(K);

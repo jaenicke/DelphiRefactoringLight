@@ -25,6 +25,11 @@ type
     procedure UnitRefsKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure MoveToUnitKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
     procedure FindOriginalKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure ChangeSignatureKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure SafeDeleteKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure ExtractVariableKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure WrapTryFinallyKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+    procedure ConvertPropertiesKeyProc(const Context: IOTAKeyContext; KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
   public
     function GetBindingType: TBindingType;
     function GetDisplayName: string;
@@ -47,7 +52,8 @@ uses
   Expert.Shortcuts,
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod, Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.WithRefactorWizard, Expert.UnitReferencesWizard,
-  Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard;
+  Expert.MoveToUnitWizard, Expert.FindOriginalSymbolWizard, Expert.ChangeSignature,
+  Expert.SafeDelete, Expert.StatementRefactor, Expert.PropertyConvertWizard;
 
 { TLspKeyBinding }
 
@@ -146,8 +152,56 @@ begin
   FindOriginalSymbol;
 end;
 
+procedure TLspKeyBinding.ChangeSignatureKeyProc(const Context: IOTAKeyContext;
+  KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if not TExpertsShortCut.AllowAction(skChangeSignature) then Exit;
+  ChangeSignatureAtCursor;
+end;
+
+procedure TLspKeyBinding.SafeDeleteKeyProc(const Context: IOTAKeyContext;
+  KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if not TExpertsShortCut.AllowAction(skSafeDelete) then Exit;
+  SafeDeleteAtCursor;
+end;
+
+procedure TLspKeyBinding.ExtractVariableKeyProc(const Context: IOTAKeyContext;
+  KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if not TExpertsShortCut.AllowAction(skExtractVariable) then Exit;
+  ExtractVariableAtSelection;
+end;
+
+procedure TLspKeyBinding.WrapTryFinallyKeyProc(const Context: IOTAKeyContext;
+  KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if not TExpertsShortCut.AllowAction(skWrapTryFinally) then Exit;
+  WrapSelectionInTryFinally;
+end;
+
+procedure TLspKeyBinding.ConvertPropertiesKeyProc(const Context: IOTAKeyContext;
+  KeyCode: TShortCut; var BindingResult: TKeyBindingResult);
+begin
+  BindingResult := krHandled;
+  if not TExpertsShortCut.AllowAction(skConvertProperties) then Exit;
+  ConvertPropertiesAtSelection;
+end;
+
 procedure TLspKeyBinding.BindKeyboard(
   const BindingServices: IOTAKeyBindingServices);
+
+  // a kind switched off in the options (shortcut 0) is not bound at all
+  procedure Bind(AKind: TShortcutKind; const AProc: TKeyBindingProc);
+  begin
+    if TExpertsShortCut.Shortcuts[AKind] <> 0 then
+      BindingServices.AddKeyBinding([TExpertsShortCut.Shortcuts[AKind]], AProc, nil);
+  end;
+
 begin
   // Ctrl+Alt+Shift+R -> Rename
   BindingServices.AddKeyBinding([TExpertsShortCut.scRename], RenameKeyProc, nil);
@@ -178,6 +232,13 @@ begin
 
   // Ctrl+G -> Find original symbol (go to declaration)
   BindingServices.AddKeyBinding([TExpertsShortCut.scFindOriginal], FindOriginalKeyProc, nil);
+
+  // the refactorings that used to be menu-only (issue #11)
+  Bind(skChangeSignature, ChangeSignatureKeyProc);
+  Bind(skSafeDelete, SafeDeleteKeyProc);
+  Bind(skExtractVariable, ExtractVariableKeyProc);
+  Bind(skWrapTryFinally, WrapTryFinallyKeyProc);
+  Bind(skConvertProperties, ConvertPropertiesKeyProc);
 
   // NOTE: do NOT bind plain editing keys (arrows, Enter, Tab, Escape)
   // here for the completion popup. Empirically, registering them eats

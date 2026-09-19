@@ -432,13 +432,14 @@ begin
   // ---- Refactor code at the cursor ----------------------------------------
   Leaf(Root, 'Rename...',                 OnRename,               skRename,     REQ_EDITOR);
   Leaf(Root, 'Extract Method',            OnExtractMethod,        skExtract,    REQ_EDITOR);
-  Plain(Root, 'Extract variable...',      OnExtractVariable,      REQ_EDITOR);
-  Plain(Root, 'Wrap in try..finally',     OnWrapTryFinally,       REQ_EDITOR);
+  Leaf(Root, 'Extract variable...',       OnExtractVariable,      skExtractVariable, REQ_EDITOR);
+  Leaf(Root, 'Wrap in try..finally',      OnWrapTryFinally,       skWrapTryFinally,  REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
-  Plain(Root, 'Change signature...',      OnChangeSignature,      REQ_EDITOR);
+  Leaf(Root, 'Change signature...',       OnChangeSignature,      skChangeSignature, REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
-  Plain(Root, 'Safe delete...',           OnSafeDelete,           REQ_EDITOR);
-  Plain(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties, REQ_EDITOR);
+  Leaf(Root, 'Safe delete...',            OnSafeDelete,           skSafeDelete,      REQ_EDITOR);
+  Leaf(Root, 'Convert properties (field / getter, setter)...', OnConvertProperties,
+    skConvertProperties, REQ_EDITOR);
 
   RemoveWithSub := Sub(Root, 'Remove with');
   Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);

@@ -56,7 +56,20 @@ implementation
 
 
 uses
-  Expert.PascalScanner;
+  Winapi.Windows, Expert.PascalScanner, Expert.SafeDeletePlan;
+
+// Content for the kind classification: the editor buffer (main thread),
+// else the disk
+function EditorOrDiskContent: TFunc<string, string>;
+begin
+  Result :=
+    function(AFile: string): string
+    begin
+      if not ((Editor <> nil) and Editor.ReadEditorContent(AFile, Result)) then
+        Result := ReadDelphiFile(AFile);
+    end;
+end;
+
 {$IFNDEF STANDALONE_BUILD}
 { TLspFindReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
   Only compiled into the IDE plugin; the standalone build does not
@@ -147,6 +160,7 @@ var
   Client: TLspClient;
   LspLocations: TArray<TLspLocation>;
   LspLine, LspCol: Integer;
+  DefLineOut: Integer;
 begin
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
@@ -174,7 +188,21 @@ begin
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
 
-  Client.RefreshDocument(FContext.FileName);
+  // send the unit only when its content changed since the last send, and
+  // wait for its analysis then - a blind re-open restarts DelphiLSP's
+  // analysis and every query before it is done answers null
+  begin
+    var StartBefore := Client.GetFileDiagnosticsVersion(FContext.FileName);
+    if Client.SyncDocument(FContext.FileName) and WasRunning then
+      Client.WaitFileAnalysed(FContext.FileName, StartBefore, 30000,
+        function: Boolean
+        begin
+          FDialog.SetStatus('Waiting for DelphiLSP to analyse ' +
+            ExtractFileName(FContext.FileName) + '...');
+          Application.ProcessMessages;
+          Result := True;
+        end);
+  end;
 
   LspLine := FContext.Line - 1;
   LspCol := FContext.Column - 1;
@@ -194,9 +222,7 @@ begin
       except end;
       Sleep(1000);
     end;
-  end
-  else
-    Sleep(300);
+  end;
 
   // Strategy 1: try textDocument/references directly
   if Client.SupportsReferences then
@@ -217,6 +243,7 @@ begin
     if Length(LspLocations) > 0 then
     begin
       Items := ConvertLspLocations(LspLocations, FContext.WordAtCursor);
+      AssignReferenceKinds(Items, FContext.WordAtCursor, '', -1, EditorOrDiskContent());
       FDialog.SetItems(Items);
       FDialog.SetStatus(Format('LSP: %d reference(s) found.', [Length(Items)]));
       Exit;
@@ -256,6 +283,7 @@ begin
     begin
       DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri);
       DefLine := DefLocs[0].Range.Start.Line;
+      DefLineOut := DefLine;
       IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLocs[0].Range.Start.Line,
         DefLocs[0].Range.Start.Character);
     end
@@ -263,6 +291,7 @@ begin
     begin
       // null AT a declaration: the caret is the symbol
       DefFilePath := FContext.FileName;
+      DefLineOut := LspLine;
       IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
     end;
 
@@ -311,6 +340,8 @@ begin
     IncCtx.Free;
   end;
 
+  // how each hit uses the symbol (the "Kind" column)
+  AssignReferenceKinds(Items, FContext.WordAtCursor, DefFilePath, DefLineOut, EditorOrDiskContent());
   var Unverified := 0;
   for var It in Items do
     if It.Note <> '' then Inc(Unverified);
@@ -441,13 +472,13 @@ function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenc
   AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
-  LastOpenedFile: string;
+  Synced: TDictionary<string, Boolean>;
   I: Integer;
   C: TFindReferenceItem;
 begin
   Verified := TList<TFindReferenceItem>.Create;
+  Synced := TDictionary<string, Boolean>.Create;
   try
-    LastOpenedFile := '';
     FDialog.SetProgress(0, System.Length(ACandidates));
 
     for I := 0 to High(ACandidates) do
@@ -461,22 +492,47 @@ begin
         Application.ProcessMessages;
       end;
 
-      // an include file (or a unit currently sent expanded) is served by
-      // the include context - sending it here would undo that
-      if not SameText(C.FilePath, LastOpenedFile) then
+      // Send each file once, only when its content changed, and wait for
+      // the analysis then (the old re-open + 300 ms lost answers). An
+      // include file (or a unit currently sent expanded) is served by the
+      // include context - sending it here would undo that.
+      var FirstInFile := not Synced.ContainsKey(UpperCase(C.FilePath));
+      if FirstInFile then
       begin
+        Synced.Add(UpperCase(C.FilePath), True);
         if not AIncludes.OwnsDocument(C.FilePath) then
         begin
-          AClient.RefreshDocument(C.FilePath);
-          Sleep(300);
+          var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
+          if AClient.SyncDocument(C.FilePath) then
+          begin
+            var Name := ExtractFileName(C.FilePath);
+            AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
+              function: Boolean
+              begin
+                FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                Application.ProcessMessages;
+                Result := True;
+              end);
+          end;
         end;
-        LastOpenedFile := C.FilePath;
       end;
 
       var Matches := False;
       var NoAnswer := False;
       try
         var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+        // an EMPTY answer is retried briefly, a wrong one never
+        if (System.Length(Defs) = 0) and not ATargets.Contains(C.FilePath, C.Line) and
+           not ALinked.Contains(C.FilePath, C.Line) then
+        begin
+          var Dl := GetTickCount64 + UInt64(IfThen(FirstInFile, 3000, 600));
+          while (System.Length(Defs) = 0) and (GetTickCount64 < Dl) do
+          begin
+            Sleep(150);
+            Application.ProcessMessages;
+            Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+          end;
+        end;
         NoAnswer := System.Length(Defs) = 0;
 
         // The candidate IS one of the symbol's positions (declaration /
@@ -515,12 +571,22 @@ begin
         // tell (the including unit may not compile on its own)
         C.Note := 'UNVERIFIED - no answer inside this include file';
         Verified.Add(C);
+      end
+      else if NoAnswer and not LineDeclaresName(C.Preview, AOldName) then
+      begin
+        // was silently dropped: an occurrence DelphiLSP does not resolve
+        // (inactive {$IFDEF} branch, unit still in analysis) may well be a
+        // reference - show it, marked. A declaration line without an
+        // answer declares ANOTHER symbol and stays out.
+        C.Note := 'UNVERIFIED - no answer from DelphiLSP';
+        Verified.Add(C);
       end;
     end;
 
     FDialog.SetProgress(System.Length(ACandidates), System.Length(ACandidates));
     Result := Verified.ToArray;
   finally
+    Synced.Free;
     Verified.Free;
   end;
 end;

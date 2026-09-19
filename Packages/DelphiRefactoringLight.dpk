@@ -111,6 +111,7 @@ contains
   Expert.SafeDelete in '..\Source\Expert.SafeDelete.pas',
   Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
   Expert.ChangeSignature in '..\Source\Expert.ChangeSignature.pas',
+  Expert.ReferenceKind in '..\Source\Expert.ReferenceKind.pas',
   Expert.BlameGutter in '..\Source\Expert.BlameGutter.pas',
   Expert.ResourceMonitor in '..\Source\Expert.ResourceMonitor.pas',
   Expert.ScopeFiles in '..\Source\Expert.ScopeFiles.pas',

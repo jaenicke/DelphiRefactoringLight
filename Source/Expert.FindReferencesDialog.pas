@@ -27,10 +27,23 @@ type
     ///  itself: "declared in interface IFoo", "call via interface IFoo",
     ///  "implemented by TFoo", "call via class TFoo". '' otherwise.</summary>
     Relation: string;
+    /// <summary>How the symbol is used there - "Call", "Write", "Read",
+    ///  "Declaration", "Implementation", "Type use", ... (see
+    ///  Expert.ReferenceKind); '' when not classified.</summary>
+    Kind: string;
   end;
 
   TFindReferenceItems = TArray<TFindReferenceItem>;
 
+/// <summary>Fills Kind of every item: the symbol's own kind comes from its
+///  declaration line (ADeclFile / ADeclLine, '' / -1 = unknown), the items
+///  are classified per file in one pass. AReadContent returns a file's
+///  current content ('' when unreadable) - editor buffer or disk, as the
+///  caller's thread allows.</summary>
+procedure AssignReferenceKinds(var AItems: TFindReferenceItems; const AName,
+  ADeclFile: string; ADeclLine: Integer; const AReadContent: TFunc<string, string>);
+
+type
   /// <summary>Modal dialog with a ListView of all occurrences of an identifier.
   ///  Double-click = jump to location (dialog stays open).
   ///  ENTER on a line = jump to location and close dialog.
@@ -79,7 +92,71 @@ type
 implementation
 
 uses
-  System.IOUtils, Expert.IdeThemes, Expert.DialogHelper, Expert.ListViewSort;
+  System.IOUtils, System.Types, Expert.IdeThemes, Expert.DialogHelper, Expert.ListViewSort,
+  Expert.ReferenceKind;
+
+procedure AssignReferenceKinds(var AItems: TFindReferenceItems; const AName,
+  ADeclFile: string; ADeclLine: Integer; const AReadContent: TFunc<string, string>);
+var
+  Cache: TDictionary<string, string>;
+  Groups: TDictionary<string, TList<Integer>>;
+
+  function Get(const AFile: string): string;
+  begin
+    if not Cache.TryGetValue(UpperCase(AFile), Result) then
+    begin
+      Result := '';
+      if Assigned(AReadContent) then
+        try
+          Result := AReadContent(AFile);
+        except
+          Result := '';
+        end;
+      Cache.Add(UpperCase(AFile), Result);
+    end;
+  end;
+
+begin
+  if (Length(AItems) = 0) or (AName = '') then Exit;
+  Cache := TDictionary<string, string>.Create;
+  Groups := TDictionary<string, TList<Integer>>.Create;
+  try
+    var Sym := rsUnknown;
+    if (ADeclFile <> '') and (ADeclLine >= 0) then
+    begin
+      var DL := Get(ADeclFile).Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+      if ADeclLine <= High(DL) then Sym := SymbolKindFromDeclLine(DL[ADeclLine], AName);
+    end;
+    for var I := 0 to High(AItems) do
+    begin
+      var K := UpperCase(AItems[I].FilePath);
+      var L: TList<Integer>;
+      if not Groups.TryGetValue(K, L) then
+      begin
+        L := TList<Integer>.Create;
+        Groups.Add(K, L);
+      end;
+      L.Add(I);
+    end;
+    for var G in Groups do
+    begin
+      var Idx := G.Value.ToArray;
+      var Content := Get(AItems[Idx[0]].FilePath);
+      if Content = '' then Continue;
+      var Pts: TArray<TPoint>;
+      SetLength(Pts, Length(Idx));
+      for var K := 0 to High(Idx) do
+        Pts[K] := Point(AItems[Idx[K]].Col, AItems[Idx[K]].Line);
+      var Kinds := ClassifyReferences(Content, Pts, Length(AName), Sym);
+      for var K := 0 to High(Idx) do
+        if K <= High(Kinds) then AItems[Idx[K]].Kind := RefKindText(Kinds[K]);
+    end;
+  finally
+    for var G in Groups do G.Value.Free;
+    Groups.Free;
+    Cache.Free;
+  end;
+end;
 
 { TFindReferencesDialog }
 
@@ -187,6 +264,10 @@ begin
   Col.Alignment := taRightJustify;
 
   Col := FListView.Columns.Add;
+  Col.Caption := 'Kind';
+  Col.Width := 110;
+
+  Col := FListView.Columns.Add;
   Col.Caption := 'Preview';
   Col.Width := 420;
 
@@ -239,6 +320,7 @@ begin
       LI.Caption := DisplayPath;
       LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
       LI.SubItems.Add(IntToStr(AItems[I].Col + 1));
+      LI.SubItems.Add(AItems[I].Kind);
       LI.SubItems.Add(AItems[I].Preview);
       if (AItems[I].Relation <> '') and (AItems[I].Note <> '') then
         LI.SubItems.Add(AItems[I].Relation + '; ' + AItems[I].Note)

@@ -98,3 +98,4 @@ Mcp/DCU/
 # DUnitX test output
 Tests/Win32/
 Tests/Win64/
+/Packages/DelphiRefactoringLight.res

@@ -830,8 +830,11 @@ begin
   LineCache := TDictionary<string, TArray<string>>.Create;
   try
     try
-      AClient.RefreshDocument(AFilePath);
-      Sleep(300);
+      // only when changed, then wait for the analysis (a blind re-open +
+      // 300 ms answered before DelphiLSP had analysed the unit)
+      var Before := AClient.GetFileDiagnosticsVersion(AFilePath);
+      if AClient.SyncDocument(AFilePath) then
+        AClient.WaitFileAnalysed(AFilePath, Before, 15000);
       ImplLocs := AClient.GotoImplementation(AFilePath, ALine, ACol);
     except
       Exit(nil);

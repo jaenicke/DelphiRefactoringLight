@@ -114,7 +114,7 @@ begin
   if AName.StartsWith('rename_') or (AName = 'find_references') or
      (AName = 'find_implementations') or AName.StartsWith('uses_') or
      (AName = 'analyze_uses') or (AName = 'debug_consistency') or
-     (AName = 'blame') or (AName = 'commit_info') then
+     (AName = 'blame') or (AName = 'commit_info') or (AName = 'safe_delete') then
     Result := 300000
   else
     Result := ToolTimeoutMs;

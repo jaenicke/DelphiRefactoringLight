@@ -88,6 +88,7 @@
         <DCCReference Include="Test.InheritedDefectFixes.pas"/>
         <DCCReference Include="..\Source\Expert.SignatureCheck.pas"/>
         <DCCReference Include="..\Source\Expert.StatementRefactor.pas"/>
+        <DCCReference Include="..\Source\Expert.SafeDeletePlan.pas"/>
         <DCCReference Include="Test.RegressionSuite.pas"/>
         <DCCReference Include="Test.Issue11.pas"/>
         <BuildConfiguration Include="Release">

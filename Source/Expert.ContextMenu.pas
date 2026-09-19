@@ -133,6 +133,7 @@ type
     procedure OnExtractMethod(Sender: TObject);
     procedure OnExtractVariable(Sender: TObject);
     procedure OnWrapTryFinally(Sender: TObject);
+    procedure OnSafeDelete(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
     procedure OnShowMcpTools(Sender: TObject);
@@ -228,7 +229,7 @@ uses
   Expert.DebugConsistencyDialog,
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
-  Expert.UsesCleanup, Expert.StatementRefactor;
+  Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete;
 
 
 
@@ -428,6 +429,7 @@ begin
   Plain(Root, 'Wrap in try..finally',     OnWrapTryFinally,       REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
+  Plain(Root, 'Safe delete...',           OnSafeDelete,           REQ_EDITOR);
 
   RemoveWithSub := Sub(Root, 'Remove with');
   Leaf(RemoveWithSub, 'At cursor only',     OnRemoveWithAtCursor,      skRemoveWith, REQ_EDITOR);
@@ -1517,6 +1519,11 @@ end;
 procedure TContextMenuInstaller.OnWrapTryFinally(Sender: TObject);
 begin
   WrapSelectionInTryFinally;
+end;
+
+procedure TContextMenuInstaller.OnSafeDelete(Sender: TObject);
+begin
+  SafeDeleteAtCursor;
 end;
 
 procedure TContextMenuInstaller.OnShowStatus(Sender: TObject);

@@ -32,13 +32,54 @@ type
     [Test] procedure ExtractVariable_RefusesUnsafeSpots;
     [Test] procedure WrapTryFinally_InfersCleanup;
     [Test] procedure WrapTryFinally_WrapsAndRefusesPartialBlocks;
+    [Test] procedure SafeDelete_MethodDeclarationAndBody;
+    [Test] procedure SafeDelete_VetoesDispatchAndPublished;
+    [Test] procedure SafeDelete_DataDeclarations;
   end;
 
 implementation
 
 uses
   System.SysUtils, Expert.SignatureCheck, Expert.WithScanner, Expert.UnitIndex,
-  Expert.AutoImport, Expert.StatementRefactor;
+  Expert.AutoImport, Expert.StatementRefactor, Expert.SafeDeletePlan;
+
+const
+  SafeDemo: array[0..28] of string = (
+    'unit Demo;',                                        // 0
+    'interface',                                         // 1
+    'type',                                              // 2
+    '  TFoo = class',                                    // 3
+    '  private',                                         // 4
+    '    FA, FB: Integer;',                              // 5
+    '    procedure Unused;',                             // 6
+    '    procedure Virt; virtual;',                      // 7
+    '  published',                                       // 8
+    '    procedure Pub;',                                // 9
+    '  end;',                                            // 10
+    '',                                                  // 11
+    'const',                                             // 12
+    '  CLone = 5;',                                      // 13
+    '',                                                  // 14
+    'implementation',                                    // 15
+    '',                                                  // 16
+    'procedure TFoo.Unused;',                            // 17
+    'begin',                                             // 18
+    'end;',                                              // 19
+    '',                                                  // 20
+    'procedure TFoo.Virt;',                              // 21
+    'begin',                                             // 22
+    'end;',                                              // 23
+    '',                                                  // 24
+    'procedure TFoo.Pub;',                               // 25
+    'begin',                                             // 26
+    'end;',                                              // 27
+    'end.');                                             // 28
+
+function SafeDemoLines: TArray<string>;
+begin
+  SetLength(Result, Length(SafeDemo));
+  for var I := 0 to High(SafeDemo) do Result[I] := SafeDemo[I];
+end;
 
 procedure TIssue11Tests.AlignSignature_ReplacesSignatureKeepsDirectives;
 var
@@ -195,6 +236,55 @@ begin
   Assert.AreEqual('  L := TStringList.Create;|  try|    L.Add(''a'');|    if X then|' +
     '    begin|      Y;|    end;|  finally|    L.Free;|  end;|  Z;', string.Join('|', R));
   Assert.IsFalse(PlanWrapTryFinally(Src, 1, 4, '', R, Why), 'begin without its end');
+end;
+
+procedure TIssue11Tests.SafeDelete_MethodDeclarationAndBody;
+var
+  Sym: TSafeDeleteSymbol;
+  Why: string;
+begin
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 6, 'Unused', Sym, Why), Why);
+  Assert.AreEqual<Integer>(Ord(sdkMethod), Ord(Sym.Kind));
+  Assert.AreEqual('TFoo', Sym.Container);
+  Assert.AreEqual(17, Sym.ImplLine);
+  Assert.AreEqual<Integer>(0, Length(Sym.Vetoes));
+  Assert.AreEqual<Integer>(2, Length(Sym.Edits));
+  var Res := ApplySafeDeleteEdits(SafeDemoLines, Sym.Edits);
+  Assert.IsFalse(string.Join('|', Res).Contains('Unused'));
+  Assert.AreEqual<Integer>(Length(SafeDemo) - 5, Length(Res));
+  // the implementation header leads to the same plan
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 17, 'Unused', Sym, Why), Why);
+  Assert.AreEqual(6, Sym.DeclLine);
+  // a line that does not declare the name
+  Assert.IsFalse(PlanSafeDeleteSymbol(SafeDemoLines, 18, 'Unused', Sym, Why));
+end;
+
+procedure TIssue11Tests.SafeDelete_VetoesDispatchAndPublished;
+var
+  Sym: TSafeDeleteSymbol;
+  Why: string;
+begin
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 7, 'Virt', Sym, Why), Why);
+  Assert.AreEqual<Integer>(1, Length(Sym.Vetoes), 'virtual');
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 9, 'Pub', Sym, Why), Why);
+  Assert.AreEqual<Integer>(1, Length(Sym.Vetoes), 'published');
+end;
+
+procedure TIssue11Tests.SafeDelete_DataDeclarations;
+var
+  Sym: TSafeDeleteSymbol;
+  Why: string;
+begin
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 5, 'FB', Sym, Why), Why);
+  Assert.AreEqual<Integer>(Ord(sdkField), Ord(Sym.Kind));
+  Assert.IsTrue(Sym.Edits[0].HasReplacement);
+  Assert.AreEqual('    FA: Integer;', Sym.Edits[0].Replacement);
+  Assert.IsTrue(PlanSafeDeleteSymbol(SafeDemoLines, 13, 'CLone', Sym, Why), Why);
+  Assert.AreEqual<Integer>(Ord(sdkConstant), Ord(Sym.Kind));
+  Assert.AreEqual(12, Sym.Edits[0].FirstLine, 'the lone "const" goes with it');
+  var Hits := FormTextMentions('object B: TButton'#13#10'  OnClick = UnusedClick', 'UnusedClick');
+  Assert.AreEqual<Integer>(1, Length(Hits));
+  Assert.AreEqual(1, Hits[0]);
 end;
 
 initialization

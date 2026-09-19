@@ -39,6 +39,7 @@ uses
   Test.InheritedDefectFixes in 'Test.InheritedDefectFixes.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',
+  Expert.SafeDeletePlan in '..\Source\Expert.SafeDeletePlan.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas';
 

@@ -740,6 +740,20 @@ const
     'pe":"integer"},"instance":{"type":"integer","description":"Process id of the IDE to use. N' +
     'ormally omitted - the IDE is chosen automatically (see ide_instances)."}}}}' +
     ',' +
+    '{"name":"safe_delete","description":"Safe delete of the symbol at a position (method, rou' +
+    'tine, field, property, variable, constant, single-line type): checks that NOTHING uses it ' +
+    '(every occurrence in the project scope verified via DelphiLSP - an occurrence DelphiLSP ca' +
+    'nnot resolve, e.g. in an inactive IFDEF branch, counts as a use; form files; interface imp' +
+    'lementations) and refuses overloaded / virtual / override / published members. Without ap' +
+    'ply it only reports; apply=true deletes declaration + implementation in the IDE buffer (no' +
+    't saved) when the check allows it.","inputSchema":{"type":"object","properties":{"file":{"' +
+    'type":"string","description":"Absolute path of the unit."},"line":{"type":"integer","descr' +
+    'iption":"1-based line of the identifier (a use or the declaration)."},"column":{"type":"in' +
+    'teger","description":"1-based column."},"apply":{"type":"boolean","description":"Delete it' +
+    ' when deletable (default false)."},"instance":{"type":"integer","description":"Process id ' +
+    'of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances).' +
+    '"}},"required":["file","line","column"]}}' +
+    ',' +
     '{"name":"debug_consistency","description":"Checks the active project for reasons why break' +
     'points are not hit or debug info does not match: duplicate sources on the search path, str' +
     'ay DCUs, LF line endings, debug options and directives, outdated executable / symbol files' +
@@ -886,6 +900,7 @@ begin
     'Refactoring: find_unit / add_unit / remove_unit / analyze_uses, ' +
     'find_references / find_implementations, rename_preview + rename_apply ' +
     '(the IDE plugin''s rename incl. form files), uses_path / uses_cycles, ' +
+    'safe_delete (check that nothing uses a symbol, then delete it), ' +
     'debug_consistency, blame / commit_info. The lsp_* tools talk to the ' +
     'plugin''s own DelphiLSP session directly. ' +
     'When something does not work as expected (no fixes, no diagnostics, ' +

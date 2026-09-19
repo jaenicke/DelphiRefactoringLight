@@ -312,6 +312,33 @@ function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0:
   const ADecls: TArray<string>; out AInsLine: Integer; out AText: string;
   out AFirstDeclLine: Integer): Boolean;
 
+// ---- shared Pascal line helpers (also used by Expert.SafeDeletePlan) -------
+
+/// <summary>AContent split into lines (CRLF / LF).</summary>
+function SplitContentLines(const AContent: string): TArray<string>;
+/// <summary>0-based line of the 'implementation' keyword, or MaxInt when none.</summary>
+function ImplementationLineOf(const ALines: TArray<string>): Integer;
+/// <summary>S is a routine header: procedure / function / constructor /
+///  destructor, optionally with 'class '.</summary>
+function IsHeaderLine(const S: string; out AKind: string;
+  out AIsClassMethod: Boolean): Boolean;
+/// <summary>Joins lines from AStart up to the first ';' outside brackets
+///  (the signature); AEndLine = last joined line. '' when none.</summary>
+function CollectHeader(const ALines: TArray<string>; AStart: Integer;
+  out AEndLine: Integer): string;
+/// <summary>Name (possibly qualified), parameter text and result type of a
+///  collected header.</summary>
+function ParseHeader(const AHeader, AKind: string;
+  out AQualified, AParams, ARetType: string): Boolean;
+/// <summary>'TFoo' for a trimmed "TFoo = class(...)" / "= record" opener that
+///  opens a BODY; '' for anything else (forward, metaclass, alias).</summary>
+function ClassOpenerName(const ATrimmed: string): string;
+/// <summary>The (possibly nested, then qualified 'TOuter.TInner') class or
+///  record whose declaration body encloses ALine0; '' = none.</summary>
+function EnclosingContainerName(const ALines: TArray<string>; ALine0: Integer): string;
+/// <summary>AWord occurs in S as a whole word (case-insensitive).</summary>
+function HasWholeWordCI(const S, AWord: string): Boolean;
+
 /// <summary>True for diagnostic codes a quick-fix provider handles.
 ///  Everything else can never produce a fix (E2250 & co).</summary>
 function IsHandledDiagCode(const ACode: string): Boolean;
@@ -1083,7 +1110,6 @@ begin
   Result := True;
 end;
 
-function ClassOpenerName(const ATrimmed: string): string; forward;
 
 function ResolveQuickFixes(const AContent: string;
   const ADiags: TArray<TLspErrorDiag>): TArray<TQuickFix>;

@@ -49,11 +49,11 @@
         <SanitizedProjectName>DelphiRefactoringLight</SanitizedProjectName>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
         <VerInfo_MajorVer>1</VerInfo_MajorVer>
-        <VerInfo_MinorVer>1</VerInfo_MinorVer>
+        <VerInfo_MinorVer>2</VerInfo_MinorVer>
         <VerInfo_Release>0</VerInfo_Release>
         <VerInfo_Build>0</VerInfo_Build>
         <VerInfo_Locale>1031</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=Sebastian Jaenicke;FileDescription=Delphi Refactoring Light;FileVersion=1.1.0.0;InternalName=DelphiRefactoringLight;LegalCopyright=Copyright (c) 2026 Sebastian Jaenicke, MPL 2.0;LegalTrademarks=;OriginalFilename=;ProductName=Delphi Refactoring Light;ProductVersion=1.1.0;Comments=https://github.com/jaenicke/DelphiRefactoringLight</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Sebastian Jaenicke;FileDescription=Delphi Refactoring Light;FileVersion=1.2.0.0;InternalName=DelphiRefactoringLight;LegalCopyright=Copyright (c) 2026 Sebastian Jaenicke, MPL 2.0;LegalTrademarks=;OriginalFilename=;ProductName=Delphi Refactoring Light;ProductVersion=1.2.0;Comments=https://github.com/jaenicke/DelphiRefactoringLight</VerInfo_Keys>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;Vcl.Imaging;Vcl.Touch;Vcl.Samples;Vcl.Shell;$(DCC_Namespace)</DCC_Namespace>
         <GenDll>true</GenDll>
         <GenPackage>true</GenPackage>
@@ -166,6 +166,8 @@
         <DCCReference Include="..\Source\Expert.VcsBlame.pas"/>
         <DCCReference Include="..\Source\Expert.WorkerLatch.pas"/>
         <DCCReference Include="..\Source\Expert.StatementRefactor.pas"/>
+        <DCCReference Include="..\Source\Expert.SafeDeletePlan.pas"/>
+        <DCCReference Include="..\Source\Expert.SafeDelete.pas"/>
         <DCCReference Include="..\Source\Expert.BlameGutter.pas"/>
         <DCCReference Include="..\Source\Expert.ResourceMonitor.pas"/>
         <DCCReference Include="..\Source\Expert.ScopeFiles.pas"/>

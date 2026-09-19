@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.1.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.2.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -14,6 +14,7 @@ A design-time package for **Delphi 13** that connects to the built-in Delphi Lan
 | `Ctrl+Alt+Shift+Space` | **Code Completion** &mdash; suggestions via DelphiLSP                                                                                                |
 | `Ctrl+Alt+Shift+M`     | **Extract Method** &mdash; move the selected block into a new method                                                                                 |
 | *(menu only)*          | **Extract variable** &mdash; turn the selected expression into an inline `var` declared right before its statement, and **Wrap in try..finally** with the cleanup inferred from the preceding statement (`.Free`, `.EndUpdate`, `.Leave`, ...) |
+| *(menu only)*          | **Safe delete** &mdash; delete a method, routine, field, property, variable or constant only after proving that nothing uses it (every occurrence checked via DelphiLSP, form files, interface implementations) |
 | `Ctrl+Alt+Shift+A`     | **Align method signature** &mdash; compare a method's class/interface declaration with its implementation and highlight mismatches                   |
 | `Ctrl+Alt+Shift+W`     | **Remove with** &mdash; rewrite a `with` statement as inline-vars + qualified accesses. Scope (at cursor / current unit / selected units / project-wide) is picked from the submenu; the shortcut defaults to "at cursor only" |
 | `Ctrl+Shift+M`         | **Move identifier to other unit** &mdash; move a type / class / routine / const / var to another existing unit and update consumer `uses` clauses    |
@@ -126,6 +127,14 @@ In the last three weeks I tested with big projects and used it myself in real li
 - **Extract variable**: select an expression on one line; the plugin proposes a name (`Foo.Bar.Count` &rarr; `LCount`), declares `var LCount := Foo.Bar.Count;` right before the **statement** that contains it and replaces the selection. Deliberately never at the routine's `begin`, and refused where even the statement start would change the meaning: after a short-circuit `and`/`or` (`if Assigned(X) and (X.Foo > 0)` would dereference nil), in a loop condition, in a branch or loop body on the same line, as the only statement of a `then`/`else`/`do` branch, on a `case` branch, inside a `with`, or when the name is already used in the routine. Uses Delphi's inline variables (10.3+).
 - **Wrap in try..finally**: select complete statements; they move into a `try` block, and the `finally` part is inferred from the statement right before them &mdash; `X := TFoo.Create` &rarr; `X.Free`, `X.BeginUpdate` &rarr; `X.EndUpdate`, `X.Enter`/`Acquire`/`Lock` &rarr; `Leave`/`Release`/`Unlock`, `TMonitor.Enter(X)` &rarr; `TMonitor.Exit(X)`, otherwise a TODO comment. Only wrapper lines are added, so a wrong guess is a compile error, never silent damage. Selections with an unbalanced `begin`/`try`/`case`..`end` are refused.
 - Both write through the editor (undoable) and are not saved.
+
+### Safe delete (menu only)
+Put the caret on a symbol - its declaration or any use - and choose **Safe delete...**. The plugin deletes the declaration (and the implementation of a method or routine) only after proving that **nothing uses it**:
+- Every whole-word occurrence in the project scope (comments and strings excluded) is asked where it leads. Only an occurrence DelphiLSP attributes to a **different** symbol is harmless. One that leads to the declaration is a use, and one DelphiLSP **cannot resolve** counts as a use, too &mdash; that is what a call in an inactive `{$IFDEF}` branch looks like, and deleting the declaration would break the other configuration.
+- Form files (`.dfm` / `.fmx`) bind event handlers and components by name, so any mention there blocks.
+- Refused outright: overloaded methods (another overload could silently take over the calls), `virtual` / `dynamic` / `abstract` / `override` / `message` methods (reachable through dispatch), `published` members (streaming, RTTI), methods implementing an interface method, multi-line data declarations and types with a body.
+- Supported: methods of classes, records and interfaces, free and nested routines, fields, properties, unit-level and local variables and constants (one name out of `A, B, C: Integer` is removed on its own), single-line types. A `///` doc comment directly above goes with it, and so does a `var` / `const` keyword that would be left without declarations.
+- The dialog lists what will be deleted and every occurrence with its verdict; **Delete** is enabled only when the check passed. The edit goes through the editor (undoable) and is not saved. Code outside the project scope (other projects using the unit) is not seen &mdash; the dialog says so.
 
 ### Extract Method (`Ctrl+Alt+Shift+M`)
 - Validates the selection with a Pascal tokenizer (paren balance, `if`/`then`/`else`, `repeat`/`until`, `try`/`except`/`finally`, no selection crossing method boundaries, ...).
@@ -456,6 +465,8 @@ DelphiRefactoringLight/
 |   |-- Expert.FindReferencesDialog.pas      # Results dialog with list view
 |   |-- Expert.ImplementationFinder.pas      # Shared impl finder (rename + find-impl)
 |   |-- Expert.FindImplementationsWizard.pas # Find-implementations wizard
+|   |-- Expert.SafeDeletePlan.pas            # Safe delete: what would be removed, vetoes (pure)
+|   |-- Expert.SafeDelete.pas                # Safe delete: usage check via DelphiLSP, dialog, MCP tool
 |   |-- Expert.SignatureCheck.pas            # Signature collection / normalization
 |   |-- Expert.SignatureCheckDialog.pas      # Align-signature dialog
 |   |-- Expert.SignatureCheckWizard.pas      # Align-signature wizard

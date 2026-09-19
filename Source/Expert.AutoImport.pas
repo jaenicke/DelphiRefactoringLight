@@ -1728,6 +1728,27 @@ var
       and not ((C0 >= 0) and (FoundCol >= 0) and (C0 >= FoundCol)
                and (C0 < FoundCol + Length(Tok))) then Exit;   // ambiguous
 
+    // A token that is part of a DOTTED expression is a member access, not
+    // a stray word - "lMyClassA.In" is a half-typed member and removing
+    // the "In" would eat what the user is writing (tester screenshot,
+    // 2026-09-19: the fix popped up while typing).
+    begin
+      var J := FoundCol;                       // 1-based index before it
+      while (J >= 1) and CharInSet(S[J], [' ', #9]) do Dec(J);
+      if (J >= 1) and (S[J] = '.') then
+      begin
+        Decline('E2029', Tok, 'part of a dotted expression (member access)');
+        Exit;
+      end;
+      J := FoundCol + Length(Tok) + 1;         // 1-based index after it
+      while (J <= Length(S)) and CharInSet(S[J], [' ', #9]) do Inc(J);
+      if (J <= Length(S)) and (S[J] = '.') then
+      begin
+        Decline('E2029', Tok, 'part of a dotted expression (qualifier)');
+        Exit;
+      end;
+    end;
+
     if Seen.ContainsKey('RT|' + IntToStr(L0) + '|' + UTok) then Exit;
     Seen.Add('RT|' + IntToStr(L0) + '|' + UTok, True);
 

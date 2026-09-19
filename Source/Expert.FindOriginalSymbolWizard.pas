@@ -26,8 +26,9 @@ uses
   System.SysUtils, System.IOUtils, System.Math,
   Vcl.Forms, Vcl.Controls, Vcl.Dialogs,
   Lsp.Protocol, Lsp.Client, Lsp.Uri, Expert.LspManager,
-  Expert.EditorHelperIntf, Expert.DialogHelper,
-  Expert.UnitIndex, Expert.FindUnitDialog;
+  Expert.EditorHelperIntf, Expert.DialogHelper, Expert.PascalScanner,
+  Expert.UnitIndex, Expert.FindUnitDialog, Expert.InterfaceLinks,
+  Expert.ScopeFiles;
 
 // 0-based column of AWord as a whole word in ALine (case-insensitive),
 // or -1. Word boundaries: identifier characters on either side disqualify.
@@ -64,25 +65,6 @@ begin
   except
     Result := False;
   end;
-end;
-
-// Qualifier of a dotted use site: for "TMyClass.MyClassProc" with the
-// caret on the member this returns 'TMyClass'. '' when the identifier is
-// not dot-qualified. ACol0 is the 0-based column of the identifier.
-function QualifierBefore(const ALine: string; ACol0: Integer): string;
-var
-  I, EndP: Integer;
-begin
-  Result := '';
-  I := ACol0;                      // 1-based index of the char BEFORE it
-  while (I >= 1) and (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
-  if (I < 1) or (I > Length(ALine)) or (ALine[I] <> '.') then Exit;
-  Dec(I);
-  while (I >= 1) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
-  EndP := I;
-  while (I >= 1) and CharInSet(ALine[I],
-    ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Dec(I);
-  if EndP > I then Result := Copy(ALine, I + 1, EndP - I);
 end;
 
 // Jumps to a MEMBER declaration of a dot-qualified use site. Class
@@ -284,6 +266,7 @@ begin
     // the safer answer - a plain lookup of the member name alone could
     // land on an unrelated global routine of the same name.
     var Content: string;
+    var MemberNote := '';
     if ReadBuffer(Ctx.FileName, Content) then
     begin
       var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
@@ -295,6 +278,30 @@ begin
         begin
           var Qual := QualifierBefore(Lines[L0], C0);
           if (Qual <> '') and TryQualifiedFallback(Qual, Ctx.WordAtCursor) then Exit;
+
+          // The qualifier may be a VARIABLE, not a type ("lMyClassA.Init"):
+          // resolve its declared type and look the member up there,
+          // ancestors included. Since Delphi 13.1 this is the ONLY way for a
+          // private/public overload pair - DelphiLSP answers nothing at all
+          // for those (RSS-5463), not even hover or completion.
+          if Qual <> '' then
+          begin
+            var Graph := TTypeGraph.Create([Ctx.FileName], EditorOrDiskReader());
+            try
+              var Link: TMemberLink;
+              if ResolveMemberUse(Graph, Content, L0, C0, Ctx.WordAtCursor,
+                Link) <> murNone then
+              begin
+                if Editor.GotoLocation(Link.FilePath, Link.Line, Link.Col,
+                  Length(Ctx.WordAtCursor)) then Exit;
+                MemberNote := Format(
+                  'resolved to %s.%s in %s, but that file could not be opened',
+                  [Link.TypeName, Ctx.WordAtCursor, ExtractFileName(Link.FilePath)]);
+              end;
+            finally
+              Graph.Free;
+            end;
+          end;
         end;
       end;
     end;
@@ -302,6 +309,7 @@ begin
     // Unqualified: one declaring unit -> jump straight to its
     // declaration, several -> hand over to the Find-Unit dialog.
     if TryIndexFallback(Ctx.WordAtCursor) then Exit;
+    if MemberNote <> '' then GIndexFallbackNote := MemberNote;
     if GIndexFallbackNote <> '' then
       ShowThemedMessage(Format('No declaration found for "%s".'#13#10#13#10 +
         'Index fallback: %s.', [Ctx.WordAtCursor, GIndexFallbackNote]))

@@ -280,6 +280,20 @@ function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
 function FindMemberDeclarationLine(const AContent, ATypeName,
   AMemberName: string): Integer;
 
+/// <summary>The TYPE a dotted use site's qualifier has: for
+///  "lMyClassA.Init" with AName = 'lMyClassA' this answers 'TMyClassA'.
+///  Looks where the compiler would: the parameters and var/const section
+///  of the routine around ALine0, an inline "var X: T" / "X := T.Create"
+///  inside it, then a field / global declaration of that name anywhere in
+///  the unit. Generic arguments and a unit qualification are stripped, so
+///  the result is a bare type name ready for a lookup; '' when nothing
+///  usable was found (pointer, array, dynamic expression, ...).
+///  Together with FindMemberDeclarationLine this resolves a member
+///  WITHOUT DelphiLSP - the case it fails at most often (a private/public
+///  overload pair makes it answer nothing at all, RSS-5463).</summary>
+function DeclaredTypeOfIdentifier(const AContent: string; ALine0: Integer;
+  const AName: string): string;
+
 /// <summary>Expands IDE path variables - $(BDS), $(BDSCOMMONDIR), and
 ///  above all USER-DEFINED ones like $(DXVCL) (Tools > Options >
 ///  Environment Variables, stored under the IDE registry key). Values may
@@ -1440,6 +1454,180 @@ begin
     else if (Depth = 0) and (I > HdrLine) and IsHeader(U) then
       Exit;   // next routine started - the first one had no body
   end;
+end;
+
+function DeclaredTypeOfIdentifier(const AContent: string; ALine0: Integer;
+  const AName: string): string;
+var
+  Lines: TArray<string>;
+  Code: TArray<string>;          // comments stripped, same line count
+  First, Last, BeginLine, I: Integer;
+
+  // "TList<Integer>" -> "TList", "System.Classes.TFoo" -> "TFoo";
+  // '' for anything that is not a plain type name (array/pointer/set/
+  // procedural), because only a named type has members to look up.
+  function CleanType(const S: string): string;
+  var
+    P: Integer;
+  begin
+    Result := Trim(S);
+    if Result = '' then Exit('');
+    var U := UpperCase(Result);
+    for var W in ['ARRAY', 'SET', 'FILE', 'RECORD', 'CLASS OF', 'PROCEDURE',
+      'FUNCTION', 'REFERENCE'] do
+      if StartsWithWord(U, W) then Exit('');
+    if Result[1] = '^' then Exit('');
+    // a parameter list's closing bracket ("X: TFoo)") is not part of the type
+    while (Result <> '') and CharInSet(Result[Length(Result)], [')', ';']) do
+      Result := TrimRight(Copy(Result, 1, Length(Result) - 1));
+    P := Pos('<', Result);
+    if P > 0 then Result := TrimRight(Copy(Result, 1, P - 1));
+    P := LastDelimiter('.', Result);
+    if P > 0 then Result := Copy(Result, P + 1, MaxInt);
+    Result := Trim(Result);
+    if not IsIdentifier(Result) then Result := '';
+  end;
+
+  // ONE declaration without its trailing ';': "const A, B: TFoo = nil".
+  // Answers the type when AName is among the declared names.
+  function TypeOfDecl(const ADecl: string): string;
+  var
+    P: Integer;
+    Names, Types: string;
+  begin
+    Result := '';
+    P := Pos(':', ADecl);
+    if P <= 0 then Exit;
+    Names := Copy(ADecl, 1, P - 1);
+    Types := Copy(ADecl, P + 1, MaxInt);
+    if (Types <> '') and (Types[1] = '=') then Exit;   // ':=' is no declaration
+    P := Pos('=', Types);                              // default value
+    if P > 0 then Types := Copy(Types, 1, P - 1);
+    for var N in Names.Split([',']) do
+    begin
+      var Nm := Trim(N);
+      // strip a parameter modifier ("const AValue", "var X", "out Y")
+      var Sp := LastDelimiter(' '#9, Nm);
+      if Sp > 0 then Nm := Trim(Copy(Nm, Sp + 1, MaxInt));
+      if SameText(Nm, AName) then Exit(CleanType(Types));
+    end;
+  end;
+
+  // Every ';'-separated declaration of a line, with a leading section or
+  // visibility keyword removed ("var A: TFoo; B: TBar").
+  function TypeOfLine(const ALine: string): string;
+  var
+    S: string;
+  begin
+    Result := '';
+    S := Trim(ALine);
+    for var W in ['VAR', 'CONST', 'THREADVAR', 'CLASS VAR', 'PUBLISHED',
+      'PUBLIC', 'PROTECTED', 'PRIVATE', 'STRICT PRIVATE', 'STRICT PROTECTED'] do
+      if StartsWithWord(UpperCase(S), W) then
+      begin
+        S := TrimLeft(Copy(S, Length(W) + 1, MaxInt));
+        Break;
+      end;
+    for var Part in S.Split([';']) do
+    begin
+      Result := TypeOfDecl(Part);
+      if Result <> '' then Exit;
+    end;
+    Result := '';
+  end;
+
+  // "lMyClassA := TMyClassA.Create;" -> 'TMyClassA' (also "var X := ...")
+  function TypeOfAssignment(const ALine: string): string;
+  var
+    P: Integer;
+    Lhs, Rhs: string;
+  begin
+    Result := '';
+    P := Pos(':=', ALine);
+    if P <= 0 then Exit;
+    Lhs := Trim(Copy(ALine, 1, P - 1));
+    if StartsWithWord(UpperCase(Lhs), 'VAR') then
+      Lhs := TrimLeft(Copy(Lhs, 4, MaxInt));
+    if not SameText(Lhs, AName) then Exit;
+    Rhs := TrimLeft(Copy(ALine, P + 2, MaxInt));
+    P := Pos('.', Rhs);
+    if P <= 0 then Exit;
+    Result := CleanType(Copy(Rhs, 1, P - 1));
+  end;
+
+begin
+  Result := '';
+  if (AContent = '') or not IsIdentifier(AName) then Exit;
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  Code := MaskCommentsAndStrings(Lines);
+  for I := 0 to High(Code) do
+    Code[I] := Trim(Code[I]);
+
+  // 1) the routine around the line: parameters, its var/const section and
+  //    inline declarations / constructor assignments in the body
+  if FindEnclosingRoutineRange(AContent, ALine0, First, Last) then
+  begin
+    // header parameters: everything between the outermost ( ) of the
+    // header, which may wrap over several lines
+    var Hdr := '';
+    var Depth := 0;
+    for I := First to Last do
+    begin
+      var L := Code[I];
+      for var C in L do
+        if C = '(' then Inc(Depth)
+        else if C = ')' then Dec(Depth);
+      Hdr := Hdr + ' ' + L;
+      if (Depth <= 0) and (Pos(';', L) > 0) then Break;
+    end;
+    var OpenP := Pos('(', Hdr);
+    if OpenP > 0 then
+    begin
+      var CloseP := LastDelimiter(')', Hdr);
+      if CloseP > OpenP then
+        for var Part in Copy(Hdr, OpenP + 1, CloseP - OpenP - 1).Split([';']) do
+        begin
+          Result := TypeOfDecl(Part);
+          if Result <> '' then Exit;
+        end;
+    end;
+
+    BeginLine := Last;
+    for I := First to Last do
+      if SameText(Code[I], 'begin') then
+      begin
+        BeginLine := I;
+        Break;
+      end;
+    for I := First + 1 to BeginLine - 1 do       // var / const section
+    begin
+      Result := TypeOfLine(Code[I]);
+      if Result <> '' then Exit;
+    end;
+    for I := BeginLine to Last do                // inline var / := Create
+    begin
+      if StartsWithWord(UpperCase(Code[I]), 'VAR') then
+      begin
+        Result := TypeOfLine(Code[I]);
+        if Result <> '' then Exit;
+      end;
+      Result := TypeOfAssignment(Code[I]);
+      if Result <> '' then Exit;
+    end;
+  end;
+
+  // 2) a field or global of that name - nearest declaration above the use
+  for I := Min(ALine0, High(Code)) downto 0 do
+  begin
+    Result := TypeOfLine(Code[I]);
+    if Result <> '' then Exit;
+  end;
+  for I := ALine0 + 1 to High(Code) do
+  begin
+    Result := TypeOfLine(Code[I]);
+    if Result <> '' then Exit;
+  end;
+  Result := '';
 end;
 
 function FindMemberDeclarationLine(const AContent, ATypeName,

@@ -89,6 +89,13 @@ function IsIdentifier(const S: string): Boolean;
 ///  one was cut). A '//' inside a string literal stays.</summary>
 function StripLineComment(const ALine: string): string;
 
+/// <summary>The qualifier directly before the identifier at the 0-based
+///  column ACol0: for "lMyClassA.Init" with the caret on Init this is
+///  'lMyClassA'. '' when the use site is not dot-qualified. Whitespace
+///  around the dot is allowed; only the LAST segment is returned
+///  ("A.B.Init" -&gt; 'B').</summary>
+function QualifierBefore(const ALine: string; ACol0: Integer): string;
+
 /// <summary>ALines with every comment, directive and string literal
 ///  character replaced by a blank - line count and line lengths are kept,
 ///  so a position in the result IS the position in the source. Block
@@ -130,6 +137,21 @@ begin
   if Result then
     for var I := 2 to Length(S) do
       if not IsIdentChar(S[I]) then Exit(False);
+end;
+
+function QualifierBefore(const ALine: string; ACol0: Integer): string;
+var
+  I, EndP: Integer;
+begin
+  Result := '';
+  I := ACol0;                      // 1-based index of the char BEFORE it
+  while (I >= 1) and (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
+  if (I < 1) or (I > Length(ALine)) or (ALine[I] <> '.') then Exit;
+  Dec(I);
+  while (I >= 1) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
+  EndP := I;
+  while (I >= 1) and IsIdentChar(ALine[I]) do Dec(I);
+  if EndP > I then Result := Copy(ALine, I + 1, EndP - I);
 end;
 
 function StripLineComment(const ALine: string): string;

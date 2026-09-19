@@ -315,6 +315,9 @@ type
     procedure AddWithPartner(AClient: TLspClient; const AFile: string;
       ALine, ACol: Integer);
     function Contains(const AFile: string; ALine: Integer): Boolean;
+    /// <summary>Any position of the symbol in that FILE - the coarse test
+    ///  for cases where a line cannot be pinned down (overloads).</summary>
+    function ContainsFile(const AFile: string): Boolean;
     function Count: Integer;
     function Text: string;
   end;
@@ -1869,6 +1872,15 @@ begin
   for var S in FKeys do
     if S = K then Exit(True);
   Result := False;
+end;
+
+function TLspSymbolTargets.ContainsFile(const AFile: string): Boolean;
+begin
+  Result := False;
+  if AFile = '' then Exit;
+  var Prefix := UpperCase(ExpandFileName(AFile)) + '|';
+  for var S in FKeys do
+    if S.StartsWith(Prefix) then Exit(True);
 end;
 
 function TLspSymbolTargets.Count: Integer;

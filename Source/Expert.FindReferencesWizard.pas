@@ -28,7 +28,8 @@ type
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
       const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
-      AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
+      AClient: TLspClient; AIncludes: TLspIncludeContext;
+      AGraph: TTypeGraph): TFindReferenceItems;
     function ConvertLspLocations(const ALocations: TArray<TLspLocation>; const AOldName: string): TFindReferenceItems;
 
     procedure SearchAndShow;
@@ -302,17 +303,20 @@ begin
     var Linked := TLinkedTargets.Create;
     try
       var Links: TArray<TMemberLink> := nil;
+      // the graph stays alive THROUGH the verification: an occurrence
+      // DelphiLSP does not answer for is resolved through the declared
+      // type of its qualifier instead of being listed as unverified noise
       var Graph := TTypeGraph.Create(ProjFiles, EditorOrDiskReader());
       try
         var Owner := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
         Links := CollectLinkedTargets(Graph, Owner, FContext.WordAtCursor, Linked);
+
+        // Verify each candidate via GotoDefinition
+        Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
+          Client, IncCtx, Graph);
       finally
         Graph.Free;
       end;
-
-      // Verify each candidate via GotoDefinition
-      Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
-        Client, IncCtx);
 
       // a linked declaration outside the scanned files (an interface of a
       // library, say) has no text candidate - list it anyway
@@ -469,15 +473,29 @@ end;
 
 function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
   const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
-  AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
+  AClient: TLspClient; AIncludes: TLspIncludeContext;
+  AGraph: TTypeGraph): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
   Synced: TDictionary<string, Boolean>;
+  Contents: TDictionary<string, string>;
+  Reader: TIncludeReader;
   I: Integer;
   C: TFindReferenceItem;
+
+  // content of a candidate's file (buffer first), read once per file
+  function FileContent(const AFile: string): string;
+  begin
+    if Contents.TryGetValue(UpperCase(AFile), Result) then Exit;
+    if not Reader(AFile, Result) then Result := '';
+    Contents.Add(UpperCase(AFile), Result);
+  end;
+
 begin
   Verified := TList<TFindReferenceItem>.Create;
   Synced := TDictionary<string, Boolean>.Create;
+  Contents := TDictionary<string, string>.Create;
+  Reader := EditorOrDiskReader();
   try
     FDialog.SetProgress(0, System.Length(ACandidates));
 
@@ -563,8 +581,41 @@ begin
         Matches := False;
       end;
 
+      // DelphiLSP said nothing: resolve the use site through the declared
+      // type of its qualifier. Its NEGATIVE answer is the valuable one -
+      // "TMyRec2.Init" is simply another symbol and drops out instead of
+      // adding an unverified row the user has to judge (tester 2026-09-19).
+      if NoAnswer and not Matches then
+      begin
+        var Link: TMemberLink;
+        case ClassifyUnansweredUse(AGraph, FileContent(C.FilePath), C.Line, C.Col,
+          AOldName,
+          function(AFile: string; ALine: Integer): Boolean
+          begin
+            Result := ATargets.Contains(AFile, ALine) or ALinked.Contains(AFile, ALine);
+          end,
+          function(AFile: string): Boolean
+          begin
+            Result := ATargets.ContainsFile(AFile);
+          end, Link) of
+          uuOurs:
+            begin
+              Matches := True;
+              C.Note := Format('verified via %s (no answer from DelphiLSP)',
+                [Link.TypeName]);
+            end;
+          uuOtherSymbol:
+            Continue;      // belongs to another type - not a reference
+          uuOverloaded:
+            C.Note := Format('UNVERIFIED - overload of %s, DelphiLSP gave no answer',
+              [Link.TypeName]);
+        end;
+      end;
+
       if Matches then
         Verified.Add(C)
+      else if NoAnswer and (C.Note <> '') then
+        Verified.Add(C)            // classified above (overload of our type)
       else if NoAnswer and IsIncludeFile(C.FilePath) then
       begin
         // never drop a hit in an include file silently: DelphiLSP could not
@@ -586,6 +637,7 @@ begin
     FDialog.SetProgress(System.Length(ACandidates), System.Length(ACandidates));
     Result := Verified.ToArray;
   finally
+    Contents.Free;
     Synced.Free;
     Verified.Free;
   end;

@@ -80,6 +80,17 @@ type
       AMember: string): TArray<TMemberLink>;
     /// <summary>The declaration of AName, if known.</summary>
     function FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
+    /// <summary>The declaration of AMember in ATypeName or, when that type
+    ///  does not declare it, in its nearest ANCESTOR that does (classes and
+    ///  interfaces alike). This is the member lookup the compiler does and
+    ///  DelphiLSP sometimes refuses to (a private/public overload pair
+    ///  makes it answer nothing at all) - resolving a use site through the
+    ///  declared type of its qualifier is then the only way left.
+    ///  AAmbiguous says the type declares the member MORE THAN ONCE
+    ///  (overloads): the position is then one of several and callers must
+    ///  not treat it as THE declaration.</summary>
+    function FindMember(const ATypeName, AMember: string;
+      out ALink: TMemberLink; out AAmbiguous: Boolean): Boolean;
     /// <summary>The virtual / override chain of AMember around the class
     ///  AClassName: up through the ancestors as long as they declare the
     ///  member (the topmost one introduces it), then every SCANNED class
@@ -135,6 +146,45 @@ type
 ///  interface outside the scanned files).</summary>
 function CollectLinkedTargets(AGraph: TTypeGraph; const AOwnerType, AMember: string;
   ATargets: TLinkedTargets): TArray<TMemberLink>;
+
+type
+  /// <summary>Outcome of ResolveMemberUse. murAmbiguous carries a position
+  ///  too, but the type declares the member several times (overloads), so
+  ///  it says "this type" and not "this declaration".</summary>
+  TMemberUseResult = (murNone, murResolved, murAmbiguous);
+
+/// <summary>Which member declaration a DOTTED use site refers to, decided
+///  WITHOUT DelphiLSP: the qualifier before the caret is resolved to its
+///  declared type (DeclaredTypeOfIdentifier) and that type - or its
+///  nearest ancestor declaring it - gives the member. ALine0/ACol0 are the
+///  0-based position of AMember in AContent.
+///  This is the answer for the use sites DelphiLSP refuses: since Delphi
+///  13.1 a private/public overload pair makes definition and completion
+///  return nothing at all (RSS-5463), and a text scan alone cannot tell
+///  whose member it is.</summary>
+function ResolveMemberUse(AGraph: TTypeGraph; const AContent: string;
+  ALine0, ACol0: Integer; const AMember: string;
+  out ALink: TMemberLink): TMemberUseResult;
+
+type
+  /// <summary>What an occurrence DelphiLSP gave NO answer for turned out
+  ///  to be. uuOtherSymbol is the valuable one: it belongs to a different
+  ///  type, so the scans can drop it instead of listing it as unverified
+  ///  noise. uuOverloaded = the right type, but which overload cannot be
+  ///  decided from the text.</summary>
+  TUnansweredUse = (uuUnknown, uuOurs, uuOtherSymbol, uuOverloaded);
+
+/// <summary>Classifies an occurrence DelphiLSP did not resolve, using the
+///  declared type of its qualifier (see ResolveMemberUse). AIsTargetLine
+///  answers whether a position is one of the searched symbol's
+///  declarations; AHasTargetInFile whether a file holds any of them - an
+///  overloaded member is decided at FILE level, because the text cannot
+///  tell its overloads apart.</summary>
+function ClassifyUnansweredUse(AGraph: TTypeGraph; const AContent: string;
+  ALine0, ACol0: Integer; const AMember: string;
+  const AIsTargetLine: TFunc<string, Integer, Boolean>;
+  const AHasTargetInFile: TFunc<string, Boolean>;
+  out ALink: TMemberLink): TUnansweredUse;
 
 implementation
 
@@ -359,6 +409,101 @@ end;
 function TTypeGraph.FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
 begin
   Result := TryType(StripGenericAndUnit(AName), ADecl);
+end;
+
+function ResolveMemberUse(AGraph: TTypeGraph; const AContent: string;
+  ALine0, ACol0: Integer; const AMember: string;
+  out ALink: TMemberLink): TMemberUseResult;
+var
+  Lines: TArray<string>;
+  Decl: TTypeDecl;
+  TypeName, Qualifier: string;
+  Ambiguous: Boolean;
+begin
+  Result := murNone;
+  ALink := Default(TMemberLink);
+  if (AGraph = nil) or (AContent = '') or (AMember = '') then Exit;
+  Lines := SplitContentLinesLocal(AContent);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  Qualifier := QualifierBefore(Lines[ALine0], ACol0);
+  if Qualifier = '' then Exit;     // not a dotted use - nothing to resolve
+
+  // The qualifier is either a TYPE itself ("TMyClass.Create") or an
+  // expression whose declared type we have to look up ("lMyClassA.Init").
+  if AGraph.FindType(Qualifier, Decl) then
+    TypeName := Decl.Name
+  else
+    TypeName := DeclaredTypeOfIdentifier(AContent, ALine0, Qualifier);
+  if TypeName = '' then Exit;
+  if not AGraph.FindMember(TypeName, AMember, ALink, Ambiguous) then Exit;
+  if Ambiguous then Result := murAmbiguous else Result := murResolved;
+end;
+
+function ClassifyUnansweredUse(AGraph: TTypeGraph; const AContent: string;
+  ALine0, ACol0: Integer; const AMember: string;
+  const AIsTargetLine: TFunc<string, Integer, Boolean>;
+  const AHasTargetInFile: TFunc<string, Boolean>;
+  out ALink: TMemberLink): TUnansweredUse;
+begin
+  Result := uuUnknown;
+  case ResolveMemberUse(AGraph, AContent, ALine0, ACol0, AMember, ALink) of
+    murResolved:
+      if Assigned(AIsTargetLine) and AIsTargetLine(ALink.FilePath, ALink.Line) then
+        Result := uuOurs
+      else
+        Result := uuOtherSymbol;
+    murAmbiguous:
+      // overloads: the position is one of several declarations of the same
+      // name in that type, so only the FILE can be compared
+      if Assigned(AHasTargetInFile) and AHasTargetInFile(ALink.FilePath) then
+        Result := uuOverloaded
+      else
+        Result := uuOtherSymbol;
+  end;
+end;
+
+function TTypeGraph.FindMember(const ATypeName, AMember: string;
+  out ALink: TMemberLink; out AAmbiguous: Boolean): Boolean;
+var
+  Queue: TArray<string>;
+  Seen: TArray<string>;
+  Decl: TTypeDecl;
+
+  function AlreadySeen(const AName: string): Boolean;
+  begin
+    Result := False;
+    for var S in Seen do
+      if SameText(S, AName) then Exit(True);
+  end;
+
+begin
+  Result := False;
+  AAmbiguous := False;
+  ALink := Default(TMemberLink);
+  if (ATypeName = '') or (AMember = '') then Exit;
+  Queue := [StripGenericAndUnit(ATypeName)];
+  // breadth first through the parents, so the type's OWN declaration wins
+  // over an inherited one; 64 steps are far more than any real hierarchy
+  for var Step := 0 to 63 do
+  begin
+    if Length(Queue) = 0 then Exit;
+    var Name := Queue[0];
+    Delete(Queue, 0, 1);
+    if AlreadySeen(Name) then Continue;
+    Seen := Seen + [Name];
+    if not TryType(Name, Decl) then Continue;
+    if MemberLink(Decl, AMember, ALink) then
+    begin
+      // Overloads: the type declares the member more than once, so this
+      // position is one of several - the caller must not take it as THE
+      // declaration (and that is exactly the shape DelphiLSP chokes on).
+      var U := ' ' + UpperCase(ALink.Text) + ' ';
+      AAmbiguous := (Pos(' OVERLOAD;', U) > 0) or (Pos(' OVERLOAD ', U) > 0);
+      Exit(True);
+    end;
+    for var P in Decl.Parents do
+      Queue := Queue + [StripGenericAndUnit(P)];
+  end;
 end;
 
 function TTypeGraph.MemberLink(const ADecl: TTypeDecl; const AMember: string;

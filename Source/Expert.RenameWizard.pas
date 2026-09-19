@@ -17,6 +17,7 @@ uses
   Expert.EditorHelperIntf,
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
   Expert.UnitIndex, Expert.UnitUsageProbe, Expert.ScopeFiles, Expert.DfmRename,
+  Expert.InterfaceLinks,
   Expert.IncludeExpansion,
   Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding, Expert.UsesEditor,
@@ -1774,6 +1775,8 @@ var
   FileMap: TDictionary<string, TList<TLspTextEdit>>;
   Synced: TDictionary<string, Boolean>;
   LineCache: TDictionary<string, TArray<string>>;
+  Contents: TDictionary<string, string>;
+  Graph: TTypeGraph;
   LastOpenedFile: string;
   VerifiedCount, SkippedCount, I: Integer;
   C: TRenameCandidate;
@@ -1805,10 +1808,36 @@ var
     FUnverifiedWhy := FUnverifiedWhy + [AWhy];
   end;
 
+  // whole file (buffer first), read once - the type resolution below needs
+  // more than the candidate's own line
+  function FileContent(const AFile: string): string;
+  begin
+    if Contents.TryGetValue(UpperCase(AFile), Result) then Exit;
+    if not ((Editor <> nil) and Editor.ReadEditorContent(AFile, Result)) then
+      try
+        Result := ReadDelphiFile(AFile);
+      except
+        Result := '';
+      end;
+    Contents.Add(UpperCase(AFile), Result);
+  end;
+
 begin
   FileMap := TDictionary<string, TList<TLspTextEdit>>.Create;
   Synced := TDictionary<string, Boolean>.Create;
   LineCache := TDictionary<string, TArray<string>>.Create;
+  Contents := TDictionary<string, string>.Create;
+  // types of the candidates' files; anything else is loaded on demand
+  // through the identifier index
+  var GraphFiles: TArray<string> := nil;
+  for var GC in ACandidates do
+  begin
+    var Known := False;
+    for var GF in GraphFiles do
+      if SameText(GF, GC.FilePath) then Known := True;
+    if not Known then GraphFiles := GraphFiles + [GC.FilePath];
+  end;
+  Graph := TTypeGraph.Create(GraphFiles, EditorOrDiskReader());
   try
     LastOpenedFile := '';
     VerifiedCount := 0;
@@ -1895,11 +1924,46 @@ begin
           DiagLine := DiagLine + 'null at another declaration -> SKIP (other symbol)'
         else if Length(Defs) = 0 then
         begin
-          // was a silent SKIP: a real occurrence DelphiLSP did not resolve
-          // (inactive {$IFDEF} branch, unit still in analysis) must be
-          // SHOWN, never dropped without a trace
-          DiagLine := DiagLine + 'null -> UNVERIFIED (listed, not renamed)';
-          Unverified(C, 'no answer from DelphiLSP');
+          // DelphiLSP said nothing. A DOTTED use site can still be decided
+          // from the sources: resolve the qualifier's declared type and
+          // look the member up there (the only way for the private/public
+          // overload pair of RSS-5463, and it also covers occurrences in
+          // an inactive {$IFDEF} branch, which used to stay unrenamed).
+          var Link: TMemberLink;
+          var Cls := ClassifyUnansweredUse(Graph, FileContent(C.FilePath),
+            C.Line, C.Col, AOldName,
+            function(AFile: string; ALine: Integer): Boolean
+            begin
+              Result := ATargets.Contains(AFile, ALine);
+            end,
+            function(AFile: string): Boolean
+            begin
+              Result := ATargets.ContainsFile(AFile);
+            end, Link);
+          case Cls of
+            uuOurs:
+              begin
+                Matches := True;
+                DiagLine := DiagLine + Format('null, resolved via %s -> MATCH',
+                  [Link.TypeName]);
+              end;
+            uuOtherSymbol:
+              DiagLine := DiagLine + Format('null, resolved via %s -> SKIP (other symbol)',
+                [Link.TypeName]);
+            uuOverloaded:
+              begin
+                DiagLine := DiagLine + Format('null, %s declares overloads -> UNVERIFIED',
+                  [Link.TypeName]);
+                Unverified(C, Format('overload of %s - no answer from DelphiLSP',
+                  [Link.TypeName]));
+              end;
+          else
+            // was a silent SKIP: a real occurrence DelphiLSP did not resolve
+            // (inactive {$IFDEF} branch, unit still in analysis) must be
+            // SHOWN, never dropped without a trace
+            DiagLine := DiagLine + 'null -> UNVERIFIED (listed, not renamed)';
+            Unverified(C, 'no answer from DelphiLSP');
+          end;
         end
         else
         begin
@@ -1969,6 +2033,8 @@ begin
     for var Pair in FileMap do
       Pair.Value.Free;
   finally
+    Graph.Free;
+    Contents.Free;
     LineCache.Free;
     Synced.Free;
     FileMap.Free;

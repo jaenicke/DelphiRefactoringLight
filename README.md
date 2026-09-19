@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.7.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.8.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -59,7 +59,12 @@ In the last three weeks I tested with big projects and used it myself in real li
 - Tries `textDocument/references` on the LSP server first.
 - If that returns nothing (or the server does not support it), falls back to the same strategy as Rename: project-wide text search plus per-candidate verification via `textDocument/definition`.
 - Shows the results in a dialog (file, line, column, **kind**, line preview, note). The **Kind** column says how the symbol is used at each place: *Declaration*, *Implementation*, *Call*, *Inherited call*, *Write*, *Read*, *Method reference*, *Address (@)*, *Property accessor*, *Type use* or *Uses clause*. The symbol's own kind (procedure, function, data, type) decides the ambiguous shapes: `X := Foo;` is a call of a function, a method reference of a procedure and a read of a variable. The MCP tool `find_references` returns the same value as `kind`.
-- An occurrence DelphiLSP gives **no answer** for (an inactive `{$IFDEF}` branch, say) is listed marked *UNVERIFIED* instead of being dropped. Rename works the same way: such occurrences are shown as *UNVERIFIED - not renamed*, never skipped without a trace.
+- An occurrence DelphiLSP gives **no answer** for is not simply dropped. It is first resolved **from the sources**: the qualifier before it (`lMyClassA.Init`) is looked up as a variable, parameter or field, and the member is searched in its declared type and that type's ancestors. Three outcomes:
+  - it is a member of **another type** &mdash; the occurrence is not a reference and disappears (it used to be an unverified row you had to judge yourself);
+  - it is **our** member &mdash; the row says *verified via TMyClassA*, and Rename renames it (this is what keeps an inactive `{$IFDEF}` branch consistent);
+  - the type declares the member **several times** (overloads) &mdash; the text cannot tell them apart, so it stays *UNVERIFIED* and Rename leaves it alone.
+  
+  This is also the answer to a Delphi 13.1 bug ([RSS-5463](https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5463)): when a class declares a method as a `private` / `public` **overload pair**, DelphiLSP answers nothing at all for it from another unit &mdash; no definition, no completion. *Find original symbol* uses the same resolution and jumps to the declaration anyway.
 - **Interfaces**: for a class method that implements an interface method, the declaration in the interface counts as a use &mdash; also when the interface is never called &mdash; and calls through the interface are found ("declared in interface IFoo", "call via interface IFoo"). Interface inheritance is followed (`IFoo = interface(IBase)`). For an interface method it works the other way round: the implementing classes' methods and the calls on them ("implemented by TFoo", "call via class TFoo").
 - **Double-click** or **Enter** jumps to the location.
 

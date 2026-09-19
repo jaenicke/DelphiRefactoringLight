@@ -30,6 +30,8 @@ type
     [Test] procedure MemberDeclaration_AfterNestedClasses;
     [Test] procedure ReferenceKinds_Classified;
     [Test] procedure BatchFixes_And_SemanticVerdicts;
+    [Test] procedure MemberResolution_WithoutLsp;
+    [Test] procedure MemberResolution_PrivatePublicOverloadAcrossUnits;
   end;
 
 implementation
@@ -426,6 +428,194 @@ begin
   // (a real batch on a file runs in the console suite - it needs the
   // editor stand-in that writes files; this project has none)
   Assert.AreEqual('', BFails, BFails);
+end;
+
+procedure TChangeSignatureTests.MemberResolution_WithoutLsp;
+// Delphi 13.1 answers NOTHING for a member whose class declares it as a
+// private/public overload pair (RSS-5463) - the use site then has to be
+// resolved from the sources: qualifier -> its declared type -> member.
+const
+  Src =
+    'unit MuDemo;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TBase = class'#13#10 +
+    '  public'#13#10 +
+    '    procedure Shared;'#13#10 +
+    '  end;'#13#10 +
+    ''#13#10 +
+    '  TMyClassA = class(TBase)'#13#10 +
+    '  private'#13#10 +
+    '    procedure Init; overload;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Init(const ABoolean: Boolean); overload;'#13#10 +
+    '  end;'#13#10 +
+    ''#13#10 +
+    'implementation'#13#10 +
+    ''#13#10 +
+    'procedure TMyClassB.Test;'#13#10 +
+    'var'#13#10 +
+    '  lMyClassA: TMyClassA;'#13#10 +
+    'begin'#13#10 +
+    '  lMyClassA := TMyClassA.Create;'#13#10 +
+    '  lMyClassA.Init(True);'#13#10 +
+    '  lMyClassA.Shared;'#13#10 +
+    'end;'#13#10 +
+    ''#13#10 +
+    'end.';
+var
+  Link: TMemberLink;
+  Ambiguous: Boolean;
+begin
+  var Lines := Src.Replace(#13#10, #10).Split([#10]);
+  var UseInit := -1;
+  var UseShared := -1;
+  for var I := 0 to High(Lines) do
+  begin
+    if Pos('lMyClassA.Init', Lines[I]) > 0 then UseInit := I;
+    if Pos('lMyClassA.Shared', Lines[I]) > 0 then UseShared := I;
+  end;
+
+  Assert.AreEqual('lMyClassA',
+    QualifierBefore(Lines[UseInit], Pos('Init', Lines[UseInit]) - 1), 'qualifier');
+  Assert.AreEqual('TMyClassA', DeclaredTypeOfIdentifier(Src, UseInit, 'lMyClassA'),
+    'declared type of the qualifier');
+
+  var FileName := TPath.Combine(TPath.GetTempPath, 'rl_dunitx_member.pas');
+  TFile.WriteAllText(FileName, Src, TEncoding.UTF8);
+  var Graph := TTypeGraph.Create([FileName], nil, False);
+  try
+    // inherited member: found in the ANCESTOR, unambiguous
+    Assert.IsTrue(Graph.FindMember('TMyClassA', 'Shared', Link, Ambiguous), 'Shared found');
+    Assert.AreEqual('TBase', Link.TypeName, 'Shared declared in TBase');
+    Assert.IsFalse(Ambiguous, 'Shared is not overloaded');
+    // the overload pair: a position, but not THE declaration
+    Assert.IsTrue(Graph.FindMember('TMyClassA', 'Init', Link, Ambiguous), 'Init found');
+    Assert.IsTrue(Ambiguous, 'Init is overloaded');
+
+    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, Src, UseShared,
+      Pos('Shared', Lines[UseShared]) - 1, 'Shared', Link)), 'use site resolved');
+    Assert.AreEqual(Ord(murAmbiguous), Ord(ResolveMemberUse(Graph, Src, UseInit,
+      Pos('Init', Lines[UseInit]) - 1, 'Init', Link)), 'overloaded use site');
+
+    // the valuable answer: NOT our symbol, so the scans can drop it
+    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, Src, UseShared,
+      Pos('Shared', Lines[UseShared]) - 1, 'Shared',
+      function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
+      function(AFile: string): Boolean begin Result := False; end, Link)), 'other symbol');
+    Assert.AreEqual(Ord(uuOurs), Ord(ClassifyUnansweredUse(Graph, Src, UseShared,
+      Pos('Shared', Lines[UseShared]) - 1, 'Shared',
+      function(AFile: string; ALine: Integer): Boolean begin Result := ALine = 5; end,
+      function(AFile: string): Boolean begin Result := True; end, Link)), 'our symbol');
+  finally
+    Graph.Free;
+    TFile.Delete(FileName);
+  end;
+end;
+
+procedure TChangeSignatureTests.MemberResolution_PrivatePublicOverloadAcrossUnits;
+// The reported constellation (forum #156, Delphi 13.1 bug RSS-5463): the
+// class declares Init as a private/public OVERLOAD PAIR in one unit and is
+// used from ANOTHER one. DelphiLSP then answers nothing at all there - no
+// definition, no completion - so everything below has to hold without it.
+const
+  UnitA =
+    'unit MuClassA;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TMyClassA = class(TObject)'#13#10 +
+    '  private'#13#10 +
+    '    procedure Init; overload;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Init(const ABoolean: Boolean); overload;'#13#10 +
+    '    procedure Free2;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'end.';
+  UnitB =
+    'unit MuClassB;'#13#10 +
+    'interface'#13#10 +
+    'uses MuClassA;'#13#10 +
+    'type'#13#10 +
+    '  TMyClassB = class'#13#10 +
+    '  public'#13#10 +
+    '    procedure Test;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    ''#13#10 +
+    'procedure TMyClassB.Test;'#13#10 +
+    'var'#13#10 +
+    '  lMyClassA: TMyClassA;'#13#10 +
+    'begin'#13#10 +
+    '  lMyClassA := TMyClassA.Create;'#13#10 +
+    '  try'#13#10 +
+    '    lMyClassA.Init(True);'#13#10 +
+    '    lMyClassA.Free2;'#13#10 +
+    '  finally'#13#10 +
+    '    lMyClassA.Free;'#13#10 +
+    '  end;'#13#10 +
+    'end;'#13#10 +
+    ''#13#10 +
+    'end.';
+var
+  Link: TMemberLink;
+  Ambiguous: Boolean;
+begin
+  var Dir := TPath.Combine(TPath.GetTempPath, 'rl_member_units');
+  TDirectory.CreateDirectory(Dir);
+  var FileA := TPath.Combine(Dir, 'MuClassA.pas');
+  var FileB := TPath.Combine(Dir, 'MuClassB.pas');
+  TFile.WriteAllText(FileA, UnitA, TEncoding.UTF8);
+  TFile.WriteAllText(FileB, UnitB, TEncoding.UTF8);
+  try
+    var Lines := UnitB.Replace(#13#10, #10).Split([#10]);
+    var UseInit := -1;
+    var UseFree2 := -1;
+    for var I := 0 to High(Lines) do
+    begin
+      if Pos('lMyClassA.Init', Lines[I]) > 0 then UseInit := I;
+      if Pos('lMyClassA.Free2', Lines[I]) > 0 then UseFree2 := I;
+    end;
+    // the variable is declared in the OTHER unit's type - the type name is
+    // all the use site itself gives us
+    Assert.AreEqual('TMyClassA', DeclaredTypeOfIdentifier(UnitB, UseInit, 'lMyClassA'),
+      'type of the qualifier');
+
+    var Graph := TTypeGraph.Create([FileA, FileB], nil, False);
+    try
+      // the overload pair: found, but not pinnable to ONE declaration
+      Assert.IsTrue(Graph.FindMember('TMyClassA', 'Init', Link, Ambiguous), 'Init found');
+      Assert.IsTrue(Ambiguous, 'the private/public pair is overloaded');
+      Assert.AreEqual(FileA.ToUpper, Link.FilePath.ToUpper, 'declared in the other unit');
+      Assert.AreEqual(Ord(murAmbiguous), Ord(ResolveMemberUse(Graph, UnitB, UseInit,
+        Pos('Init', Lines[UseInit]) - 1, 'Init', Link)), 'use site is ambiguous');
+
+      // ... which is honest, not a dead end: the rename/find-references
+      // scans keep such a hit and mark it, while a hit of ANOTHER type
+      // drops out. Same file as the symbol -> "one of the overloads".
+      Assert.AreEqual(Ord(uuOverloaded), Ord(ClassifyUnansweredUse(Graph, UnitB, UseInit,
+        Pos('Init', Lines[UseInit]) - 1, 'Init',
+        function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
+        function(AFile: string): Boolean
+        begin Result := SameText(AFile, FileA); end, Link)), 'overload of our type');
+      Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, UnitB, UseInit,
+        Pos('Init', Lines[UseInit]) - 1, 'Init',
+        function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
+        function(AFile: string): Boolean begin Result := False; end, Link)),
+        'Init of a class we are not renaming');
+
+      // a NON-overloaded member of the same class resolves exactly, so the
+      // scans can use it (this is what rename needs to stay complete)
+      Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, UnitB, UseFree2,
+        Pos('Free2', Lines[UseFree2]) - 1, 'Free2', Link)), 'Free2 resolved');
+      Assert.AreEqual(8, Link.Line, 'declaration line of Free2 in MuClassA');
+    finally
+      Graph.Free;
+    end;
+  finally
+    TFile.Delete(FileA);
+    TFile.Delete(FileB);
+  end;
 end;
 
 initialization

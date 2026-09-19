@@ -635,13 +635,12 @@ begin
     // it; for an interface method, the implementing class methods and the
     // calls on them.
     Linked := TLinkedTargets.Create;
+    // kept alive through the verification below: an occurrence DelphiLSP
+    // does not answer for is resolved through the declared type of its
+    // qualifier instead of being rejected blindly
     var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
-    try
-      Links := CollectLinkedTargets(Graph,
-        TImplementationFinder.FindContainingType(DeclFile, DeclLine), Ctx.Identifier, Linked);
-    finally
-      Graph.Free;
-    end;
+    Links := CollectLinkedTargets(Graph,
+      TImplementationFinder.FindContainingType(DeclFile, DeclLine), Ctx.Identifier, Linked);
     var Cands := TList<TFindReferenceItem>.Create;
     try
       for var SF in Ctx.ScopeFiles do
@@ -731,6 +730,39 @@ begin
             D := IncCtx.Definition(Cd.FilePath, Cd.Line, Cd.Col);
           // answered, or had its one longer wait - short retries from now on
           Answered.AddOrSetValue(Key, True);
+
+          // No answer? Then the sources decide: resolve the qualifier's
+          // declared type and look the member up there (ancestors
+          // included). "Belongs to another type" is the valuable half -
+          // it turns an unexplained rejection into a reason.
+          var TypeAnswer := '';
+          var TypeIsRef := False;
+          if Length(D) = 0 then
+          begin
+            var Content: string;
+            if ContentOf.TryGetValue(Key, Content) then
+            begin
+              var Link: TMemberLink;
+              case ClassifyUnansweredUse(Graph, Content, Cd.Line, Cd.Col,
+                Ctx.Identifier,
+                function(AFile: string; ALine: Integer): Boolean
+                begin
+                  Result := SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine);
+                end,
+                function(AFile: string): Boolean
+                begin
+                  Result := SameText(ExpandFileName(AFile), DeclFile);
+                end, Link) of
+                uuOurs: TypeIsRef := True;
+                uuOtherSymbol:
+                  TypeAnswer := Format('member of %s (resolved through the declared ' +
+                    'type - DelphiLSP gave no answer)', [Link.TypeName]);
+                uuOverloaded:
+                  TypeAnswer := Format('an overload of %s - DelphiLSP gave no answer, ' +
+                    'so which one cannot be decided', [Link.TypeName]);
+              end;
+            end;
+          end;
           if (Length(D) > 0) and
              SameText(ExpandFileName(TLspUri.FileUriToPath(D[0].Uri)), DeclFile) and
              (D[0].Range.Start.Line = DeclLine) then
@@ -757,6 +789,13 @@ begin
             U.Note := 'UNVERIFIED - no answer inside this include file';
             Verified := Verified + [U];
           end
+          else if TypeIsRef then
+            // decided from the sources: the qualifier's declared type says
+            // this IS our member (DelphiLSP stays silent for a private/
+            // public overload pair since 13.1 - RSS-5463)
+            Verified := Verified + [Cd]
+          else if TypeAnswer <> '' then
+            Answer := TypeAnswer
           else if (Length(D) = 0) and LineDeclaresName(Cd.Preview, Ctx.Identifier) then
             // DelphiLSP answers nothing AT a declaration - one that is no
             // position of the symbol declares another symbol (not a sign of
@@ -819,6 +858,7 @@ begin
           Trim(IncCtx.NotesText).Replace(sLineBreak, '; ');
     finally
       Cands.Free;
+      Graph.Free;
     end;
     finally
       Linked.Free;

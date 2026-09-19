@@ -503,20 +503,23 @@ begin
     Assert.AreEqual('TMyRec1', Link.TypeName, 'record type');
     Assert.IsFalse(Ambiguous, 'the record declares Init once');
 
-    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, Src, UseShared,
+    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileName, Src, UseShared,
       Pos('Shared', Lines[UseShared]) - 1, 'Shared', Link)), 'use site resolved');
-    Assert.AreEqual(Ord(murAmbiguous), Ord(ResolveMemberUse(Graph, Src, UseInit,
+    // an overloaded call is decided by its ARGUMENT COUNT: "Init(True)"
+    // can only reach the declaration that takes one parameter
+    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileName, Src, UseInit,
       Pos('Init', Lines[UseInit]) - 1, 'Init', Link)), 'overloaded use site');
+    Assert.IsTrue(Link.Text.Contains('ABoolean'), 'the one-parameter overload');
 
     // the valuable answer: NOT our symbol, so the scans can drop it
-    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, Src, UseShared,
+    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileName, Src, UseShared,
       Pos('Shared', Lines[UseShared]) - 1, 'Shared',
       function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
-      function(AFile: string): Boolean begin Result := False; end, Link)), 'other symbol');
-    Assert.AreEqual(Ord(uuOurs), Ord(ClassifyUnansweredUse(Graph, Src, UseShared,
+      function(ATypeName: string): Boolean begin Result := False; end, Link)), 'other symbol');
+    Assert.AreEqual(Ord(uuOurs), Ord(ClassifyUnansweredUse(Graph, FileName, Src, UseShared,
       Pos('Shared', Lines[UseShared]) - 1, 'Shared',
       function(AFile: string; ALine: Integer): Boolean begin Result := ALine = 5; end,
-      function(AFile: string): Boolean begin Result := True; end, Link)), 'our symbol');
+      function(ATypeName: string): Boolean begin Result := True; end, Link)), 'our symbol');
   finally
     Graph.Free;
     TFile.Delete(FileName);
@@ -597,26 +600,34 @@ begin
       Assert.IsTrue(Graph.FindMember('TMyClassA', 'Init', Link, Ambiguous), 'Init found');
       Assert.IsTrue(Ambiguous, 'the private/public pair is overloaded');
       Assert.AreEqual(FileA.ToUpper, Link.FilePath.ToUpper, 'declared in the other unit');
-      Assert.AreEqual(Ord(murAmbiguous), Ord(ResolveMemberUse(Graph, UnitB, UseInit,
-        Pos('Init', Lines[UseInit]) - 1, 'Init', Link)), 'use site is ambiguous');
+      // one argument, one declaration that takes one - decidable
+      Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileB, UnitB, UseInit,
+        Pos('Init', Lines[UseInit]) - 1, 'Init', Link)), 'use site resolved by argument count');
+      Assert.IsTrue(Link.Text.Contains('ABoolean'), 'the public overload');
 
-      // ... which is honest, not a dead end: the rename/find-references
-      // scans keep such a hit and mark it, while a hit of ANOTHER type
-      // drops out. Same file as the symbol -> "one of the overloads".
-      Assert.AreEqual(Ord(uuOverloaded), Ord(ClassifyUnansweredUse(Graph, UnitB, UseInit,
+      // resolved, but to a declaration that is not the searched one:
+      // another symbol, not an unverified row the user has to judge
+      Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileB, UnitB, UseInit,
         Pos('Init', Lines[UseInit]) - 1, 'Init',
         function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
-        function(AFile: string): Boolean
-        begin Result := SameText(AFile, FileA); end, Link)), 'overload of our type');
-      Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, UnitB, UseInit,
+        function(ATypeName: string): Boolean
+        begin Result := SameText(ATypeName, 'TMyClassA'); end, Link)), 'not the searched overload');
+      // ... and when it IS the searched declaration, it counts
+      Assert.AreEqual(Ord(uuOurs), Ord(ClassifyUnansweredUse(Graph, FileB, UnitB, UseInit,
+        Pos('Init', Lines[UseInit]) - 1, 'Init',
+        function(AFile: string; ALine: Integer): Boolean
+        begin Result := ALine = Link.Line; end,
+        function(ATypeName: string): Boolean
+        begin Result := SameText(ATypeName, 'TMyClassA'); end, Link)), 'the searched overload');
+      Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileB, UnitB, UseInit,
         Pos('Init', Lines[UseInit]) - 1, 'Init',
         function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
-        function(AFile: string): Boolean begin Result := False; end, Link)),
+        function(ATypeName: string): Boolean begin Result := False; end, Link)),
         'Init of a class we are not renaming');
 
       // a NON-overloaded member of the same class resolves exactly, so the
       // scans can use it (this is what rename needs to stay complete)
-      Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, UnitB, UseFree2,
+      Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileB, UnitB, UseFree2,
         Pos('Free2', Lines[UseFree2]) - 1, 'Free2', Link)), 'Free2 resolved');
       Assert.AreEqual(8, Link.Line, 'declaration line of Free2 in MuClassA');
     finally

@@ -125,7 +125,8 @@ type
     function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
     function VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>; const AOldName, ANewName: string;
       AIncludes: TLspIncludeContext;
-      const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
+      const ATargets: TLspSymbolTargets; AClient: TLspClient;
+      const AOwnerType: string): TLspWorkspaceEdit;
 
     /// <summary>Finds interface/class method implementations via a
     ///  text + syntax scan over all project files. Returns candidates
@@ -1293,7 +1294,8 @@ begin
       end;
       FDiagLog := FDiagLog + 'Symbol positions (' + IntToStr(Targets.Count) + '):' +
         sLineBreak + Targets.Text + sLineBreak;
-      FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, IncCtx, Targets, Client);
+      FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, IncCtx,
+        Targets, Client, OwnerType);
     finally
       ImplFilesList.Free;
     end;
@@ -1770,7 +1772,8 @@ end;
 
 function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>;
   const AOldName, ANewName: string; AIncludes: TLspIncludeContext;
-  const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
+  const ATargets: TLspSymbolTargets; AClient: TLspClient;
+  const AOwnerType: string): TLspWorkspaceEdit;
 var
   FileMap: TDictionary<string, TList<TLspTextEdit>>;
   Synced: TDictionary<string, Boolean>;
@@ -1862,15 +1865,15 @@ begin
       // (measured 2026-09-20).
       begin
         var PreLink: TMemberLink;
-        if ClassifyUnansweredUse(Graph, FileContent(C.FilePath), C.Line, C.Col,
-          AOldName,
+        if ClassifyUnansweredUse(Graph, C.FilePath, FileContent(C.FilePath),
+          C.Line, C.Col, AOldName,
           function(AFile: string; ALine: Integer): Boolean
           begin
             Result := ATargets.Contains(AFile, ALine);
           end,
-          function(AFile: string): Boolean
+          function(ATypeName: string): Boolean
           begin
-            Result := ATargets.ContainsFile(AFile);
+            Result := (AOwnerType <> '') and SameText(ATypeName, AOwnerType);
           end, PreLink) = uuOtherSymbol then
         begin
           Inc(SkippedCount);
@@ -1959,15 +1962,15 @@ begin
           // overload pair of RSS-5463, and it also covers occurrences in
           // an inactive {$IFDEF} branch, which used to stay unrenamed).
           var Link: TMemberLink;
-          var Cls := ClassifyUnansweredUse(Graph, FileContent(C.FilePath),
+          var Cls := ClassifyUnansweredUse(Graph, C.FilePath, FileContent(C.FilePath),
             C.Line, C.Col, AOldName,
             function(AFile: string; ALine: Integer): Boolean
             begin
               Result := ATargets.Contains(AFile, ALine);
             end,
-            function(AFile: string): Boolean
+            function(ATypeName: string): Boolean
             begin
-              Result := ATargets.ContainsFile(AFile);
+              Result := (AOwnerType <> '') and SameText(ATypeName, AOwnerType);
             end, Link);
           case Cls of
             uuOurs:

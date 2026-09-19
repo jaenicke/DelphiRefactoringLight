@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.8.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.8.2** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -62,7 +62,7 @@ In the last three weeks I tested with big projects and used it myself in real li
 - An occurrence DelphiLSP gives **no answer** for is not simply dropped. It is first resolved **from the sources**: the qualifier before it (`lMyClassA.Init`) is looked up as a variable, parameter or field, and the member is searched in its declared type and that type's ancestors. Three outcomes:
   - it is a member of **another type** &mdash; the occurrence is not a reference and disappears (it used to be an unverified row you had to judge yourself);
   - it is **our** member &mdash; the row says *verified via TMyClassA*, and Rename renames it (this is what keeps an inactive `{$IFDEF}` branch consistent);
-  - the type declares the member **several times** (overloads) &mdash; the text cannot tell them apart, so it stays *UNVERIFIED* and Rename leaves it alone.
+  - the type declares the member **several times** (overloads) &mdash; then the **argument count** decides: a call with one argument can only reach a declaration that takes one, and when exactly one does, the occurrence is resolved after all (this also covers an overload pair where one of them is `strict private`). Only when several declarations accept that count does it stay *UNVERIFIED*, and Rename leaves it alone.
   
   Records and old-style objects count as types here, not just classes and interfaces, and a qualifier declared in another unit is resolved through the identifier index.
   

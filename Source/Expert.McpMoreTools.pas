@@ -635,12 +635,12 @@ begin
     // it; for an interface method, the implementing class methods and the
     // calls on them.
     Linked := TLinkedTargets.Create;
+    var OwnerTypeName := TImplementationFinder.FindContainingType(DeclFile, DeclLine);
     // kept alive through the verification below: an occurrence DelphiLSP
     // does not answer for is resolved through the declared type of its
     // qualifier instead of being rejected blindly
     var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
-    Links := CollectLinkedTargets(Graph,
-      TImplementationFinder.FindContainingType(DeclFile, DeclLine), Ctx.Identifier, Linked);
+    Links := CollectLinkedTargets(Graph, OwnerTypeName, Ctx.Identifier, Linked);
     var PreSkipped := 0;
     var Cands := TList<TFindReferenceItem>.Create;
     try
@@ -710,17 +710,16 @@ begin
             // .SetStatus" as a foreign member - caught by comparing the
             // result against the run before the filter existed.
             if ContentOf.TryGetValue(Key, PreContent) and
-               (ClassifyUnansweredUse(Graph, PreContent, Cd.Line, Cd.Col,
+               (ClassifyUnansweredUse(Graph, Cd.FilePath, PreContent, Cd.Line, Cd.Col,
                  Ctx.Identifier,
                  function(AFile: string; ALine: Integer): Boolean
                  begin
                    Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
                      or Linked.Contains(AFile, ALine);
                  end,
-                 function(AFile: string): Boolean
+                 function(ATypeName: string): Boolean
                  begin
-                   Result := SameText(ExpandFileName(AFile), DeclFile)
-                     or Linked.ContainsFile(AFile);
+                   Result := SameText(ATypeName, OwnerTypeName) or Linked.HasType(ATypeName);
                  end, PreLink) = uuOtherSymbol) then
             begin
               Inc(PreSkipped);
@@ -774,17 +773,16 @@ begin
             if ContentOf.TryGetValue(Key, Content) then
             begin
               var Link: TMemberLink;
-              case ClassifyUnansweredUse(Graph, Content, Cd.Line, Cd.Col,
+              case ClassifyUnansweredUse(Graph, Cd.FilePath, Content, Cd.Line, Cd.Col,
                 Ctx.Identifier,
                 function(AFile: string; ALine: Integer): Boolean
                 begin
                   Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
                     or Linked.Contains(AFile, ALine);
                 end,
-                function(AFile: string): Boolean
+                function(ATypeName: string): Boolean
                 begin
-                  Result := SameText(ExpandFileName(AFile), DeclFile)
-                    or Linked.ContainsFile(AFile);
+                  Result := SameText(ATypeName, OwnerTypeName) or Linked.HasType(ATypeName);
                 end, Link) of
                 uuOurs: TypeIsRef := True;
                 uuOtherSymbol:

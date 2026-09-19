@@ -270,6 +270,10 @@ function CodeWordLines(const ALines: TArray<string>; const AWord: string): TArra
 function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
   out AFirst, ALast: Integer): Boolean;
 
+/// <summary>Same on already split lines (no re-splitting per call).</summary>
+function FindEnclosingRoutineRangeIn(const ALines: TArray<string>; ALine0: Integer;
+  out AFirst, ALast: Integer): Boolean;
+
 /// <summary>0-based line of AMemberName's declaration INSIDE the body of
 ///  type ATypeName, or -1. Class members (class procedure / class
 ///  function / class property, and their instance counterparts) are NOT
@@ -279,6 +283,13 @@ function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
 ///  a member of an inner record does not end the search early.</summary>
 function FindMemberDeclarationLine(const AContent, ATypeName,
   AMemberName: string): Integer;
+
+/// <summary>EVERY line on which ATypeName declares a routine or property
+///  AMemberName - overloads give several. A call can then be attributed to
+///  ONE of them by its argument count, which is the only way to tell
+///  overloads apart without the compiler.</summary>
+function FindMemberDeclarationLines(const AContent, ATypeName,
+  AMemberName: string): TArray<Integer>;
 
 /// <summary>The TYPE a dotted use site's qualifier has: for
 ///  "lMyClassA.Init" with AName = 'lMyClassA' this answers 'TMyClassA'.
@@ -293,6 +304,12 @@ function FindMemberDeclarationLine(const AContent, ATypeName,
 ///  overload pair makes it answer nothing at all, RSS-5463).</summary>
 function DeclaredTypeOfIdentifier(const AContent: string; ALine0: Integer;
   const AName: string): string;
+
+/// <summary>Same, but on lines that are already split and masked - masking
+///  a whole unit per occurrence was the expensive part of a scan (a
+///  verification asks this for every candidate).</summary>
+function DeclaredTypeOfIdentifierIn(const ALines, AMasked: TArray<string>;
+  ALine0: Integer; const AName: string): string;
 
 /// <summary>Expands IDE path variables - $(BDS), $(BDSCOMMONDIR), and
 ///  above all USER-DEFINED ones like $(DXVCL) (Tools > Options >
@@ -1351,7 +1368,7 @@ begin
   Result := BestLine;
 end;
 
-function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
+function FindEnclosingRoutineRangeIn(const ALines: TArray<string>; ALine0: Integer;
   out AFirst, ALast: Integer): Boolean;
 var
   Lines: TArray<string>;
@@ -1407,8 +1424,7 @@ begin
   Result := False;
   AFirst := -1;
   ALast := -1;
-  if AContent = '' then Exit;
-  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  Lines := ALines;
   if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
 
   // Nearest header at or above the line. A FORWARD declaration (header
@@ -1456,8 +1472,19 @@ begin
   end;
 end;
 
-function DeclaredTypeOfIdentifier(const AContent: string; ALine0: Integer;
-  const AName: string): string;
+function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;
+  out AFirst, ALast: Integer): Boolean;
+begin
+  Result := False;
+  AFirst := -1;
+  ALast := -1;
+  if AContent = '' then Exit;
+  Result := FindEnclosingRoutineRangeIn(
+    AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]), ALine0, AFirst, ALast);
+end;
+
+function DeclaredTypeOfIdentifierIn(const ALines, AMasked: TArray<string>;
+  ALine0: Integer; const AName: string): string;
 var
   Lines: TArray<string>;
   Code: TArray<string>;          // comments stripped, same line count
@@ -1557,15 +1584,15 @@ var
 
 begin
   Result := '';
-  if (AContent = '') or not IsIdentifier(AName) then Exit;
-  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
-  Code := MaskCommentsAndStrings(Lines);
-  for I := 0 to High(Code) do
-    Code[I] := Trim(Code[I]);
+  if (Length(ALines) = 0) or not IsIdentifier(AName) then Exit;
+  Lines := ALines;
+  SetLength(Code, Length(AMasked));
+  for I := 0 to High(AMasked) do
+    Code[I] := Trim(AMasked[I]);
 
   // 1) the routine around the line: parameters, its var/const section and
   //    inline declarations / constructor assignments in the body
-  if FindEnclosingRoutineRange(AContent, ALine0, First, Last) then
+  if FindEnclosingRoutineRangeIn(Lines, ALine0, First, Last) then
   begin
     // header parameters: everything between the outermost ( ) of the
     // header, which may wrap over several lines
@@ -1630,8 +1657,20 @@ begin
   Result := '';
 end;
 
-function FindMemberDeclarationLine(const AContent, ATypeName,
-  AMemberName: string): Integer;
+function DeclaredTypeOfIdentifier(const AContent: string; ALine0: Integer;
+  const AName: string): string;
+var
+  Lines: TArray<string>;
+begin
+  Result := '';
+  if AContent = '' then Exit;
+  Lines := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  Result := DeclaredTypeOfIdentifierIn(Lines, MaskCommentsAndStrings(Lines),
+    ALine0, AName);
+end;
+
+function MemberDeclarationScan(const AContent, ATypeName, AMemberName: string;
+  ACollectAll: Boolean; var AAll: TArray<Integer>): Integer;
 var
   Lines: TArray<string>;
   I, Depth, Best, Score, BestScore: Integer;
@@ -1850,14 +1889,34 @@ begin
       end;
     end;
 
+    if ACollectAll and (Score = 3) then
+      AAll := AAll + [I];        // overloads: every declaration counts
+
     if Score > BestScore then
     begin
       BestScore := Score;
       Best := I;
-      if Score = 3 then Break;   // exact declaration form - done
+      // exact declaration form - done, unless every one of them is wanted
+      if (Score = 3) and not ACollectAll then Break;
     end;
   end;
   Result := Best;
+end;
+
+function FindMemberDeclarationLine(const AContent, ATypeName,
+  AMemberName: string): Integer;
+var
+  All: TArray<Integer>;
+begin
+  All := nil;
+  Result := MemberDeclarationScan(AContent, ATypeName, AMemberName, False, All);
+end;
+
+function FindMemberDeclarationLines(const AContent, ATypeName,
+  AMemberName: string): TArray<Integer>;
+begin
+  Result := nil;
+  MemberDeclarationScan(AContent, ATypeName, AMemberName, True, Result);
 end;
 
 function GatherCompileSearchDirs: TArray<string>;

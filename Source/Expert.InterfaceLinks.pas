@@ -58,6 +58,9 @@ type
     FContents: TDictionary<string, string>;     // UPPER path -> content
     FLoadedFiles: TDictionary<string, Boolean>;
     FGlobals: TDictionary<string, string>;      // UPPER name -> declared type
+    FTypeMiss: TDictionary<string, Boolean>;    // names the index could not resolve
+    FMasked: TDictionary<string, TArray<string>>;
+    FRawLines: TDictionary<string, TArray<string>>;
     FUseIndex: Boolean;
     procedure LoadFile(const AFile: string);
     function Content(const AFile: string): string;
@@ -98,6 +101,14 @@ type
     ///  not treat it as THE declaration.</summary>
     function FindMember(const ATypeName, AMember: string;
       out ALink: TMemberLink; out AAmbiguous: Boolean): Boolean;
+    /// <summary>EVERY declaration of AMember in ATypeName (or, when that
+    ///  type does not declare it, in its nearest ancestor that does):
+    ///  overloads come back as several links, which is what lets a call be
+    ///  attributed by its ARGUMENT COUNT.</summary>
+    function FindMembers(const ATypeName, AMember: string): TArray<TMemberLink>;
+    /// <summary>Masked lines of AFile, cached - a scan asks for the same
+    ///  file once per candidate, and masking a unit is not cheap.</summary>
+    function MaskedLines(const AFile, AContent: string): TArray<string>;
     /// <summary>The virtual / override chain of AMember around the class
     ///  AClassName: up through the ancestors as long as they declare the
     ///  member (the topmost one introduces it), then every SCANNED class
@@ -139,6 +150,10 @@ type
     /// <summary>Any linked position in that FILE - the coarse test for
     ///  cases where a line cannot be pinned down (overloads).</summary>
     function ContainsFile(const AFile: string): Boolean;
+    /// <summary>Is ATypeName one of the linked types (an implementer of
+    ///  the searched interface method, or the interface of a class
+    ///  method)? The test for overloads that cannot be pinned to a line.</summary>
+    function HasType(const ATypeName: string): Boolean;
     /// <summary>For a hit AT the position: "declared in interface IFoo" /
     ///  "implemented by TFoo"; '' when not linked.</summary>
     function DeclLabel(const AFile: string; ALine: Integer): string;
@@ -172,7 +187,7 @@ type
 ///  13.1 a private/public overload pair makes definition and completion
 ///  return nothing at all (RSS-5463), and a text scan alone cannot tell
 ///  whose member it is.</summary>
-function ResolveMemberUse(AGraph: TTypeGraph; const AContent: string;
+function ResolveMemberUse(AGraph: TTypeGraph; const AFile, AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   out ALink: TMemberLink): TMemberUseResult;
 
@@ -190,16 +205,17 @@ type
 ///  declarations; AHasTargetInFile whether a file holds any of them - an
 ///  overloaded member is decided at FILE level, because the text cannot
 ///  tell its overloads apart.</summary>
-function ClassifyUnansweredUse(AGraph: TTypeGraph; const AContent: string;
+function ClassifyUnansweredUse(AGraph: TTypeGraph; const AFile, AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   const AIsTargetLine: TFunc<string, Integer, Boolean>;
-  const AHasTargetInFile: TFunc<string, Boolean>;
+  const AIsOurType: TFunc<string, Boolean>;
   out ALink: TMemberLink): TUnansweredUse;
 
 implementation
 
 uses
-  System.StrUtils, Expert.PascalScanner, Expert.UnitIndex, Delphi.FileEncoding;
+  System.StrUtils, Expert.PascalScanner, Expert.UnitIndex, Delphi.FileEncoding,
+  Expert.SignatureEdit;
 
 function SplitContentLinesLocal(const AContent: string): TArray<string>;
 begin
@@ -373,6 +389,9 @@ begin
   FContents := TDictionary<string, string>.Create;
   FLoadedFiles := TDictionary<string, Boolean>.Create;
   FGlobals := TDictionary<string, string>.Create;
+  FTypeMiss := TDictionary<string, Boolean>.Create;
+  FMasked := TDictionary<string, TArray<string>>.Create;
+  FRawLines := TDictionary<string, TArray<string>>.Create;
   for var F in AFiles do LoadFile(F);
 end;
 
@@ -380,6 +399,9 @@ destructor TTypeGraph.Destroy;
 begin
   FLoadedFiles.Free;
   FGlobals.Free;
+  FTypeMiss.Free;
+  FMasked.Free;
+  FRawLines.Free;
   FContents.Free;
   FTypes.Free;
   inherited;
@@ -417,15 +439,32 @@ begin
 end;
 
 function TTypeGraph.TryType(const AName: string; out ADecl: TTypeDecl): Boolean;
+const
+  // Loading files for a name the index knows from many units (a common
+  // identifier, or one that is no type at all) used to read and parse
+  // whatever the index offered - per occurrence. A scan then spent its
+  // time in RTL/VCL sources instead of asking DelphiLSP (tester: "find
+  // references got noticeably slower", 2026-09-20).
+  MaxOnDemandFiles = 4;
 begin
   if FTypes.TryGetValue(UpperCase(AName), ADecl) then Exit(True);
   Result := False;
   if not FUseIndex then Exit;
+  if FTypeMiss.ContainsKey(UpperCase(AName)) then Exit;
   var Snap := TUnitIndex.Instance.Snapshot;
   if Snap = nil then Exit;
+  var Loaded := 0;
   for var H in Snap.Lookup(AName) do
+  begin
+    if Loaded >= MaxOnDemandFiles then Break;
+    if FLoadedFiles.ContainsKey(UpperCase(ExpandFileName(H.Path))) then Continue;
     LoadFile(H.Path);
+    Inc(Loaded);
+    if FTypes.ContainsKey(UpperCase(AName)) then Break;
+  end;
   Result := FTypes.TryGetValue(UpperCase(AName), ADecl);
+  // remember the misses too: the same qualifier appears again and again
+  if not Result then FTypeMiss.AddOrSetValue(UpperCase(AName), True);
 end;
 
 function TTypeGraph.FindType(const AName: string; out ADecl: TTypeDecl): Boolean;
@@ -455,14 +494,102 @@ begin
   FGlobals.AddOrSetValue(UpperCase(AName), Result);
 end;
 
-function ResolveMemberUse(AGraph: TTypeGraph; const AContent: string;
+// Arguments of the call that starts right after the member name at ACol0
+// (0-based): 0 for "Foo;" / "Foo.Bar", -1 when the list is not closed on
+// this line (then the text cannot count reliably). Nested calls, strings
+// and brackets are skipped, so "Foo(A, B(C, D))" counts 2.
+function CallArgumentCount(const ALine: string; ACol0: Integer): Integer;
+var
+  I, Depth, Count: Integer;
+  Empty: Boolean;
+begin
+  Result := -1;
+  I := ACol0 + 1;                      // 1-based, first char after the name
+  while (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Inc(I);
+  if I > Length(ALine) then Exit(0);   // name at the line end: no arguments
+  if ALine[I] <> '(' then
+  begin
+    if CharInSet(ALine[I], [';', ',', ')', ']', '.', '=', '<', '>', '+', '-', '*', '/']) then
+      Exit(0);                         // a call without a list, or a use
+    Exit(-1);
+  end;
+  Inc(I);
+  Depth := 1;
+  Count := 1;
+  Empty := True;
+  while I <= Length(ALine) do
+  begin
+    var C := ALine[I];
+    if C = #39 then                    // a string literal
+    begin
+      Empty := False;
+      Inc(I);
+      while (I <= Length(ALine)) and (ALine[I] <> #39) do Inc(I);
+    end
+    else if CharInSet(C, ['(', '[']) then
+    begin
+      Inc(Depth);
+      Empty := False;
+    end
+    else if CharInSet(C, [')', ']']) then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        if Empty and (Count = 1) then Count := 0;
+        Exit(Count);
+      end;
+    end
+    else if (C = ',') and (Depth = 1) then Inc(Count)
+    else if not CharInSet(C, [' ', #9]) then Empty := False;
+    Inc(I);
+  end;
+  Result := -1;                        // list not closed on this line
+end;
+
+// Can ADecl ("procedure Load(const AName: string; AFlag: Boolean = False);")
+// be called with ACount arguments? Parameters with a default value lower
+// the minimum.
+function MemberAcceptsArgCount(const ADecl: string; ACount: Integer): Boolean;
+var
+  Open, Close, Depth, I, MinCount, MaxCount: Integer;
+begin
+  Open := 0;
+  Close := 0;
+  Depth := 0;
+  for I := 1 to Length(ADecl) do
+    if ADecl[I] = '(' then
+    begin
+      Inc(Depth);
+      if Depth = 1 then Open := I;
+    end
+    else if ADecl[I] = ')' then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        Close := I;
+        Break;
+      end;
+    end;
+  if (Open = 0) or (Close = 0) then Exit(ACount = 0);   // no parameter list
+  MinCount := 0;
+  MaxCount := 0;
+  for var P in ParseParamList(Copy(ADecl, Open + 1, Close - Open - 1)) do
+  begin
+    Inc(MaxCount);
+    if P.DefaultText = '' then Inc(MinCount);
+  end;
+  Result := (ACount >= MinCount) and (ACount <= MaxCount);
+end;
+
+function ResolveMemberUse(AGraph: TTypeGraph; const AFile, AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   out ALink: TMemberLink): TMemberUseResult;
 var
   Lines: TArray<string>;
   Decl: TTypeDecl;
   TypeName, Qualifier: string;
-  Ambiguous: Boolean;
 begin
   Result := murNone;
   ALink := Default(TMemberLink);
@@ -477,38 +604,107 @@ begin
   if AGraph.FindType(Qualifier, Decl) then
     TypeName := Decl.Name
   else
-    TypeName := DeclaredTypeOfIdentifier(AContent, ALine0, Qualifier);
+    TypeName := DeclaredTypeOfIdentifierIn(Lines,
+      AGraph.MaskedLines(AFile, AContent), ALine0, Qualifier);
   // Not declared in this file? Then it is a global of ANOTHER unit
   // ("WizardInstance.Execute"), which the identifier index can point to.
   if TypeName = '' then
     TypeName := AGraph.TypeOfGlobal(Qualifier);
   if TypeName = '' then Exit;
-  if not AGraph.FindMember(TypeName, AMember, ALink, Ambiguous) then Exit;
-  if Ambiguous then Result := murAmbiguous else Result := murResolved;
+
+  var Links := AGraph.FindMembers(TypeName, AMember);
+  if Length(Links) = 0 then Exit;
+  ALink := Links[0];
+  if Length(Links) = 1 then Exit(murResolved);
+
+  // OVERLOADS: the text cannot compare parameter TYPES, but it can count.
+  // A call with N arguments can only reach a declaration that accepts N -
+  // when exactly one does, the use site is resolved after all. That is the
+  // "one of the overloads is strict private" case the tester still saw as
+  // UNVERIFIED (2026-09-20).
+  var ArgCount := CallArgumentCount(Lines[ALine0], ACol0 + Length(AMember));
+  if ArgCount >= 0 then
+  begin
+    var Fits: TArray<TMemberLink> := nil;
+    for var L in Links do
+      if MemberAcceptsArgCount(L.Text, ArgCount) then Fits := Fits + [L];
+    if Length(Fits) = 1 then
+    begin
+      ALink := Fits[0];
+      Exit(murResolved);
+    end;
+  end;
+  Result := murAmbiguous;
 end;
 
-function ClassifyUnansweredUse(AGraph: TTypeGraph; const AContent: string;
+function ClassifyUnansweredUse(AGraph: TTypeGraph; const AFile, AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   const AIsTargetLine: TFunc<string, Integer, Boolean>;
-  const AHasTargetInFile: TFunc<string, Boolean>;
+  const AIsOurType: TFunc<string, Boolean>;
   out ALink: TMemberLink): TUnansweredUse;
 begin
   Result := uuUnknown;
-  case ResolveMemberUse(AGraph, AContent, ALine0, ACol0, AMember, ALink) of
+  case ResolveMemberUse(AGraph, AFile, AContent, ALine0, ACol0, AMember, ALink) of
     murResolved:
       if Assigned(AIsTargetLine) and AIsTargetLine(ALink.FilePath, ALink.Line) then
         Result := uuOurs
       else
         Result := uuOtherSymbol;
     murAmbiguous:
-      // overloads: the position is one of several declarations of the same
-      // name in that type, so only the FILE can be compared
-      if Assigned(AHasTargetInFile) and AHasTargetInFile(ALink.FilePath) then
+      // overloads the argument count could not tell apart: only the TYPE
+      // can decide. Comparing FILES was wrong - an unrelated class in the
+      // same unit counted as ours then (tester, 2026-09-20: "a method that
+      // is only in the strict private part, twice overloaded, is shown
+      // although it has nothing to do with the search").
+      if Assigned(AIsOurType) and AIsOurType(ALink.TypeName) then
         Result := uuOverloaded
       else
         Result := uuOtherSymbol;
   end;
 end;
+
+
+function TTypeGraph.MaskedLines(const AFile, AContent: string): TArray<string>;
+begin
+  var Key := UpperCase(ExpandFileName(AFile));
+  if (AFile <> '') and FMasked.TryGetValue(Key, Result) then Exit;
+  var Lines := SplitContentLinesLocal(AContent);
+  Result := MaskCommentsAndStrings(Lines);
+  if AFile <> '' then
+  begin
+    FMasked.AddOrSetValue(Key, Result);
+    FRawLines.AddOrSetValue(Key, Lines);
+  end;
+end;
+
+function TTypeGraph.FindMembers(const ATypeName, AMember: string): TArray<TMemberLink>;
+var
+  Link: TMemberLink;
+  Ambiguous: Boolean;
+begin
+  Result := nil;
+  if not FindMember(ATypeName, AMember, Link, Ambiguous) then Exit;
+  Result := [Link];
+  if not Ambiguous then Exit;
+  // overloads: EVERY declaration of that name in the same type body, so a
+  // call can be attributed by its argument count
+  var C := Content(Link.FilePath);
+  if C = '' then Exit;
+  var Lines := SplitContentLinesLocal(C);
+  var All: TArray<TMemberLink> := nil;
+  for var L in FindMemberDeclarationLines(C, Link.TypeName, AMember) do
+  begin
+    if (L < 0) or (L > High(Lines)) then Continue;
+    var L2 := Link;
+    L2.Line := L;
+    L2.Text := Trim(Lines[L]);
+    var P := Pos(UpperCase(AMember), UpperCase(Lines[L]));
+    if P > 0 then L2.Col := P - 1;
+    All := All + [L2];
+  end;
+  if Length(All) > 0 then Result := All;
+end;
+
 
 function TTypeGraph.FindMember(const ATypeName, AMember: string;
   out ALink: TMemberLink; out AAmbiguous: Boolean): Boolean;
@@ -743,6 +939,14 @@ begin
   var Prefix := UpperCase(ExpandFileName(AFile)) + '|';
   for var K in FTypes.Keys do
     if K.StartsWith(Prefix) then Exit(True);
+end;
+
+function TLinkedTargets.HasType(const ATypeName: string): Boolean;
+begin
+  Result := False;
+  if ATypeName = '' then Exit;
+  for var V in FTypes.Values do
+    if SameText(Copy(V, 3, MaxInt), ATypeName) then Exit(True);   // 'I:' / 'C:' prefix
 end;
 
 function TLinkedTargets.DeclLabel(const AFile: string; ALine: Integer): string;

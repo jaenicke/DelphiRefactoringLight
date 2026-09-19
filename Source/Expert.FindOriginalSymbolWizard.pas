@@ -289,8 +289,8 @@ begin
             var Graph := TTypeGraph.Create([Ctx.FileName], EditorOrDiskReader());
             try
               var Link: TMemberLink;
-              if ResolveMemberUse(Graph, Content, L0, C0, Ctx.WordAtCursor,
-                Link) <> murNone then
+              if ResolveMemberUse(Graph, Ctx.FileName, Content, L0, C0,
+                Ctx.WordAtCursor, Link) <> murNone then
               begin
                 if Editor.GotoLocation(Link.FilePath, Link.Line, Link.Col,
                   Length(Ctx.WordAtCursor)) then Exit;

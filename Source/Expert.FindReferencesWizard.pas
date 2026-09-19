@@ -31,7 +31,7 @@ type
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
       const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
       AClient: TLspClient; AIncludes: TLspIncludeContext;
-      AGraph: TTypeGraph): TFindReferenceItems;
+      AGraph: TTypeGraph; const AOwnerType: string): TFindReferenceItems;
     function ConvertLspLocations(const ALocations: TArray<TLspLocation>; const AOldName: string): TFindReferenceItems;
 
     procedure SearchAndShow;
@@ -316,7 +316,7 @@ begin
 
         // Verify each candidate via GotoDefinition
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
-          Client, IncCtx, Graph);
+          Client, IncCtx, Graph, Owner);
       finally
         Graph.Free;
       end;
@@ -484,7 +484,7 @@ end;
 function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
   const ATargets: TLspSymbolTargets; ALinked: TLinkedTargets;
   AClient: TLspClient; AIncludes: TLspIncludeContext;
-  AGraph: TTypeGraph): TFindReferenceItems;
+  AGraph: TTypeGraph; const AOwnerType: string): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
   Synced: TDictionary<string, Boolean>;
@@ -527,15 +527,15 @@ begin
       // 2026-09-20), so every saved request is saved waiting time.
       begin
         var PreLink: TMemberLink;
-        if ClassifyUnansweredUse(AGraph, FileContent(C.FilePath), C.Line, C.Col,
-          AOldName,
+        if ClassifyUnansweredUse(AGraph, C.FilePath, FileContent(C.FilePath),
+          C.Line, C.Col, AOldName,
           function(AFile: string; ALine: Integer): Boolean
           begin
             Result := ATargets.Contains(AFile, ALine) or ALinked.Contains(AFile, ALine);
           end,
-          function(AFile: string): Boolean
+          function(ATypeName: string): Boolean
           begin
-            Result := ATargets.ContainsFile(AFile) or ALinked.ContainsFile(AFile);
+            Result := SameText(ATypeName, AOwnerType) or ALinked.HasType(ATypeName);
           end, PreLink) = uuOtherSymbol then
         begin
           Inc(FPreSkipped);
@@ -621,15 +621,15 @@ begin
       if NoAnswer and not Matches then
       begin
         var Link: TMemberLink;
-        case ClassifyUnansweredUse(AGraph, FileContent(C.FilePath), C.Line, C.Col,
-          AOldName,
+        case ClassifyUnansweredUse(AGraph, C.FilePath, FileContent(C.FilePath),
+          C.Line, C.Col, AOldName,
           function(AFile: string; ALine: Integer): Boolean
           begin
             Result := ATargets.Contains(AFile, ALine) or ALinked.Contains(AFile, ALine);
           end,
-          function(AFile: string): Boolean
+          function(ATypeName: string): Boolean
           begin
-            Result := ATargets.ContainsFile(AFile) or ALinked.ContainsFile(AFile);
+            Result := SameText(ATypeName, AOwnerType) or ALinked.HasType(ATypeName);
           end, Link) of
           uuOurs:
             begin

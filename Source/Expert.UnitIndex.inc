@@ -303,7 +303,7 @@ implementation
 uses
   System.IOUtils, System.StrUtils, System.Win.Registry, System.Types,
   System.Generics.Defaults, System.Math, Winapi.Windows,
-  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.ResourceMonitor, Expert.PascalScanner;
+  Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.ResourceMonitor, Expert.PascalScanner, Expert.IncludeExpansion;
 
 const
   MaxFiles      = 40000;      // hard cap (32-bit process guard)
@@ -457,129 +457,14 @@ end;
 //  Include files
 // ---------------------------------------------------------------------------
 
-const
-  MaxIncludeDepth = 8;
-
-function ResolveIncludeFile(const AName, ABaseDir: string): string;
-var
-  N: string;
-begin
-  Result := '';
-  N := Trim(AName);
-  if (Length(N) >= 2) and (N[1] = '''') and (N[Length(N)] = '''') then
-    N := Copy(N, 2, Length(N) - 2);
-  N := Trim(N).Replace('/', '\');
-  if N = '' then Exit;
-  try
-    if not TPath.IsPathRooted(N) then
-      N := TPath.Combine(ABaseDir, N);
-    if TFile.Exists(N) then Exit(TPath.GetFullPath(N));
-    if ExtractFileExt(N) = '' then
-      for var Ext in ['.inc', '.pas'] do
-        if TFile.Exists(N + Ext) then Exit(TPath.GetFullPath(N + Ext));
-  except
-    Result := '';   // invalid path characters in the directive
-  end;
-end;
-
 function ExpandIncludeDirectives(const AText, ABaseDir: string;
   AIncludes: TStrings; ADepth: Integer): string;
-var
-  SB: TStringBuilder;
-  I, N, Start, Stop, CloseLen: Integer;
-  Body, U, Name, Path, Sub: string;
 begin
-  // cheap exit - almost no unit has an include
-  U := UpperCase(AText);
-  if (ADepth > MaxIncludeDepth) or
-     ((Pos('{$I', U) = 0) and (Pos('(*$I', U) = 0)) then
-    Exit(AText);
-  SB := TStringBuilder.Create(Length(AText) + 1024);
-  try
-    N := Length(AText);
-    I := 1;
-    while I <= N do
-    begin
-      var C := AText[I];
-      if C = '''' then
-      begin
-        // string literal ('' inside = two literals in a row, same result)
-        Start := I;
-        Inc(I);
-        while (I <= N) and (AText[I] <> '''') and (AText[I] <> #10) and
-              (AText[I] <> #13) do
-          Inc(I);
-        if (I <= N) and (AText[I] = '''') then Inc(I);
-        SB.Append(AText, Start - 1, I - Start);
-        Continue;
-      end;
-      if (C = '/') and (I < N) and (AText[I + 1] = '/') then
-      begin
-        Start := I;
-        while (I <= N) and (AText[I] <> #10) and (AText[I] <> #13) do Inc(I);
-        SB.Append(AText, Start - 1, I - Start);
-        Continue;
-      end;
-      if (C = '{') or ((C = '(') and (I < N) and (AText[I + 1] = '*')) then
-      begin
-        Start := I;
-        Body := '';
-        if C = '{' then
-        begin
-          Stop := PosEx('}', AText, I + 1);
-          CloseLen := 1;
-          if Stop = 0 then Stop := N + 1;
-          if (I < N) and (AText[I + 1] = '$') then
-            Body := Copy(AText, I + 2, Stop - I - 2);
-        end
-        else
-        begin
-          Stop := PosEx('*)', AText, I + 2);
-          CloseLen := 2;
-          if Stop = 0 then Stop := N + 1;
-          if (I + 2 <= N) and (AText[I + 2] = '$') then
-            Body := Copy(AText, I + 3, Stop - I - 3);
-        end;
-        I := Min(Stop + CloseLen, N + 1);
-        Name := '';
-        if Body <> '' then
-        begin
-          U := UpperCase(Body);
-          // "{$I+}" / "{$I-}" / "{$IFDEF" never match: a blank must follow
-          if StartsStr('INCLUDE', U) and (Length(U) > 7) and CharInSet(U[8], [' ', #9]) then
-            Name := Trim(Copy(Body, 9, MaxInt))
-          else if StartsStr('I', U) and (Length(U) > 1) and CharInSet(U[2], [' ', #9]) then
-            Name := Trim(Copy(Body, 3, MaxInt));
-        end;
-        if Name <> '' then
-        begin
-          Path := ResolveIncludeFile(Name, ABaseDir);
-          if Path <> '' then
-            try
-              Sub := TDelphiFileEncoding.ReadAll(Path);
-            except
-              Path := '';
-            end;
-          if Path <> '' then
-          begin
-            if AIncludes <> nil then AIncludes.Add(Path);
-            SB.Append(ExpandIncludeDirectives(Sub, ExtractFileDir(Path),
-              AIncludes, ADepth + 1));
-            // whatever follows the directive starts on a line of its own
-            SB.Append(#10);
-            Continue;
-          end;
-        end;
-        SB.Append(AText, Start - 1, I - Start);
-        Continue;
-      end;
-      SB.Append(C);
-      Inc(I);
-    end;
-    Result := SB.ToString;
-  finally
-    SB.Free;
-  end;
+  // One expansion core for the index and the scans (Expert.IncludeExpansion).
+  // Same output as before: verbatim text, each resolved include replaced by
+  // its (recursively expanded) content followed by a line break.
+  if ADepth > 8 then Exit(AText);
+  Result := ExpandIncludeText(AText, ABaseDir, AIncludes);
 end;
 
 // ---------------------------------------------------------------------------

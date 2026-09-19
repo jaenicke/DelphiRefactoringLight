@@ -17,6 +17,7 @@ uses
   Expert.EditorHelperIntf,
   Expert.RenameDialog, Expert.LspManager, Expert.ImplementationFinder, Expert.FindReferencesDialog,
   Expert.UnitIndex, Expert.UnitUsageProbe, Expert.ScopeFiles, Expert.DfmRename,
+  Expert.IncludeExpansion,
   Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Rename.WorkspaceEdit, Delphi.FileEncoding, Expert.UsesEditor;
 
@@ -95,6 +96,9 @@ type
     FFormDeclFile: string;
     FContext: TEditorContext;
     FEdit: TLspWorkspaceEdit;
+    /// <summary>Hits in include files DelphiLSP gave no answer for: NOT
+    ///  renamed, but listed in the preview (never dropped silently).</summary>
+    FUnverified: TArray<TRenameCandidate>;
     FDiagLog: string;
     /// <summary>True when the dialog was opened for a unit rename
     ///  (triggered by the IDE module notifier). In that mode the preview
@@ -117,6 +121,7 @@ type
     ///  (files of the edit, a member of the owner type, a used unit).</summary>
     function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
     function VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>; const AOldName, ANewName: string;
+      AIncludes: TLspIncludeContext;
       const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
 
     /// <summary>Finds interface/class method implementations via a
@@ -174,7 +179,7 @@ implementation
 
 
 uses
-  Expert.PascalScanner;
+  Expert.PascalScanner, Expert.IdentifierCheck;
 // True when the identifier at (ALine0, ACol0) directly follows a declaring
 // keyword - 'procedure X', 'class function X', 'constructor X',
 // 'destructor X', 'property X' - i.e. the caret is ON a declaration.
@@ -916,7 +921,9 @@ var
   Candidates, ImplCandidates: TArray<TRenameCandidate>;
   Client: TLspClient;
   ScopeFirst, ScopeLast: Integer;   // "current method" line window (0-based)
+  IncCtx: TLspIncludeContext;       // freed = expanded units restored
 begin
+  IncCtx := nil;
   NewName := FHost.GetNewName;
   if NewName = '' then
   begin
@@ -928,6 +935,16 @@ begin
   if NewName = FContext.WordAtCursor then
   begin
     FHost.Notify('The new name is identical to the old one.', True);
+    Exit;
+  end;
+  // A reserved word ('string', 'begin' ...) is no symbol - and every
+  // occurrence in the project would become a candidate to verify, one
+  // DelphiLSP round trip each, on the main thread (a misplaced caret on
+  // 'string' kept the IDE busy for minutes).
+  if TIdentifierChecker.IsPascalKeyword(FContext.WordAtCursor) then
+  begin
+    FHost.Notify(Format('"%s" is a reserved word - place the caret on the ' +
+      'identifier to rename.', [FContext.WordAtCursor]), True);
     Exit;
   end;
 
@@ -1058,11 +1075,17 @@ begin
     Client := TLspManager.Instance.GetClient(
       RootPath, FContext.ProjectFile, DelphiLspJson);
 
+    // Positions inside {$I} include files are answered through the
+    // INCLUDING unit, sent expanded (Expert.IncludeExpansion); freeing the
+    // context sends the original text again.
+    FUnverified := nil;
+    IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
+    IncCtx.RegisterFiles(ProjFiles);
+
     // Refresh document (didClose+didOpen when LSP is already running,
-    // just didOpen on first start - so LSP always has current file content)
-    if WasRunning then
-      Client.RefreshDocument(FContext.FileName)
-    else
+    // just didOpen on first start - so LSP always has current file content).
+    // An include file is no unit - the include context serves it.
+    if not IncCtx.OwnsDocument(FContext.FileName) then
       Client.RefreshDocument(FContext.FileName);
 
     // On first start, wait for readiness
@@ -1076,7 +1099,7 @@ begin
         try
           var H := Client.GetHover(FContext.FileName, LspLine, LspCol);
           if H <> '' then Break;
-          var D := Client.GotoDefinition(FContext.FileName, LspLine, LspCol);
+          var D := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
           if Length(D) > 0 then Break;
         except end;
         Sleep(1000);
@@ -1090,7 +1113,7 @@ begin
 
     var LspLine := FContext.Line - 1;
     var LspCol := FContext.Column - 1;
-    var DefLocs := Client.GotoDefinition(FContext.FileName, LspLine, LspCol);
+    var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
     var DefLine := 0;
     var DefCol := 0;
 
@@ -1119,6 +1142,26 @@ begin
     end;
 
     FDiagLog := FDiagLog + 'Declaration: ' + DefFilePath + ':' + IntToStr(DefLine + 1) + ':' + IntToStr(DefCol + 1) + sLineBreak;
+
+    // Declared in the RAD Studio installation (RTL/VCL): not ours to rename.
+    // Refuse BEFORE verifying - such names ('Integer', 'Create', 'Free')
+    // occur thousands of times, each one a DelphiLSP round trip.
+    var BdsRootDir := FindBdsRoot;
+    if (BdsRootDir <> '') and (DefFilePath <> '') and
+       UpperCase(ExpandFileName(DefFilePath)).StartsWith(
+         UpperCase(IncludeTrailingPathDelimiter(ExpandFileName(BdsRootDir)))) then
+    begin
+      FDiagLog := FDiagLog + 'Refused: the declaration is part of the RAD Studio ' +
+        'installation.' + sLineBreak;
+      FreeAndNil(IncCtx);
+      FHost.SetPreviewItems(nil);
+      FHost.SetDetailsText(FDiagLog);
+      FHost.SetStatus(Format('"%s" is declared in %s (RAD Studio installation) - ' +
+        'it cannot be renamed.', [FContext.WordAtCursor, ExtractFileName(DefFilePath)]));
+      FHost.EnableRename(False);
+      FHost.SetBusy(False);
+      Exit;
+    end;
 
     // The DECLARATION may live in a unit none of the scanned files is -
     // renaming every use but not the declaration does not compile. For
@@ -1201,9 +1244,9 @@ begin
       // those of every implementing class (interface / virtual methods).
       var Targets: TLspSymbolTargets;
       if Length(DefLocs) > 0 then
-        Targets.AddWithPartner(Client, DefFilePath, DefLine, DefCol)
+        IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLine, DefCol)
       else
-        Targets.AddWithPartner(Client, FContext.FileName, LspLine, LspCol);
+        IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
       // The implementation scan is for OTHER types (interface implementers,
       // overrides in descendants). A header of the OWNER type itself that is
       // not the symbol already is a sibling OVERLOAD - forum report: renaming
@@ -1230,17 +1273,20 @@ begin
               ExtractFileName(IC.FilePath) + ':' + IntToStr(IC.Line + 1) + sLineBreak;
             Continue;
           end;
-          Targets.AddWithPartner(Client, IC.FilePath, IC.Line, IC.Col);
+          IncCtx.AddTargetWithPartner(Targets, IC.FilePath, IC.Line, IC.Col);
         end;
       finally
         ImplLinesOf.Free;
       end;
       FDiagLog := FDiagLog + 'Symbol positions (' + IntToStr(Targets.Count) + '):' +
         sLineBreak + Targets.Text + sLineBreak;
-      FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, Targets, Client);
+      FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, IncCtx, Targets, Client);
     finally
       ImplFilesList.Free;
     end;
+    if IncCtx.Activations > 0 then
+      FDiagLog := FDiagLog + 'Include files:' + sLineBreak + IncCtx.NotesText;
+    FreeAndNil(IncCtx);   // sends the original text of expanded units again
 
     // Form files: component names, event handlers, component references.
     // Only when the LSP actually told us where the declaration is, and not
@@ -1254,7 +1300,7 @@ begin
         FContext.WordAtCursor, NewName);
     end;
 
-    if Length(FEdit.FileEdits) = 0 then
+    if (Length(FEdit.FileEdits) = 0) and (Length(FUnverified) = 0) then
     begin
       FHost.SetPreviewItems(nil);
       FHost.SetDetailsText(FDiagLog);
@@ -1265,6 +1311,22 @@ begin
 
     // Build structured preview for the ListView
     var PreviewItems := BuildPreviewItems(FEdit, DefFilePath, DefLine, ImplFilesArray);
+    for var U in FUnverified do
+    begin
+      var PI := Default(TRenamePreviewItem);
+      PI.FilePath := U.FilePath;
+      PI.Line := U.Line;
+      PI.Col := U.Col;
+      PI.Kind := 'UNVERIFIED - not renamed (include file)';
+      try
+        var UL := ReadDelphiFileLines(U.FilePath);
+        if (U.Line >= 0) and (U.Line <= High(UL)) then PI.OriginalLine := UL[U.Line];
+      except
+        PI.OriginalLine := '';
+      end;
+      PI.PreviewLine := PI.OriginalLine;
+      PreviewItems := PreviewItems + [PI];
+    end;
 
     // Count for the status line
     // A CANCELLED scan has only partial candidates - never present that
@@ -1315,7 +1377,11 @@ begin
         'see the details tab.';
     FHost.SetDetailsText(TrimLeft(ScopeWarn) + sLineBreak + Conflict + sLineBreak +
       sLineBreak + FDiagLog);
-    FHost.EnableRename(True);
+    if Length(FUnverified) > 0 then
+      ScopeWarn := ScopeWarn + Format('  WARNING: %d occurrence(s) in include files ' +
+        'could not be verified and are NOT renamed - check them (UNVERIFIED rows).',
+        [Length(FUnverified)]);
+    FHost.EnableRename(Length(FEdit.FileEdits) > 0);
     FHost.SetStatus(Format('Done: %d change(s) in %d file(s).%s',
       [TotalEdits, Length(FEdit.FileEdits), ScopeWarn]));
   except
@@ -1327,6 +1393,7 @@ begin
       FHost.SetStatus('An error occurred.');
     end;
   end;
+  FreeAndNil(IncCtx);   // after an exception: restore the expanded units
   FHost.SetBusy(False);
 end;
 
@@ -1685,7 +1752,8 @@ end;
 { LSP verification }
 
 function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>;
-  const AOldName, ANewName: string; const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
+  const AOldName, ANewName: string; AIncludes: TLspIncludeContext;
+  const ATargets: TLspSymbolTargets; AClient: TLspClient): TLspWorkspaceEdit;
 var
   FileMap: TDictionary<string, TList<TLspTextEdit>>;
   LastOpenedFile: string;
@@ -1709,11 +1777,15 @@ begin
       if (I mod 3 = 0) then
         FHost.SetStatus(Format('Verifying %d/%d (ok:%d skip:%d)', [I + 1, Length(ACandidates), VerifiedCount, SkippedCount]));
 
-      // Open file on the LSP
+      // Open file on the LSP - unless the include context serves it (an
+      // include file, or a unit currently sent expanded)
       if not SameText(C.FilePath, LastOpenedFile) then
       begin
-        AClient.RefreshDocument(C.FilePath);
-        Sleep(300);
+        if not AIncludes.OwnsDocument(C.FilePath) then
+        begin
+          AClient.RefreshDocument(C.FilePath);
+          Sleep(300);
+        end;
         LastOpenedFile := C.FilePath;
       end;
 
@@ -1721,7 +1793,7 @@ begin
       var DiagLine := Format('  [%d] %s:%d:%d => ', [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
 
       try
-        var Defs := AClient.GotoDefinition(C.FilePath, C.Line, C.Col);
+        var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
 
         // The candidate IS one of the symbol's positions (declaration /
         // implementation of the symbol or of an implementing class - see
@@ -1732,6 +1804,11 @@ begin
         begin
           Matches := True;
           DiagLine := DiagLine + '(symbol position) -> MATCH';
+        end
+        else if (Length(Defs) = 0) and IsIncludeFile(C.FilePath) then
+        begin
+          DiagLine := DiagLine + 'null in an include file -> UNVERIFIED (listed, not renamed)';
+          FUnverified := FUnverified + [C];
         end
         else if Length(Defs) = 0 then
           DiagLine := DiagLine + 'null -> SKIP'

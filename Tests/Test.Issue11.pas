@@ -39,6 +39,8 @@ type
     [Test] procedure Scanner_MultiLineStringIsOneToken;
     [Test] procedure Scanner_UnicodeIdentifiersAndEscapes;
     [Test] procedure Scanner_StripAndMask;
+    [Test] procedure Include_ExpansionMapsBothWays;
+    [Test] procedure Include_ExpandedTextMatchesTheCompiler;
   end;
 
 implementation
@@ -46,7 +48,7 @@ implementation
 uses
   System.SysUtils, Expert.SignatureCheck, Expert.WithScanner, Expert.UnitIndex,
   Expert.AutoImport, Expert.StatementRefactor, Expert.SafeDeletePlan,
-  Expert.PascalScanner;
+  Expert.PascalScanner, Expert.IncludeExpansion, System.IOUtils;
 
 const
   SafeDemo: array[0..28] of string = (
@@ -368,6 +370,66 @@ begin
   Assert.AreEqual('        B', M[1]);
   Assert.AreEqual('      ', M[3], 'content of a multi-line string');
   Assert.AreEqual('     ; C     ', M[4]);
+end;
+
+// U1.pas includes u1decl.inc and sub\u1impl.inc, which includes nested.inc
+function MakeIncludeFixture(out AUnit, ADecl, ANested: string): string;
+begin
+  var Dir := TPath.Combine(TPath.GetTempPath, 'rl_inc_dunitx');
+  TDirectory.CreateDirectory(TPath.Combine(Dir, 'sub'));
+  AUnit := TPath.Combine(Dir, 'U1.pas');
+  ADecl := TPath.Combine(Dir, 'u1decl.inc');
+  ANested := TPath.Combine(Dir, 'sub\nested.inc');
+  Result := 'unit U1;'#13#10'interface'#13#10'{$I u1decl.inc}'#13#10'implementation'#13#10 +
+    '{$INCLUDE ''sub\u1impl''}'#13#10'end.';
+  TFile.WriteAllText(AUnit, Result);
+  TFile.WriteAllText(ADecl, 'procedure Foo;'#13#10);
+  TFile.WriteAllText(TPath.Combine(Dir, 'sub\u1impl.inc'),
+    'procedure Foo;'#13#10'begin'#13#10'  {$I nested.inc}'#13#10'end;'#13#10);
+  TFile.WriteAllText(ANested, '  Bar; // x');
+end;
+
+procedure TIssue11Tests.Include_ExpansionMapsBothWays;
+var
+  UnitF, DeclF, NestF, F: string;
+  L, C: Integer;
+begin
+  var Text := MakeIncludeFixture(UnitF, DeclF, NestF);
+  var U := ExpandUnitIncludes(UnitF, Text, nil);
+  try
+    Assert.IsNotNull(U);
+    Assert.AreEqual<Integer>(3, Length(U.Includes));
+    Assert.IsTrue(U.ToExpanded(DeclF, 0, 10, L, C));
+    Assert.AreEqual(2, L);
+    Assert.AreEqual(10, C);
+    Assert.IsTrue(U.ToExpanded(NestF, 0, 2, L, C), 'nested include');
+    Assert.AreEqual(8, L);
+    Assert.AreEqual(4, C);
+    Assert.IsTrue(U.FromExpanded(8, 4, F, L, C));
+    Assert.IsTrue(SameText(NestF, F));
+    Assert.AreEqual(0, L);
+    Assert.AreEqual(2, C);
+    Assert.IsTrue(U.ToExpanded(UnitF, 5, 0, L, C), 'the unit''s own text after the includes');
+    Assert.AreEqual(13, L);
+    Assert.IsFalse(U.ToExpanded(UnitF, 2, 1, L, C), 'a directive has no expanded position');
+    Assert.IsFalse(U.FromExpanded(3, 0, F, L, C), 'the synthetic line break belongs to no file');
+  finally
+    U.Free;
+  end;
+  Assert.IsNull(ExpandUnitIncludes(DeclF, 'procedure Foo;', nil));
+end;
+
+procedure TIssue11Tests.Include_ExpandedTextMatchesTheCompiler;
+var
+  UnitF, DeclF, NestF: string;
+begin
+  var Text := MakeIncludeFixture(UnitF, DeclF, NestF);
+  var Expected := 'unit U1;'#13#10'interface'#13#10'procedure Foo;'#13#10#10#13#10'implementation'#13#10 +
+    'procedure Foo;'#13#10'begin'#13#10'    Bar; // x'#10#13#10'end;'#13#10#10#13#10'end.';
+  Assert.AreEqual(Expected, ExpandIncludeText(Text, ExtractFileDir(UnitF), nil));
+  Assert.AreEqual<Integer>(3, Length(CollectIncludeFiles(UnitF, Text, nil)));
+  Assert.IsTrue(IsIncludeFile('x.inc'));
+  Assert.IsFalse(IsIncludeFile('x.DPR'));
 end;
 
 initialization

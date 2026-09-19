@@ -36,7 +36,8 @@ uses
   Expert.ImplementationFinder, Expert.FindReferencesDialog, Expert.ScopeFiles,
   Expert.UsesGraph, Expert.DebugConsistency, Expert.DebugConsistencyDialog,
   Expert.VcsBlame, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
-  Expert.PluginSettings, Lsp.Client, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner;
+  Expert.PluginSettings, Expert.IncludeExpansion, Lsp.Client, Lsp.Protocol, Lsp.Uri,
+  Delphi.FileEncoding, Expert.PascalScanner;
 
 // ---------------------------------------------------------------------------
 //  Helpers
@@ -187,6 +188,7 @@ begin
     O.AddPair('line', TJSONNumber.Create(It.Line + 1));
     O.AddPair('column', TJSONNumber.Create(It.Col + 1));
     O.AddPair('text', Trim(It.Preview));
+    if It.Note <> '' then O.AddPair('note', It.Note);
     Result.Add(O);
   end;
 end;
@@ -547,9 +549,13 @@ begin
   // Only when changed - every didOpen restarts DelphiLSP's analysis of the
   // unit, and until it is done the unit answers nothing. After a send,
   // wait for the analysis (the per-file diagnostics push).
-  var StartBefore := Ctx.Client.GetFileDiagnosticsVersion(F);
-  if McpSyncLspContent(Ctx.Client, F, Ctx.Content) then
-    McpWaitLspAnalysed(Ctx.Client, F, StartBefore, AStop);
+  // (an include file is no unit - the include context below serves it)
+  if not IsIncludeFile(F) then
+  begin
+    var StartBefore := Ctx.Client.GetFileDiagnosticsVersion(F);
+    if McpSyncLspContent(Ctx.Client, F, Ctx.Content) then
+      McpWaitLspAnalysed(Ctx.Client, F, StartBefore, AStop);
+  end;
   Items := nil;
   Method := '';
   if Ctx.Client.SupportsReferences then
@@ -579,7 +585,24 @@ begin
   begin
     // Text scan over the project scope, every hit verified by asking the
     // LSP where it leads - the approach of the Find References dialog.
-    var Decl := Ctx.Client.GotoDefinition(F, L1 - 1, Ctx.IdentCol0);
+    // Positions inside {$I} include files are answered through the
+    // INCLUDING unit, sent expanded; freeing the context restores it.
+    var ContentOf: TDictionary<string, string> := nil;
+    var IncCtx := TLspIncludeContext.Create(Ctx.Client,
+      function(const APath: string; out AContent: string): Boolean
+      begin
+        if (ContentOf <> nil) and ContentOf.TryGetValue(UpperCase(APath), AContent) then
+          Exit(True);
+        try
+          AContent := ReadDelphiFile(APath);
+          Result := True;
+        except
+          Result := False;
+        end;
+      end);
+    try
+    IncCtx.RegisterFiles(Ctx.ScopeFiles);
+    var Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
     if Length(Decl) = 0 then
       Exit(McpErr('DelphiLSP knows no declaration for ' + Ctx.Identifier + ' at that position'));
     var DeclFile := ExpandFileName(TLspUri.FileUriToPath(Decl[0].Uri));
@@ -622,7 +645,7 @@ begin
             Found[I] := McpReadContent(Paths[I], Contents[I]);
         end, True, AStop, Err) then
         Exit(McpErr(Err));
-      var ContentOf := TDictionary<string, string>.Create;
+      ContentOf := TDictionary<string, string>.Create;
       for var I := 0 to High(Paths) do
         if Found[I] then ContentOf.AddOrSetValue(UpperCase(Paths[I]), Contents[I]);
       var Synced := TDictionary<string, Boolean>.Create;    // files checked this call
@@ -646,7 +669,7 @@ begin
           begin
             Synced.Add(Key, True);
             var C: string;
-            if ContentOf.TryGetValue(Key, C) then
+            if not IncCtx.OwnsDocument(Cd.FilePath) and ContentOf.TryGetValue(Key, C) then
             begin
               var Before := Ctx.Client.GetFileDiagnosticsVersion(Cd.FilePath);
               if McpSyncLspContent(Ctx.Client, Cd.FilePath, C) then
@@ -657,7 +680,7 @@ begin
               end;
             end;
           end;
-          var D := Ctx.Client.GotoDefinition(Cd.FilePath, Cd.Line, Cd.Col);
+          var D := IncCtx.Definition(Cd.FilePath, Cd.Line, Cd.Col);
           // An EMPTY answer is retried briefly, a WRONG one never: 3 s for
           // the first query in a file sent a moment ago, 0.5 s otherwise.
           // (A unit that answers NOTHING at all is usually not slow: DelphiLSP
@@ -672,7 +695,7 @@ begin
           end;
           while (Length(D) = 0) and (GetTickCount64 < Deadline) and
                 (WaitForSingleObject(AStop, 500) <> WAIT_OBJECT_0) do
-            D := Ctx.Client.GotoDefinition(Cd.FilePath, Cd.Line, Cd.Col);
+            D := IncCtx.Definition(Cd.FilePath, Cd.Line, Cd.Col);
           // answered, or had its one longer wait - short retries from now on
           Answered.AddOrSetValue(Key, True);
           if (Length(D) > 0) and
@@ -681,6 +704,13 @@ begin
             Verified := Verified + [Cd]
           else if SameText(ExpandFileName(Cd.FilePath), DeclFile) and (Cd.Line = DeclLine) then
             Verified := Verified + [Cd]   // the declaration itself
+          else if (Length(D) = 0) and IsIncludeFile(Cd.FilePath) then
+          begin
+            // never dropped silently: listed, marked unverified
+            var U := Cd;
+            U.Note := 'UNVERIFIED - no answer inside this include file';
+            Verified := Verified + [U];
+          end
           else if Length(D) = 0 then
             Answer := 'no answer from DelphiLSP'
           else
@@ -702,7 +732,7 @@ begin
       end;
       finally
         Answered.Free;
-        ContentOf.Free;
+        FreeAndNil(ContentOf);
         Synced.Free;
       end;
       Items := Verified;
@@ -715,8 +745,14 @@ begin
         Method := Method + Format(' - %d analysis wait(s) TIMED OUT', [TimedOut]);
       if Cands.Count >= MaxCandidates then
         Method := Method + Format(' (STOPPED at %d candidates)', [MaxCandidates]);
+      if IncCtx.Activations > 0 then
+        Method := Method + '; include files: ' +
+          Trim(IncCtx.NotesText).Replace(sLineBreak, '; ');
     finally
       Cands.Free;
+    end;
+    finally
+      IncCtx.Free;
     end;
   end;
 

@@ -92,7 +92,7 @@ implementation
 
 
 uses
-  Expert.PascalScanner;
+  Expert.PascalScanner, Expert.IncludeExpansion;
 {$IFNDEF STANDALONE_BUILD}
 { TLspFindUnitReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
   Only compiled into the IDE plugin; the standalone build does not
@@ -928,6 +928,20 @@ begin
         var DroppedNotResolving: Integer := 0;
 
         var LastRefreshedFile: string := '';
+        // Positions inside {$I} include files are answered through the
+        // INCLUDING unit, sent expanded; and a unit whose code sits in an
+        // include file is reached by answers pointing INTO that file.
+        var IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
+        try
+        IncCtx.RegisterFiles(ProjFiles + [FContext.FileName]);
+        var TargetFiles := TStringList.Create;
+        try
+        TargetFiles.CaseSensitive := False;
+        TargetFiles.Add(TargetExpanded);
+        var TargetContent: string;
+        if EditorOrDiskReader()(FContext.FileName, TargetContent) then
+          TargetFiles.AddStrings(CollectIncludeFiles(FContext.FileName, TargetContent,
+            EditorOrDiskReader()));
         for I := 0 to AllCandidates.Count - 1 do
         begin
           if FDialog.CloseRequested then Break;
@@ -941,7 +955,8 @@ begin
           begin
             TraceNote(Format('RefreshDocument: %s', [Item.FilePath]));
             try
-              Client.RefreshDocument(Item.FilePath);
+              if not IncCtx.OwnsDocument(Item.FilePath) then
+                Client.RefreshDocument(Item.FilePath);
             except
               on E: Exception do
                 TraceNote('RefreshDocument FAILED: ' + E.Message);
@@ -955,14 +970,14 @@ begin
           var DefPathLog := '';
           var ErrLog := '';
           try
-            var Defs := Client.GotoDefinition(Item.FilePath, Item.Line, Item.Col);
+            var Defs := IncCtx.Definition(Item.FilePath, Item.Line, Item.Col);
             DefCount := System.Length(Defs);
             if DefCount > 0 then
             begin
               var DefPath := TLspUri.FileUriToPath(Defs[0].Uri);
               DefPathLog := DefPath;
               if (DefPath <> '') and
-                 SameText(ExpandFileName(DefPath), TargetExpanded) then
+                 (TargetFiles.IndexOf(ExpandFileName(DefPath)) >= 0) then
                 Resolves := True;
             end;
           except
@@ -1000,6 +1015,12 @@ begin
             HitsByFile.Add(UpKey, FileList);
           end;
           FileList.Add(Item);
+        end;
+        finally
+          TargetFiles.Free;
+        end;
+        finally
+          IncCtx.Free;
         end;
         // Stash the count for the final status line via the existing
         // counter (repurposed: "non-using" no longer applies).

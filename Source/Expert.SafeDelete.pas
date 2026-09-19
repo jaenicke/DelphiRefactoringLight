@@ -95,7 +95,8 @@ uses
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.AutoImport, Expert.UsesEditor,
   Expert.ScopeFiles, Expert.LspManager, Expert.DiagStore, Expert.DialogHelper,
   Expert.IdeThemes, Expert.ListViewSort, Expert.WorkerLatch, Expert.McpServer,
-  Expert.McpLspTools, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner;
+  Expert.McpLspTools, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding, Expert.PascalScanner,
+  Expert.IncludeExpansion;
 
 type
   TCand = record
@@ -322,6 +323,7 @@ var
   IdentCol, DeclLine: Integer;
   Why: string;
   Targets: TLspSymbolTargets;
+  IncCtx: TLspIncludeContext;
 
   procedure AddFinding(AKind: TSafeDeleteFindingKind; const AFile: string;
     ALine, ACol: Integer; const AText, ANote: string);
@@ -351,6 +353,7 @@ var
 
 begin
   Res := Default(TSafeDeleteResult);
+  IncCtx := nil;
   Src := TContentSource.Create(AIn);
   try
     StartLines := SplitContentLines(AIn.Content);
@@ -368,16 +371,28 @@ begin
     end;
     if Assigned(AProgress) then AProgress(0, 0, 'Asking DelphiLSP for the declaration...');
 
+    // Positions inside {$I} include files are answered through the
+    // INCLUDING unit, sent expanded; freeing the context restores it.
+    IncCtx := TLspIncludeContext.Create(AIn.Client,
+      function(const APath: string; out AContent: string): Boolean
+      begin
+        Result := Src.Get(APath, AContent);
+      end);
+    IncCtx.RegisterFiles(AIn.ScopeFiles + [AIn.FileName]);
+
     // 1. declaration
-    var Before := AIn.Client.GetFileDiagnosticsVersion(AIn.FileName);
-    if McpSyncLspContent(AIn.Client, AIn.FileName, AIn.Content) then
-      McpWaitLspAnalysed(AIn.Client, AIn.FileName, Before, AStop, 30000);
-    var D := AIn.Client.GotoDefinition(AIn.FileName, AIn.Line0, IdentCol);
+    if not IncCtx.OwnsDocument(AIn.FileName) then
+    begin
+      var Before := AIn.Client.GetFileDiagnosticsVersion(AIn.FileName);
+      if McpSyncLspContent(AIn.Client, AIn.FileName, AIn.Content) then
+        McpWaitLspAnalysed(AIn.Client, AIn.FileName, Before, AStop, 30000);
+    end;
+    var D := IncCtx.Definition(AIn.FileName, AIn.Line0, IdentCol);
     var Deadline := GetTickCount64 + 3000;
     while (Length(D) = 0) and (GetTickCount64 < Deadline) and not Stopped do
     begin
       Sleep(300);
-      D := AIn.Client.GotoDefinition(AIn.FileName, AIn.Line0, IdentCol);
+      D := IncCtx.Definition(AIn.FileName, AIn.Line0, IdentCol);
     end;
     if Length(D) > 0 then
     begin
@@ -481,7 +496,7 @@ begin
         begin
           Synced.Add(Key, True);
           var C: string;
-          if Src.Get(Cd.F, C) then
+          if not IncCtx.OwnsDocument(Cd.F) and Src.Get(Cd.F, C) then
           begin
             var B := AIn.Client.GetFileDiagnosticsVersion(Cd.F);
             if McpSyncLspContent(AIn.Client, Cd.F, C) then
@@ -490,19 +505,22 @@ begin
         end;
         var Answer: TArray<TLspLocation> := nil;
         try
-          Answer := AIn.Client.GotoDefinition(Cd.F, Cd.L, Cd.C);
+          Answer := IncCtx.Definition(Cd.F, Cd.L, Cd.C);
           // an EMPTY answer is retried briefly (the unit may still be in
           // analysis), a wrong one never
           var Dl := GetTickCount64 + IfThen(FirstInFile, 3000, 600);
           while (Length(Answer) = 0) and (GetTickCount64 < Dl) and not Stopped do
           begin
             Sleep(300);
-            Answer := AIn.Client.GotoDefinition(Cd.F, Cd.L, Cd.C);
+            Answer := IncCtx.Definition(Cd.F, Cd.L, Cd.C);
           end;
         except
           Answer := nil;
         end;
-        if Length(Answer) = 0 then
+        if (Length(Answer) = 0) and IsIncludeFile(Cd.F) then
+          AddFinding(sfUnverified, Cd.F, Cd.L, Cd.C, Cd.T,
+            'DelphiLSP gives no answer inside this include file - counted as a use')
+        else if Length(Answer) = 0 then
           AddFinding(sfUnverified, Cd.F, Cd.L, Cd.C, Cd.T,
             'DelphiLSP gives no answer here - an inactive {$IFDEF} branch looks like this')
         else
@@ -552,6 +570,7 @@ begin
     Res.Ok := True;
     Result := Res;
   finally
+    IncCtx.Free;   // sends the original text of expanded units again
     Src.Free;
   end;
 end;

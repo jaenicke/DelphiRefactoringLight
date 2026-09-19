@@ -20,6 +20,9 @@ type
     Col: Integer;      // 0-based
     Length: Integer;   // Length of the identifier
     Preview: string;   // Line containing the match
+    /// <summary>'' = verified; otherwise why it could not be verified (the
+    ///  hit is shown anyway - hiding it would look like "no reference").</summary>
+    Note: string;
   end;
 
   TFindReferenceItems = TArray<TFindReferenceItem>;
@@ -182,6 +185,10 @@ begin
   Col := FListView.Columns.Add;
   Col.Caption := 'Preview';
   Col.Width := 420;
+
+  Col := FListView.Columns.Add;
+  Col.Caption := 'Note';
+  Col.Width := 200;
 end;
 
 function TFindReferencesDialog.CommonPathPrefix(
@@ -229,6 +236,7 @@ begin
       LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
       LI.SubItems.Add(IntToStr(AItems[I].Col + 1));
       LI.SubItems.Add(AItems[I].Preview);
+      LI.SubItems.Add(AItems[I].Note);
     end;
     if FListView.Items.Count > 0 then
     begin

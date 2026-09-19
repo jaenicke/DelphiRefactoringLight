@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.2.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.2.2** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -48,6 +48,8 @@ In the last three weeks I tested with big projects and used it myself in real li
 - **Name conflict check**: when the new name already exists &mdash; in code of the files the rename touches, as a member of the owner class, or declared in a unit the declaring file uses &mdash; the status line says so and the details tab lists the places. Such a rename can compile and still change what a name refers to; it is reported, not refused.
 - Optional backup (on by default): before anything is written, every affected file (the editor buffer for open files, unsaved changes included) is copied to `%LOCALAPPDATA%\DelphiRefactoringLight\backup\<timestamp>\`, full path mirrored; the result message names the folder.
 - Applies the changes byte-precisely via `IOTAEditWriter` and reloads modified modules in the IDE.
+- Refuses at once when the identifier is a reserved word or its declaration lies in the RAD Studio installation (RTL/VCL) &mdash; such names occur thousands of times, and verifying each one would keep the IDE busy for minutes.
+- **Include files** (`{$I file}` / `{$INCLUDE file}`): the scans of rename, find references, find unit references and safe delete also cover the files the project's units include. DelphiLSP cannot analyse an include file on its own, so a position inside one is verified through the **including unit**: that unit is sent to DelphiLSP with the include expanded in place (exactly what the compiler sees), and afterwards its original text is sent again. An occurrence DelphiLSP still cannot resolve is listed as *UNVERIFIED* and not renamed (safe delete counts it as a use). Starting a refactoring *inside* an include file is not reliably supported: the same file can be included in different places with a different context.
 
 ### Find References (`Ctrl+Alt+Shift+U`)
 - Reads the identifier under the cursor.
@@ -461,6 +463,7 @@ DelphiRefactoringLight/
 |   |-- Expert.ExtractMethod.pas             # Extract-method logic
 |   |-- Expert.ExtractMethodDialog.pas       # Progress / preview dialog
 |   |-- Expert.PascalScanner.pas             # The shared Pascal lexer + identifier / comment / string helpers
+|   |-- Expert.IncludeExpansion.pas          # {$I} expansion with a position map; DelphiLSP inside include files
 |   |-- Expert.SelectionValidator.pas        # Extract Method: selection validation
 |   |-- Expert.FindReferencesWizard.pas      # Find-references logic
 |   |-- Expert.FindReferencesDialog.pas      # Results dialog with list view

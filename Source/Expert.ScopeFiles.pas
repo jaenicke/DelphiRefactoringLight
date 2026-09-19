@@ -26,8 +26,16 @@ unit Expert.ScopeFiles;
 //     the search/browsing path. Units below the RAD Studio installation
 //     are never included: nobody renames inside the shipped RTL/VCL, and
 //     scanning it would dwarf every project.
+//  4. always: the files those units pull in via {$I file} / {$INCLUDE file}.
+//     Several units are only "unit X; {$I X.inc}" - without this the scans
+//     never saw their code (find references missed uses there, and a rename
+//     would have left them unchanged). The scans verify positions inside an
+//     include through Expert.IncludeExpansion.TLspIncludeContext.
 
 interface
+
+uses
+  Expert.IncludeExpansion;
 
 type
   TScopeExtra = record
@@ -35,6 +43,7 @@ type
     UsedUnits: Integer;    // added via uses clauses
     CaretFile: Boolean;    // the caret's file was not in the project
     Truncated: Boolean;    // uses walk hit MaxScopeFiles
+    IncludeFiles: Integer; // added because a scanned unit includes them
   end;
 
 const
@@ -54,6 +63,10 @@ function ProjectScopeFiles(const ACaretFile: string): TArray<string>; overload;
 ///  17 unit(s) via uses" - for status lines and diagnostics logs.
 ///  ATotal is the length of the returned file list.</summary>
 function ScopeExtraText(ATotal: Integer; const AExtra: TScopeExtra): string;
+
+/// <summary>Reader for Expert.IncludeExpansion: the editor buffer when the
+///  file is open, else disk. MAIN THREAD only (ToolsAPI).</summary>
+function EditorOrDiskReader: TIncludeReader;
 
 implementation
 
@@ -101,6 +114,20 @@ var
     Seen.Add(Key, True);
     List.Add(AFile);
     Result := True;
+  end;
+
+  // an include file keeps whatever extension it has (.inc, .pas, .txt ...)
+  function AddInclude(const AFile: string): Boolean;
+  var
+    Key: string;
+  begin
+    Key := UpperCase(ExpandFileName(AFile));
+    Result := not Seen.ContainsKey(Key);
+    if Result then
+    begin
+      Seen.Add(Key, True);
+      List.Add(AFile);
+    end;
   end;
 
   function BelowBds(const AFile: string): Boolean;
@@ -168,6 +195,31 @@ begin
       end;
     end;
 
+    // 4. Include files of everything collected so far (nested ones too).
+    if BdsRoot = '' then
+    begin
+      BdsRoot := FindBdsRoot;
+      if BdsRoot <> '' then
+        BdsRoot := UpperCase(IncludeTrailingPathDelimiter(ExpandFileName(BdsRoot)));
+    end;
+    var Units := List.ToArray;
+    for var F in Units do
+    begin
+      if List.Count >= MaxScopeFiles then
+      begin
+        AExtra.Truncated := True;
+        Break;
+      end;
+      if not ReadContent(F, Content) then Continue;
+      for var IncF in CollectIncludeFiles(F, Content,
+        function(const APath: string; out AContent: string): Boolean
+        begin
+          Result := ReadContent(APath, AContent);
+        end) do
+        if not BelowBds(IncF) and AddInclude(IncF) then
+          Inc(AExtra.IncludeFiles);
+    end;
+
     Result := List.ToArray;
   finally
     List.Free;
@@ -183,15 +235,26 @@ begin
     TPluginSettings.ScopeIncludeUsedUnits, Extra);
 end;
 
+function EditorOrDiskReader: TIncludeReader;
+begin
+  Result :=
+    function(const APath: string; out AContent: string): Boolean
+    begin
+      Result := ReadContent(APath, AContent);
+    end;
+end;
+
 function ScopeExtraText(ATotal: Integer; const AExtra: TScopeExtra): string;
 begin
   Result := Format('%d project file(s)', [ATotal - AExtra.OpenUnits -
-    AExtra.UsedUnits - Ord(AExtra.CaretFile)]);
+    AExtra.UsedUnits - AExtra.IncludeFiles - Ord(AExtra.CaretFile)]);
   if AExtra.CaretFile then Result := Result + ' + the current unit';
   if AExtra.OpenUnits > 0 then
     Result := Result + Format(' + %d open unit(s)', [AExtra.OpenUnits]);
   if AExtra.UsedUnits > 0 then
     Result := Result + Format(' + %d unit(s) via uses', [AExtra.UsedUnits]);
+  if AExtra.IncludeFiles > 0 then
+    Result := Result + Format(' + %d include file(s)', [AExtra.IncludeFiles]);
   if AExtra.Truncated then
     Result := Result + Format(' (uses walk stopped at %d files)', [MaxScopeFiles]);
 end;

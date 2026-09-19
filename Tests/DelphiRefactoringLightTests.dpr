@@ -41,6 +41,7 @@ uses
   Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',
   Expert.SafeDeletePlan in '..\Source\Expert.SafeDeletePlan.pas',
   Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',
+  Expert.IncludeExpansion in '..\Source\Expert.IncludeExpansion.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas';
 

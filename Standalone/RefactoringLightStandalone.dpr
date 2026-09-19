@@ -56,6 +56,7 @@ uses
   Expert.RestartHint in '..\Source\Expert.RestartHint.pas',
   Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
   Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',
+  Expert.IncludeExpansion in '..\Source\Expert.IncludeExpansion.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.SignatureCheckDialog in '..\Source\Expert.SignatureCheckDialog.pas',
   Expert.UnitReferencesDialog in '..\Source\Expert.UnitReferencesDialog.pas',

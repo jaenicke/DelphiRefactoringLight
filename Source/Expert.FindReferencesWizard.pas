@@ -12,7 +12,8 @@ interface
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
-  Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles, Expert.UnitIndex;
+  Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles, Expert.UnitIndex,
+  Expert.IncludeExpansion;
 
 type
   TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -27,7 +28,7 @@ type
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
       const ATargets: TLspSymbolTargets;
-      AClient: TLspClient): TFindReferenceItems;
+      AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
     function ConvertLspLocations(const ALocations: TArray<TLspLocation>; const AOldName: string): TFindReferenceItems;
 
     procedure SearchAndShow;
@@ -238,30 +239,47 @@ begin
     Exit;
   end;
 
-  // Resolve the declaration (for verification comparison)
-  FDialog.SetStatus('Finding declaration...');
-  var DefLocs := Client.GotoDefinition(FContext.FileName, LspLine, LspCol);
-  // The symbol = its declaration + implementation (see TLspSymbolTargets).
-  var Targets: TLspSymbolTargets;
-  if Length(DefLocs) > 0 then
-  begin
-    DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri);
-    Targets.AddWithPartner(Client, DefFilePath, DefLocs[0].Range.Start.Line,
-      DefLocs[0].Range.Start.Character);
-  end
-  else
-  begin
-    // null AT a declaration: the caret is the symbol
-    DefFilePath := FContext.FileName;
-    Targets.AddWithPartner(Client, FContext.FileName, LspLine, LspCol);
+  // Positions inside {$I} include files are answered through the INCLUDING
+  // unit, sent to DelphiLSP with the include expanded (Expert.IncludeExpansion);
+  // freeing the context sends the original text again.
+  var IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
+  try
+    IncCtx.RegisterFiles(ProjFiles);
+
+    // Resolve the declaration (for verification comparison)
+    FDialog.SetStatus('Finding declaration...');
+    var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
+    // The symbol = its declaration + implementation (see TLspSymbolTargets).
+    var Targets: TLspSymbolTargets;
+    if Length(DefLocs) > 0 then
+    begin
+      DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri);
+      IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLocs[0].Range.Start.Line,
+        DefLocs[0].Range.Start.Character);
+    end
+    else
+    begin
+      // null AT a declaration: the caret is the symbol
+      DefFilePath := FContext.FileName;
+      IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
+    end;
+
+    // Verify each candidate via GotoDefinition
+    Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Client, IncCtx);
+  finally
+    IncCtx.Free;
   end;
 
-  // Verify each candidate via GotoDefinition
-  Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Client);
-
+  var Unverified := 0;
+  for var It in Items do
+    if It.Note <> '' then Inc(Unverified);
   FDialog.SetItems(Items);
-  FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.',
-    [Length(Items), Length(TextCandidates)]));
+  if Unverified > 0 then
+    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
+      '(see the Note column).', [Length(Items) - Unverified, Length(TextCandidates), Unverified]))
+  else
+    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.',
+      [Length(Items), Length(TextCandidates)]));
 end;
 
 function TLspFindReferencesWizard.ConvertLspLocations(const ALocations: TArray<TLspLocation>;
@@ -379,7 +397,7 @@ end;
 
 function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
   const ATargets: TLspSymbolTargets;
-  AClient: TLspClient): TFindReferenceItems;
+  AClient: TLspClient; AIncludes: TLspIncludeContext): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
   LastOpenedFile: string;
@@ -402,16 +420,23 @@ begin
         Application.ProcessMessages;
       end;
 
+      // an include file (or a unit currently sent expanded) is served by
+      // the include context - sending it here would undo that
       if not SameText(C.FilePath, LastOpenedFile) then
       begin
-        AClient.RefreshDocument(C.FilePath);
-        Sleep(300);
+        if not AIncludes.OwnsDocument(C.FilePath) then
+        begin
+          AClient.RefreshDocument(C.FilePath);
+          Sleep(300);
+        end;
         LastOpenedFile := C.FilePath;
       end;
 
       var Matches := False;
+      var NoAnswer := False;
       try
-        var Defs := AClient.GotoDefinition(C.FilePath, C.Line, C.Col);
+        var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+        NoAnswer := System.Length(Defs) = 0;
 
         // The candidate IS one of the symbol's positions (declaration /
         // implementation - DelphiLSP answers those with null or with the
@@ -428,7 +453,14 @@ begin
       end;
 
       if Matches then
+        Verified.Add(C)
+      else if NoAnswer and IsIncludeFile(C.FilePath) then
+      begin
+        // never drop a hit in an include file silently: DelphiLSP could not
+        // tell (the including unit may not compile on its own)
+        C.Note := 'UNVERIFIED - no answer inside this include file';
         Verified.Add(C);
+      end;
     end;
 
     FDialog.SetProgress(System.Length(ACandidates), System.Length(ACandidates));

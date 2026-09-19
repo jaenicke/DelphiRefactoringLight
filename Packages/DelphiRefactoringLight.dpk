@@ -58,6 +58,7 @@ contains
   Expert.ExtractMethodDialog in '..\Source\Expert.ExtractMethodDialog.pas',
   Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
   Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',
+  Expert.IncludeExpansion in '..\Source\Expert.IncludeExpansion.pas',
   Expert.RestartHint in '..\Source\Expert.RestartHint.pas',
   Expert.FindReferencesDialog in '..\Source\Expert.FindReferencesDialog.pas',
   Expert.FindReferencesWizard in '..\Source\Expert.FindReferencesWizard.pas',

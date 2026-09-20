@@ -98,6 +98,18 @@ type
     [Test] procedure Start_ReportsThePipeItReallyCreated;
   end;
 
+  /// <summary>The uses-graph SCC pass used to recurse once per unit along
+  ///  the chain, so a deep enough graph overflowed the stack - and a stack
+  ///  overflow inside a design-time BPL takes the IDE with it rather than
+  ///  failing the analysis. Measured on the recursive version through this
+  ///  same seam: 6,000 units passed, 7,000 raised EStackOverflow.</summary>
+  [TestFixture]
+  TUsesGraphDepthTests = class
+  public
+    [Test] procedure DeepCycle_DoesNotOverflowTheStack;
+    [Test] procedure Components_AreStillCorrectOnASmallGraph;
+  end;
+
 implementation
 
 uses
@@ -105,7 +117,7 @@ uses
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
-  Winapi.Windows, Mcp.PipeServer;
+  Winapi.Windows, Mcp.PipeServer, Expert.UsesGraph;
 
 const
   NL = sLineBreak;
@@ -502,6 +514,71 @@ begin
   end;
 end;
 
+{ TUsesGraphDepthTests }
+
+// A ring of AUnits units - U0 uses U1 ... U(n-1) uses U0 - built entirely
+// through Analyze's own AReader seam, so the test touches no disk and no
+// IDE. One ring is ONE strongly connected component, which is the worst
+// case for the SCC pass: it must reach the whole chain before it can close
+// a single component.
+function RingResult(AUnits: Integer): TUsesCycleResult;
+var
+  Files: TArray<string>;
+begin
+  SetLength(Files, AUnits);
+  for var I := 0 to AUnits - 1 do
+    Files[I] := 'C:\ring\U' + IntToStr(I) + '.pas';
+  Result := TUsesGraphAnalyzer.Analyze(Files, nil,
+    function(APath: string): string
+    var
+      Idx: Integer;
+    begin
+      Idx := StrToIntDef(ChangeFileExt(ExtractFileName(APath), '').Substring(1), -1);
+      if Idx < 0 then Exit('');
+      Result := 'unit U' + IntToStr(Idx) + ';'#13#10 +
+                'interface'#13#10 +
+                'uses U' + IntToStr((Idx + 1) mod AUnits) + ';'#13#10 +
+                'implementation'#13#10 +
+                'end.';
+    end);
+end;
+
+procedure TUsesGraphDepthTests.DeepCycle_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+begin
+  // 20,000 is roughly three times the depth at which the recursive version
+  // died. That margin IS the test, so do not lower it casually: anything at
+  // or under ~6,000 passes either way and proves nothing.
+  Res := RingResult(20000);
+  try
+    Assert.AreEqual<Integer>(20000, Length(Res.UnitNames), 'every unit is in the graph');
+    Assert.AreEqual<Integer>(20000, Length(Res.Edges), 'a ring of N units has N cycle edges');
+    Assert.AreEqual<Integer>(1, Length(Res.GroupInfos), 'the ring is a single component');
+    Assert.AreEqual<Integer>(20000, Res.GroupInfos[0].UnitCount, 'and it spans every unit');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.Components_AreStillCorrectOnASmallGraph;
+var
+  Res: TUsesCycleResult;
+begin
+  // The companion to the depth test: the rewrite must still compute the
+  // SAME partition. A 5-unit ring is small enough to check by hand - one
+  // group, five units, five edges, girth five.
+  Res := RingResult(5);
+  try
+    Assert.AreEqual<Integer>(1, Length(Res.GroupInfos), 'one group');
+    Assert.AreEqual<Integer>(5, Res.GroupInfos[0].UnitCount, 'five units in it');
+    Assert.AreEqual<Integer>(5, Res.GroupInfos[0].ShortestCycle, 'the girth of a 5-ring is 5');
+    Assert.AreEqual<Integer>(5, Length(Res.Edges), 'five cycle edges');
+  finally
+    Res.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -511,5 +588,6 @@ initialization
   TDUnitX.RegisterTestFixture(TMiscRegressionTests);
   TDUnitX.RegisterTestFixture(TVersionTests);
   TDUnitX.RegisterTestFixture(TMcpPipeRegressionTests);
+  TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
 
 end.

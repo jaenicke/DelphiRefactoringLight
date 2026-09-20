@@ -1103,33 +1103,88 @@ var
   Counter, CompCount: Integer;
   CompSize: TArray<Integer>;
 
-  procedure StrongConnect(V: Integer);
-  var
-    W: Integer;
-  begin
-    Index[V] := Counter;
-    Lowlink[V] := Counter;
-    Inc(Counter);
-    Stack.Push(V);
-    OnStack[V] := True;
-    for W in Adj[V] do
-    begin
-      if Index[W] < 0 then
-      begin
-        StrongConnect(W);
-        if Lowlink[W] < Lowlink[V] then Lowlink[V] := Lowlink[W];
-      end
-      else if OnStack[W] then
-        if Index[W] < Lowlink[V] then Lowlink[V] := Index[W];
+  // ITERATIVE Tarjan, with the search stack on the HEAP.
+  //
+  // The recursive form nested one call frame per unit along the uses
+  // chain, so a deep enough graph overflowed the stack - and a stack
+  // overflow inside a design-time BPL is not something the IDE survives:
+  // the guard page is already gone by the time anything could handle it,
+  // so bds.exe dies with every unsaved project in it, instead of this
+  // analysis simply failing. Measured before this change, with a
+  // synthetic single-cycle chain fed through Analyze's AReader seam:
+  // 6,000 units completed, 7,000 raised EStackOverflow on a default 1 MB
+  // stack. The IDE has less headroom than that probe did, not more.
+  //
+  // The transformation is the textbook one: a frame remembers WHICH
+  // adjacency index it had reached, so the edge loop can resume after a
+  // child is pushed. Every other step - discovery numbering, the
+  // on-stack test, the lowlink propagation and the component pop -
+  // happens at exactly the point it did before, so the components come
+  // out identical, in the same order.
+  procedure StrongConnect(ARoot: Integer);
+  type
+    TFrame = record
+      V: Integer;      // the node being expanded
+      Edge: Integer;   // next index into Adj[V] still to visit
     end;
-    if Lowlink[V] = Index[V] then
+  var
+    Frames: TArray<TFrame>;
+    Top, V, W, Parent: Integer;
+  begin
+    SetLength(Frames, 64);
+    Top := 0;
+    Frames[0].V := ARoot;
+    Frames[0].Edge := 0;
+    Index[ARoot] := Counter;
+    Lowlink[ARoot] := Counter;
+    Inc(Counter);
+    Stack.Push(ARoot);
+    OnStack[ARoot] := True;
+
+    while Top >= 0 do
     begin
-      repeat
-        W := Stack.Pop;
-        OnStack[W] := False;
-        Comp[W] := CompCount;
-      until W = V;
-      Inc(CompCount);
+      V := Frames[Top].V;
+      if Frames[Top].Edge < Adj[V].Count then
+      begin
+        W := Adj[V][Frames[Top].Edge];
+        Inc(Frames[Top].Edge);
+        if Index[W] < 0 then
+        begin
+          // was: StrongConnect(W)
+          Index[W] := Counter;
+          Lowlink[W] := Counter;
+          Inc(Counter);
+          Stack.Push(W);
+          OnStack[W] := True;
+          Inc(Top);
+          if Top = Length(Frames) then
+            SetLength(Frames, Top * 2);
+          Frames[Top].V := W;
+          Frames[Top].Edge := 0;
+        end
+        else if OnStack[W] then
+          if Index[W] < Lowlink[V] then Lowlink[V] := Index[W];
+      end
+      else
+      begin
+        // V's edges are exhausted - this is the tail of the recursive body
+        if Lowlink[V] = Index[V] then
+        begin
+          repeat
+            W := Stack.Pop;
+            OnStack[W] := False;
+            Comp[W] := CompCount;
+          until W = V;
+          Inc(CompCount);
+        end;
+        // ...and this is the caller's line after StrongConnect(W) returned
+        Dec(Top);
+        if Top >= 0 then
+        begin
+          Parent := Frames[Top].V;
+          if Lowlink[V] < Lowlink[Parent] then Lowlink[Parent] := Lowlink[V];
+        end;
+      end;
     end;
   end;
 

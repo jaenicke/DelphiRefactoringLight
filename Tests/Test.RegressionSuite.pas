@@ -108,6 +108,9 @@ type
   public
     [Test] procedure DeepCycle_DoesNotOverflowTheStack;
     [Test] procedure Components_AreStillCorrectOnASmallGraph;
+    [Test] procedure DeepEnumerateCycles_DoesNotOverflowTheStack;
+    [Test] procedure DeepEnumerateCyclesThrough_DoesNotOverflowTheStack;
+    [Test] procedure DeepEdgeLevers_DoesNotOverflowTheStack;
   end;
 
 implementation
@@ -574,6 +577,62 @@ begin
     Assert.AreEqual<Integer>(5, Res.GroupInfos[0].UnitCount, 'five units in it');
     Assert.AreEqual<Integer>(5, Res.GroupInfos[0].ShortestCycle, 'the girth of a 5-ring is 5');
     Assert.AreEqual<Integer>(5, Length(Res.Edges), 'five cycle edges');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEnumerateCycles_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+  Trunc: Boolean;
+begin
+  // The cycle enumerator recurses once per unit ON THE CURRENT PATH, and on
+  // a ring the path is the whole ring. Its ceiling was LOWER than the SCC
+  // pass's - it overflowed at 6,000 where StrongConnect reached 7,000 -
+  // because the frame carries more locals. 12,000 is past both.
+  Res := RingResult(12000);
+  try
+    var Cycles := Res.EnumerateCycles(10, Trunc, 0);
+    Assert.AreEqual<Integer>(1, Length(Cycles), 'a ring has exactly one simple cycle');
+    Assert.AreEqual<Integer>(12000, Length(Cycles[0].Units), 'and it spans every unit');
+    Assert.IsFalse(Trunc, 'well under the count cap, so nothing was truncated');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEnumerateCyclesThrough_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+  Trunc: Boolean;
+begin
+  // Same walk, rooted at one unit - the Path tab of the results dialog.
+  Res := RingResult(12000);
+  try
+    var Cycles := Res.EnumerateCyclesThrough('U0', 10, Trunc, 0);
+    Assert.AreEqual<Integer>(1, Length(Cycles), 'one cycle through U0');
+    Assert.AreEqual<Integer>(12000, Length(Cycles[0].Units), 'spanning every unit');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEdgeLevers_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+begin
+  // EdgeLevers runs CountCycleNodes once per unique dependency, so this is
+  // N+1 full SCC passes - the slowest test here by far, and the reason the
+  // ring is 11,000 rather than larger. The recursive form of that pass
+  // reached 8,000 and died at 10,000.
+  Res := RingResult(11000);
+  try
+    var Levers := Res.EdgeLevers;
+    Assert.AreEqual<Integer>(11000, Length(Levers), 'one lever per edge of the ring');
+    // Removing any single edge of a ring breaks the whole cycle, so every
+    // unit leaves the cyclic set - the same answer for every lever.
+    Assert.AreEqual<Integer>(11000, Levers[0].UnitsFreed, 'cutting one edge frees the whole ring');
   finally
     Res.Free;
   end;

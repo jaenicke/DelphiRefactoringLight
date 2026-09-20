@@ -34,6 +34,9 @@ type
     FContext: TEditorContext;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
     procedure SearchAndShow;
+    /// <summary>The user closed the result window, or the IDE is shutting
+    ///  down - the scan runs on the MAIN thread and must stop.</summary>
+    function Aborted: Boolean;
   public
     {$IFNDEF STANDALONE_BUILD}
 
@@ -112,6 +115,7 @@ begin
       Application.ProcessMessages;
       SearchAndShow;
     except
+      on EAbort do ;          // window closed during the scan - nothing to report
       on E: Exception do
         if FDialog <> nil then
           FDialog.SetStatus('Error: ' + E.Message);
@@ -129,6 +133,11 @@ end;
 procedure TLspFindImplementationsWizard.DoGotoLocation(AItem: TFindReferenceItem);
 begin
   Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+end;
+
+function TLspFindImplementationsWizard.Aborted: Boolean;
+begin
+  Result := (FDialog = nil) or FDialog.CloseRequested or Application.Terminated;
 end;
 
 procedure TLspFindImplementationsWizard.SearchAndShow;
@@ -181,6 +190,7 @@ begin
       begin
         for var Retry := 1 to 30 do
         begin
+          if Aborted then Abort;
           FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
           Application.ProcessMessages;
           try
@@ -225,7 +235,8 @@ begin
       ProjFiles, FContext.WordAtCursor,
       procedure(ACurrent, ATotal: Integer)
       begin
-        FDialog.SetProgress(ACurrent, ATotal);
+        if Aborted then Abort;
+      FDialog.SetProgress(ACurrent, ATotal);
         if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
         begin
           FDialog.SetStatus(Format('Scanning project (%d/%d)...',
@@ -256,6 +267,7 @@ begin
   Items := TImplementationFinder.FindByProjectScan(ProjFiles, FContext.WordAtCursor, OwnerType,
     procedure(ACurrent, ATotal: Integer)
     begin
+      if Aborted then Abort;
       FDialog.SetProgress(ACurrent, ATotal);
       if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
       begin
@@ -293,7 +305,8 @@ begin
       ProjFiles, FContext.WordAtCursor,
       procedure(ACurrent, ATotal: Integer)
       begin
-        FDialog.SetProgress(ACurrent, ATotal);
+        if Aborted then Abort;
+      FDialog.SetProgress(ACurrent, ATotal);
         if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
         begin
           FDialog.SetStatus(Format('Scanning for property accessors (%d/%d)...',

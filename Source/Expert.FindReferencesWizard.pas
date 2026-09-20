@@ -33,6 +33,11 @@ type
       AClient: TLspClient; AIncludes: TLspIncludeContext;
       AGraph: TTypeGraph; const AOwnerType: string): TFindReferenceItems;
     function ConvertLspLocations(const ALocations: TArray<TLspLocation>; const AOldName: string): TFindReferenceItems;
+    /// <summary>The search must stop: the user closed the window, or the
+    ///  IDE is shutting down. The scan runs on the MAIN thread, so one
+    ///  that nobody watches any more keeps the IDE busy and blocks its
+    ///  shutdown (tester, 2026-09-20).</summary>
+    function Aborted: Boolean;
 
     procedure SearchAndShow;
   public
@@ -147,6 +152,11 @@ begin
   end;
 end;
 
+function TLspFindReferencesWizard.Aborted: Boolean;
+begin
+  Result := (FDialog = nil) or FDialog.CloseRequested or Application.Terminated;
+end;
+
 procedure TLspFindReferencesWizard.DoGotoLocation(AItem: TFindReferenceItem);
 begin
   // Static-style: uses only the item's own location data. Safe to be
@@ -201,13 +211,15 @@ begin
       Client.WaitFileAnalysed(FContext.FileName, StartBefore, 30000,
         function: Boolean
         begin
-          FDialog.SetStatus('Waiting for DelphiLSP to analyse ' +
-            ExtractFileName(FContext.FileName) + '...');
+          if not Aborted then
+            FDialog.SetStatus('Waiting for DelphiLSP to analyse ' +
+              ExtractFileName(FContext.FileName) + '...');
           Application.ProcessMessages;
-          Result := True;
+          Result := not Aborted;
         end);
   end;
 
+  if Aborted then Exit;
   LspLine := FContext.Line - 1;
   LspCol := FContext.Column - 1;
 
@@ -216,6 +228,7 @@ begin
   begin
     for var Retry := 1 to 30 do
     begin
+      if Aborted then Exit;
       FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
       try
@@ -228,6 +241,7 @@ begin
     end;
   end;
 
+  if Aborted then Exit;
   // Strategy 1: try textDocument/references directly
   if Client.SupportsReferences then
   begin
@@ -262,6 +276,7 @@ begin
   ProjFiles := ProjectScopeFiles(FContext.FileName);
 
   var TextCandidates := FindCandidatesByText(FContext.WordAtCursor, ProjFiles);
+  if Aborted then Exit;
 
   if Length(TextCandidates) = 0 then
   begin
@@ -317,6 +332,9 @@ begin
         // Verify each candidate via GotoDefinition
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
           Client, IncCtx, Graph, Owner);
+        // the window is gone: stop here, but let the finally blocks below
+        // restore the include documents and free the graph
+        if Aborted then Exit;
       finally
         Graph.Free;
       end;
@@ -433,6 +451,7 @@ begin
       begin
         FDialog.SetProgress(FileIdx + 1, System.Length(AFiles));
         Application.ProcessMessages;
+        if Aborted then Break;
       end;
 
       try
@@ -512,6 +531,7 @@ begin
     for I := 0 to High(ACandidates) do
     begin
       C := ACandidates[I];
+      if Aborted then Break;
       FDialog.SetProgress(I + 1, System.Length(ACandidates));
       if (I mod 3 = 0) then
       begin
@@ -560,9 +580,10 @@ begin
             AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
               function: Boolean
               begin
-                FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                if not Aborted then
+                  FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
                 Application.ProcessMessages;
-                Result := True;
+                Result := not Aborted;   // a closed window waits for nothing
               end);
           end;
         end;
@@ -577,7 +598,7 @@ begin
            not ALinked.Contains(C.FilePath, C.Line) then
         begin
           var Dl := GetTickCount64 + UInt64(IfThen(FirstInFile, 3000, 600));
-          while (System.Length(Defs) = 0) and (GetTickCount64 < Dl) do
+          while (System.Length(Defs) = 0) and (GetTickCount64 < Dl) and not Aborted do
           begin
             Sleep(150);
             Application.ProcessMessages;

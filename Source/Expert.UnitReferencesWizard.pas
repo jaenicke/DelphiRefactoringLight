@@ -691,6 +691,8 @@ begin
   begin
     for var Retry := 1 to 30 do
     begin
+      // the window may be gone by now - the scan runs on the main thread
+      if (FDialog = nil) or FDialog.CloseRequested or Application.Terminated then Exit;
       FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
       var ProbeOk := False;

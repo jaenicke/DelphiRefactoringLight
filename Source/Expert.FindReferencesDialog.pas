@@ -84,6 +84,12 @@ type
     ///  closing the dialog actually frees it.</summary>
     procedure SetClosable;
 
+    /// <summary>The user closed the window while the search was still
+    ///  running. The search MUST poll this and stop - it runs on the main
+    ///  thread, so a scan nobody watches any more keeps the IDE busy and
+    ///  even blocks shutting it down (tester, 2026-09-20).</summary>
+    property CloseRequested: Boolean read FCloseRequested;
+
     property OnGotoLocation: TProc<TFindReferenceItem> read FOnGotoLocation write FOnGotoLocation;
     /// <summary>Fired right before the dialog is destroyed.</summary>
     property OnDialogClose: TNotifyEvent read FOnDialogClose write FOnDialogClose;

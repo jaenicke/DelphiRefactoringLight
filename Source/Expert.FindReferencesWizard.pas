@@ -207,7 +207,13 @@ begin
   // analysis and every query before it is done answers null
   begin
     var StartBefore := Client.GetFileDiagnosticsVersion(FContext.FileName);
-    if Client.SyncDocument(FContext.FileName) and WasRunning then
+    // Wait also when the file did NOT have to be sent: right after the IDE
+    // started, our session has the file but has not analysed anything yet -
+    // every GotoDefinition then answers null and the whole result comes out
+    // UNVERIFIED, which is what the tester saw on the first run ("LSP ready
+    // (server did not publish diagnostics)" in the caption, correct rows on
+    // the second run).
+    if (Client.SyncDocument(FContext.FileName) or (StartBefore = 0)) and WasRunning then
       Client.WaitFileAnalysed(FContext.FileName, StartBefore, 30000,
         function: Boolean
         begin
@@ -373,14 +379,19 @@ begin
   FDialog.SetItems(Items);
   // how many candidates never needed a DelphiLSP request (their qualifier's
   // declared type already said they belong to another type)
+  var NotAnalysed := '';
+  if (Unverified > 0) and (Client.GetDiagnosticsCount = 0) then
+    NotAnalysed := ' DelphiLSP has not analysed this project yet (it published ' +
+      'no diagnostics at all) - that is why they are unverified; running the ' +
+      'search again in a moment should verify them.';
   var FromSource := '';
   if FPreSkipped > 0 then
     FromSource := Format(' %d were decided from the sources without asking ' +
       'DelphiLSP.', [FPreSkipped]);
   if Unverified > 0 then
     FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
-      '(see the Note column).%s', [Length(Items) - Unverified, Length(TextCandidates),
-      Unverified, FromSource]))
+      '(see the Note column).%s%s', [Length(Items) - Unverified, Length(TextCandidates),
+      Unverified, FromSource, NotAnalysed]))
   else
     FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.%s',
       [Length(Items), Length(TextCandidates), FromSource]));

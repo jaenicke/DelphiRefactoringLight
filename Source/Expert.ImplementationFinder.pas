@@ -125,7 +125,8 @@ type
 implementation
 
 uses
-  System.Classes, System.Generics.Collections, System.StrUtils, Winapi.Windows, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
+  System.Classes, System.Generics.Collections, System.StrUtils, Winapi.Windows, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding,
+  Expert.UnitIndex;
 
 { File-private helpers for parsing Pascal class/interface headers
   and class-method implementation lines. Grouped into a class to keep
@@ -357,51 +358,10 @@ end;
 
 class function TImplementationFinder.OwnerTypeFromImplLine(
   const ALine: string): string;
-var
-  L, U, Rest, Name: string;
-  P, I, Depth: Integer;
-  Parts: TArray<string>;
 begin
-  Result := '';
-  L := Trim(ALine);
-  P := Pos('//', L);
-  if P > 0 then L := TrimRight(Copy(L, 1, P - 1));
-  if L = '' then Exit;
-  U := UpperCase(L);
-  if StartsStr('CLASS ', U) then
-  begin
-    L := TrimLeft(Copy(L, Length('CLASS ') + 1, MaxInt));
-    U := UpperCase(L);
-  end;
-  if not (StartsStr('PROCEDURE ', U) or StartsStr('FUNCTION ', U)
-    or StartsStr('CONSTRUCTOR ', U) or StartsStr('DESTRUCTOR ', U)
-    or StartsStr('OPERATOR ', U)) then Exit;
-
-  P := Pos(' ', L);
-  Rest := TrimLeft(Copy(L, P + 1, MaxInt));
-
-  // Qualified name up to '(' / ':' / ';'; generic arguments are skipped
-  // so 'TFoo<T>.Get' still splits at the right dot.
-  Name := '';
-  Depth := 0;
-  I := 1;
-  while I <= Length(Rest) do
-  begin
-    if Rest[I] = '<' then
-      Inc(Depth)
-    else if Rest[I] = '>' then
-      Dec(Depth)
-    else if Depth = 0 then
-    begin
-      if CharInSet(Rest[I], ['(', ':', ';', ' ', #9, '=']) then Break;
-      Name := Name + Rest[I];
-    end;
-    Inc(I);
-  end;
-
-  Parts := Name.Split(['.']);
-  if Length(Parts) >= 2 then
-    Result := Trim(Parts[High(Parts) - 1]);
+  // the parsing lives in Expert.UnitIndex now - the member resolution
+  // needs the same answer for an unqualified use site inside a method
+  Result := OwnerTypeOfImplHeader(ALine);
 end;
 
 class function TImplementationFinder.FindContainingTypeInLines(

@@ -583,6 +583,120 @@ begin
   Result := (ACount >= MinCount) and (ACount <= MaxCount);
 end;
 
+// The ARGUMENT TEXTS of the call after the member name at ACol0, or nil
+// when there is no argument list on this line. "Foo(A, B(C, D))" -> two.
+function CallArgumentTexts(const ALine: string; ACol0: Integer): TArray<string>;
+var
+  I, Depth, Start: Integer;
+begin
+  Result := nil;
+  I := ACol0 + 1;
+  while (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Inc(I);
+  if (I > Length(ALine)) or (ALine[I] <> '(') then Exit;
+  Inc(I);
+  Depth := 1;
+  Start := I;
+  while I <= Length(ALine) do
+  begin
+    var C := ALine[I];
+    if C = #39 then
+    begin
+      Inc(I);
+      while (I <= Length(ALine)) and (ALine[I] <> #39) do Inc(I);
+    end
+    else if CharInSet(C, ['(', '[']) then Inc(Depth)
+    else if CharInSet(C, [')', ']']) then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        if Trim(Copy(ALine, Start, I - Start)) <> '' then
+          Result := Result + [Trim(Copy(ALine, Start, I - Start))];
+        Exit;
+      end;
+    end
+    else if (C = ',') and (Depth = 1) then
+    begin
+      Result := Result + [Trim(Copy(ALine, Start, I - Start))];
+      Start := I + 1;
+    end;
+    Inc(I);
+  end;
+  Result := nil;                       // list not closed on this line
+end;
+
+// The TYPE of one argument, as far as the TEXT can tell: an explicit
+// typecast "TMyListA(X)", a literal, or a plain identifier whose
+// declaration is in this file. '' = unknown, and an unknown argument
+// never disqualifies a candidate.
+function ArgumentTypeName(AGraph: TTypeGraph; const ALines, AMasked: TArray<string>;
+  ALine0: Integer; const AArg: string): string;
+var
+  P: Integer;
+  Head: string;
+  Decl: TTypeDecl;
+begin
+  Result := '';
+  if AArg = '' then Exit;
+  if AArg[1] = #39 then Exit('string');
+  if SameText(AArg, 'True') or SameText(AArg, 'False') then Exit('Boolean');
+  if SameText(AArg, 'nil') then Exit('');          // fits every class type
+  // "TMyListA(AListe)" - a typecast, and the most explicit answer there is
+  P := Pos('(', AArg);
+  if (P > 1) and AArg.EndsWith(')') then
+  begin
+    Head := Trim(Copy(AArg, 1, P - 1));
+    if IsIdentifier(Head) and AGraph.FindType(Head, Decl) then Exit(Head);
+  end;
+  if IsIdentifier(AArg) then
+    Result := DeclaredTypeOfIdentifierIn(ALines, AMasked, ALine0, AArg);
+end;
+
+// Does ADecl's parameter list accept an argument of type ATypeName at
+// position AIndex? Unknown ('') always fits; a DESCENDANT fits its
+// ancestor's parameter type.
+function ParamTypeAccepts(AGraph: TTypeGraph; const ADecl: string;
+  AIndex: Integer; const ATypeName: string): Boolean;
+var
+  Open, Close, Depth, I: Integer;
+begin
+  Result := True;
+  if ATypeName = '' then Exit;
+  Open := 0;
+  Close := 0;
+  Depth := 0;
+  for I := 1 to Length(ADecl) do
+    if ADecl[I] = '(' then
+    begin
+      Inc(Depth);
+      if Depth = 1 then Open := I;
+    end
+    else if ADecl[I] = ')' then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        Close := I;
+        Break;
+      end;
+    end;
+  if (Open = 0) or (Close = 0) then Exit;
+  var Params := ParseParamList(Copy(ADecl, Open + 1, Close - Open - 1));
+  if (AIndex < 0) or (AIndex > High(Params)) then Exit;
+  var Want := StripGenericAndUnit(Trim(Params[AIndex].TypeText));
+  if (Want = '') or SameText(Want, ATypeName) then Exit;
+  // a descendant may be passed where the ancestor is expected
+  var Name := ATypeName;
+  var D: TTypeDecl;
+  for var Step := 0 to 16 do
+  begin
+    if not AGraph.FindType(Name, D) or (Length(D.Parents) = 0) then Break;
+    Name := StripGenericAndUnit(D.Parents[0]);
+    if SameText(Name, Want) then Exit;
+  end;
+  Result := False;
+end;
+
 function ResolveMemberUse(AGraph: TTypeGraph; const AFile, AContent: string;
   ALine0, ACol0: Integer; const AMember: string;
   out ALink: TMemberLink): TMemberUseResult;
@@ -596,20 +710,33 @@ begin
   if (AGraph = nil) or (AContent = '') or (AMember = '') then Exit;
   Lines := SplitContentLinesLocal(AContent);
   if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  var Masked := AGraph.MaskedLines(AFile, AContent);
   Qualifier := QualifierBefore(Lines[ALine0], ACol0);
-  if Qualifier = '' then Exit;     // not a dotted use - nothing to resolve
-
-  // The qualifier is either a TYPE itself ("TMyClass.Create") or an
-  // expression whose declared type we have to look up ("lMyClassA.Init").
-  if AGraph.FindType(Qualifier, Decl) then
-    TypeName := Decl.Name
+  if Qualifier = '' then
+  begin
+    // UNQUALIFIED use ("Init(TMyListA(AListe), ASpur);" inside another
+    // method of the same type): Delphi resolves it against the enclosing
+    // type, so we do too - unless the name is a local variable, which
+    // would shadow the member (tester 2026-09-20, forum #156).
+    var First, Last: Integer;
+    if not FindEnclosingRoutineRangeIn(Lines, ALine0, First, Last) then Exit;
+    if DeclaredTypeOfIdentifierIn(Lines, Masked, ALine0, AMember) <> '' then Exit;
+    TypeName := OwnerTypeOfImplHeader(Lines[First]);
+    if TypeName = '' then Exit;
+  end
   else
-    TypeName := DeclaredTypeOfIdentifierIn(Lines,
-      AGraph.MaskedLines(AFile, AContent), ALine0, Qualifier);
-  // Not declared in this file? Then it is a global of ANOTHER unit
-  // ("WizardInstance.Execute"), which the identifier index can point to.
-  if TypeName = '' then
-    TypeName := AGraph.TypeOfGlobal(Qualifier);
+  begin
+    // The qualifier is either a TYPE itself ("TMyClass.Create") or an
+    // expression whose declared type we have to look up ("lMyClassA.Init").
+    if AGraph.FindType(Qualifier, Decl) then
+      TypeName := Decl.Name
+    else
+      TypeName := DeclaredTypeOfIdentifierIn(Lines, Masked, ALine0, Qualifier);
+    // Not declared in this file? Then it is a global of ANOTHER unit
+    // ("WizardInstance.Execute"), which the identifier index can point to.
+    if TypeName = '' then
+      TypeName := AGraph.TypeOfGlobal(Qualifier);
+  end;
   if TypeName = '' then Exit;
 
   var Links := AGraph.FindMembers(TypeName, AMember);
@@ -632,6 +759,35 @@ begin
     begin
       ALink := Fits[0];
       Exit(murResolved);
+    end;
+    // Same argument COUNT in several overloads - then their TYPES decide,
+    // as far as the text shows them: an explicit typecast
+    // "Init(TMyListA(AListe), ASpur)" names the parameter type outright
+    // (the tester's record with two 2-parameter overloads, 2026-09-20).
+    if Length(Fits) > 1 then
+    begin
+      var Args := CallArgumentTexts(Lines[ALine0], ACol0 + Length(AMember));
+      if Length(Args) > 0 then
+      begin
+        var ByType: TArray<TMemberLink> := nil;
+        for var L in Fits do
+        begin
+          var Ok := True;
+          for var I := 0 to High(Args) do
+            if not ParamTypeAccepts(AGraph, L.Text, I,
+              ArgumentTypeName(AGraph, Lines, Masked, ALine0, Args[I])) then
+            begin
+              Ok := False;
+              Break;
+            end;
+          if Ok then ByType := ByType + [L];
+        end;
+        if Length(ByType) = 1 then
+        begin
+          ALink := ByType[0];
+          Exit(murResolved);
+        end;
+      end;
     end;
   end;
   Result := murAmbiguous;

@@ -291,6 +291,13 @@ function FindMemberDeclarationLine(const AContent, ATypeName,
 function FindMemberDeclarationLines(const AContent, ATypeName,
   AMemberName: string): TArray<Integer>;
 
+/// <summary>The type an IMPLEMENTATION header belongs to:
+///  "class procedure TMyRecord.Init(...)" -&gt; 'TMyRecord', generics and
+///  nested types handled ("TOuter.TInner.Baz" -&gt; 'TInner'). '' when the
+///  line is no implementation header. Lets a use site inside a method be
+///  attributed to its own type, which is what an UNQUALIFIED call needs.</summary>
+function OwnerTypeOfImplHeader(const ALine: string): string;
+
 /// <summary>The TYPE a dotted use site's qualifier has: for
 ///  "lMyClassA.Init" with AName = 'lMyClassA' this answers 'TMyClassA'.
 ///  Looks where the compiler would: the parameters and var/const section
@@ -1470,6 +1477,50 @@ begin
     else if (Depth = 0) and (I > HdrLine) and IsHeader(U) then
       Exit;   // next routine started - the first one had no body
   end;
+end;
+
+function OwnerTypeOfImplHeader(const ALine: string): string;
+var
+  L, U, Rest, Name: string;
+  P, I, Depth: Integer;
+  Parts: TArray<string>;
+begin
+  Result := '';
+  L := StripLineComment(Trim(ALine));
+  if L = '' then Exit;
+  U := UpperCase(L);
+  if U.StartsWith('CLASS ') then
+  begin
+    L := TrimLeft(Copy(L, Length('CLASS ') + 1, MaxInt));
+    U := UpperCase(L);
+  end;
+  if not (U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ')
+    or U.StartsWith('CONSTRUCTOR ') or U.StartsWith('DESTRUCTOR ')
+    or U.StartsWith('OPERATOR ')) then Exit;
+
+  P := Pos(' ', L);
+  Rest := TrimLeft(Copy(L, P + 1, MaxInt));
+
+  // qualified name up to '(' / ':' / ';'; generic arguments are skipped so
+  // 'TFoo<T>.Get' still splits at the right dot
+  Name := '';
+  Depth := 0;
+  I := 1;
+  while I <= Length(Rest) do
+  begin
+    if Rest[I] = '<' then Inc(Depth)
+    else if Rest[I] = '>' then Dec(Depth)
+    else if Depth = 0 then
+    begin
+      if CharInSet(Rest[I], ['(', ':', ';', ' ', #9, '=']) then Break;
+      Name := Name + Rest[I];
+    end;
+    Inc(I);
+  end;
+
+  Parts := Name.Split(['.']);
+  if Length(Parts) >= 2 then
+    Result := Trim(Parts[High(Parts) - 1]);
 end;
 
 function FindEnclosingRoutineRange(const AContent: string; ALine0: Integer;

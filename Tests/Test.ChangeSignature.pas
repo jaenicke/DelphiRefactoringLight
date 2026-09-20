@@ -32,6 +32,7 @@ type
     [Test] procedure BatchFixes_And_SemanticVerdicts;
     [Test] procedure MemberResolution_WithoutLsp;
     [Test] procedure MemberResolution_PrivatePublicOverloadAcrossUnits;
+    [Test] procedure MemberResolution_UnqualifiedOverloadByArgumentType;
   end;
 
 implementation
@@ -636,6 +637,82 @@ begin
   finally
     TFile.Delete(FileA);
     TFile.Delete(FileB);
+  end;
+end;
+
+procedure TChangeSignatureTests.MemberResolution_UnqualifiedOverloadByArgumentType;
+// The tester's record (forum #156, 2026-09-20): nested classes in a strict
+// private section, two overloads with the SAME number of parameters, and an
+// UNQUALIFIED call inside one of them. Neither the argument count nor a
+// qualifier helps - only the TYPECAST in the first argument does.
+const
+  Src =
+    'unit RecDemo;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TMyRecord = record'#13#10 +
+    '  strict private'#13#10 +
+    '   type'#13#10 +
+    '    TMyListA = class'#13#10 +
+    '    end;'#13#10 +
+    '    TMyListB = class'#13#10 +
+    '    end;'#13#10 +
+    '  strict private'#13#10 +
+    '   class procedure Init(AListe: TMyListA; ASpur: Integer); overload; static;'#13#10 +
+    '  public'#13#10 +
+    '   class procedure Init(AListe: TMyListB; ASpur: Integer); overload; static;'#13#10 +
+    '  end;'#13#10 +
+    ''#13#10 +
+    'implementation'#13#10 +
+    ''#13#10 +
+    'class procedure TMyRecord.Init(AListe: TMyListB; ASpur: Integer);'#13#10 +
+    'begin'#13#10 +
+    '  Init(TMyListA(AListe), ASpur);'#13#10 +
+    'end;'#13#10 +
+    ''#13#10 +
+    'class procedure TMyRecord.Init(AListe: TMyListA; ASpur: Integer);'#13#10 +
+    'begin'#13#10 +
+    'end;'#13#10 +
+    ''#13#10 +
+    'end.';
+var
+  Link: TMemberLink;
+begin
+  var Lines := Src.Replace(#13#10, #10).Split([#10]);
+  var CallLine := -1;
+  var DeclA := -1;
+  var DeclB := -1;
+  for var I := 0 to High(Lines) do
+  begin
+    if Pos('Init(TMyListA(AListe)', Lines[I]) > 0 then CallLine := I;
+    if Pos('Init(AListe: TMyListA', Lines[I]) > 0 then
+      if DeclA < 0 then DeclA := I;
+    if Pos('Init(AListe: TMyListB', Lines[I]) > 0 then
+      if DeclB < 0 then DeclB := I;
+  end;
+
+  var FileName := TPath.Combine(TPath.GetTempPath, 'rl_dunitx_record.pas');
+  TFile.WriteAllText(FileName, Src, TEncoding.UTF8);
+  var Graph := TTypeGraph.Create([FileName], nil, False);
+  try
+    // both overloads are declarations of the same name
+    // Integer(): on Win64 Length answers NativeInt, and AreEqual cannot
+    // infer its generic argument from two different integer types
+    Assert.AreEqual(2, Integer(Length(Graph.FindMembers('TMyRecord', 'Init'))), 'two overloads');
+    // the unqualified call belongs to the enclosing type, and the typecast
+    // says which overload it reaches
+    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileName, Src,
+      CallLine, Pos('Init', Lines[CallLine]) - 1, 'Init', Link)), 'call resolved');
+    Assert.AreEqual(DeclA, Link.Line, 'the TMyListA overload');
+    // searching the OTHER overload must not list that call
+    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileName, Src,
+      CallLine, Pos('Init', Lines[CallLine]) - 1, 'Init',
+      function(AFile: string; ALine: Integer): Boolean begin Result := ALine = DeclB; end,
+      function(ATypeName: string): Boolean
+      begin Result := SameText(ATypeName, 'TMyRecord'); end, Link)), 'not the B overload');
+  finally
+    Graph.Free;
+    TFile.Delete(FileName);
   end;
 end;
 

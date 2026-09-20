@@ -33,6 +33,7 @@ type
     [Test] procedure MemberResolution_WithoutLsp;
     [Test] procedure MemberResolution_PrivatePublicOverloadAcrossUnits;
     [Test] procedure MemberResolution_UnqualifiedOverloadByArgumentType;
+    [Test] procedure MemberResolution_SelfQualifiedWrappedCall;
   end;
 
 implementation
@@ -713,6 +714,94 @@ begin
   finally
     Graph.Free;
     TFile.Delete(FileName);
+  end;
+end;
+
+procedure TChangeSignatureTests.MemberResolution_SelfQualifiedWrappedCall;
+// Forum 2026-09-20: searching TTestRecord.Init (another unit) listed the
+// call "Self.Init( nil, ..." inside TMyRecord.Test as UNVERIFIED. Three
+// things had to come together: "Self" is no declared identifier, the CALL
+// wraps over six lines and so does the DECLARATION it reaches - so neither
+// the type nor the argument count could be determined.
+const
+  SrcB =
+    'unit UnitB;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    ' TMyRecord = record'#13#10 +
+    ' private'#13#10 +
+    '  type'#13#10 +
+    '   TMyInnerRecord = record'#13#10 +
+    '   public'#13#10 +
+    '    procedure Init( AInteger1,'#13#10 +
+    '                    AInteger2,'#13#10 +
+    '                    AInteger3: Integer;'#13#10 +
+    '                    AString: String);'#13#10 +
+    '   end;'#13#10 +
+    ' strict private'#13#10 +
+    '  procedure Init; overload;'#13#10 +
+    '  procedure Init( AObject: TObject;'#13#10 +
+    '                  ABoolean1,'#13#10 +
+    '                  ABoolean2: Boolean;'#13#10 +
+    '                  AInteger1,'#13#10 +
+    '                  AInteger2: Integer;'#13#10 +
+    '                  AString: String); overload;'#13#10 +
+    ' public'#13#10 +
+    '   procedure Test;'#13#10 +
+    ' end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TMyRecord.Test;'#13#10 +
+    'begin'#13#10 +
+    '  Self.Init( nil,'#13#10 +
+    '             True,'#13#10 +
+    '             True,'#13#10 +
+    '             1,'#13#10 +
+    '             2,'#13#10 +
+    '             '''');'#13#10 +
+    'end;'#13#10 +
+    'end.';
+var
+  Link: TMemberLink;
+begin
+  var Lines := SrcB.Replace(#13#10, #10).Split([#10]);
+  var CallLine := -1;
+  var DeclSix := -1;
+  var DeclNone := -1;
+  for var I := 0 to High(Lines) do
+  begin
+    if Pos('Self.Init(', Lines[I]) > 0 then CallLine := I;
+    if Pos('procedure Init( AObject', Lines[I]) > 0 then DeclSix := I;
+    if Pos('procedure Init; overload', Lines[I]) > 0 then DeclNone := I;
+  end;
+  var FileB := TPath.Combine(TPath.GetTempPath, 'rl_dunitx_self_b.pas');
+  TFile.WriteAllText(FileB, SrcB, TEncoding.UTF8);
+  var Graph := TTypeGraph.Create([FileB], nil, False);
+  try
+    var Col := Pos('Init(', Lines[CallLine]) - 1;
+    // Self. resolves to the enclosing type, and the six arguments pick the
+    // six-parameter overload although both wrap over several lines
+    Assert.AreEqual(Ord(murResolved), Ord(ResolveMemberUse(Graph, FileB, SrcB,
+      CallLine, Col, 'Init', Link)), 'Self.Init resolved');
+    Assert.AreEqual(DeclSix, Link.Line, 'the six-parameter overload');
+    // the parameterless overload is not reached by that call
+    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileB, SrcB,
+      CallLine, Col, 'Init',
+      function(AFile: string; ALine: Integer): Boolean begin Result := ALine = DeclNone; end,
+      function(ATypeName: string): Boolean
+      begin Result := SameText(ATypeName, 'TMyRecord'); end, Link)), 'not the empty overload');
+    // and the same-named member of a record in ANOTHER unit is not it either
+    Assert.AreEqual(Ord(uuOtherSymbol), Ord(ClassifyUnansweredUse(Graph, FileB, SrcB,
+      CallLine, Col, 'Init',
+      function(AFile: string; ALine: Integer): Boolean begin Result := False; end,
+      function(ATypeName: string): Boolean
+      begin Result := SameText(ATypeName, 'TTestRecord'); end, Link)), 'not TTestRecord.Init');
+    // the wrapped join keeps the first line's columns and runs to the end
+    var Joined := JoinOpenParenLines(Lines, CallLine, 40);
+    Assert.IsTrue(Joined.StartsWith('  Self.Init( nil,'), 'first line kept');
+    Assert.IsTrue(Joined.EndsWith(');'), 'continued to the closing bracket');
+  finally
+    Graph.Free;
+    TFile.Delete(FileB);
   end;
 end;
 

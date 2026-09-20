@@ -25,6 +25,8 @@ type
     FContext: TEditorContext;
     // candidates decided from the sources, without a DelphiLSP request
     FPreSkipped: Integer;
+    // what the second attempt for unanswered occurrences achieved
+    FSecondPassNote: string;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
@@ -176,6 +178,7 @@ var
   DefLineOut: Integer;
 begin
   FPreSkipped := 0;
+  FSecondPassNote := '';
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
@@ -213,8 +216,15 @@ begin
     // UNVERIFIED, which is what the tester saw on the first run ("LSP ready
     // (server did not publish diagnostics)" in the caption, correct rows on
     // the second run).
-    if (Client.SyncDocument(FContext.FileName) or (StartBefore = 0)) and WasRunning then
-      Client.WaitFileAnalysed(FContext.FileName, StartBefore, 30000,
+    var Sent := Client.SyncDocument(FContext.FileName);
+    // 30 s are for a file we just SENT (it is being analysed). For one that
+    // was merely never analysed, a short wait is enough - and if the
+    // session stays silent for it, the client remembers that and the next
+    // run does not wait at all (forum 2026-09-20: 20-30 s before every
+    // single run).
+    if (Sent or (StartBefore = 0)) and WasRunning then
+      Client.WaitFileAnalysed(FContext.FileName, StartBefore,
+        IfThen(Sent, 30000, 8000),
         function: Boolean
         begin
           if not Aborted then
@@ -388,6 +398,7 @@ begin
   if FPreSkipped > 0 then
     FromSource := Format(' %d were decided from the sources without asking ' +
       'DelphiLSP.', [FPreSkipped]);
+  if FSecondPassNote <> '' then FromSource := FromSource + ' ' + FSecondPassNote + '.';
   if Unverified > 0 then
     FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
       '(see the Note column).%s%s', [Length(Items) - Unverified, Length(TextCandidates),
@@ -517,6 +528,9 @@ function TLspFindReferencesWizard.VerifyWithLsp(const ACandidates: TFindReferenc
   AGraph: TTypeGraph; const AOwnerType: string): TFindReferenceItems;
 var
   Verified: TList<TFindReferenceItem>;
+  // index in Verified <-> index in ACandidates of every row that ended
+  // UNVERIFIED, for the second attempt after the pass
+  Retry: TList<TPair<Integer, Integer>>;
   Synced: TDictionary<string, Boolean>;
   Contents: TDictionary<string, string>;
   Reader: TIncludeReader;
@@ -533,6 +547,7 @@ var
 
 begin
   Verified := TList<TFindReferenceItem>.Create;
+  Retry := TList<TPair<Integer, Integer>>.Create;
   Synced := TDictionary<string, Boolean>.Create;
   Contents := TDictionary<string, string>.Create;
   Reader := EditorOrDiskReader();
@@ -695,7 +710,62 @@ begin
         // reference - show it, marked. A declaration line without an
         // answer declares ANOTHER symbol and stays out.
         C.Note := 'UNVERIFIED - no answer from DelphiLSP';
+        Retry.Add(TPair<Integer, Integer>.Create(Verified.Count, I));
         Verified.Add(C);
+      end;
+    end;
+
+    // SECOND ATTEMPT for everything DelphiLSP stayed silent about. On a
+    // cold session its first analysis of a unit takes many seconds, so the
+    // first run used to end with a pile of UNVERIFIED rows that were
+    // correct on the second run - the tester's "beim zweiten Mal ist das
+    // Ergebnis richtig". By now those files have been sent and analysed,
+    // so one more query each usually answers. Cheap: only the unanswered
+    // ones, and only while the window is open.
+    if (Retry.Count > 0) and not Aborted then
+    begin
+      var Fixed := 0;
+      var Dropped: TList<Integer> := TList<Integer>.Create;
+      try
+        for var R := 0 to Retry.Count - 1 do
+        begin
+          if Aborted then Break;
+          FDialog.SetStatus(Format('Second attempt for unverified occurrences (%d/%d)...',
+            [R + 1, Retry.Count]));
+          Application.ProcessMessages;
+          var VIdx := Retry[R].Key;
+          var Cand := ACandidates[Retry[R].Value];
+          var Defs2 := AIncludes.Definition(Cand.FilePath, Cand.Line, Cand.Col);
+          if System.Length(Defs2) = 0 then Continue;
+          var DF2 := TLspUri.FileUriToPath(Defs2[0].Uri);
+          var DL2 := Defs2[0].Range.Start.Line;
+          var Row := Verified[VIdx];
+          if ATargets.Contains(DF2, DL2) then
+          begin
+            Row.Note := '';
+            Verified[VIdx] := Row;
+            Inc(Fixed);
+          end
+          else if ALinked.Contains(DF2, DL2) then
+          begin
+            Row.Note := '';
+            Row.Relation := ALinked.CallLabel(DF2, DL2);
+            Verified[VIdx] := Row;
+            Inc(Fixed);
+          end
+          else
+            Dropped.Add(VIdx);      // it belongs to another symbol after all
+        end;
+        // remove bottom-up, the indexes must stay valid
+        Dropped.Sort;
+        for var K := Dropped.Count - 1 downto 0 do
+          Verified.Delete(Dropped[K]);
+        if (Fixed > 0) or (Dropped.Count > 0) then
+          FSecondPassNote := Format(
+            'second attempt: %d of %d unverified occurrence(s) resolved, %d dropped',
+            [Fixed, Retry.Count, Dropped.Count]);
+      finally
+        Dropped.Free;
       end;
     end;
 
@@ -704,6 +774,7 @@ begin
   finally
     Contents.Free;
     Synced.Free;
+    Retry.Free;
     Verified.Free;
   end;
 end;

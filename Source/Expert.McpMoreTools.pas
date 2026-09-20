@@ -611,10 +611,12 @@ begin
     var Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
     var DeclFile := '';
     var DeclLine: Integer;
+    var DeclCol := 0;
     if Length(Decl) > 0 then
     begin
       DeclFile := ExpandFileName(TLspUri.FileUriToPath(Decl[0].Uri));
       DeclLine := Decl[0].Range.Start.Line;
+      DeclCol := Decl[0].Range.Start.Character;
     end
     else
     begin
@@ -624,12 +626,31 @@ begin
       begin
         DeclFile := F;
         DeclLine := L1 - 1;
+        DeclCol := Ctx.IdentCol0;
       end
       else
         Exit(McpErr('DelphiLSP knows no declaration for ' + Ctx.Identifier + ' at that position'));
     end;
     DeclFileOut := DeclFile;
     DeclLineOut := DeclLine;
+    // THE SYMBOL'S POSITIONS, not just one: declaration AND implementation
+    // (DelphiLSP answers a use with either of them, and a use resolved from
+    // the sources lands on the DECLARATION while DeclLine may be the
+    // implementation). With only one of the two, "Self.Init(...)" inside the
+    // record was taken for another symbol and dropped (forum 2026-09-20) -
+    // the same shape as the linked-targets gap the day before.
+    var Targets: TLspSymbolTargets;
+    Targets := Default(TLspSymbolTargets);
+    // the COLUMN matters: asked at the line start, DelphiLSP answers
+    // nothing and the partner is lost
+    IncCtx.AddTargetWithPartner(Targets, DeclFile, DeclLine, DeclCol);
+    // the caret itself, when it sits on a declaration of the name (the
+    // partner query can fail - a declaration must never be missing here)
+    begin
+      var CaretLines := Ctx.Content.Replace(#13#10, #10).Split([#10]);
+      if (L1 - 1 <= High(CaretLines)) and LineDeclaresName(CaretLines[L1 - 1], Ctx.Identifier) then
+        Targets.Add(F, L1 - 1);
+    end;
     // Interface <-> class (user request): the interface declaration a class
     // method implements counts as a use, calls through the interface reach
     // it; for an interface method, the implementing class methods and the
@@ -714,8 +735,7 @@ begin
                  Ctx.Identifier,
                  function(AFile: string; ALine: Integer): Boolean
                  begin
-                   Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
-                     or Linked.Contains(AFile, ALine);
+                   Result := Targets.Contains(AFile, ALine) or Linked.Contains(AFile, ALine);
                  end,
                  function(ATypeName: string): Boolean
                  begin
@@ -777,8 +797,7 @@ begin
                 Ctx.Identifier,
                 function(AFile: string; ALine: Integer): Boolean
                 begin
-                  Result := (SameText(ExpandFileName(AFile), DeclFile) and (ALine = DeclLine))
-                    or Linked.Contains(AFile, ALine);
+                  Result := Targets.Contains(AFile, ALine) or Linked.Contains(AFile, ALine);
                 end,
                 function(ATypeName: string): Boolean
                 begin
@@ -795,11 +814,10 @@ begin
             end;
           end;
           if (Length(D) > 0) and
-             SameText(ExpandFileName(TLspUri.FileUriToPath(D[0].Uri)), DeclFile) and
-             (D[0].Range.Start.Line = DeclLine) then
+             Targets.Contains(TLspUri.FileUriToPath(D[0].Uri), D[0].Range.Start.Line) then
             Verified := Verified + [Cd]
-          else if SameText(ExpandFileName(Cd.FilePath), DeclFile) and (Cd.Line = DeclLine) then
-            Verified := Verified + [Cd]   // the declaration itself
+          else if Targets.Contains(Cd.FilePath, Cd.Line) then
+            Verified := Verified + [Cd]   // a declaration / implementation itself
           else if Linked.Contains(Cd.FilePath, Cd.Line) then
           begin
             var U := Cd;

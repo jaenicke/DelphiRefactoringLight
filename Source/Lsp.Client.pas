@@ -80,6 +80,10 @@ type
     FDiagnosticsCount: Integer;
     // Pushes per file (see GetFileDiagnosticsVersion).
     FFileDiagVersion: TDictionary<string, Integer>;
+    // Files this session did not analyse within a waiter's timeout, with
+    // the version that was current then: waiting again costs the same
+    // timeout and yields the same nothing (see WaitFileAnalysed).
+    FAnalysisHopeless: TDictionary<string, Integer>;
     /// <summary>Set of uppercase file paths that have received at least
     ///  one publishDiagnostics notification.</summary>
     FFilesWithDiagnostics: TDictionary<string, Boolean>;
@@ -459,6 +463,7 @@ begin
   FAutoCompleteUnits := True;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
   FFileDiagVersion := TDictionary<string, Integer>.Create;
+  FAnalysisHopeless := TDictionary<string, Integer>.Create;
   FProcessHandle := INVALID_HANDLE_VALUE;
   FStdinWrite := INVALID_HANDLE_VALUE;
   FStdoutRead := INVALID_HANDLE_VALUE;
@@ -502,6 +507,7 @@ begin
   FInactiveRangesLock.Free;
   FFilesWithDiagnostics.Free;
   FFileDiagVersion.Free;
+  FAnalysisHopeless.Free;
   inherited;
 end;
 
@@ -1064,7 +1070,29 @@ end;
 
 function TLspClient.WaitFileAnalysed(const AFilePath: string; ABefore: Integer;
   ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean>): Boolean;
+var
+  UpKey: string;
+  Hopeless: Integer;
 begin
+  // ONCE PER FILE. DelphiLSP does not publish for every file - a unit its
+  // own compile cannot resolve stays silent for the whole session, and the
+  // version then never moves. Waiting the full timeout AGAIN on every call
+  // is what made find references start with 20-30 s of "Waiting for
+  // DelphiLSP to analyse ..." even on repeat runs (forum, 2026-09-20).
+  // A push for the file clears this note, so a session that comes to life
+  // is waited for again.
+  UpKey := '';
+  if AFilePath <> '' then
+  begin
+    UpKey := AnsiUpperCase(ExpandFileName(AFilePath));
+    FInactiveRangesLock.Enter;
+    try
+      if FAnalysisHopeless.TryGetValue(UpKey, Hopeless) and (Hopeless = ABefore) then
+        Exit(False);
+    finally
+      FInactiveRangesLock.Leave;
+    end;
+  end;
   var Deadline := GetTickCount64 + ATimeoutMs;
   repeat
     if GetFileDiagnosticsVersion(AFilePath) <> ABefore then Exit(True);
@@ -1072,6 +1100,15 @@ begin
     Sleep(50);
   until GetTickCount64 > Deadline;
   Result := False;
+  if UpKey <> '' then
+  begin
+    FInactiveRangesLock.Enter;
+    try
+      FAnalysisHopeless.AddOrSetValue(UpKey, ABefore);
+    finally
+      FInactiveRangesLock.Leave;
+    end;
+  end;
 end;
 
 procedure TLspClient.RefreshDocument(const AFilePath: string);
@@ -1568,6 +1605,8 @@ begin
     var Ver: Integer;
     if not FFileDiagVersion.TryGetValue(UpKey, Ver) then Ver := 0;
     FFileDiagVersion.AddOrSetValue(UpKey, Ver + 1);
+    // it answers for this file after all - a later wait is worth it again
+    FAnalysisHopeless.Remove(UpKey);
     if FInactiveRanges.TryGetValue(UpKey, List) then List.Clear
     else begin List := TList<TLspRange>.Create; FInactiveRanges.Add(UpKey, List); end;
     if FErrorDiags.TryGetValue(UpKey, ErrList) then ErrList.Clear

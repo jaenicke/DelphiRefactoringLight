@@ -131,6 +131,13 @@ function TypeHeaderParents(const ALines: TArray<string>; ALine0: Integer): TArra
 ///  ALines ('procedure TFoo.Bar', also 'function TFoo<T>.Bar'), -1 = none.</summary>
 function FindMethodImplLine(const ALines: TArray<string>; const AType, AMember: string): Integer;
 
+/// <summary>ALines[AFrom] plus the following lines while its brackets are
+///  still open, joined by a blank - a call or a declaration whose parameter
+///  list WRAPS ("Self.Init( nil," / "True," / ...). Positions on the first
+///  line keep their column. Line comments are cut, string literals kept.</summary>
+function JoinOpenParenLines(const ALines: TArray<string>; AFrom: Integer;
+  AMaxLines: Integer = 40): string;
+
 type
   /// <summary>Positions of a symbol's relatives with a label each ("declared
   ///  in interface IFoo", "implemented by TFoo") - used by the find
@@ -498,6 +505,43 @@ end;
 // (0-based): 0 for "Foo;" / "Foo.Bar", -1 when the list is not closed on
 // this line (then the text cannot count reliably). Nested calls, strings
 // and brackets are skipped, so "Foo(A, B(C, D))" counts 2.
+function JoinOpenParenLines(const ALines: TArray<string>; AFrom: Integer;
+  AMaxLines: Integer): string;
+
+  function DepthOf(const S: string; ADepth: Integer): Integer;
+  begin
+    Result := ADepth;
+    var I := 1;
+    while I <= Length(S) do
+    begin
+      case S[I] of
+        #39:
+          begin
+            Inc(I);
+            while (I <= Length(S)) and (S[I] <> #39) do Inc(I);
+          end;
+        '(', '[': Inc(Result);
+        ')', ']': if Result > 0 then Dec(Result);
+      end;
+      Inc(I);
+    end;
+  end;
+
+begin
+  Result := '';
+  if (AFrom < 0) or (AFrom > High(ALines)) then Exit;
+  Result := StripLineComment(ALines[AFrom]);
+  var Depth := DepthOf(Result, 0);
+  var I := AFrom + 1;
+  while (Depth > 0) and (I <= High(ALines)) and (I - AFrom <= AMaxLines) do
+  begin
+    var S := StripLineComment(ALines[I]);
+    Result := Result + ' ' + S;
+    Depth := DepthOf(S, Depth);
+    Inc(I);
+  end;
+end;
+
 function CallArgumentCount(const ALine: string; ACol0: Integer): Integer;
 var
   I, Depth, Count: Integer;
@@ -712,7 +756,18 @@ begin
   if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
   var Masked := AGraph.MaskedLines(AFile, AContent);
   Qualifier := QualifierBefore(Lines[ALine0], ACol0);
-  if Qualifier = '' then
+  if SameText(Qualifier, 'Self') then
+  begin
+    // "Self.Init(...)" is the enclosing type's member, like the unqualified
+    // form - but without its shadowing question: a local variable can never
+    // hide Self.X. The qualifier is no declared identifier, so the lookup
+    // found nothing and the occurrence stayed UNVERIFIED (forum,
+    // 2026-09-20).
+    var SFirst, SLast: Integer;
+    if not FindEnclosingRoutineRangeIn(Lines, ALine0, SFirst, SLast) then Exit;
+    TypeName := OwnerTypeOfImplHeader(Lines[SFirst]);
+  end
+  else if Qualifier = '' then
   begin
     // UNQUALIFIED use ("Init(TMyListA(AListe), ASpur);" inside another
     // method of the same type): Delphi resolves it against the enclosing
@@ -749,7 +804,10 @@ begin
   // when exactly one does, the use site is resolved after all. That is the
   // "one of the overloads is strict private" case the tester still saw as
   // UNVERIFIED (2026-09-20).
-  var ArgCount := CallArgumentCount(Lines[ALine0], ACol0 + Length(AMember));
+  // the call may WRAP over several lines - then its argument list is not
+  // closed on the use line and nothing could be counted (forum, 2026-09-20)
+  var CallText := JoinOpenParenLines(Lines, ALine0, 40);
+  var ArgCount := CallArgumentCount(CallText, ACol0 + Length(AMember));
   if ArgCount >= 0 then
   begin
     var Fits: TArray<TMemberLink> := nil;
@@ -766,7 +824,7 @@ begin
     // (the tester's record with two 2-parameter overloads, 2026-09-20).
     if Length(Fits) > 1 then
     begin
-      var Args := CallArgumentTexts(Lines[ALine0], ACol0 + Length(AMember));
+      var Args := CallArgumentTexts(CallText, ACol0 + Length(AMember));
       if Length(Args) > 0 then
       begin
         var ByType: TArray<TMemberLink> := nil;
@@ -853,7 +911,9 @@ begin
     if (L < 0) or (L > High(Lines)) then Continue;
     var L2 := Link;
     L2.Line := L;
-    L2.Text := Trim(Lines[L]);
+    // a WRAPPED parameter list belongs to the declaration, or its
+    // argument count cannot be compared (forum, 2026-09-20)
+    L2.Text := Trim(JoinOpenParenLines(Lines, L, 40));
     var P := Pos(UpperCase(AMember), UpperCase(Lines[L]));
     if P > 0 then L2.Col := P - 1;
     All := All + [L2];
@@ -920,7 +980,7 @@ begin
   ALink.IsInterface := ADecl.IsInterface;
   ALink.FilePath := ADecl.FilePath;
   ALink.Line := L;
-  ALink.Text := Trim(Lines[L]);
+  ALink.Text := Trim(JoinOpenParenLines(Lines, L, 40));
   // the member NAME as a whole word on that line
   var U := UpperCase(Lines[L]);
   var W := UpperCase(AMember);

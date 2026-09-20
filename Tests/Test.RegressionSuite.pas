@@ -86,13 +86,26 @@ type
     [Test] procedure WorkerLatch_WaitsAndRefusesAfterShutdown;
   end;
 
+  /// <summary>The MCP pipe is how Claude Code reaches this IDE. On a 64-bit
+  ///  IDE it was never created: the token buffer of GetTokenInformation was
+  ///  a byte array (alignment 1), and on an odd stack address the API
+  ///  answers ERROR_NOACCESS (998). These tests run on BOTH platforms, so
+  ///  the 64-bit build is the one that matters here.</summary>
+  [TestFixture]
+  TMcpPipeRegressionTests = class
+  public
+    [Test] procedure SecurityDescriptor_IsBuiltOnThisPlatform;
+    [Test] procedure Start_ReportsThePipeItReallyCreated;
+  end;
+
 implementation
 
 uses
   System.SysUtils, System.IOUtils, System.Classes, System.SyncObjs,
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
-  Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions;
+  Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
+  Winapi.Windows, Mcp.PipeServer;
 
 const
   NL = sLineBreak;
@@ -451,6 +464,44 @@ begin
   end;
 end;
 
+{ TMcpPipeRegressionTests }
+
+procedure TMcpPipeRegressionTests.SecurityDescriptor_IsBuiltOnThisPlatform;
+var
+  Err: DWORD;
+begin
+  // The step the 64-bit IDE failed at. 998 = ERROR_NOACCESS, which for
+  // GetTokenInformation means "your buffer is not aligned".
+  Assert.IsTrue(McpPipeSecurityProbe(Err),
+    Format('the pipe security descriptor must be buildable, error %d: %s',
+      [Err, SysErrorMessage(Err)]));
+end;
+
+procedure TMcpPipeRegressionTests.Start_ReportsThePipeItReallyCreated;
+var
+  Srv: TMcpPipeServer;
+  Name: string;
+begin
+  // Start used to return True whatever the listener did, so an IDE without
+  // a pipe looked like a running server.
+  Name := '\\.\pipe\RefLightTest-' + UIntToStr(GetCurrentProcessId) + '-' +
+    FormatDateTime('hhnnsszzz', Now);
+  Srv := TMcpPipeServer.Create(Name,
+    function(const ARequest: string; AStop: THandle): string
+    begin
+      Result := '{"ok":true}';
+    end);
+  try
+    Assert.IsTrue(Srv.Start, 'Start reports the created pipe: ' + Srv.LastError);
+    Assert.IsTrue(Srv.Listening, 'an instance is waiting');
+    Assert.IsTrue(WaitNamedPipe(PChar(Name), 1000), 'the pipe is reachable');
+    Srv.Stop;
+    Assert.IsFalse(Srv.Listening, 'after Stop nothing listens');
+  finally
+    Srv.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -459,5 +510,6 @@ initialization
   TDUnitX.RegisterTestFixture(TSourceScanRegressionTests);
   TDUnitX.RegisterTestFixture(TMiscRegressionTests);
   TDUnitX.RegisterTestFixture(TVersionTests);
+  TDUnitX.RegisterTestFixture(TMcpPipeRegressionTests);
 
 end.

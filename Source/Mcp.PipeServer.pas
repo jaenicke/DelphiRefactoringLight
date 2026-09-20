@@ -45,7 +45,9 @@ type
     FPipeName: string;
     FHandler: TMcpRequestHandler;
     FStopEvent: THandle;
+    FReadyEvent: THandle;   // set once a pipe instance is waiting
     FListener: TThread;
+    FListening: Integer;
     FActive: Integer;
     FRequests: Integer;
     FLastError: string;
@@ -58,7 +60,12 @@ type
   public
     constructor Create(const APipeName: string; const AHandler: TMcpRequestHandler);
     destructor Destroy; override;
+    /// <summary>Starts the listener and waits briefly for its first pipe
+    ///  instance. False = the pipe is NOT there (LastError says why); the
+    ///  listener keeps retrying, so it can still come up later.</summary>
     function Start: Boolean;
+    /// <summary>True while a pipe instance is waiting for clients.</summary>
+    function Listening: Boolean;
     procedure Stop(ATimeoutMs: Cardinal = 5000);
     function LastError: string;
     /// <summary>The processes (MCP bridges) that sent a request within the
@@ -68,6 +75,12 @@ type
     property StopEvent: THandle read FStopEvent;
     property RequestCount: Integer read FRequests;
   end;
+
+/// <summary>Builds the pipe's security descriptor once and frees it again -
+///  the step every pipe instance depends on, and the one that failed with
+///  ERROR_NOACCESS (998) on a 64-bit IDE while the token buffer was a byte
+///  array. For the test suites and for diagnostics.</summary>
+function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
 
 implementation
 
@@ -88,21 +101,43 @@ function ConvertStringSecurityDescriptorToSecurityDescriptorW(
 
 // "D:P(A;;GA;;;<current user>)" - only this user (and SYSTEM) may open the
 // pipe. The default DACL would additionally grant READ to Everyone.
-function CurrentUserPipeSD(out ASD: PSECURITY_DESCRIPTOR): Boolean;
+function CurrentUserPipeSD(out ASD: PSECURITY_DESCRIPTOR; out AErr: DWORD): Boolean;
 var
   Token: THandle;
-  Buf: array[0..511] of Byte;
+  // ALIGNMENT MATTERS HERE. GetTokenInformation writes a TOKEN_USER, and
+  // that structure STARTS WITH A POINTER. An array of Byte has alignment 1,
+  // so its stack slot may land on an odd address - the API then refuses the
+  // buffer with ERROR_NOACCESS (998), the security descriptor is never
+  // built and the whole MCP pipe stays absent. Reported from a 64-bit IDE
+  // (the 32-bit one happened to get an even slot every time). An array of
+  // UInt64 is the same 512 bytes, guaranteed 8-byte aligned.
+  // RULE: every buffer a Win32 API fills with a STRUCTURE must be aligned -
+  // a byte array is only safe for raw bytes.
+  Buf: array[0..63] of UInt64;
   Len: DWORD;
   SidStr: PWideChar;
   Sddl: string;
 begin
   Result := False;
   ASD := nil;
-  if not OpenProcessToken(GetCurrentProcess, TOKEN_QUERY, Token) then Exit;
+  AErr := 0;
+  if not OpenProcessToken(GetCurrentProcess, TOKEN_QUERY, Token) then
+  begin
+    AErr := GetLastError;
+    Exit;
+  end;
   try
-    if not GetTokenInformation(Token, TokenUser, @Buf[0], SizeOf(Buf), Len) then Exit;
+    if not GetTokenInformation(Token, TokenUser, @Buf[0], SizeOf(Buf), Len) then
+    begin
+      AErr := GetLastError;
+      Exit;
+    end;
     SidStr := nil;
-    if not ConvertSidToStringSidW(PTokenUser(@Buf[0])^.User.Sid, SidStr) then Exit;
+    if not ConvertSidToStringSidW(PTokenUser(@Buf[0])^.User.Sid, SidStr) then
+    begin
+      AErr := GetLastError;
+      Exit;
+    end;
     try
       Sddl := 'D:P(A;;GA;;;' + SidStr + ')(A;;GA;;;SY)';
     finally
@@ -110,9 +145,19 @@ begin
     end;
     Result := ConvertStringSecurityDescriptorToSecurityDescriptorW(PWideChar(Sddl),
       SDDL_REVISION_1, ASD, nil);
+    if not Result then AErr := GetLastError;
   finally
-    CloseHandle(Token);
+    CloseHandle(Token);   // must not overwrite AErr - hence the captures above
   end;
+end;
+
+function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
+var
+  SD: PSECURITY_DESCRIPTOR;
+begin
+  SD := nil;
+  Result := CurrentUserPipeSD(SD, AErr);
+  if Result then LocalFree(HLOCAL(SD));
 end;
 
 type
@@ -138,11 +183,13 @@ begin
   FHandler := AHandler;
   FLock := TObject.Create;
   FStopEvent := CreateEvent(nil, True, False, nil);
+  FReadyEvent := CreateEvent(nil, True, False, nil);
 end;
 
 destructor TMcpPipeServer.Destroy;
 begin
   Stop;
+  CloseHandle(FReadyEvent);
   CloseHandle(FStopEvent);
   FLock.Free;
   inherited;
@@ -231,12 +278,23 @@ begin
   Result := FListener <> nil;
   if Result then Exit;
   ResetEvent(FStopEvent);
+  ResetEvent(FReadyEvent);
   T := TListenerThread.Create(True);
   T.FOwner := Self;
   T.FreeOnTerminate := False;
   FListener := T;
   T.Start;
-  Result := True;
+  // The first instance is created within milliseconds. Waiting for it is
+  // what makes a failure VISIBLE: the old version returned True whatever
+  // happened, so a listener that had already given up looked like a
+  // running server (that is how a 64-bit IDE ended up with no pipe and no
+  // explanation beyond the status row).
+  Result := WaitForSingleObject(FReadyEvent, 2000) = WAIT_OBJECT_0;
+end;
+
+function TMcpPipeServer.Listening: Boolean;
+begin
+  Result := TInterlocked.CompareExchange(FListening, 0, 0) <> 0;
 end;
 
 procedure TMcpPipeServer.Stop(ATimeoutMs: Cardinal);
@@ -266,13 +324,21 @@ var
   First: Boolean;
   Flags: DWORD;
   Got: DWORD;
+  Err: DWORD;
+  Attempt: Integer;
 begin
   SD := nil;
-  if not CurrentUserPipeSD(SD) then
+  // A failing security descriptor used to END this thread - the IDE then
+  // had no pipe until it was restarted, and Start reported success anyway.
+  // It is treated like a failing CreateNamedPipe now: say why and try
+  // again, so a transient cause heals itself.
+  Attempt := 0;
+  while not CurrentUserPipeSD(SD, Err) do
   begin
-    SetLastError('cannot build the pipe security descriptor: ' +
-      SysErrorMessage(GetLastError));
-    Exit;
+    Inc(Attempt);
+    SetLastError(Format('cannot build the pipe security descriptor (attempt %d): %s (%d)',
+      [Attempt, SysErrorMessage(Err), Err]));
+    if WaitForSingleObject(FStopEvent, 5000) = WAIT_OBJECT_0 then Exit;
   end;
   FillChar(Ov, SizeOf(Ov), 0);
   Ov.hEvent := CreateEvent(nil, True, False, nil);
@@ -298,6 +364,13 @@ begin
         Continue;
       end;
       First := False;
+      // An instance is waiting: the server really is reachable now, so a
+      // previous failure message must not stay in the status row.
+      if TInterlocked.Exchange(FListening, 1) = 0 then
+      begin
+        SetLastError('');
+        SetEvent(FReadyEvent);
+      end;
 
       ResetEvent(Ov.hEvent);
       var Connected := ConnectNamedPipe(Pipe, @Ov);
@@ -344,6 +417,7 @@ begin
       end;
     end;
   finally
+    TInterlocked.Exchange(FListening, 0);
     CloseHandle(Ov.hEvent);
     LocalFree(HLOCAL(SD));
   end;

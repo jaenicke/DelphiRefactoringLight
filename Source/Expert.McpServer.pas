@@ -1698,10 +1698,20 @@ end;
 function McpServerStatus: string;
 begin
   if GServer = nil then Exit('not running');
+  // "listening" is what the bridge needs - a server object alone says
+  // nothing (the listener can be stuck retrying, e.g. when the security
+  // descriptor cannot be built).
+  if not GServer.Listening then
+  begin
+    if GServer.LastError <> '' then
+      Result := 'NOT LISTENING (retrying): ' + GServer.LastError
+    else
+      Result := 'starting...';
+    Exit;
+  end;
+  Result := Format('listening, %d request(s)', [GServer.RequestCount]);
   if GServer.LastError <> '' then
-    Result := 'ERROR: ' + GServer.LastError
-  else
-    Result := Format('listening, %d request(s)', [GServer.RequestCount]);
+    Result := Result + ', last error: ' + GServer.LastError;
   if (GHeadless <> nil) and (GHeadless.Count > 0) then
     Result := Result + Format(', %d headless buffer(s)', [GHeadless.Count]);
   if GLastTool <> '' then Result := Result + ', last tool: ' + GLastTool;

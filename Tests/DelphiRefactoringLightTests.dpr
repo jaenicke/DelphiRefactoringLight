@@ -47,6 +47,8 @@ uses
   Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
   Expert.ReferenceKind in '..\Source\Expert.ReferenceKind.pas',
   Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
+  Mcp.Protocol in '..\Source\Mcp.Protocol.pas',
+  Mcp.PipeServer in '..\Source\Mcp.PipeServer.pas',
   Test.UserIdeas13 in 'Test.UserIdeas13.pas',
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',

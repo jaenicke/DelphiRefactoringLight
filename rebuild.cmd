@@ -8,7 +8,7 @@ setlocal
 
 set BDSVER=37.0
 set DELINST=%~dp0delinst.exe
-set CONFIG=DelphiRefactoringLight.xml
+set CONFIG=%~dp0DelphiRefactoringLight.xml
 set USEBDS=
 
 :: Build delinst.exe first (also detects if cmd compiler is available)

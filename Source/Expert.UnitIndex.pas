@@ -201,6 +201,17 @@ type
 ///  Exposed for the console tests and the memory measurement.</summary>
 function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
 
+const
+  /// <summary>Prefix of a CLASS/RECORD HELPER member in the identifier
+  ///  lists and the lookup ('.Dummy' for "TButtonHelper = class helper for
+  ///  TButton ... procedure Dummy"). A helper is never named where it is
+  ///  used - "Button1.Dummy" is all the using unit shows - so its unit is
+  ///  only recognisable through the member. The prefix keeps those names
+  ///  apart from real top-level identifiers: Lookup('Dummy') does not find
+  ///  them, Lookup('.Dummy') does, and Search / FuzzyIdentifiers skip them
+  ///  (no "add unit" or "did you mean" for a helper member).</summary>
+  HelperMemberPrefix = '.';
+
 /// <summary>Estimated heap bytes the index keeps for these units in its
 ///  per-path dictionary: the unit objects, path / dictionary key / unit
 ///  name strings, and every identifier string with its array.</summary>
@@ -366,7 +377,10 @@ const
   // seeing "TcxButton / TStringGrid unknown" - which made uses-cleanup
   // offer units in use for REMOVAL, and left add-unit and "find original
   // symbol" blind for those types.
-  IndexParserVersion = '12';
+  IndexParserVersion = '13';
+  //  13: members of class/record HELPERS are indexed with the '.' prefix
+  //      (HelperMemberPrefix) - uses cleanup called a helper unit unused
+  //      although "Button1.Dummy" used it
   //  10: enum members under {$SCOPEDENUMS ON} are not indexed - they are
   //      only reachable qualified ("TEnum.Test"); the tester got "add
   //      Winapi.Networking.NetworkOperators" for an undeclared Test
@@ -538,7 +552,7 @@ var
   Lines: TArray<string>;
   Idents: TList<string>;
   I, Block, PendingEnds, ImplIdx, InParams: Integer;
-  Started, InEnum, ScopedEnums: Boolean;
+  Started, InEnum, ScopedEnums, InHelper: Boolean;
   Sect: TSect;
   Code, Up, Tr, TrU: string;
 
@@ -601,6 +615,33 @@ var
       else if S[K] = ')' then Dec(Result);
   end;
 
+  // A member declared at the helper's own level: 'procedure Dummy;',
+  // 'class function Make: X; static;', 'property Text: string read ...'.
+  // Only the NAME matters - the lookup is by member name.
+  procedure AddHelperMember(const ATrimmed: string);
+  var
+    U, Rest: string;
+    P: Integer;
+  begin
+    U := UpperCase(ATrimmed);
+    Rest := ATrimmed;
+    if StartsWithWord(U, 'CLASS') then
+    begin
+      Rest := Trim(Copy(Rest, 6, MaxInt));
+      U := UpperCase(Rest);
+    end;
+    var Kw := '';
+    for var K in ['PROCEDURE', 'FUNCTION', 'PROPERTY', 'CONSTRUCTOR'] do
+      if StartsWithWord(U, K) then begin Kw := K; Break; end;
+    if Kw = '' then Exit;
+    Rest := Trim(Copy(Rest, Length(Kw) + 1, MaxInt));
+    P := 1;
+    while (P <= Length(Rest)) and IsIdentChar(Rest[P]) do Inc(P);
+    var Name := Copy(Rest, 1, P - 1);
+    if IsIdentifier(Name) then
+      Idents.Add(HelperMemberPrefix + Name);
+  end;
+
   procedure AddEnumMembers(const S: string);
   begin
     // {$SCOPEDENUMS ON}: members exist only as "TEnum.Member" - indexing
@@ -644,6 +685,7 @@ begin
   try
     Block := 0; PendingEnds := 0; Started := False; Sect := secNone;
     InEnum := False; ImplIdx := -1; InParams := 0; ScopedEnums := False;
+    InHelper := False;
     for I := 0 to High(Lines) do
     begin
       // The directive is a {...} comment to CleanLine - read it from the
@@ -703,9 +745,15 @@ begin
         // it means the count drifted. Trust the structure, not the count.
         if (Sect = secType) and (LeadingSpaces(Code) <= 2)
           and LooksLikeTypeOpener(TrU) then
-          PendingEnds := 0
+        begin
+          PendingEnds := 0;
+          InHelper := False;
+        end
         else
         begin
+          // A helper's OWN members (depth 1 - not those of a nested type)
+          if InHelper and (PendingEnds = 1) then
+            AddHelperMember(Tr);
           Up := StripAngleSpans(TrU);
           // Openers inside a body: an inline 'record' field AND a nested
           // TYPE declaration. Only 'record' used to count, so a nested
@@ -719,6 +767,7 @@ begin
                          - CountWord(Up, 'END');
           if ClassLikeOpener(Up) then Inc(PendingEnds);
           if PendingEnds < 0 then PendingEnds := 0;
+          if PendingEnds = 0 then InHelper := False;
           InParams := 0;   // the body owns these lines, not a paren run
           Continue;
         end;
@@ -874,6 +923,11 @@ begin
                       if IsClass or IsObj or IsIntf then Inc(Opens);
                       PendingEnds := Opens - CountWord(RhsU, 'END');
                       if PendingEnds < 0 then PendingEnds := 0;
+                      // 'class helper for X' / 'record helper for X':
+                      // collect the members (see HelperMemberPrefix)
+                      var AfterKw := Trim(Copy(Core, Pos(' ', Core + ' ') + 1, MaxInt));
+                      InHelper := (PendingEnds > 0) and (IsClass or IsRec)
+                        and StartsWithWord(AfterKw, 'HELPER');
                     end;
                   end;
                 end;
@@ -2192,6 +2246,7 @@ begin
   try
     for I := 0 to High(FKeysUpper) do
     begin
+      if FKeysUpper[I].StartsWith(HelperMemberPrefix) then Continue;
       if Abs(Length(FKeysUpper[I]) - L) > AMaxDist then Continue;
       D := BoundedEditDistance(U, FKeysUpper[I], AMaxDist);
       if (D = 0) or (D > AMaxDist) then Continue;   // 0 = same identifier
@@ -2302,6 +2357,7 @@ begin
     for I := 0 to High(FKeysUpper) do
     begin
       if Pos(Needle, FKeysUpper[I]) = 0 then Continue;
+      if FKeysUpper[I].StartsWith(HelperMemberPrefix) then Continue;
       for var Id in FMap[FKeysUpper[I]] do
       begin
         var UnitIdx := Id and not GenericBit;

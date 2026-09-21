@@ -29,6 +29,7 @@ uses
   Expert.WithRewriter in '..\Source\Expert.WithRewriter.pas',
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',
   Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
+  Expert.UsesCleanup in '..\Source\Expert.UsesCleanup.pas',
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
   Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',

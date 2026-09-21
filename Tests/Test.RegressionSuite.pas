@@ -164,6 +164,20 @@ type
     [Test] procedure DeepEdgeLevers_DoesNotOverflowTheStack;
   end;
 
+  /// <summary>Uses cleanup called a unit UNUSED although a method of its
+  ///  class helper was called ("Button1.Dummy" with TButtonHelper = class
+  ///  helper for TButton in Unit1). The using unit never names the helper,
+  ///  only the member - which the index did not know, because it skips
+  ///  class bodies. Helper members are indexed with HelperMemberPrefix
+  ///  now.</summary>
+  [TestFixture]
+  THelperUsageTests = class
+  public
+    [Test] procedure Parser_IndexesHelperMembersWithThePrefix;
+    [Test] procedure Snapshot_KeepsHelperMembersOutOfTheNormalLookup;
+    [Test] procedure Cleanup_CountsAMemberCallAsUseOfTheHelperUnit;
+  end;
+
 implementation
 
 uses
@@ -172,7 +186,8 @@ uses
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
-  System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph;
+  System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
+  Expert.UsesCleanup;
 
 const
   NL = sLineBreak;
@@ -721,6 +736,130 @@ begin
   end;
 end;
 
+{ THelperUsageTests }
+
+const
+  HelperUnit1 =
+    'unit Unit1;'#13#10 +
+    'interface'#13#10 +
+    'uses'#13#10 +
+    '   Vcl.StdCtrls;'#13#10 +
+    'type'#13#10 +
+    '  TButtonHelper = class helper for TButton'#13#10 +
+    '  public'#13#10 +
+    '    procedure Dummy;'#13#10 +
+    '    class function Make(const A: string): TButton; static;'#13#10 +
+    '    property Hint2: string read GetHint2;'#13#10 +
+    '  private type'#13#10 +
+    '    TInner = class'#13#10 +
+    '      procedure NotAHelperMember;'#13#10 +
+    '    end;'#13#10 +
+    '  end;'#13#10 +
+    '  TPlain = class'#13#10 +
+    '    procedure PlainMember;'#13#10 +
+    '  end;'#13#10 +
+    '  TIntHelper = record helper for Integer'#13#10 +
+    '    function Twice: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'procedure AfterAll;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TButtonHelper.Dummy;'#13#10 +
+    'begin'#13#10 +
+    'end;'#13#10 +
+    'end.';
+
+procedure THelperUsageTests.Parser_IndexesHelperMembersWithThePrefix;
+var
+  F, UnitName: string;
+  HasInit: Boolean;
+  Ids: TArray<string>;
+begin
+  F := TPath.Combine(TPath.GetTempPath, 'RlHelperUnit1.pas');
+  TFile.WriteAllText(F, HelperUnit1);
+  try
+    Ids := ParseUnit(F, UnitName, HasInit);
+  finally
+    TFile.Delete(F);
+  end;
+  var Joined := '|' + string.Join('|', Ids) + '|';
+  Assert.Contains(Joined, '|TButtonHelper|');
+  Assert.Contains(Joined, '|.Dummy|', 'helper method');
+  Assert.Contains(Joined, '|.Make|', 'class function of the helper');
+  Assert.Contains(Joined, '|.Hint2|', 'helper property');
+  Assert.Contains(Joined, '|.Twice|', 'record helper for a simple type');
+  Assert.DoesNotContain(Joined, '|Dummy|', 'never as a top-level identifier');
+  Assert.DoesNotContain(Joined, 'NotAHelperMember', 'member of a NESTED type');
+  Assert.DoesNotContain(Joined, 'PlainMember', 'members of ordinary classes stay out');
+  Assert.Contains(Joined, '|TPlain|');
+  Assert.Contains(Joined, '|AfterAll|', 'the parser is back on track after the helper');
+end;
+
+procedure THelperUsageTests.Snapshot_KeepsHelperMembersOutOfTheNormalLookup;
+var
+  Src: TUnitSource;
+  Snap: IUnitSnapshot;
+begin
+  Src.UnitName := 'Unit1';
+  Src.Path := 'C:\x\Unit1.pas';
+  Src.Idents := TArray<string>.Create('TButtonHelper', HelperMemberPrefix + 'Dummy');
+  Src.HasInit := False;
+  Snap := BuildUnitSnapshot([Src]);
+  Assert.AreEqual<Integer>(0, Length(Snap.Lookup('Dummy')), 'no add-unit for a bare Dummy');
+  Assert.AreEqual<Integer>(1, Length(Snap.Lookup(HelperMemberPrefix + 'dummy')));
+  Assert.AreEqual<Integer>(0, Length(Snap.Search('Dumm', 50)), 'not in the Find Unit search');
+  Assert.AreEqual<Integer>(0, Length(Snap.FuzzyIdentifiers('Dummx', 2, 10)), 'no "did you mean"');
+  // and the layered view the IDE actually uses
+  Snap := ComposeUnitSnapshots(nil, Snap);
+  Assert.AreEqual<Integer>(1, Length(Snap.Lookup(HelperMemberPrefix + 'Dummy')));
+  Assert.AreEqual<Integer>(0, Length(Snap.Search('Dumm', 50)));
+end;
+
+procedure THelperUsageTests.Cleanup_CountsAMemberCallAsUseOfTheHelperUnit;
+const
+  Unit2 =
+    'unit Unit2;'#13#10 +
+    'interface'#13#10 +
+    'uses'#13#10 +
+    '  Vcl.StdCtrls, Unit1, UnitOther;'#13#10 +
+    'procedure Run(Button: TButton);'#13#10 +
+    'implementation'#13#10 +
+    'procedure Run(Button: TButton);'#13#10 +
+    'begin'#13#10 +
+    '  Button.Dummy;'#13#10 +
+    '  Dummy2;'#13#10 +
+    'end;'#13#10 +
+    'end.';
+var
+  Infos: TArray<TUsesEntryInfo>;
+begin
+  Infos := AnalyzeUses(Unit2,
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      if SameText(AIdent, 'TButton') then Result := ['Vcl.StdCtrls']
+      else if SameText(AIdent, HelperMemberPrefix + 'Dummy') then Result := ['Unit1']
+      else if SameText(AIdent, HelperMemberPrefix + 'Dummy2') then Result := ['UnitOther'];
+    end,
+    function(const AUnit: string): Boolean begin Result := True; end,
+    function(const AUnit: string): Boolean begin Result := False; end);
+  var Found := 0;
+  for var E in Infos do
+  begin
+    if SameText(E.UnitName, 'Unit1') then
+    begin
+      Inc(Found);
+      Assert.IsTrue(E.Verdict <> uvUnused, 'Unit1 is used through Button.Dummy');
+    end;
+    if SameText(E.UnitName, 'UnitOther') then
+    begin
+      Inc(Found);
+      // an UNQUALIFIED Dummy2 is no member access - no helper involved
+      Assert.IsTrue(E.Verdict = uvUnused, 'a bare call does not count as a helper use');
+    end;
+  end;
+  Assert.AreEqual(2, Found);
+end;
+
 { TPartnerQueryTests }
 
 procedure TPartnerQueryTests.NameColumn_ImplementationHeaderPrefersTheMember;
@@ -1005,5 +1144,6 @@ initialization
   TDUnitX.RegisterTestFixture(TPartnerQueryTests);
   TDUnitX.RegisterTestFixture(TAlignSignatureFixTests);
   TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
+  TDUnitX.RegisterTestFixture(THelperUsageTests);
 
 end.

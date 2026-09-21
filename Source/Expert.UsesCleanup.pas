@@ -267,6 +267,26 @@ var
           for var U in Units do
             if ByName.TryGetValue(UpperCase(U), EntryIdx) then
               NoteUsage(EntryIdx, L);
+          // A MEMBER access ("Button1.Dummy") may be served by a class or
+          // record HELPER - and the helper's name never appears here, only
+          // the member's. The index keeps helper members under
+          // HelperMemberPrefix; any unit whose helper declares this member
+          // counts as used (conservative: the helper may extend another
+          // type, but keeping a unit is always safe).
+          var Q := StartP - 1;
+          while (Q >= 1) and CharInSet(S[Q], [' ', #9]) do Dec(Q);
+          if (Q >= 1) and (S[Q] = '.') then
+          begin
+            var HKey := HelperMemberPrefix + UpperCase(Token);
+            if not TokenCache.TryGetValue(HKey, Units) then
+            begin
+              Units := ALookup(HelperMemberPrefix + Token);
+              TokenCache.Add(HKey, Units);
+            end;
+            for var U in Units do
+              if ByName.TryGetValue(UpperCase(U), EntryIdx) then
+                NoteUsage(EntryIdx, L);
+          end;
         end
         else
           Inc(P);

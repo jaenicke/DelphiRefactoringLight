@@ -23,8 +23,11 @@ unit Mcp.Bridge;
 // THE TOOL LIST COMES FROM THE IDEs. Only ide_instances / select_ide are
 // the bridge's own; everything else is whatever the running IDEs serve
 // ("tools" request), merged by name, newest plugin build first. The list
-// compiled into the bridge is the fallback when no IDE runs or an IDE's
-// plugin predates the "tools" request. So a new IDE tool needs a new
+// compiled into the bridge is the fallback for an IDE whose plugin
+// predates the "tools" request. While NO IDE runs, tools/list holds only
+// the bridge's own two: every other tool would fail anyway, and the names
+// cost tokens in every Claude Code session on the machine, Delphi or not
+// (a user-scope registration loads everywhere). So a new IDE tool needs a new
 // PLUGIN only - not a new bridge. A running Claude session learns about a
 // changed set through notifications/tools/list_changed: the exe's watcher
 // thread calls CheckToolsChanged, which compares the IDEs' tool hashes
@@ -33,7 +36,7 @@ unit Mcp.Bridge;
 interface
 
 uses
-  System.SysUtils, System.JSON, Mcp.Protocol;
+  System.SysUtils, System.JSON, Mcp.Protocol, Expert.Version;
 
 type
   IMcpTransport = interface
@@ -82,7 +85,11 @@ type
   end;
 
 const
-  BridgeVersion = '1.2.0';
+  /// <summary>The bridge ships with the plugin and carries ITS version -
+  ///  one number for the whole product, no separate bridge numbering to
+  ///  keep in step (see the VERSION RULE; Expert.Version is the one
+  ///  place).</summary>
+  BridgeVersion = PluginVersion;
 
 implementation
 
@@ -165,7 +172,9 @@ begin
       if X = H then Dup := True;
     if not Dup then Hashes := Hashes + [H];
   end;
-  if Length(Hashes) = 0 then Exit(McpToolsHash);
+  // No IDE: a signature of its own, so an IDE starting (or the last one
+  // closing) is ONE list_changed - the list really changes then.
+  if Length(Hashes) = 0 then Exit('no-ide');
   TArray.Sort<string>(Hashes);
   Result := string.Join(',', Hashes);
 end;
@@ -211,7 +220,7 @@ begin
       begin
         Result := -CompareStr(A.PluginBuild, B.PluginBuild);
       end));
-    NeedStatic := Length(Order) = 0;
+    NeedStatic := False;   // no IDE -> the bridge's own two only
     for var C in Order do
     begin
       if C.ToolsHash = '' then

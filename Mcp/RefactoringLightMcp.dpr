@@ -29,6 +29,7 @@ uses
   System.Classes,
   System.SyncObjs,
   System.JSON,
+  Expert.Version in '..\Source\Expert.Version.pas',
   Mcp.Protocol in '..\Source\Mcp.Protocol.pas',
   Mcp.Bridge in '..\Source\Mcp.Bridge.pas';
 

@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.11.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.11.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -482,6 +482,36 @@ An **IDE restart** is required afterwards so the package is loaded cleanly. The 
 Further scripts:
 - `rebuild.cmd` &mdash; build only (no IDE registration).
 - `uninstall.cmd` &mdash; remove the package from the IDE registry.
+
+### MCP bridge for Claude Code
+
+`install.cmd` also builds `RefactoringLightMcp.exe` (copied to
+`%LOCALAPPDATA%\DelphiRefactoringLight\mcp\`) and prints the line that
+registers it with Claude Code. It connects Claude Code to every running IDE
+with the plugin, so rename, find references, quick fixes and the rest work
+on the IDE's live buffers.
+
+What it costs a session: Claude Code keeps the tool schemas out of the
+context until one is needed (tool search), so what is always loaded is the
+server's short instructions and the tool names. While **no IDE runs**, the
+bridge offers only its own two tools (`ide_instances`, `select_ide`); the
+others appear by themselves as soon as an IDE with the plugin starts, in a
+running session too.
+
+Where to register it:
+- `--scope user` (the printed default): available in every Claude Code
+  session on the machine. Convenient if you mostly work on Delphi code.
+- `--scope local`: only in the folder where you run the command, and not
+  written to any file in the repository. Use this if you also work on
+  other code and want nothing Delphi-related in those sessions. Run it once
+  per Delphi project folder.
+- `--scope project` is **not** recommended: it writes the exe's path, which
+  differs per machine, into a `.mcp.json` that is meant to be committed.
+
+The server name is your choice (`claude mcp add <name> ...`); the bridge
+works under any name. It becomes the prefix of every tool name, so a shorter
+one saves a few tokens - but permission rules you wrote for the old name
+(`mcp__delphi-refactoring-light__*`) then need updating.
 
 ### Alternative: manual install inside the IDE
 

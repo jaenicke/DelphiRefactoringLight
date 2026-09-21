@@ -59,9 +59,17 @@ if %ERRORLEVEL% EQU 0 set MCPREG=1
 
 :mcp_steps
 if defined MCPREG goto :mcp_registered
-echo  1. Register the bridge (once, for all projects):
+echo  1. Register the bridge - EITHER once for every Claude Code session:
 echo.
 echo       claude mcp add --scope user delphi-refactoring-light -- "%MCPEXE%"
+echo.
+echo     OR only for one Delphi project (run it in that project folder; keeps
+echo     other, non-Delphi sessions free of it):
+echo.
+echo       claude mcp add --scope local delphi-refactoring-light -- "%MCPEXE%"
+echo.
+echo     The name is up to you - it prefixes every tool name. While no IDE
+echo     runs, the bridge offers only two tools; the rest appear with the IDE.
 echo.
 echo  2. Restart RAD Studio (the IDE side is part of the package).
 echo  3. Start Claude Code in your project folder and type /mcp -

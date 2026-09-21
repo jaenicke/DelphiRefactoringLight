@@ -968,44 +968,25 @@ end;
 
 function McpServerInstructions: string;
 begin
+  // Loaded into EVERY Claude Code session that has the server registered,
+  // so it only says what the tool names cannot: how to treat buffers, fix
+  // ids and IDE selection. No tool enumeration - the model gets the names
+  // anyway (tool search keeps the schemas out until one is needed).
   Result :=
-    'Bridge to running RAD Studio (Delphi) IDEs with the Refactoring Light ' +
-    'plugin. Everything works on the IDE''s CURRENT EDITOR BUFFERS, ' +
-    'including unsaved changes. ' +
-    'Diagnostics: get_diagnostics merges Error Insight (Structure view), the ' +
-    'messages of the last compile and the plugin''s own DelphiLSP session. ' +
-    'Fixes: get_quick_fixes lists the plugin''s automatic fixes with ids, ' +
-    'apply_quick_fix applies one to the editor buffer (not saved). Fix ids ' +
-    'expire with every edit of the unit - after applying one, list again ' +
-    'before applying the next. Prefer these fixes over editing the file on ' +
-    'disk while the unit is open in the IDE. ' +
-    'Buffers: buffer_read / buffer_edit work on the IDE''s editor buffers; ' +
-    'buffer_save writes a loaded buffer to disk like Ctrl+S (no reload ' +
-    'prompt in the IDE); prefer buffer_edit + buffer_save over editing files ' +
-    'on disk while they are open in the IDE. ' +
-    'buffer_open without visible=true loads a file HEADLESS (memory only), so ' +
-    'edits and quick fixes can be tried and verified with get_diagnostics ' +
-    'before buffer_close saves or discards them. scratch_analyze compiles a ' +
-    'throw-away unit that exists only in memory against the active project - ' +
-    'use it to test snippets. ' +
-    'Refactoring: find_unit / add_unit / remove_unit / analyze_uses, ' +
-    'find_references / find_implementations, rename_preview + rename_apply ' +
-    '(the IDE plugin''s rename incl. form files), uses_path / uses_cycles, ' +
-    'safe_delete (check that nothing uses a symbol, then delete it), ' +
-    'change_signature (add / remove / reorder / rename parameters incl. every call), ' +
-    'semantic_replace (rule-based replacements, every match verified by DelphiLSP), ' +
-    'move_to_new_unit, apply_quick_fixes (all fixes of a kind in one go), ' +
-    'expand_includes (include files written into their units for debugging), ' +
-    'convert_properties (field access <-> getter/setter), ' +
-    'debug_consistency, blame / commit_info. The lsp_* tools talk to the ' +
-    'plugin''s own DelphiLSP session directly. ' +
-    'When something does not work as expected (no fixes, no diagnostics, ' +
-    'index not ready), get_status shows the plugin''s own view of why. ' +
-    'Several IDEs may run at once: the target is chosen automatically from ' +
-    'the file argument (an IDE that has it open wins) and from this ' +
-    'session''s working directory compared with each IDE''s projects. If the ' +
-    'choice is ambiguous the tool says so - call ide_instances to see the ' +
-    'IDEs and their projects, then select_ide or pass "instance".';
+    'Delphi (RAD Studio) refactoring through running IDEs with the ' +
+    'Refactoring Light plugin; answers come from DelphiLSP and the IDE, not ' +
+    'from text matching. The IDE''s editor buffers are the truth, unsaved ' +
+    'changes included: while a unit is open in the IDE, use buffer_read / ' +
+    'buffer_edit / buffer_save or the quick fixes instead of editing the ' +
+    'file on disk. Fix ids expire with every edit of the unit - list again ' +
+    'after applying one. buffer_open without visible=true loads a file ' +
+    'headless (memory only), so changes can be checked with get_diagnostics ' +
+    'before buffer_close saves or discards them. When something does not ' +
+    'work (no fixes, no diagnostics, index not ready), get_status says why. ' +
+    'With several IDEs the target follows the file argument and the working ' +
+    'directory; if that is ambiguous, use ide_instances and select_ide. ' +
+    'While no IDE runs only ide_instances and select_ide exist; the other ' +
+    'tools appear when an IDE with the plugin starts.';
 end;
 
 end.

@@ -473,6 +473,19 @@ begin
       'this server does not send $/progress, so "busy" cannot be seen')
   else
     Row('  server busy', 'no', 'it answers requests');
+  S := '';
+  var VC := TLspManager.Instance.PeekVerifyClient;
+  if VC <> nil then
+    Row('  verification session', 'running (agent)',
+      'answers the candidate checks of find references / rename - about ' +
+      'twice as fast, and never aborted after 10 s')
+  else if TPluginSettings.VerifySession then
+    Row('  verification session', 'off (starts with the next scan)',
+      'a second DelphiLsp process, shut down again after 10 idle minutes')
+  else
+    Row('  verification session', 'disabled in the options',
+      'the main session verifies - slower, and it can be aborted while a ' +
+      'project loads');
   if TPluginSettings.LspLogging then
     Row('  session log', 'on',
       TPath.Combine(TPath.Combine(TPath.GetTempPath, 'DelphiLSP'),

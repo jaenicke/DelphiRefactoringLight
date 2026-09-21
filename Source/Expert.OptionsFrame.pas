@@ -69,6 +69,7 @@ type
     // built in code (the DFM belongs to the package project, which is open
     // in the IDE while we work on it) - issue #13 asked for this switch
     FLspLogBox: TCheckBox;
+    FVerifyBox: TCheckBox;
     procedure EnsureLspLogBox;
     procedure EnsureExtraRows;
     function EditFor(Kind: TShortcutKind): TEdit;
@@ -130,6 +131,13 @@ begin
   FLspLogBox.Hint := 'Starts our own DelphiLsp.exe with -LogModes 255. The log ' +
     'names every request and how long it took.';
   FLspLogBox.ShowHint := True;
+  FVerifyBox := TCheckBox.Create(Self);
+  FVerifyBox.Parent := grpLsp;
+  FVerifyBox.Caption := 'Verify find references / rename in a second, faster session';
+  FVerifyBox.Hint := 'A DelphiLsp "agent" session answers the verification ' +
+    'questions about twice as fast and is never cut off after 10 seconds. ' +
+    'It costs one more process while a scan runs.';
+  FVerifyBox.ShowHint := True;
   lblLspNote.Caption := '(pre-warming speeds up the first refactoring action and ' +
     'costs one LSP process. The log lands in %TEMP%\DelphiLSP\RefactoringLight*.log ' +
     'and names every request with its duration - it grows, so switch it off again.)';
@@ -246,7 +254,9 @@ begin
   grpLsp.Top := grpShortcuts.Top + grpShortcuts.Height + Gap;
   cbxPrewarmLsp.Width := grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap;
   EnsureLspLogBox;
-  FLspLogBox.SetBounds(cbxPrewarmLsp.Left, cbxPrewarmLsp.Top + cbxPrewarmLsp.Height + 6,
+  FVerifyBox.SetBounds(cbxPrewarmLsp.Left, cbxPrewarmLsp.Top + cbxPrewarmLsp.Height + 6,
+    grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap, cbxPrewarmLsp.Height);
+  FLspLogBox.SetBounds(cbxPrewarmLsp.Left, FVerifyBox.Top + FVerifyBox.Height + 6,
     grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap, cbxPrewarmLsp.Height);
   lblLspNote.AutoSize := False;
   lblLspNote.WordWrap := True;
@@ -329,6 +339,7 @@ begin
   cbxPrewarmLsp.Checked := TPluginSettings.PrewarmLspOnProjectOpen;
   EnsureLspLogBox;
   FLspLogBox.Checked := TPluginSettings.LspLogging;
+  FVerifyBox.Checked := TPluginSettings.VerifySession;
 
   if cbxBlameInfo.Items.Count = 0 then
   begin
@@ -359,6 +370,7 @@ begin
   end;
   TPluginSettings.PrewarmLspOnProjectOpen := cbxPrewarmLsp.Checked;
   if FLspLogBox <> nil then TPluginSettings.LspLogging := FLspLogBox.Checked;
+  if FVerifyBox <> nil then TPluginSettings.VerifySession := FVerifyBox.Checked;
 
   TPluginSettings.BlameInfo := Max(0, cbxBlameInfo.ItemIndex);
   // 0 is a legitimate value ("do not touch the gutter"); anything wider
@@ -428,6 +440,7 @@ begin
   cbxPrewarmLsp.Checked := TPluginSettings.DefaultPrewarm;
   EnsureLspLogBox;
   FLspLogBox.Checked := False;
+  FVerifyBox.Checked := True;
 end;
 
 end.

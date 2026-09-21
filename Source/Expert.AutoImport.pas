@@ -44,7 +44,8 @@ type
   TQuickFixKind = (qfAddUnit, qfRenameIdent, qfFixUsesName, qfRemoveUses,
     qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
     qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken,
-    qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod);
+    qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod,
+    qfAlignDeclToImpl);
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -62,7 +63,9 @@ type
     Section: TUsesSection;      // target section for uses additions
     FollowUpUnit: string;       // qfRenameIdent: unit to add after renaming
     OldUnit: string;            // qfRemoveUses: unit to remove
-    AuxLine: Integer;           // qfInitVar: 0-based line of the routine's 'begin'
+    AuxLine: Integer;           // qfInitVar: 0-based line of the routine's 'begin';
+                                //  qfAlignHeader / qfAlignDeclToImpl anchored at a
+                                //  DECLARATION: its implementation line (> 0)
   end;
 
 /// <summary>Turns compiler diagnostics into concrete quick fixes. Pure
@@ -368,6 +371,22 @@ function CollectHeader(const ALines: TArray<string>; AStart: Integer;
 ///  collected header.</summary>
 function ParseHeader(const AHeader, AKind: string;
   out AQualified, AParams, ARetType: string): Boolean;
+/// <summary>0-based line of the IMPLEMENTATION header that belongs to the
+///  routine declared at ADeclLine0 (method: "Container.Name", free routine:
+///  "Name" at column 0), matched by NAME only - so it is also found when
+///  the two signatures differ, which is exactly the case it exists for.
+///  -1 when there is none.</summary>
+function FindImplementationOfDecl(const ALines: TArray<string>; ADeclLine0: Integer): Integer;
+/// <summary>ALines with the declaration at ADeclLine0 rewritten to the
+///  signature of the implementation header at AImplLine0: kind, parameters
+///  and result type from the implementation, the declaration's own name,
+///  'class ' prefix and directives kept, and default values kept for every
+///  parameter that survives unchanged (defaults live in the declaration).
+///  False when either header cannot be read, the implementation header has
+///  NO parameter list (legal Delphi, it matches any declaration - nothing to
+///  align) or nothing would change.</summary>
+function PlanDeclToImplAlign(const ALines: TArray<string>; ADeclLine0, AImplLine0: Integer;
+  out ANewLines: TArray<string>): Boolean;
 /// <summary>'TFoo' for a trimmed "TFoo = class(...)" / "= record" opener that
 ///  opens a BODY; '' for anything else (forward, metaclass, alias).</summary>
 function ClassOpenerName(const ATrimmed: string): string;
@@ -443,7 +462,9 @@ uses
   Expert.EditorHelperIntf, Expert.UnitAvailability, Expert.DiagStore,
   Expert.DfmEventCheck,   // MergeParamNames (shared with the DFM auto-fix)
   Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
-  Delphi.FileEncoding, Expert.PascalScanner;
+  Delphi.FileEncoding, Expert.PascalScanner,
+  Expert.SignatureEdit,    // ParseParamList / FormatParamList (align declaration)
+  Expert.SignatureCheck;   // TSignatureChecker.ReplaceSignature
 
 type
   TMissingIdent = record
@@ -615,6 +636,119 @@ begin
   Result := True;
 end;
 
+
+function StripGenericArgs(const S: string): string;
+var
+  Depth: Integer;
+begin
+  Result := '';
+  Depth := 0;
+  for var C in S do
+    if C = '<' then Inc(Depth)
+    else if C = '>' then begin if Depth > 0 then Dec(Depth); end
+    else if Depth = 0 then Result := Result + C;
+  Result := StringReplace(Result, ' ', '', [rfReplaceAll]);
+end;
+
+function FindImplementationOfDecl(const ALines: TArray<string>; ADeclLine0: Integer): Integer;
+var
+  Kind, Q, P, R, Target: string;
+  IsCM: Boolean;
+  E: Integer;
+begin
+  Result := -1;
+  if (ADeclLine0 < 0) or (ADeclLine0 > High(ALines)) then Exit;
+  if not IsHeaderLine(Trim(StripLineComment(ALines[ADeclLine0])), Kind, IsCM) then Exit;
+  if not ParseHeader(CollectHeader(ALines, ADeclLine0, E), Kind, Q, P, R) then Exit;
+  // the declared name is never qualified; the implementation's is
+  var Container := EnclosingContainerName(ALines, ADeclLine0);
+  if Container <> '' then Target := Container + '.' + Q else Target := Q;
+  Target := UpperCase(StripGenericArgs(Target));
+  var From := ImplementationLineOf(ALines);
+  if (From = MaxInt) or (From < 0) then Exit;
+  for var I := From + 1 to High(ALines) do
+  begin
+    var Raw := ALines[I];
+    // a free routine's implementation starts at column 0; an indented
+    // header with the same plain name is a NESTED routine of another one
+    if (Container = '') and (Raw <> '') and CharInSet(Raw[1], [' ', #9]) then Continue;
+    var K2: string;
+    var C2: Boolean;
+    if not IsHeaderLine(Trim(StripLineComment(Raw)), K2, C2) then Continue;
+    var Q2, P2, R2: string;
+    var E2: Integer;
+    if not ParseHeader(CollectHeader(ALines, I, E2), K2, Q2, P2, R2) then Continue;
+    if UpperCase(StripGenericArgs(Q2)) = Target then Exit(I);
+  end;
+end;
+
+function PlanDeclToImplAlign(const ALines: TArray<string>; ADeclLine0, AImplLine0: Integer;
+  out ANewLines: TArray<string>): Boolean;
+var
+  DKind, IKind, DQ, DP, DR, IQ, IP, IR, IHeader, NewSig: string;
+  DCM, ICM: Boolean;
+  DE, IE: Integer;
+begin
+  Result := False;
+  ANewLines := nil;
+  if (ADeclLine0 < 0) or (ADeclLine0 > High(ALines)) or
+     (AImplLine0 < 0) or (AImplLine0 > High(ALines)) then Exit;
+  if not IsHeaderLine(Trim(StripLineComment(ALines[ADeclLine0])), DKind, DCM) then Exit;
+  if not IsHeaderLine(Trim(StripLineComment(ALines[AImplLine0])), IKind, ICM) then Exit;
+  if not ParseHeader(CollectHeader(ALines, ADeclLine0, DE), DKind, DQ, DP, DR) then Exit;
+  IHeader := CollectHeader(ALines, AImplLine0, IE);
+  if not ParseHeader(IHeader, IKind, IQ, IP, IR) then Exit;
+  // "procedure TFoo.Bar;" without a parameter list fits ANY declaration -
+  // aligning to it would throw the declaration's parameters away
+  if (IP = '') and (Pos('(', IHeader) = 0) and (DP <> '') then Exit;
+  var Params := ParseParamList(IP);
+  var Old := ParseParamList(DP);
+  // default values belong to the declaration: keep them where the
+  // parameter itself is unchanged
+  for var I := 0 to High(Params) do
+    for var O in Old do
+      if (O.DefaultText <> '') and SameText(O.Name, Params[I].Name) and
+         SameText(O.TypeText, Params[I].TypeText) and
+         SameText(O.Modifier, Params[I].Modifier) then
+      begin
+        Params[I].DefaultText := O.DefaultText;
+        Break;
+      end;
+  // Delphi allows default values only on a TRAILING run of parameters: a
+  // kept default in front of a new parameter without one would not compile
+  var SeenPlain := False;
+  for var I := High(Params) downto 0 do
+    if Params[I].DefaultText = '' then SeenPlain := True
+    else if SeenPlain then Params[I].DefaultText := '';
+  NewSig := IKind + ' ' + DQ;
+  if Length(Params) > 0 then NewSig := NewSig + '(' + FormatParamList(Params) + ')';
+  if IR <> '' then NewSig := NewSig + ': ' + IR;
+  if not TSignatureChecker.ReplaceSignature(ALines, ADeclLine0, NewSig, ANewLines) then Exit;
+  // nothing to do (a stale diagnostic) is no fix
+  Result := string.Join(#10, ANewLines) <> string.Join(#10, ALines);
+end;
+
+// Applier of qfAlignDeclToImpl - the implementation is found again in the
+// CURRENT buffer (the fix may have been listed a while ago).
+function AlignDeclToImplHeader(const AFile: string; ADeclLine0: Integer): Boolean;
+var
+  Content: string;
+  Lines, NewLines: TArray<string>;
+begin
+  Result := False;
+  if not ReadCurrentContent(AFile, Content) then Exit;
+  Lines := SplitContentLines(Content);
+  var Impl := FindImplementationOfDecl(Lines, ADeclLine0);
+  if Impl < 0 then Exit;
+  if not PlanDeclToImplAlign(Lines, ADeclLine0, Impl, NewLines) then Exit;
+  var SL := TStringList.Create;
+  try
+    for var L in NewLines do SL.Add(L);
+    Result := ApplyLinesMinimal(AFile, SL, Content);
+  finally
+    SL.Free;
+  end;
+end;
 
 // Turns the E2003 diagnostics for a buffer into missing-identifier records
 // with candidate units. Pure function of (content, diagnostics) - safe on
@@ -2039,6 +2173,51 @@ var
     if not IsHeaderLine(T, Kind, IsCM) then Exit;
     if Pos('EXTERNAL', UpperCase(T)) > 0 then Exit;   // cannot generate that
 
+    // AN IMPLEMENTATION OF THAT NAME EXISTS, only with another signature -
+    // one of the two was edited (user, 2026-09-21: a parameter added to
+    // the declaration). An empty second body would only add errors; what
+    // helps is making the two AGREE, in either direction. An OVERLOADED
+    // declaration is different: a new overload really needs its own body,
+    // so for it the stub stays the only offer (user, same round).
+    var HdrEnd: Integer;
+    CollectHeader(Lines, D.Range.Start.Line, HdrEnd);
+    // the directives of THIS declaration: its own header lines, plus a
+    // following line only when that one IS a directive continuation - the
+    // next line is usually the NEXT declaration, and a sibling overload
+    // there made this one look overloaded (caught by the test)
+    var Directives := '';
+    for var K := D.Range.Start.Line to HdrEnd do
+      Directives := Directives + ' ' + StripLineComment(Lines[K]);
+    if (HdrEnd + 1 <= High(Lines)) and
+       StartsText('overload', Trim(StripLineComment(Lines[HdrEnd + 1]))) then
+      Directives := Directives + ' overload';
+    if not HasWholeWordCI(Directives, 'overload') then
+    begin
+      var ImplLine := FindImplementationOfDecl(Lines, D.Range.Start.Line);
+      if ImplLine > 0 then
+      begin
+        F := Default(TQuickFix);
+        F.Kind := qfAlignHeader;
+        F.Line := D.Range.Start.Line;
+        F.AuxLine := ImplLine;          // > 0: anchored at the declaration
+        F.Col := Col0;
+        F.TokenLen := Len;
+        F.Identifier := Ident;
+        F.Caption := Format('Align implementation (line %d) with this declaration',
+          [ImplLine + 1]);
+        Res.Add(F);
+        var Plan: TArray<string>;
+        if PlanDeclToImplAlign(Lines, D.Range.Start.Line, ImplLine, Plan) then
+        begin
+          F.Kind := qfAlignDeclToImpl;
+          F.Caption := Format('Align this declaration with the implementation (line %d)',
+            [ImplLine + 1]);
+          Res.Add(F);
+        end;
+        Exit;
+      end;
+    end;
+
     F := Default(TQuickFix);
     F.Kind := qfImplStub;
     F.Line := D.Range.Start.Line;
@@ -2073,6 +2252,22 @@ var
     begin
       Decline(D.Code, Meth, 'the diagnosed line is not a class declaration (stale?)');
       Exit;
+    end;
+    // The class already DECLARES that member, only with another signature
+    // (typically it was just edited): adding the interface's version would
+    // make a second declaration. The fix belongs at that member (the E2065
+    // / E2037 align offers). An OVERLOADED member may legitimately get one
+    // more overload, so that case keeps the offer.
+    begin
+      var Existing := FindMemberDeclarationLine(AContent, ClassName, Meth);
+      if (Existing >= 0) and (Existing <= High(Lines)) and
+         not HasWholeWordCI(StripLineComment(Lines[Existing]), 'overload') then
+      begin
+        Decline(D.Code, Meth, Format('%s already declares %s (line %d) with another ' +
+          'signature - align that one instead of adding a second', [ClassName, Meth,
+          Existing + 1]));
+        Exit;
+      end;
     end;
     IntfBare := Intf;
     P := LastDelimiter('.', IntfBare);
@@ -3466,7 +3661,22 @@ begin
     qfRemoveUses:
       Result := RemoveUnitFromUses(AFile, AFix.OldUnit);
     qfAlignHeader:
-      Result := AlignImplHeaderToDecl(AFile, AFix.Line);
+      if AFix.AuxLine > 0 then
+      begin
+        // anchored at the DECLARATION: find its implementation again in the
+        // current buffer rather than trusting a line number from the list
+        var Cur: string;
+        Result := False;
+        if ReadCurrentContent(AFile, Cur) then
+        begin
+          var Impl := FindImplementationOfDecl(SplitContentLines(Cur), AFix.Line);
+          if Impl > 0 then Result := AlignImplHeaderToDecl(AFile, Impl);
+        end;
+      end
+      else
+        Result := AlignImplHeaderToDecl(AFile, AFix.Line);
+    qfAlignDeclToImpl:
+      Result := AlignDeclToImplHeader(AFile, AFix.Line);
     qfRemoveVar:
       Result := RemoveVarFromDecl(AFile, AFix.Identifier, AFix.Line);
     qfInsertSemi:
@@ -3511,7 +3721,8 @@ const
     'Remove unused variable', 'Insert missing ;', 'Initialize variable',
     'Remove dead assignment', 'Add reintroduce', 'Create implementation stub',
     'Create class stub', 'Remove stray token', 'Remove unused private member',
-    'Declare variable', 'Declare inline variable', 'Implement interface method');
+    'Declare variable', 'Declare inline variable', 'Implement interface method',
+    'Align declaration with implementation');
 begin
   Result := Texts[AKind];
 end;
@@ -3827,9 +4038,12 @@ begin
             FActions := FActions + [A];
             FList.Items.Add(A.Caption);
           end;
-        qfAlignHeader:
+        qfAlignHeader, qfAlignDeclToImpl:
           begin
-            A.Caption := 'Align implementation header with declaration';
+            if FFixes[I].Caption <> '' then
+              A.Caption := FFixes[I].Caption
+            else
+              A.Caption := 'Align implementation header with declaration';
             A.FixIdx := I;
             A.UnitChoice := -1;
             FActions := FActions + [A];
@@ -5019,6 +5233,22 @@ begin
   end;
 end;
 
+/// <summary>True when the running LSP session belongs to the project that
+///  is active now (or when either side is unknown - nothing to compare).</summary>
+function LiveSessionFitsActiveProject: Boolean;
+var
+  Session, Active: string;
+begin
+  Session := TLspManager.Instance.SessionProjectFile;
+  if Session = '' then Exit(True);
+  try
+    Active := Editor.GetCurrentProjectDproj;
+  except
+    Active := '';
+  end;
+  Result := (Active = '') or SameText(ExpandFileName(Session), ExpandFileName(Active));
+end;
+
 procedure TAutoImportLive.StartAnalysis(const AFile, AContent: string; AHash: Integer);
 var
   Client: TLspClient;
@@ -5027,6 +5257,13 @@ begin
   // NEVER cold-start the LSP from the background poller - only piggyback
   // on a client the prewarmer / a wizard has already brought up.
   Client := TLspManager.Instance.PeekClient;
+  // A session started for ANOTHER project (the active project was switched
+  // and nobody restarted it yet) resolves this unit in the wrong context:
+  // its E2003 for an identifier the new project CAN see came back after
+  // every reset and kept a "did you mean" fix on screen (user, 2026-09-21).
+  // Silence is better than that - the Structure view still answers.
+  if (Client <> nil) and not LiveSessionFitsActiveProject then
+    Client := nil;
   if Client = nil then
   begin
     FDirtyTick := GetTickCount;   // retry after another idle period

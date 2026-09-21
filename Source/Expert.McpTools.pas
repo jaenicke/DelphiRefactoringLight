@@ -97,7 +97,14 @@ begin
     qfRemoveUses:
       Result := Format('Remove %s from the uses clause', [AFix.OldUnit]);
     qfAlignHeader:
-      Result := 'Align the implementation header with its declaration';
+      if AFix.AuxLine > 0 then
+        Result := Format('Align the implementation (line %d) with this declaration',
+          [AFix.AuxLine + 1])
+      else
+        Result := 'Align the implementation header with its declaration';
+    qfAlignDeclToImpl:
+      Result := Format('Align this declaration with its implementation (line %d)',
+        [AFix.AuxLine + 1]);
     qfRemoveVar:
       Result := Format('Remove the unused variable %s', [AFix.Identifier]);
     qfInsertSemi:

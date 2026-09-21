@@ -138,6 +138,13 @@ begin
   // into %TEMP%\RefactoringLight-resources.log - the numbers an
   // "out of memory" report needs (see Expert.ResourceMonitor).
   StartResourceMonitor;
+  // the only periodic heartbeat we have: it also retires the verification
+  // LSP session after 10 idle minutes (it costs ~290 MB)
+  ResourceTickHook :=
+    procedure
+    begin
+      TLspManager.Instance.MaintainVerifySession;
+    end;
   // Named pipe for the MCP bridge (RefactoringLightMcp.exe): diagnostics
   // and quick fixes for Claude Code & co, one pipe per IDE instance.
   StartMcpServer;
@@ -163,6 +170,7 @@ finalization
   // requests fail at once instead of timing out.
   TLspManager.ShutdownIfRunning;
   ShutdownWorkersAndWait;
+  ResourceTickHook := nil;   // before the timer goes, and before the BPL unloads
   StopResourceMonitor;
   UninstallBlameGutter;
   UninstallQuickFixMarkers;

@@ -278,9 +278,14 @@ begin
   end;
 
   if Aborted then Exit;
-  // Strategy 1: try textDocument/references directly
+  // Strategy 1: try textDocument/references directly. DelphiLSP does NOT
+  // offer it (no referencesProvider in any mode, measured 2026-09-21), so
+  // for Delphi the text scan below is THE method, not a fallback - the
+  // status only says "Fallback" when references really existed and failed.
+  var Prefix := '';
   if Client.SupportsReferences then
   begin
+    Prefix := 'Fallback: ';
     FDialog.SetStatus('Querying LSP server for references...');
     try
       LspLocations := Client.FindReferences(FContext.FileName,
@@ -304,8 +309,8 @@ begin
     end;
   end;
 
-  // Strategy 2: fallback - text search + GotoDefinition verification
-  FDialog.SetStatus('Fallback: text search in project...');
+  // Strategy 2: text search + GotoDefinition verification
+  FDialog.SetStatus(Prefix + 'Text search in project...');
 
   // Project + the caret's unit + the extras from the settings (see
   // Expert.ScopeFiles).
@@ -324,7 +329,21 @@ begin
   // Positions inside {$I} include files are answered through the INCLUDING
   // unit, sent to DelphiLSP with the include expanded (Expert.IncludeExpansion);
   // freeing the context sends the original text again.
-  var IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
+  // VERIFICATION runs through the agent session when it is available: it
+  // answers textDocument/definition about twice as fast and the controller's
+  // 10 s abort does not exist there (measured, issue #13). Identical answers
+  // - and when it cannot be started, this IS the main client.
+  var VClient := TLspManager.Instance.VerificationClient(Client, RootPath,
+    FContext.ProjectFile, DelphiLspJson);
+  if VClient <> Client then
+  begin
+    // it would read the start file from DISK otherwise - an unsaved buffer
+    // would be verified against the wrong text
+    var StartContent: string;
+    if EditorOrDiskReader()(FContext.FileName, StartContent) then
+      VClient.SyncDocumentWith(FContext.FileName, StartContent);
+  end;
+  var IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
   try
     IncCtx.RegisterFiles(ProjFiles);
 
@@ -340,14 +359,15 @@ begin
       DefLine := DefLocs[0].Range.Start.Line;
       DefLineOut := DefLine;
       IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLocs[0].Range.Start.Line,
-        DefLocs[0].Range.Start.Character);
+        DefLocs[0].Range.Start.Character, FContext.WordAtCursor);
     end
     else
     begin
       // null AT a declaration: the caret is the symbol
       DefFilePath := FContext.FileName;
       DefLineOut := LspLine;
-      IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
+      IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol,
+        FContext.WordAtCursor);
     end;
 
     // Interface <-> class (user request): the interface declaration a class
@@ -362,12 +382,30 @@ begin
       // type of its qualifier instead of being listed as unverified noise
       var Graph := TTypeGraph.Create(ProjFiles, EditorOrDiskReader());
       try
+        // SELF-CONSISTENCY ANCHOR (PsyPrax report, 2026-09-21): the source
+        // pre-check below judges every candidate by where the SOURCES say it
+        // leads, and drops the ones that lead elsewhere than the target set.
+        // That is only safe while the target set really holds the symbol's
+        // declaration - and when the partner query came back empty it did
+        // not: all 8 calls of TGemTiFunctions.IsConnectorUnreachable
+        // resolved correctly to its declaration and were thrown away as
+        // "another type's member". So the START position is judged by the
+        // same resolver: the declaration it finds there IS ours, and the
+        // pre-check can never disagree with itself about it again.
+        begin
+          var StartContent: string;
+          var StartLink: TMemberLink;
+          if EditorOrDiskReader()(FContext.FileName, StartContent) and
+             (ResolveMemberUse(Graph, FContext.FileName, StartContent, LspLine, LspCol,
+               FContext.WordAtCursor, StartLink) = murResolved) then
+            Targets.Add(StartLink.FilePath, StartLink.Line);
+        end;
         var Owner := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
         Links := CollectLinkedTargets(Graph, Owner, FContext.WordAtCursor, Linked);
 
         // Verify each candidate via GotoDefinition
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
-          Client, IncCtx, Graph, Owner);
+          VClient, IncCtx, Graph, Owner);
         // the window is gone: stop here, but let the finally blocks below
         // restore the include documents and free the graph
         if Aborted then Exit;
@@ -423,11 +461,11 @@ begin
     FromSource := FromSource + Format(' %d request(s) were aborted by DelphiLSP ' +
       '(it was busy - those occurrences are marked, not dropped).', [FLspErrors]);
   if Unverified > 0 then
-    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
+    FDialog.SetStatus(Prefix + Format('%d of %d candidate(s) verified, %d shown UNVERIFIED ' +
       '(see the Note column).%s%s', [Length(Items) - Unverified, Length(TextCandidates),
       Unverified, FromSource, NotAnalysed]))
   else
-    FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified.%s',
+    FDialog.SetStatus(Prefix + Format('%d of %d candidate(s) verified.%s',
       [Length(Items), Length(TextCandidates), FromSource]));
 end;
 
@@ -489,12 +527,23 @@ begin
   CandidateList := TList<TFindReferenceItem>.Create;
   try
     FDialog.SetProgress(0, System.Length(AFiles));
+    // the bar alone says "something happens"; the text says how far, how
+    // many hits so far, and which unit - a big project has thousands of
+    // files (user request, 2026-09-21). Throttled: repainting the label for
+    // every file would cost more than reading many of them.
+    var LastText: UInt64 := 0;
     for var FileIdx := 0 to High(AFiles) do
     begin
       F := AFiles[FileIdx];
       if (FileIdx mod 5 = 0) then
       begin
         FDialog.SetProgress(FileIdx + 1, System.Length(AFiles));
+        if GetTickCount64 - LastText >= 150 then
+        begin
+          LastText := GetTickCount64;
+          FDialog.SetStatus(Format('Text search: %d of %d file(s), %d candidate(s) so far - %s',
+            [FileIdx + 1, System.Length(AFiles), CandidateList.Count, ExtractFileName(F)]));
+        end;
         Application.ProcessMessages;
         if Aborted then Break;
       end;
@@ -622,18 +671,27 @@ begin
         Synced.Add(UpperCase(C.FilePath), True);
         if not AIncludes.OwnsDocument(C.FilePath) then
         begin
-          var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
-          if AClient.SyncDocument(C.FilePath) then
+          if AClient.ServerType <> '' then
+            // AGENT session: it pushes no diagnostics, so there is nothing
+            // to wait for - measured (21 candidates in 13 units): it answers
+            // straight after the didOpen, with the same answers the main
+            // session gives after its analysis wait.
+            AClient.SyncDocumentWith(C.FilePath, FileContent(C.FilePath))
+          else
           begin
-            var Name := ExtractFileName(C.FilePath);
-            AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
-              function: Boolean
-              begin
-                if not Aborted then
-                  FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
-                Application.ProcessMessages;
-                Result := not Aborted;   // a closed window waits for nothing
-              end);
+            var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
+            if AClient.SyncDocument(C.FilePath) then
+            begin
+              var Name := ExtractFileName(C.FilePath);
+              AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
+                function: Boolean
+                begin
+                  if not Aborted then
+                    FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                  Application.ProcessMessages;
+                  Result := not Aborted;   // a closed window waits for nothing
+                end);
+            end;
           end;
         end;
       end;

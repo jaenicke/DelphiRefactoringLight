@@ -33,11 +33,11 @@ type
     class var FBlameColumnOffset: Integer;
     class var FBlameUseTortoise: Boolean;
     class var FLspLogging: Boolean;
+    class var FVerifySession: Boolean;
     class var FScopeIncludeOpenUnits: Boolean;
     class var FScopeIncludeUsedUnits: Boolean;
     class var FLoaded: Boolean;
     class function BaseRegistryKey: string; static;
-    class function RegistryKey: string; static;
     class function LegacyRegistryKey: string; static;
     class procedure MigrateLegacyKey; static;
   public
@@ -90,6 +90,14 @@ type
     ///  its duration. Off by default (the log grows); asked for in issue
     ///  #13, because without it a slow session cannot be diagnosed.</summary>
     class property LspLogging: Boolean read FLspLogging write FLspLogging;
+    /// <summary>Verify candidates through a SECOND DelphiLsp session in
+    ///  'agent' mode: measured twice as fast and immune to the controller's
+    ///  10 s abort, at the price of one more process (~290 MB) that is shut
+    ///  down again after 10 idle minutes. See issue #13.</summary>
+    class property VerifySession: Boolean read FVerifySession write FVerifySession;
+    /// <summary>Where these settings live - for the status window and the
+    ///  tests.</summary>
+    class function RegistryKey: string; static;
 
     /// <summary>Project-wide scans (rename, find references, find
     ///  implementations, find unit references) also look at units that
@@ -142,6 +150,47 @@ begin
   Result := BaseKey;
 end;
 
+// A registry value of the WRONG TYPE used to raise out of Load, and the IDE
+// then refused to load the ENTIRE package: "Package ...370.bpl kann nicht
+// geladen werden. Ungueltiger Datentyp fuer 'VerifySession'." (seen
+// 2026-09-21, after a script wrote the value as a string). One stray value -
+// from an older build, another tool or a hand edit - must never cost the
+// user the whole plugin. Every read goes through these two now: wrong type
+// or unreadable = the default, and a string value is still understood.
+function ReadBoolDef(AReg: TRegistry; const AName: string; ADefault: Boolean): Boolean;
+var
+  S: string;
+begin
+  Result := ADefault;
+  try
+    if not AReg.ValueExists(AName) then Exit;
+    case AReg.GetDataType(AName) of
+      rdInteger: Result := AReg.ReadInteger(AName) <> 0;
+      rdString, rdExpandString:
+        begin
+          S := Trim(AReg.ReadString(AName));
+          Result := (S <> '') and (S <> '0') and not SameText(S, 'false');
+        end;
+    end;
+  except
+    Result := ADefault;
+  end;
+end;
+
+function ReadIntDef(AReg: TRegistry; const AName: string; ADefault: Integer): Integer;
+begin
+  Result := ADefault;
+  try
+    if not AReg.ValueExists(AName) then Exit;
+    case AReg.GetDataType(AName) of
+      rdInteger: Result := AReg.ReadInteger(AName);
+      rdString, rdExpandString: Result := StrToIntDef(Trim(AReg.ReadString(AName)), ADefault);
+    end;
+  except
+    Result := ADefault;
+  end;
+end;
+
 // ONE branch for the whole plugin. The settings used to live under
 // '...\RefactoringLight\Settings' while the shortcuts were (and are)
 // under '...\DelphiRefactoringLight\Shortcuts' - two keys for one
@@ -170,20 +219,14 @@ begin
     if not Reg.KeyExists(LegacyRegistryKey) then Exit;
     if Reg.OpenKeyReadOnly(LegacyRegistryKey) then
     try
-      if Reg.ValueExists('PrewarmLspOnProjectOpen') then
-        FPrewarmLspOnProjectOpen := Reg.ReadBool('PrewarmLspOnProjectOpen');
-      if Reg.ValueExists('LiveBlame') then
-        FLiveBlame := Reg.ReadBool('LiveBlame');
-      if Reg.ValueExists('BlameColumnWidth') then
-        FBlameColumnWidth := Reg.ReadInteger('BlameColumnWidth');
-      if Reg.ValueExists('BlameInfo') then
-        FBlameInfo := Reg.ReadInteger('BlameInfo');
-      if Reg.ValueExists('BlameColumnOffset') then
-        FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
-      if Reg.ValueExists('BlameUseTortoise') then
-        FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
-      if Reg.ValueExists('LspLogging') then
-        FLspLogging := Reg.ReadBool('LspLogging');
+      FPrewarmLspOnProjectOpen := ReadBoolDef(Reg, 'PrewarmLspOnProjectOpen', FPrewarmLspOnProjectOpen);
+      FLiveBlame := ReadBoolDef(Reg, 'LiveBlame', FLiveBlame);
+      FBlameColumnWidth := ReadIntDef(Reg, 'BlameColumnWidth', FBlameColumnWidth);
+      FBlameInfo := ReadIntDef(Reg, 'BlameInfo', FBlameInfo);
+      FBlameColumnOffset := ReadIntDef(Reg, 'BlameColumnOffset', FBlameColumnOffset);
+      FBlameUseTortoise := ReadBoolDef(Reg, 'BlameUseTortoise', FBlameUseTortoise);
+      FLspLogging := ReadBoolDef(Reg, 'LspLogging', FLspLogging);
+      FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
     finally
       Reg.CloseKey;
     end;
@@ -219,40 +262,42 @@ begin
   FBlameColumnOffset := 17;
   FBlameUseTortoise := True;
   FLspLogging := False;
+  FVerifySession := True;
   FScopeIncludeOpenUnits := True;
   FScopeIncludeUsedUnits := False;
   FLoaded := True;
 
-  MigrateLegacyKey;
+  try
+    MigrateLegacyKey;
+  except
+    // a broken legacy branch is not worth a failed package load either
+  end;
 
+  try
   Reg := TRegistry.Create(KEY_READ);
   try
     Reg.RootKey := HKEY_CURRENT_USER;
     if Reg.OpenKeyReadOnly(RegistryKey) then
     try
-      if Reg.ValueExists('PrewarmLspOnProjectOpen') then
-        FPrewarmLspOnProjectOpen := Reg.ReadBool('PrewarmLspOnProjectOpen');
-      if Reg.ValueExists('LiveBlame') then
-        FLiveBlame := Reg.ReadBool('LiveBlame');
-      if Reg.ValueExists('BlameColumnWidth') then
-        FBlameColumnWidth := Reg.ReadInteger('BlameColumnWidth');
-      if Reg.ValueExists('BlameInfo') then
-        FBlameInfo := Reg.ReadInteger('BlameInfo');
-      if Reg.ValueExists('BlameColumnOffset') then
-        FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
-      if Reg.ValueExists('BlameUseTortoise') then
-        FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
-      if Reg.ValueExists('LspLogging') then
-        FLspLogging := Reg.ReadBool('LspLogging');
-      if Reg.ValueExists('ScopeIncludeOpenUnits') then
-        FScopeIncludeOpenUnits := Reg.ReadBool('ScopeIncludeOpenUnits');
-      if Reg.ValueExists('ScopeIncludeUsedUnits') then
-        FScopeIncludeUsedUnits := Reg.ReadBool('ScopeIncludeUsedUnits');
+      FPrewarmLspOnProjectOpen := ReadBoolDef(Reg, 'PrewarmLspOnProjectOpen', FPrewarmLspOnProjectOpen);
+      FLiveBlame := ReadBoolDef(Reg, 'LiveBlame', FLiveBlame);
+      FBlameColumnWidth := ReadIntDef(Reg, 'BlameColumnWidth', FBlameColumnWidth);
+      FBlameInfo := ReadIntDef(Reg, 'BlameInfo', FBlameInfo);
+      FBlameColumnOffset := ReadIntDef(Reg, 'BlameColumnOffset', FBlameColumnOffset);
+      FBlameUseTortoise := ReadBoolDef(Reg, 'BlameUseTortoise', FBlameUseTortoise);
+      FLspLogging := ReadBoolDef(Reg, 'LspLogging', FLspLogging);
+      FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
+      FScopeIncludeOpenUnits := ReadBoolDef(Reg, 'ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
+      FScopeIncludeUsedUnits := ReadBoolDef(Reg, 'ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
     finally
       Reg.CloseKey;
     end;
   finally
     Reg.Free;
+  end;
+  except
+    // LAST net: the defaults above are already in place. Settings are a
+    // convenience - they must never decide whether the plugin loads.
   end;
 end;
 
@@ -272,6 +317,7 @@ begin
       Reg.WriteInteger('BlameColumnOffset', FBlameColumnOffset);
       Reg.WriteBool('BlameUseTortoise', FBlameUseTortoise);
       Reg.WriteBool('LspLogging', FLspLogging);
+      Reg.WriteBool('VerifySession', FVerifySession);
       Reg.WriteBool('ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
       Reg.WriteBool('ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
     finally

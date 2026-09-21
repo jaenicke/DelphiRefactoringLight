@@ -32,6 +32,7 @@ type
     var
       FClient: TLspClient;
       FCurrentProject: string;     // .delphilsp.json Pfad
+      FCurrentProjectFile: string; // .dproj (for the verification session)
       FCurrentRootPath: string;
       FIsReady: Boolean;
       FProjectIndexed: Boolean;    // Alle Projektdateien via didOpen bekannt?
@@ -46,6 +47,18 @@ type
       // manager itself is destroyed (after the worker latch has drained).
       FLock: TCriticalSection;
       FRetired: TList<TPair<TLspClient, UInt64>>;
+      // SECOND SESSION, serverType 'agent', used ONLY to verify candidate
+      // positions (textDocument/definition). MEASURED (issue #13 follow-up,
+      // scratchpad lspprobe\ProbeAgent.dpr, 21 candidates in 13 units):
+      // controller 14.3 s, agent with documents 6.5 s, agent WITHOUT any
+      // didOpen 5.2 s - and all three produced BYTE-IDENTICAL answers. The
+      // agent has no 10 s abort and no second serial queue; it pushes no
+      // diagnostics at all, which is why it can only ever be the verifier,
+      // never the main session.
+      FVerify: TLspClient;
+      FVerifyProject: string;
+      FVerifyLastUse: UInt64;
+      FVerifyFailed: Boolean;      // it could not be started - do not retry in this session
     constructor CreatePrivate;
     procedure RetireClient;
     procedure SweepRetired(AAll: Boolean);
@@ -66,6 +79,13 @@ type
     ///  initialisiert ist.</summary>
     function PeekClient: TLspClient;
 
+    /// <summary>The .dproj the running main session was started for ('' =
+    ///  no session, or it is being (re)started right now). After a switch
+    ///  of the ACTIVE project the session keeps answering for the OLD one
+    ///  until somebody calls GetClient - background users compare this with
+    ///  the active project instead of trusting a stale session.</summary>
+    function SessionProjectFile: string;
+
     /// <summary>Sorgt dafuer, dass alle uebergebenen Projektdateien via
     ///  textDocument/didOpen im LSP bekannt sind. Das ist zwingend noetig
     ///  fuer projektweite Queries wie textDocument/implementation, die
@@ -73,6 +93,24 @@ type
     ///  Idempotent: wiederholte Aufrufe ohne Projektwechsel tun nichts.</summary>
     procedure EnsureProjectIndexed(const AProjectFiles: TArray<string>; AProgress: TLspIndexProgress = nil);
 
+    /// <summary>The VERIFICATION session (serverType 'agent'), started on
+    ///  first use. It answers textDocument/definition about twice as fast
+    ///  as the main session and is never aborted by the controller's 10 s
+    ///  limit - which is what makes a scan during a project load usable at
+    ///  all. Nil when it is switched off or could not be started; every
+    ///  caller must then fall back to the main client.</summary>
+    function GetVerifyClient(const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;
+    /// <summary>The verification session if it is already running.</summary>
+    function PeekVerifyClient: TLspClient;
+    /// <summary>The client a SCAN should verify its candidates with: the
+    ///  agent session when it can be had, otherwise AMain. One call site
+    ///  per scan, so falling back is never forgotten.</summary>
+    function VerificationClient(AMain: TLspClient;
+      const ARootPath: string = ''; const AProjectFile: string = '';
+      const ADelphiLspJson: string = ''): TLspClient;
+    /// <summary>Shuts the verification session down when it has been unused
+    ///  for AIdleMs (it costs ~290 MB). Cheap to call often.</summary>
+    procedure MaintainVerifySession(AIdleMs: Cardinal = 600000);
     /// <summary>Prueft ob der LSP-Client noch laeuft: Prozess lebt UND der
     ///  Lese-Thread laeuft (ohne Round-Trip).</summary>
     function IsAlive: Boolean;
@@ -324,6 +362,114 @@ begin
   Result := (C <> nil) and FIsReady and C.IsConnected;
 end;
 
+function TLspManager.GetVerifyClient(const ARootPath, AProjectFile,
+  ADelphiLspJson: string): TLspClient;
+var
+  Root, Proj, Json: string;
+begin
+  Result := nil;
+  if not TPluginSettings.VerifySession then Exit;
+  FLock.Enter;
+  try
+    if FVerifyFailed then Exit;
+    // '' = take what the main session was started with (the MCP tools have
+    // no .delphilsp.json path at hand, and the agent needs the same
+    // configuration to resolve the project's units)
+    Root := ARootPath; Proj := AProjectFile; Json := ADelphiLspJson;
+    if Root = '' then Root := FCurrentRootPath;
+    if Proj = '' then Proj := FCurrentProjectFile;
+    if Json = '' then Json := FCurrentProject;
+    // a project change invalidates it like the main session
+    if (FVerify <> nil) and
+       ((not FVerify.IsConnected) or
+        ((ADelphiLspJson <> '') and not SameText(FVerifyProject, ADelphiLspJson))) then
+    begin
+      try FVerify.Shutdown; except end;
+      FreeAndNil(FVerify);
+    end;
+    if FVerify = nil then
+    begin
+      var C := TLspClient.Create(FLspExePath);
+      try
+        C.ServerType := 'agent';   // no controller, no 10 s abort, one process
+        C.ExtraArgs := GetEnvironmentVariable('REFACTORINGLIGHT_LSP_ARGS');
+        if (C.ExtraArgs = '') and TPluginSettings.LspLogging then
+          C.ExtraArgs := '-LogModes 255 -Name RefactoringLightVerify';
+        C.Start;
+        C.Initialize(Root, Proj);
+        if (Json <> '') and FileExists(Json) then
+          C.SendConfiguration(Json);
+        FVerify := C;
+        FVerifyProject := Json;
+      except
+        // Never let the verification session break a scan: the caller
+        // falls back to the main client.
+        on E: Exception do
+        begin
+          try C.Free; except end;
+          FVerifyFailed := True;
+          Exit(nil);
+        end;
+      end;
+    end;
+    FVerifyLastUse := GetTickCount64;
+    Result := FVerify;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TLspManager.VerificationClient(AMain: TLspClient;
+  const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;
+begin
+  Result := nil;
+  try
+    Result := GetVerifyClient(ARootPath, AProjectFile, ADelphiLspJson);
+  except
+    Result := nil;   // a scan must never fail because of the extra session
+  end;
+  if Result = nil then Result := AMain;
+end;
+
+function TLspManager.PeekVerifyClient: TLspClient;
+begin
+  Result := nil;
+  if not FLock.TryEnter then Exit;
+  try
+    if (FVerify <> nil) and FVerify.IsConnected then
+    begin
+      FVerifyLastUse := GetTickCount64;
+      Result := FVerify;
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TLspManager.MaintainVerifySession(AIdleMs: Cardinal);
+var
+  Doomed: TLspClient;
+begin
+  Doomed := nil;
+  if not FLock.TryEnter then Exit;
+  try
+    if (FVerify <> nil) and (GetTickCount64 - FVerifyLastUse > AIdleMs) then
+    begin
+      Doomed := FVerify;
+      FVerify := nil;
+      FVerifyProject := '';
+    end;
+  finally
+    FLock.Leave;
+  end;
+  // outside the lock: shutting a session down takes a moment
+  if Doomed <> nil then
+  begin
+    try Doomed.Shutdown; except end;
+    Doomed.Free;
+  end;
+end;
+
 function TLspManager.PeekClient: TLspClient;
 begin
   // Never block a poller: while another thread is (re)starting the client
@@ -334,6 +480,18 @@ begin
       Result := FClient
     else
       Result := nil;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TLspManager.SessionProjectFile: string;
+begin
+  Result := '';
+  if not FLock.TryEnter then Exit;
+  try
+    if (FClient <> nil) and FIsReady then
+      Result := FCurrentProjectFile;
   finally
     FLock.Leave;
   end;
@@ -383,6 +541,7 @@ begin
       FClient.SendConfiguration(ADelphiLspJson);
 
       FCurrentProject := ADelphiLspJson;
+      FCurrentProjectFile := AProjectFile;
       FCurrentRootPath := ARootPath;
       FIsReady := True;
       FProjectIndexed := False; // neu gestartet -> Index muss neu aufgebaut werden
@@ -545,6 +704,10 @@ end;
 
 procedure TLspManager.Shutdown;
 begin
+  // The verification session first and OUTSIDE the lock (MaintainVerifySession
+  // takes it): it must be gone before the BPL can unload, like every other
+  // process we started.
+  MaintainVerifySession(0);
   FLock.Enter;
   try
     RetireClient;
@@ -557,6 +720,7 @@ end;
 
 procedure TLspManager.Reset;
 begin
+  MaintainVerifySession(0);   // a new project needs a new verification session
   FLock.Enter;
   try
     RetireClient;

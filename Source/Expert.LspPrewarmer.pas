@@ -69,6 +69,7 @@ type
     /// <summary>Called by TPrewarmIdeNotifier when the IDE opens a
     ///  project file. Kicks off the background prewarm.</summary>
     procedure HandleProjectOpened(const AProjectFile: string);
+    procedure HandleProjectSwitched(const AProjectFile: string);
   end;
 
 var
@@ -102,6 +103,10 @@ begin
   if NotifyCode = ofnActiveProjectChanged then
   begin
     LiveResetResults;
+    // ... and move our LSP session to the NEW active project. Without this
+    // the live checker kept analysing in the old project's context and
+    // published its E2003 again right after the reset (user, 2026-09-21).
+    FOwner.HandleProjectSwitched(FileName);
     Exit;
   end;
   if NotifyCode <> ofnFileOpened then Exit;
@@ -242,6 +247,32 @@ begin
       // prewarm setting.
       try TUnitIndex.Instance.RefreshSourcesFromEditor; except end;
       if DoLsp then StartPrewarmFor(LProj);
+    end);
+end;
+
+procedure TLspPrewarmer.HandleProjectSwitched(const AProjectFile: string);
+var
+  LProj: string;
+begin
+  LProj := AProjectFile;
+  FLastProject := '';
+  // State only here (notifier context); the ToolsAPI work runs queued.
+  TThread.ForceQueue(nil,
+    procedure
+    var
+      Proj: string;
+    begin
+      Proj := LProj;
+      if not SameText(ExtractFileExt(Proj), '.dproj') then
+        try Proj := Editor.GetCurrentProjectDproj; except Proj := ''; end;
+      if Proj = '' then Exit;
+      FLastProject := Proj;
+      try TUnitIndex.Instance.RefreshSourcesFromEditor; except end;
+      // A session that EXISTS is kept current even when the prewarm-on-open
+      // setting is off - otherwise it would answer for the wrong project.
+      if TPluginSettings.PrewarmLspOnProjectOpen
+        or (TLspManager.Instance.PeekClient <> nil) then
+        StartPrewarmFor(Proj);
     end);
 end;
 

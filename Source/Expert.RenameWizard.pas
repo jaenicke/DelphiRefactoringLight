@@ -924,6 +924,7 @@ var
   ProjFiles: TArray<string>;
   Candidates, ImplCandidates: TArray<TRenameCandidate>;
   Client: TLspClient;
+  VClient: TLspClient;   // agent session for the verification (issue #13)
   ScopeFirst, ScopeLast: Integer;   // "current method" line window (0-based)
   IncCtx: TLspIncludeContext;       // freed = expanded units restored
 begin
@@ -1084,7 +1085,19 @@ begin
     // context sends the original text again.
     FUnverified := nil;
     FUnverifiedWhy := nil;
-    IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
+    // Candidates are verified through the agent session when it is
+    // available (measured twice as fast, no 10 s abort - issue #13); when
+    // it cannot be started this IS the main client.
+    VClient := TLspManager.Instance.VerificationClient(Client, RootPath,
+      FContext.ProjectFile, DelphiLspJson);
+    if VClient <> Client then
+    begin
+      // otherwise it would read the start file from DISK
+      var StartContent: string;
+      if EditorOrDiskReader()(FContext.FileName, StartContent) then
+        VClient.SyncDocumentWith(FContext.FileName, StartContent);
+    end;
+    IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
     IncCtx.RegisterFiles(ProjFiles);
 
 
@@ -1275,9 +1288,11 @@ begin
       // those of every implementing class (interface / virtual methods).
       var Targets: TLspSymbolTargets;
       if Length(DefLocs) > 0 then
-        IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLine, DefCol)
+        IncCtx.AddTargetWithPartner(Targets, DefFilePath, DefLine, DefCol,
+          FContext.WordAtCursor)
       else
-        IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol);
+        IncCtx.AddTargetWithPartner(Targets, FContext.FileName, LspLine, LspCol,
+          FContext.WordAtCursor);
       // The implementation scan is for OTHER types (interface implementers,
       // overrides in descendants). A header of the OWNER type itself that is
       // not the symbol already is a sibling OVERLOAD - forum report: renaming
@@ -1304,7 +1319,8 @@ begin
               ExtractFileName(IC.FilePath) + ':' + IntToStr(IC.Line + 1) + sLineBreak;
             Continue;
           end;
-          IncCtx.AddTargetWithPartner(Targets, IC.FilePath, IC.Line, IC.Col);
+          IncCtx.AddTargetWithPartner(Targets, IC.FilePath, IC.Line, IC.Col,
+            FContext.WordAtCursor);
         end;
       finally
         ImplLinesOf.Free;
@@ -1312,7 +1328,7 @@ begin
       FDiagLog := FDiagLog + 'Symbol positions (' + IntToStr(Targets.Count) + '):' +
         sLineBreak + Targets.Text + sLineBreak;
       FEdit := VerifyWithLsp(Candidates, FContext.WordAtCursor, NewName, IncCtx,
-        Targets, Client, OwnerType);
+        Targets, VClient, OwnerType);
     finally
       ImplFilesList.Free;
     end;
@@ -1916,18 +1932,24 @@ begin
         Synced.Add(UpperCase(C.FilePath), True);
         if not AIncludes.OwnsDocument(C.FilePath) then
         begin
-          var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
-          if AClient.SyncDocument(C.FilePath) then
+          if AClient.ServerType <> '' then
+            // AGENT session: nothing to wait for, it pushes no diagnostics
+            AClient.SyncDocumentWith(C.FilePath, FileContent(C.FilePath))
+          else
           begin
-            var Name := ExtractFileName(C.FilePath);
-            FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
-            if not AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
-              function: Boolean
-              begin
-                FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
-                Result := not FHost.ScanCancelled;
-              end) then
-              FDiagLog := FDiagLog + '  ' + Name + ': no analysis result within 30 s' + sLineBreak;
+            var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
+            if AClient.SyncDocument(C.FilePath) then
+            begin
+              var Name := ExtractFileName(C.FilePath);
+              FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+              if not AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
+                function: Boolean
+                begin
+                  FHost.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                  Result := not FHost.ScanCancelled;
+                end) then
+                FDiagLog := FDiagLog + '  ' + Name + ': no analysis result within 30 s' + sLineBreak;
+            end;
           end;
         end;
       end;

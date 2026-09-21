@@ -32,6 +32,9 @@ unit Expert.ResourceMonitor;
 
 interface
 
+uses
+  System.SysUtils;
+
 type
   TResourceSample = record
     GdiObjects, GdiPeak: Integer;
@@ -69,6 +72,13 @@ function ResourceSampleText(const S: TResourceSample): string;
 procedure StartResourceMonitor;
 procedure StopResourceMonitor;
 
+var
+  /// <summary>Called from the monitor's 30 s tick (main thread) - the one
+  ///  periodic heartbeat this plugin has. Used to shut the verification LSP
+  ///  session down once it has been idle (issue #13); set from
+  ///  Expert.Registration so this unit keeps no dependencies.</summary>
+  ResourceTickHook: TProc = nil;
+
 // ---- heap size ESTIMATES (status window "memory held by this plugin") ----
 // The plugin shares the IDE's memory manager, so "how much is ours" cannot
 // be measured - it is estimated from the data structures instead. The
@@ -91,7 +101,7 @@ function MBText(ABytes: Int64): string;
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils, System.SyncObjs,
+  System.Classes, System.IOUtils, System.SyncObjs,
   Winapi.Windows, Winapi.PsAPI, Vcl.ExtCtrls;
 
 const
@@ -325,6 +335,12 @@ begin
         GdiBalanceText);
   except
   end;
+  if Assigned(ResourceTickHook) then
+    try
+      ResourceTickHook();
+    except
+      // a maintenance job must never kill the monitor
+    end;
 end;
 
 procedure StartResourceMonitor;

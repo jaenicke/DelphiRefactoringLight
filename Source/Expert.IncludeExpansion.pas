@@ -166,9 +166,15 @@ type
     /// <summary>GotoDefinition that also works inside include files; answers
     ///  that point into an expanded document come back in real files.</summary>
     function Definition(const AFile: string; ALine, ACol: Integer): TArray<TLspLocation>;
-    /// <summary>Like TLspSymbolTargets.AddWithPartner, via Definition.</summary>
+    /// <summary>Like TLspSymbolTargets.AddWithPartner, via Definition.
+    ///  AName: the symbol's name - the partner is then asked AT the name on
+    ///  that line, not at ACol. DelphiLSP reports an implementation header
+    ///  as a range starting at column 0, and a query there lands on the
+    ///  keyword and answers nothing: the declaration went missing from the
+    ///  target set and the source pre-check threw away every correctly
+    ///  resolved call (PsyPrax report, 2026-09-21).</summary>
     procedure AddTargetWithPartner(var ATargets: TLspSymbolTargets;
-      const AFile: string; ALine, ACol: Integer);
+      const AFile: string; ALine, ACol: Integer; const AName: string = '');
     /// <summary>Sends every expanded unit's ORIGINAL text again.</summary>
     procedure Restore;
     property Activations: Integer read FActivations;
@@ -181,7 +187,7 @@ implementation
 
 uses
   System.IOUtils, System.StrUtils, System.Math, Winapi.Windows, Lsp.Uri,
-  Delphi.FileEncoding;
+  Delphi.FileEncoding, Expert.PascalScanner;
 
 const
   MaxIncludeDepth = 8;
@@ -781,11 +787,29 @@ begin
 end;
 
 procedure TLspIncludeContext.AddTargetWithPartner(var ATargets: TLspSymbolTargets;
-  const AFile: string; ALine, ACol: Integer);
+  const AFile: string; ALine, ACol: Integer; const AName: string);
+var
+  Col: Integer;
+  Content: string;
 begin
   ATargets.Add(AFile, ALine);
+  Col := ACol;
+  if AName <> '' then
+    try
+      if FReader(AFile, Content) then
+      begin
+        var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+        if (ALine >= 0) and (ALine <= High(Lines)) then
+        begin
+          var C := NameColumnOnLine(Lines[ALine], AName, ACol);
+          if C >= 0 then Col := C;
+        end;
+      end;
+    except
+      // keep the given column
+    end;
   try
-    var D := Definition(AFile, ALine, ACol);
+    var D := Definition(AFile, ALine, Col);
     if Length(D) > 0 then
       ATargets.Add(TLspUri.FileUriToPath(D[0].Uri), D[0].Range.Start.Line);
   except

@@ -554,11 +554,20 @@ begin
   // unit, and until it is done the unit answers nothing. After a send,
   // wait for the analysis (the per-file diagnostics push).
   // (an include file is no unit - the include context below serves it)
+  // VERIFICATION through the agent session when it can be had: twice as
+  // fast and free of the controller's 10 s abort (issue #13). Falls back to
+  // the main client, and then nothing changes.
+  var VClient := TLspManager.Instance.VerificationClient(Ctx.Client);
   if not IsIncludeFile(F) then
   begin
-    var StartBefore := Ctx.Client.GetFileDiagnosticsVersion(F);
-    if McpSyncLspContent(Ctx.Client, F, Ctx.Content) then
-      McpWaitLspAnalysed(Ctx.Client, F, StartBefore, AStop);
+    if VClient <> Ctx.Client then
+      VClient.SyncDocumentWith(F, Ctx.Content)   // no diagnostics to wait for
+    else
+    begin
+      var StartBefore := Ctx.Client.GetFileDiagnosticsVersion(F);
+      if McpSyncLspContent(Ctx.Client, F, Ctx.Content) then
+        McpWaitLspAnalysed(Ctx.Client, F, StartBefore, AStop);
+    end;
   end;
   Items := nil;
   Method := '';
@@ -594,7 +603,7 @@ begin
     var ContentOf: TDictionary<string, string> := nil;
     var Linked: TLinkedTargets := nil;
     var Links: TArray<TMemberLink> := nil;
-    var IncCtx := TLspIncludeContext.Create(Ctx.Client,
+    var IncCtx := TLspIncludeContext.Create(VClient,
       function(const APath: string; out AContent: string): Boolean
       begin
         if (ContentOf <> nil) and ContentOf.TryGetValue(UpperCase(APath), AContent) then
@@ -643,7 +652,7 @@ begin
     Targets := Default(TLspSymbolTargets);
     // the COLUMN matters: asked at the line start, DelphiLSP answers
     // nothing and the partner is lost
-    IncCtx.AddTargetWithPartner(Targets, DeclFile, DeclLine, DeclCol);
+    IncCtx.AddTargetWithPartner(Targets, DeclFile, DeclLine, DeclCol, Ctx.Identifier);
     // the caret itself, when it sits on a declaration of the name (the
     // partner query can fail - a declaration must never be missing here)
     begin
@@ -661,6 +670,22 @@ begin
     // does not answer for is resolved through the declared type of its
     // qualifier instead of being rejected blindly
     var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
+    // SELF-CONSISTENCY ANCHOR (PsyPrax report, 2026-09-21): the source
+    // pre-check below judges every candidate by where the SOURCES say it
+    // leads, and drops the ones that lead elsewhere than the target set.
+    // That is only safe while the target set really holds the symbol's
+    // declaration - and when the partner query came back empty it did
+    // not: all 8 calls of TGemTiFunctions.IsConnectorUnreachable
+    // resolved correctly to its declaration and were thrown away as
+    // "another type's member". So the START position is judged by the
+    // same resolver: the declaration it finds there IS ours, and the
+    // pre-check can never disagree with itself about it again.
+    begin
+      var StartLink: TMemberLink;
+      if ResolveMemberUse(Graph, F, Ctx.Content, L1 - 1, Ctx.IdentCol0,
+           Ctx.Identifier, StartLink) = murResolved then
+        Targets.Add(StartLink.FilePath, StartLink.Line);
+    end;
     Links := CollectLinkedTargets(Graph, OwnerTypeName, Ctx.Identifier, Linked);
     var PreSkipped := 0;
     var LspErrors := 0;
@@ -754,12 +779,21 @@ begin
             var C: string;
             if not IncCtx.OwnsDocument(Cd.FilePath) and ContentOf.TryGetValue(Key, C) then
             begin
-              var Before := Ctx.Client.GetFileDiagnosticsVersion(Cd.FilePath);
-              if McpSyncLspContent(Ctx.Client, Cd.FilePath, C) then
+              if VClient <> Ctx.Client then
               begin
-                Inc(SentCount);
-                if not McpWaitLspAnalysed(Ctx.Client, Cd.FilePath, Before, AStop) then
-                  Inc(TimedOut);
+                // the agent pushes no diagnostics - measured: it answers
+                // right after the didOpen
+                if VClient.SyncDocumentWith(Cd.FilePath, C) then Inc(SentCount);
+              end
+              else
+              begin
+                var Before := Ctx.Client.GetFileDiagnosticsVersion(Cd.FilePath);
+                if McpSyncLspContent(Ctx.Client, Cd.FilePath, C) then
+                begin
+                  Inc(SentCount);
+                  if not McpWaitLspAnalysed(Ctx.Client, Cd.FilePath, Before, AStop) then
+                    Inc(TimedOut);
+                end;
               end;
             end;
           end;

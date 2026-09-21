@@ -96,6 +96,16 @@ function StripLineComment(const ALine: string): string;
 ///  ("A.B.Init" -&gt; 'B').</summary>
 function QualifierBefore(const ALine: string; ACol0: Integer): string;
 
+/// <summary>The 0-based column of the identifier AName on ALine - where a
+///  DelphiLSP query about that name must be asked. DelphiLSP reports an
+///  implementation header as a range starting at COLUMN 0 ("class
+///  function TGemTiFunctions.IsConnectorUnreachable(..."), and a query at
+///  column 0 lands on the keyword and answers nothing (measured
+///  2026-09-21). Prefers the occurrence right after a '.' (the member of a
+///  qualified header), then the one AHint points into, then the first one.
+///  Comments are skipped. -1 when the name does not occur.</summary>
+function NameColumnOnLine(const ALine, AName: string; AHint: Integer = -1): Integer;
+
 /// <summary>ALines with every comment, directive and string literal
 ///  character replaced by a blank - line count and line lengths are kept,
 ///  so a position in the result IS the position in the source. Block
@@ -137,6 +147,38 @@ begin
   if Result then
     for var I := 2 to Length(S) do
       if not IsIdentChar(S[I]) then Exit(False);
+end;
+
+function NameColumnOnLine(const ALine, AName: string; AHint: Integer): Integer;
+var
+  Code, UL, UN: string;
+  P, FirstHit, HintHit, DotHit: Integer;
+begin
+  Result := -1;
+  if (ALine = '') or (AName = '') then Exit;
+  Code := StripLineComment(ALine);   // never a name inside a trailing comment
+  UL := UpperCase(Code);
+  UN := UpperCase(AName);
+  FirstHit := -1; HintHit := -1; DotHit := -1;
+  P := Pos(UN, UL);
+  while P > 0 do
+  begin
+    var After := P + Length(UN);
+    if ((P = 1) or not IsIdentChar(UL[P - 1])) and
+       ((After > Length(UL)) or not IsIdentChar(UL[After])) then
+    begin
+      if FirstHit < 0 then FirstHit := P - 1;
+      if (AHint >= P - 1) and (AHint < After - 1) then HintHit := P - 1;
+      // the member of a qualified header: "TFoo.Bar" or "TFoo . Bar"
+      var Q := P - 1;
+      while (Q >= 1) and CharInSet(UL[Q], [' ', #9]) do Dec(Q);
+      if (Q >= 1) and (UL[Q] = '.') and (DotHit < 0) then DotHit := P - 1;
+    end;
+    P := Pos(UN, UL, P + 1);
+  end;
+  if DotHit >= 0 then Exit(DotHit);
+  if HintHit >= 0 then Exit(HintHit);
+  Result := FirstHit;
 end;
 
 function QualifierBefore(const ALine: string; ACol0: Integer): string;

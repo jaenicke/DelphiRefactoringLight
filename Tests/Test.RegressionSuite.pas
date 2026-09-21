@@ -110,6 +110,44 @@ type
     [Test] procedure ProgressNotification_RejectsWhatIsNotProgress;
   end;
 
+  /// <summary>A registry value of the WRONG TYPE made TRegistry.ReadBool
+  ///  raise out of TPluginSettings.Load, and the IDE then refused to load
+  ///  the whole BPL ("Ungueltiger Datentyp fuer 'VerifySession'"). Settings
+  ///  are a convenience - they may never decide whether the plugin loads.</summary>
+  [TestFixture]
+  TSettingsRobustnessTests = class
+  public
+    [Test] procedure WrongValueType_FallsBackToTheDefault;
+  end;
+
+  /// <summary>DelphiLSP answers a "go to definition" for a static class
+  ///  method with the IMPLEMENTATION header and a range starting at column
+  ///  0. The partner query (implementation -> declaration) was asked right
+  ///  there - on the keyword "class" - and answered nothing, so the
+  ///  declaration was missing from the target set and find references
+  ///  dropped every correctly resolved call (PsyPrax, 2026-09-21: 1 of 9
+  ///  verified). The query must be asked at the NAME.</summary>
+  [TestFixture]
+  TPartnerQueryTests = class
+  public
+    [Test] procedure NameColumn_ImplementationHeaderPrefersTheMember;
+    [Test] procedure NameColumn_DeclarationCommentAndMisses;
+  end;
+
+  /// <summary>A declaration whose implementation exists with ANOTHER
+  ///  signature (the user added a parameter to the declaration, 2026-09-21)
+  ///  got "create empty implementation" - a second body - and the class
+  ///  header got "implement the interface method" - a second declaration.
+  ///  Both only add errors. The fixes are to make declaration and
+  ///  implementation agree, in either direction; an OVERLOADED declaration
+  ///  keeps the stub (a new overload needs its own body).</summary>
+  [TestFixture]
+  TAlignSignatureFixTests = class
+  public
+    [Test] procedure ChangedDeclaration_OffersBothAlignDirections;
+    [Test] procedure AlignDeclaration_KeepsDirectivesAndTrailingDefaults;
+  end;
+
 implementation
 
 uses
@@ -117,7 +155,8 @@ uses
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
-  Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol;
+  Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
+  System.Win.Registry, Expert.PluginSettings;
 
 const
   NL = sLineBreak;
@@ -568,6 +607,198 @@ begin
   Assert.IsFalse(ParseProgressNotification(nil, Token, Kind, Text), 'nil params');
 end;
 
+{ TSettingsRobustnessTests }
+
+procedure TSettingsRobustnessTests.WrongValueType_FallsBackToTheDefault;
+var
+  Reg: TRegistry;
+  Key: string;
+begin
+  // write a STRING where the plugin writes a DWORD - exactly what broke
+  // the package load
+  Key := TPluginSettings.RegistryKey;
+  Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    Assert.IsTrue(Reg.OpenKey(Key, True), 'settings key');
+    var Had := Reg.ValueExists('VerifySession');
+    var Old := 0;
+    if Had and (Reg.GetDataType('VerifySession') = rdInteger) then
+      Old := Reg.ReadInteger('VerifySession');
+    try
+      Reg.WriteString('VerifySession', 'certainly not a boolean');
+      Reg.CloseKey;
+      // Load must survive it and keep the default
+      try
+        TPluginSettings.Load;
+      except
+        on E: Exception do
+          Assert.Fail('Load raised on a bad value: ' + E.ClassName + ': ' + E.Message);
+      end;
+      Assert.IsTrue(TPluginSettings.VerifySession, 'the default survives');
+    finally
+      // put the user's own value back
+      if Reg.OpenKey(Key, True) then
+      begin
+        Reg.DeleteValue('VerifySession');
+        if Had then Reg.WriteInteger('VerifySession', Old);
+        Reg.CloseKey;
+      end;
+    end;
+  finally
+    Reg.Free;
+  end;
+end;
+
+{ TPartnerQueryTests }
+
+procedure TPartnerQueryTests.NameColumn_ImplementationHeaderPrefersTheMember;
+const
+  // the reported line, verbatim
+  Impl = 'class function TGemTiFunctions.IsConnectorUnreachable(const AResultCode: Integer; ' +
+    'const AErrorMessage: string): Boolean;';
+begin
+  // column 31 (0-based) = where DelphiLSP answers; column 0 is "class"
+  Assert.AreEqual(31, NameColumnOnLine(Impl, 'IsConnectorUnreachable', 0));
+  // case does not matter in Pascal
+  Assert.AreEqual(31, NameColumnOnLine(Impl, 'isconnectorunreachable', 0));
+  // a name that is also the TYPE part: the member after the dot wins
+  // ("function Foo." = 13 characters)
+  Assert.AreEqual(13, NameColumnOnLine('function Foo.Foo: Integer;', 'Foo', 0));
+  // spaces around the dot are legal Delphi
+  Assert.AreEqual(19, NameColumnOnLine('procedure TFoo  .  Bar;', 'Bar', 0));
+end;
+
+procedure TPartnerQueryTests.NameColumn_DeclarationCommentAndMisses;
+begin
+  // a declaration: the only occurrence
+  Assert.AreEqual(19, NameColumnOnLine(
+    '    class function IsConnectorUnreachable(const A: Integer): Boolean; static;',
+    'IsConnectorUnreachable'));
+  // a longer name containing it is no hit (whole word only)
+  Assert.AreEqual(-1, NameColumnOnLine(
+    'class function IsConnectorUnreachableError(const A: Integer): Boolean;',
+    'IsConnectorUnreachable'));
+  // a mention in a trailing comment is no hit either
+  Assert.AreEqual(10, NameColumnOnLine('procedure Run; // calls Run again', 'Run'));
+  Assert.AreEqual(-1, NameColumnOnLine('x := 1; // Run', 'Run'));
+  // without a dot the hint decides between several occurrences
+  // ("  A := B(A, A);" - the A's stand at 2, 9 and 12)
+  Assert.AreEqual(12, NameColumnOnLine('  A := B(A, A);', 'A', 12));
+  Assert.AreEqual(9, NameColumnOnLine('  A := B(A, A);', 'A', 9));
+  // a hint between occurrences falls back to the first one
+  Assert.AreEqual(2, NameColumnOnLine('  A := B(A, A);', 'A', 10));
+end;
+
+{ TAlignSignatureFixTests }
+
+function AlignDemoLines: TArray<string>;
+begin
+  // the shape of the report: the class implements an interface, and the
+  // DECLARATION got an extra first parameter
+  Result := TArray<string>.Create(
+    'unit KbDemo;',                                                          // 0
+    'interface',                                                             // 1
+    'type',                                                                  // 2
+    '  IKb = interface',                                                     // 3
+    '    procedure BindKeyboard(const BindingServices: IInterface);',        // 4
+    '  end;',                                                                // 5
+    '  TKb = class(TInterfacedObject, IKb)',                                 // 6
+    '  public',                                                              // 7
+    '    procedure BindKeyboard(const A: Integer; const BindingServices: IInterface);', // 8
+    '    procedure Other(X: Integer); overload;',                           // 9
+    '    procedure Other; overload;',                                        // 10
+    '  end;',                                                                // 11
+    'implementation',                                                        // 12
+    'procedure TKb.BindKeyboard(const BindingServices: IInterface);',       // 13
+    'begin',                                                                 // 14
+    'end;',                                                                  // 15
+    'procedure TKb.Other;',                                                  // 16
+    'begin',                                                                 // 17
+    'end;',                                                                  // 18
+    'end.');                                                                 // 19
+end;
+
+function Diag(const ACode, AMsg: string; ALine, ACol, ALen: Integer): TLspErrorDiag;
+begin
+  Result := Default(TLspErrorDiag);
+  Result.Code := ACode;
+  Result.Message := AMsg;
+  Result.Severity := 1;
+  Result.Range.Start.Line := ALine;
+  Result.Range.Start.Character := ACol;
+  Result.Range.End_.Line := ALine;
+  Result.Range.End_.Character := ACol + ALen;
+end;
+
+procedure TAlignSignatureFixTests.ChangedDeclaration_OffersBothAlignDirections;
+var
+  Lines: TArray<string>;
+  Fixes: TArray<TQuickFix>;
+begin
+  Lines := AlignDemoLines;
+  Assert.AreEqual(13, FindImplementationOfDecl(Lines, 8), 'found by NAME despite the other signature');
+  Assert.AreEqual(16, FindImplementationOfDecl(Lines, 10), 'the parameterless Other');
+  Fixes := ResolveQuickFixes(string.Join(#13#10, Lines), [
+    Diag('E2291', 'E2291 Missing implementation of interface method KbDemo.IKb.BindKeyboard', 6, 2, 3),
+    Diag('E2065', 'E2065 Unsatisfied forward or external declaration: ''TKb.BindKeyboard''', 8, 14, 12),
+    Diag('E2065', 'E2065 Unsatisfied forward or external declaration: ''TKb.Other''', 9, 14, 5),
+    Diag('E2037', 'E2037 Declaration of ''BindKeyboard'' differs from previous declaration', 13, 14, 12)]);
+  var AtDecl := ''; var AtClass := ''; var AtOverload := ''; var AtImpl := '';
+  for var F in Fixes do
+    case F.Line of
+      8: AtDecl := AtDecl + QuickFixKindText(F.Kind) + '|';
+      6: AtClass := AtClass + QuickFixKindText(F.Kind) + '|';
+      9: AtOverload := AtOverload + QuickFixKindText(F.Kind) + '|';
+      13: AtImpl := AtImpl + QuickFixKindText(F.Kind) + '|';
+    end;
+  Assert.AreEqual('Align implementation header|Align declaration with implementation|', AtDecl,
+    'at the edited declaration: both directions, and NO empty second body');
+  Assert.AreEqual('', AtClass, 'no second declaration from the interface');
+  Assert.AreEqual('Create implementation stub|', AtOverload,
+    'a new OVERLOAD really needs its own body');
+  Assert.AreEqual('Align implementation header|', AtImpl, 'the E2037 offer is unchanged');
+  for var F in Fixes do
+    if (F.Line = 8) and (F.Kind = qfAlignHeader) then
+      Assert.AreEqual(13, F.AuxLine, 'anchored at the declaration, pointing at the body');
+end;
+
+procedure TAlignSignatureFixTests.AlignDeclaration_KeepsDirectivesAndTrailingDefaults;
+var
+  NewLines: TArray<string>;
+begin
+  Assert.IsTrue(PlanDeclToImplAlign(AlignDemoLines, 8, 13, NewLines));
+  Assert.AreEqual('    procedure BindKeyboard(const BindingServices: IInterface);', NewLines[8],
+    'indentation kept, parameters from the implementation');
+  // 'class', directives and a surviving default value stay; the implementation
+  // added a parameter WITHOUT default behind B, so B loses its default
+  // (Delphi allows defaults only on a trailing run)
+  var L := TArray<string>.Create(
+    'unit U;', 'interface', 'type', '  TFoo = class',
+    '    class function Run(A: Integer; B: string = ''x''): Boolean; static;',
+    '    procedure Go(A: Integer = 1);',
+    '    procedure Go3(A: Integer; B: string = ''x'');', '  end;', 'implementation',
+    'class function TFoo.Run(A: Integer; B: string; C: Boolean): Boolean;',
+    'begin', 'end;', 'procedure TFoo.Go(A: Integer; B: Integer);', 'begin', 'end;',
+    'procedure TFoo.Go3(Z: Byte; A: Integer; B: string);', 'begin', 'end;', 'end.');
+  Assert.AreEqual(9, FindImplementationOfDecl(L, 4));
+  Assert.IsTrue(PlanDeclToImplAlign(L, 4, 9, NewLines));
+  Assert.AreEqual('    class function Run(A: Integer; B: string; C: Boolean): Boolean; static;',
+    NewLines[4], 'class + static kept; B loses its default because C follows without one');
+  Assert.IsTrue(PlanDeclToImplAlign(L, 5, 12, NewLines));
+  Assert.AreEqual('    procedure Go(A: Integer; B: Integer);', NewLines[5],
+    'a default in front of a new plain parameter would not compile');
+  Assert.IsTrue(PlanDeclToImplAlign(L, 6, 15, NewLines));
+  Assert.AreEqual('    procedure Go3(Z: Byte; A: Integer; B: string = ''x'');', NewLines[6],
+    'a surviving trailing default is KEPT - defaults live in the declaration');
+  // an implementation header WITHOUT parameter list fits any declaration:
+  // aligning to it would throw the declaration's parameters away
+  var L2 := TArray<string>.Create('unit U;', 'interface', 'type', '  TFoo = class',
+    '    procedure Put(A: Integer);', '  end;', 'implementation',
+    'procedure TFoo.Put;', 'begin', 'end;', 'end.');
+  Assert.IsFalse(PlanDeclToImplAlign(L2, 4, 7, NewLines), 'never strip the parameters');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -578,5 +809,8 @@ initialization
   TDUnitX.RegisterTestFixture(TVersionTests);
   TDUnitX.RegisterTestFixture(TMcpPipeRegressionTests);
   TDUnitX.RegisterTestFixture(TLspProgressTests);
+  TDUnitX.RegisterTestFixture(TSettingsRobustnessTests);
+  TDUnitX.RegisterTestFixture(TPartnerQueryTests);
+  TDUnitX.RegisterTestFixture(TAlignSignatureFixTests);
 
 end.

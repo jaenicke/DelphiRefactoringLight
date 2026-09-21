@@ -422,7 +422,6 @@ end;
 function TLspManager.VerificationClient(AMain: TLspClient;
   const ARootPath, AProjectFile, ADelphiLspJson: string): TLspClient;
 begin
-  Result := nil;
   try
     Result := GetVerifyClient(ARootPath, AProjectFile, ADelphiLspJson);
   except

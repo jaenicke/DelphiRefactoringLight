@@ -697,13 +697,15 @@ begin
       end;
 
       var Matches := False;
-      var NoAnswer := False;
       var ErrText := '';
+      // Outside the try: the handler below clears it, and "no answer" is
+      // derived from it once, after both paths (a flag assigned in the try
+      // AND in the handler made the compiler call its initial value unused).
+      var Defs: TArray<TLspLocation> := nil;
       try
         // A request the server ABORTED says nothing about the symbol, so it
         // is repeated (issue #13: the controller cancels after 10 s while
         // the project loads, which is exactly when the first search runs).
-        var Defs: TArray<TLspLocation> := nil;
         for var Attempt := 1 to 3 do
         try
           Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
@@ -737,8 +739,6 @@ begin
             Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
           end;
         end;
-        NoAnswer := System.Length(Defs) = 0;
-
         // The candidate IS one of the symbol's positions (declaration /
         // implementation - DelphiLSP answers those with null or with the
         // counterpart), or DelphiLSP takes it to one of them. The FILE
@@ -773,12 +773,13 @@ begin
           // candidate(s) verified"). It counts as NO ANSWER now, which
           // means: resolved from the sources if possible, otherwise
           // listed as unverified - never silently dropped.
-          NoAnswer := True;
+          Defs := nil;
           Matches := False;
           ErrText := E.Message;
           Inc(FLspErrors);
         end;
       end;
+      var NoAnswer := System.Length(Defs) = 0;
 
       // DelphiLSP said nothing: resolve the use site through the declared
       // type of its qualifier. Its NEGATIVE answer is the valuable one -

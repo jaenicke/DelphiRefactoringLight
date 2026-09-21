@@ -547,7 +547,6 @@ var
   I, Depth, Count: Integer;
   Empty: Boolean;
 begin
-  Result := -1;
   I := ACol0 + 1;                      // 1-based, first char after the name
   while (I <= Length(ALine)) and CharInSet(ALine[I], [' ', #9]) do Inc(I);
   if I > Length(ALine) then Exit(0);   // name at the line end: no arguments

@@ -74,6 +74,9 @@ type
     FIndex: TProjectTextIndex;
     procedure DoFormShow(Sender: TObject);
     procedure DoScopeChange(Sender: TObject);
+    procedure DoRememberClick(Sender: TObject);
+    procedure UpdateScopeControls;
+    procedure RememberChoices;
     procedure DoPickUnitsClick(Sender: TObject);
     procedure DoScopeExtraClick(Sender: TObject);
     procedure DoBtnPreviewClick(Sender: TObject);
@@ -139,6 +142,20 @@ uses
   System.UITypes, System.IOUtils, Vcl.Graphics, Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes,
   Expert.ListViewSort, Expert.EditorHelperIntf, Expert.WithRefactorDialog,
   Expert.PluginSettings;
+
+var
+  /// <summary>The units picked for "In selected units" last time. Kept for
+  ///  the session only - a file list does not belong in the registry, and
+  ///  after an IDE restart the project may be a different one.</summary>
+  GLastSelectedUnits: TArray<string>;
+
+function ExistingFiles(const AFiles: TArray<string>): TArray<string>;
+begin
+  Result := nil;
+  for var F in AFiles do
+    if FileExists(F) then
+      Result := Result + [F];
+end;
 
 constructor TRenameDialog.CreateDialog(AOwner: TComponent; const AOldName: string);
 var
@@ -218,7 +235,10 @@ begin
   FChkBackup.Top := 164;
   FChkBackup.Width := 200;
   FChkBackup.Caption := 'Create backup';
-  FChkBackup.Checked := True;
+  // remembered from the previous rename (issue: several renames in a row
+  // meant unticking it every time)
+  FChkBackup.Checked := TPluginSettings.RenameBackup;
+  FChkBackup.OnClick := DoRememberClick;
 
   // ---- scope -------------------------------------------------------------
   // A rename is not always project-wide: renaming a local variable or a
@@ -275,6 +295,14 @@ begin
   FChkUsedUnits.Caption := 'plus units reachable via uses (outside the project)';
   FChkUsedUnits.Checked := TPluginSettings.ScopeIncludeUsedUnits;
   FChkUsedUnits.OnClick := DoScopeExtraClick;
+
+  // The previous rename's scope. Assigned in code, so OnChange does not
+  // fire - only the dependent controls are brought in line.
+  FCmbScope.ItemIndex := TPluginSettings.RenameScope;
+  if FCmbScope.ItemIndex < 0 then FCmbScope.ItemIndex := 0;
+  if Scope = rscSelectedUnits then
+    FSelectedUnits := ExistingFiles(GLastSelectedUnits);
+  UpdateScopeControls;
 
   FBtnCancel := TButton.Create(Self);
   FBtnCancel.Parent := FPanelTop;
@@ -610,6 +638,9 @@ end;
 
 procedure TRenameDialog.HideScopeSelector;
 begin
+  // A unit rename is project-wide by nature: a remembered "current unit"
+  // must not narrow it (Scope reads the combo even when it is hidden).
+  FCmbScope.ItemIndex := 0;
   FLblScope.Visible := False;
   FCmbScope.Visible := False;
   FBtnPickUnits.Visible := False;
@@ -640,9 +671,9 @@ begin
   DoScopeChange(nil);
 end;
 
-procedure TRenameDialog.DoScopeChange(Sender: TObject);
+procedure TRenameDialog.UpdateScopeControls;
 begin
-  FBtnPickUnits.Visible := Scope = rscSelectedUnits;
+  FBtnPickUnits.Visible := FCmbScope.Visible and (Scope = rscSelectedUnits);
   // The extra units widen the WHOLE-PROJECT scope; for one unit, one
   // method or a hand-picked set they would contradict the choice.
   if FChkOpenUnits <> nil then
@@ -650,6 +681,32 @@ begin
     FChkOpenUnits.Enabled := Scope = rscProject;
     FChkUsedUnits.Enabled := Scope = rscProject;
   end;
+end;
+
+procedure TRenameDialog.RememberChoices;
+begin
+  // Only while the selector is in use - the unit-rename mode forces the
+  // whole project and must not overwrite the user's choice.
+  if FCmbScope.Visible then
+    TPluginSettings.RenameScope := FCmbScope.ItemIndex;
+  TPluginSettings.RenameBackup := FChkBackup.Checked;
+  try
+    TPluginSettings.Save;
+  except
+    // a registry hiccup must not break the dialog
+  end;
+end;
+
+procedure TRenameDialog.DoRememberClick(Sender: TObject);
+begin
+  RememberChoices;
+end;
+
+procedure TRenameDialog.DoScopeChange(Sender: TObject);
+begin
+  UpdateScopeControls;
+  if Sender <> nil then
+    RememberChoices;
   // A scope change invalidates the previous preview.
   SetPreviewItems(nil);
   EnableRename(False);
@@ -678,6 +735,7 @@ begin
   end;
   if not TWithRefactorDialog.PickFiles(Self, All, Sel) then Exit;
   FSelectedUnits := Sel;
+  GLastSelectedUnits := Sel;   // for the next rename in this session
   DoScopeChange(nil);
 end;
 

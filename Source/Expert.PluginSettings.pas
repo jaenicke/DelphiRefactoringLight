@@ -36,6 +36,8 @@ type
     class var FVerifySession: Boolean;
     class var FScopeIncludeOpenUnits: Boolean;
     class var FScopeIncludeUsedUnits: Boolean;
+    class var FRenameScope: Integer;
+    class var FRenameBackup: Boolean;
     class var FLoaded: Boolean;
     class function BaseRegistryKey: string; static;
     class function LegacyRegistryKey: string; static;
@@ -111,6 +113,12 @@ type
     ///  files.</summary>
     class property ScopeIncludeUsedUnits: Boolean
       read FScopeIncludeUsedUnits write FScopeIncludeUsedUnits;
+    /// <summary>The rename dialog opens with the choices of the previous
+    ///  rename (issue: renaming several things in one unit meant switching
+    ///  the scope and unticking the backup EVERY time). RenameScope is the
+    ///  combo index (0 = whole project .. 3 = selected units).</summary>
+    class property RenameScope: Integer read FRenameScope write FRenameScope;
+    class property RenameBackup: Boolean read FRenameBackup write FRenameBackup;
 
     class function DefaultPrewarm: Boolean; static;
   end;
@@ -265,6 +273,8 @@ begin
   FVerifySession := True;
   FScopeIncludeOpenUnits := True;
   FScopeIncludeUsedUnits := False;
+  FRenameScope := 0;
+  FRenameBackup := True;
   FLoaded := True;
 
   try
@@ -289,6 +299,9 @@ begin
       FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
       FScopeIncludeOpenUnits := ReadBoolDef(Reg, 'ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
       FScopeIncludeUsedUnits := ReadBoolDef(Reg, 'ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
+      FRenameScope := ReadIntDef(Reg, 'RenameScope', FRenameScope);
+      if (FRenameScope < 0) or (FRenameScope > 3) then FRenameScope := 0;
+      FRenameBackup := ReadBoolDef(Reg, 'RenameBackup', FRenameBackup);
     finally
       Reg.CloseKey;
     end;
@@ -320,6 +333,8 @@ begin
       Reg.WriteBool('VerifySession', FVerifySession);
       Reg.WriteBool('ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
       Reg.WriteBool('ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
+      Reg.WriteInteger('RenameScope', FRenameScope);
+      Reg.WriteBool('RenameBackup', FRenameBackup);
     finally
       Reg.CloseKey;
     end;

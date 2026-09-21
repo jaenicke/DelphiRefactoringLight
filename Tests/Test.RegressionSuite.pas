@@ -118,6 +118,7 @@ type
   TSettingsRobustnessTests = class
   public
     [Test] procedure WrongValueType_FallsBackToTheDefault;
+    [Test] procedure RenameChoices_AreRememberedAndOutOfRangeIsRefused;
   end;
 
   /// <summary>DelphiLSP answers a "go to definition" for a static class
@@ -659,6 +660,61 @@ begin
         if Had then Reg.WriteInteger('VerifySession', Old);
         Reg.CloseKey;
       end;
+    end;
+  finally
+    Reg.Free;
+  end;
+end;
+
+procedure TSettingsRobustnessTests.RenameChoices_AreRememberedAndOutOfRangeIsRefused;
+var
+  Reg: TRegistry;
+  Key: string;
+  HadScope, HadBackup: Boolean;
+  OldScope: Integer;
+  OldBackup: Boolean;
+begin
+  // Issue: several renames in one unit meant switching the scope and
+  // unticking "Create backup" every time. The dialog now stores both;
+  // this pins the round trip and the range check (a combo index from a
+  // future version with more scopes must not select nothing).
+  Key := TPluginSettings.RegistryKey;
+  Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    Assert.IsTrue(Reg.OpenKey(Key, True), 'settings key');
+    HadScope := Reg.ValueExists('RenameScope') and (Reg.GetDataType('RenameScope') = rdInteger);
+    HadBackup := Reg.ValueExists('RenameBackup') and (Reg.GetDataType('RenameBackup') = rdInteger);
+    OldScope := 0; OldBackup := True;
+    if HadScope then OldScope := Reg.ReadInteger('RenameScope');
+    if HadBackup then OldBackup := Reg.ReadBool('RenameBackup');
+    Reg.CloseKey;
+    try
+      TPluginSettings.Load;
+      TPluginSettings.RenameScope := 1;       // "In current unit"
+      TPluginSettings.RenameBackup := False;
+      TPluginSettings.Save;
+      TPluginSettings.RenameScope := 0;
+      TPluginSettings.RenameBackup := True;
+      TPluginSettings.Load;
+      Assert.AreEqual(1, TPluginSettings.RenameScope, 'scope survives a reload');
+      Assert.IsFalse(TPluginSettings.RenameBackup, 'backup switch survives a reload');
+
+      Assert.IsTrue(Reg.OpenKey(Key, True));
+      Reg.WriteInteger('RenameScope', 7);
+      Reg.CloseKey;
+      TPluginSettings.Load;
+      Assert.AreEqual(0, TPluginSettings.RenameScope, 'out of range -> whole project');
+    finally
+      if Reg.OpenKey(Key, True) then
+      begin
+        Reg.DeleteValue('RenameScope');
+        Reg.DeleteValue('RenameBackup');
+        if HadScope then Reg.WriteInteger('RenameScope', OldScope);
+        if HadBackup then Reg.WriteBool('RenameBackup', OldBackup);
+        Reg.CloseKey;
+      end;
+      TPluginSettings.Load;
     end;
   finally
     Reg.Free;

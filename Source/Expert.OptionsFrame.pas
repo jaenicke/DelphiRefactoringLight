@@ -66,6 +66,10 @@ type
     // last designed row - see EnsureExtraRows)
     FExtraEdits: array[TShortcutKind] of TEdit;
     FExtraBuilt: Boolean;
+    // built in code (the DFM belongs to the package project, which is open
+    // in the IDE while we work on it) - issue #13 asked for this switch
+    FLspLogBox: TCheckBox;
+    procedure EnsureLspLogBox;
     procedure EnsureExtraRows;
     function EditFor(Kind: TShortcutKind): TEdit;
     procedure ApplyToEdit(Kind: TShortcutKind);
@@ -117,6 +121,20 @@ end;
 // 32 px row pitch at 96 dpi, same key handlers); the hint moves below
 // them. AdjustLayout then treats them exactly like the designed rows.
 // Excluded: skUnitRefs, which never had an edit on this page.
+procedure TLspOptionsFrame.EnsureLspLogBox;
+begin
+  if FLspLogBox <> nil then Exit;
+  FLspLogBox := TCheckBox.Create(Self);
+  FLspLogBox.Parent := grpLsp;
+  FLspLogBox.Caption := 'Log this plugin''s DelphiLSP session (for diagnosis)';
+  FLspLogBox.Hint := 'Starts our own DelphiLsp.exe with -LogModes 255. The log ' +
+    'names every request and how long it took.';
+  FLspLogBox.ShowHint := True;
+  lblLspNote.Caption := '(pre-warming speeds up the first refactoring action and ' +
+    'costs one LSP process. The log lands in %TEMP%\DelphiLSP\RefactoringLight*.log ' +
+    'and names every request with its duration - it grows, so switch it off again.)';
+end;
+
 procedure TLspOptionsFrame.EnsureExtraRows;
 const
   RowPitch = 32;
@@ -227,10 +245,14 @@ begin
   // ---- LSP -------------------------------------------------------------
   grpLsp.Top := grpShortcuts.Top + grpShortcuts.Height + Gap;
   cbxPrewarmLsp.Width := grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap;
+  EnsureLspLogBox;
+  FLspLogBox.SetBounds(cbxPrewarmLsp.Left, cbxPrewarmLsp.Top + cbxPrewarmLsp.Height + 6,
+    grpLsp.ClientWidth - cbxPrewarmLsp.Left - Gap, cbxPrewarmLsp.Height);
   lblLspNote.AutoSize := False;
   lblLspNote.WordWrap := True;
+  lblLspNote.Top := FLspLogBox.Top + FLspLogBox.Height + 6;
   lblLspNote.Width := grpLsp.ClientWidth - lblLspNote.Left - Gap;
-  lblLspNote.Height := 2 * LineH;
+  lblLspNote.Height := 3 * LineH;
   grpLsp.Height := lblLspNote.Top + lblLspNote.Height + Gap;
 
   // ---- live blame ------------------------------------------------------
@@ -305,6 +327,8 @@ begin
   for K := Low(TShortcutKind) to High(TShortcutKind) do
     ApplyToEdit(K);
   cbxPrewarmLsp.Checked := TPluginSettings.PrewarmLspOnProjectOpen;
+  EnsureLspLogBox;
+  FLspLogBox.Checked := TPluginSettings.LspLogging;
 
   if cbxBlameInfo.Items.Count = 0 then
   begin
@@ -334,6 +358,7 @@ begin
     TExpertsShortCut.Shortcuts[K] := SC;
   end;
   TPluginSettings.PrewarmLspOnProjectOpen := cbxPrewarmLsp.Checked;
+  if FLspLogBox <> nil then TPluginSettings.LspLogging := FLspLogBox.Checked;
 
   TPluginSettings.BlameInfo := Max(0, cbxBlameInfo.ItemIndex);
   // 0 is a legitimate value ("do not touch the gutter"); anything wider
@@ -401,6 +426,8 @@ begin
       E.Text := ShortCutToText(TExpertsShortCut.Default(K));
   end;
   cbxPrewarmLsp.Checked := TPluginSettings.DefaultPrewarm;
+  EnsureLspLogBox;
+  FLspLogBox.Checked := False;
 end;
 
 end.

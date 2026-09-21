@@ -32,6 +32,7 @@ type
     class var FBlameInfo: Integer;
     class var FBlameColumnOffset: Integer;
     class var FBlameUseTortoise: Boolean;
+    class var FLspLogging: Boolean;
     class var FScopeIncludeOpenUnits: Boolean;
     class var FScopeIncludeUsedUnits: Boolean;
     class var FLoaded: Boolean;
@@ -84,6 +85,11 @@ type
     ///  missing or refuses to start.</summary>
     class property BlameUseTortoise: Boolean
       read FBlameUseTortoise write FBlameUseTortoise;
+    /// <summary>Starts our own DelphiLsp.exe with '-LogModes 255', so
+    ///  %TEMP%\DelphiLSP\RefactoringLight*.log records every request and
+    ///  its duration. Off by default (the log grows); asked for in issue
+    ///  #13, because without it a slow session cannot be diagnosed.</summary>
+    class property LspLogging: Boolean read FLspLogging write FLspLogging;
 
     /// <summary>Project-wide scans (rename, find references, find
     ///  implementations, find unit references) also look at units that
@@ -176,6 +182,8 @@ begin
         FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
       if Reg.ValueExists('BlameUseTortoise') then
         FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
+      if Reg.ValueExists('LspLogging') then
+        FLspLogging := Reg.ReadBool('LspLogging');
     finally
       Reg.CloseKey;
     end;
@@ -210,6 +218,7 @@ begin
   // Delphi now and draws its marks at the very left of the same area.
   FBlameColumnOffset := 17;
   FBlameUseTortoise := True;
+  FLspLogging := False;
   FScopeIncludeOpenUnits := True;
   FScopeIncludeUsedUnits := False;
   FLoaded := True;
@@ -233,6 +242,8 @@ begin
         FBlameColumnOffset := Reg.ReadInteger('BlameColumnOffset');
       if Reg.ValueExists('BlameUseTortoise') then
         FBlameUseTortoise := Reg.ReadBool('BlameUseTortoise');
+      if Reg.ValueExists('LspLogging') then
+        FLspLogging := Reg.ReadBool('LspLogging');
       if Reg.ValueExists('ScopeIncludeOpenUnits') then
         FScopeIncludeOpenUnits := Reg.ReadBool('ScopeIncludeOpenUnits');
       if Reg.ValueExists('ScopeIncludeUsedUnits') then
@@ -260,6 +271,7 @@ begin
       Reg.WriteInteger('BlameInfo', FBlameInfo);
       Reg.WriteInteger('BlameColumnOffset', FBlameColumnOffset);
       Reg.WriteBool('BlameUseTortoise', FBlameUseTortoise);
+      Reg.WriteBool('LspLogging', FLspLogging);
       Reg.WriteBool('ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
       Reg.WriteBool('ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
     finally

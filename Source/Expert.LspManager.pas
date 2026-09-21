@@ -116,7 +116,7 @@ implementation
 
 uses
   Winapi.Windows, System.IOUtils, System.DateUtils, System.JSON,
-  System.Win.Registry, System.TypInfo
+  System.Win.Registry, System.TypInfo, Expert.PluginSettings
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI, Expert.EditorHelper {$ENDIF};
 
 const
@@ -371,6 +371,12 @@ begin
     // session write %TEMP%\DelphiLSP\DelphiLSP.log (+ trace) - the only
     // way to see WHY DelphiLSP answers nothing for a unit.
     FClient.ExtraArgs := GetEnvironmentVariable('REFACTORINGLIGHT_LSP_ARGS');
+    // ... or from the options page (issue #13 asked for it): the log names
+    // every request and how long it took, which is the only way to tell a
+    // slow session from a broken one. Our own name keeps it apart from the
+    // IDE's instance in the same folder.
+    if (FClient.ExtraArgs = '') and TPluginSettings.LspLogging then
+      FClient.ExtraArgs := '-LogModes 255 -Name RefactoringLight';
     try
       FClient.Start;
       FClient.Initialize(ARootPath, AProjectFile);

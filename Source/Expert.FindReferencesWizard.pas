@@ -27,6 +27,8 @@ type
     FPreSkipped: Integer;
     // what the second attempt for unanswered occurrences achieved
     FSecondPassNote: string;
+    // requests DelphiLSP answered with an error (-32800 & co)
+    FLspErrors: Integer;
     procedure DoGotoLocation(AItem: TFindReferenceItem);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
@@ -179,6 +181,7 @@ var
 begin
   FPreSkipped := 0;
   FSecondPassNote := '';
+  FLspErrors := 0;
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
@@ -204,6 +207,23 @@ begin
 
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
+
+
+  // The server may be BUSY (a big project takes 12-30 s to load). While it
+  // is, the DelphiLSP controller aborts every request after 10 s, so asking
+  // produces failures, not answers - waiting for its own "$/progress ...
+  // end" is the honest readiness signal (issue #13).
+  if Client.BusyWith <> '' then
+  begin
+    FDialog.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+    Client.WaitServerIdle(180000,
+      function: Boolean
+      begin
+        FDialog.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+        Application.ProcessMessages;
+        Result := not Aborted;
+      end);
+  end;
 
   // send the unit only when its content changed since the last send, and
   // wait for its analysis then - a blind re-open restarts DelphiLSP's
@@ -399,6 +419,9 @@ begin
     FromSource := Format(' %d were decided from the sources without asking ' +
       'DelphiLSP.', [FPreSkipped]);
   if FSecondPassNote <> '' then FromSource := FromSource + ' ' + FSecondPassNote + '.';
+  if FLspErrors > 0 then
+    FromSource := FromSource + Format(' %d request(s) were aborted by DelphiLSP ' +
+      '(it was busy - those occurrences are marked, not dropped).', [FLspErrors]);
   if Unverified > 0 then
     FDialog.SetStatus(Format('Fallback: %d of %d candidate(s) verified, %d shown UNVERIFIED ' +
       '(see the Note column).%s%s', [Length(Items) - Unverified, Length(TextCandidates),
@@ -617,8 +640,33 @@ begin
 
       var Matches := False;
       var NoAnswer := False;
+      var ErrText := '';
       try
-        var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+        // A request the server ABORTED says nothing about the symbol, so it
+        // is repeated (issue #13: the controller cancels after 10 s while
+        // the project loads, which is exactly when the first search runs).
+        var Defs: TArray<TLspLocation> := nil;
+        for var Attempt := 1 to 3 do
+        try
+          Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+          ErrText := '';
+          Break;
+        except
+          on E: Exception do
+          begin
+            ErrText := E.Message;
+            Inc(FLspErrors);
+            if (Attempt = 3) or Aborted then raise;
+            FDialog.SetStatus(Format('DelphiLSP aborted a request (%d/3), retrying...',
+              [Attempt]));
+            var Until_ := GetTickCount64 + 700;
+            while (GetTickCount64 < Until_) and not Aborted do
+            begin
+              Sleep(100);
+              Application.ProcessMessages;
+            end;
+          end;
+        end;
         // an EMPTY answer is retried briefly, a wrong one never
         if (System.Length(Defs) = 0) and not ATargets.Contains(C.FilePath, C.Line) and
            not ALinked.Contains(C.FilePath, C.Line) then
@@ -657,8 +705,21 @@ begin
           end;
         end;
       except
-        // Error -> location skipped
-        Matches := False;
+        on E: Exception do
+        begin
+          // AN ERROR IS NOT A NEGATIVE ANSWER (issue #13). While a big
+          // project loads, the DelphiLSP controller aborts every request
+          // after 10 s with -32800 "Request removed" - and this branch
+          // used to treat that like "not a reference", so the occurrence
+          // vanished from the result without a trace ("1 of 341
+          // candidate(s) verified"). It counts as NO ANSWER now, which
+          // means: resolved from the sources if possible, otherwise
+          // listed as unverified - never silently dropped.
+          NoAnswer := True;
+          Matches := False;
+          ErrText := E.Message;
+          Inc(FLspErrors);
+        end;
       end;
 
       // DelphiLSP said nothing: resolve the use site through the declared
@@ -709,7 +770,10 @@ begin
         // (inactive {$IFDEF} branch, unit still in analysis) may well be a
         // reference - show it, marked. A declaration line without an
         // answer declares ANOTHER symbol and stays out.
-        C.Note := 'UNVERIFIED - no answer from DelphiLSP';
+        if ErrText <> '' then
+          C.Note := 'UNVERIFIED - DelphiLSP reported an error: ' + ErrText
+        else
+          C.Note := 'UNVERIFIED - no answer from DelphiLSP';
         Retry.Add(TPair<Integer, Integer>.Create(Verified.Count, I));
         Verified.Add(C);
       end;
@@ -725,8 +789,8 @@ begin
     if (Retry.Count > 0) and not Aborted then
     begin
       var Fixed := 0;
-      var Dropped: TList<Integer> := TList<Integer>.Create;
-      try
+      var Elsewhere := 0;
+      begin
         for var R := 0 to Retry.Count - 1 do
         begin
           if Aborted then Break;
@@ -754,18 +818,21 @@ begin
             Inc(Fixed);
           end
           else
-            Dropped.Add(VIdx);      // it belongs to another symbol after all
+          begin
+            // NOT dropped (issue #13): these rows exist because the server
+            // was silent the first time, so this answer comes from exactly
+            // the session state we do not trust. Say where it led and let
+            // the user judge - removing a real reference is the worse error.
+            Row.Note := Format('UNVERIFIED - DelphiLSP resolved it to %s:%d',
+              [ExtractFileName(DF2), DL2 + 1]);
+            Verified[VIdx] := Row;
+            Inc(Elsewhere);
+          end;
         end;
-        // remove bottom-up, the indexes must stay valid
-        Dropped.Sort;
-        for var K := Dropped.Count - 1 downto 0 do
-          Verified.Delete(Dropped[K]);
-        if (Fixed > 0) or (Dropped.Count > 0) then
+        if (Fixed > 0) or (Elsewhere > 0) then
           FSecondPassNote := Format(
-            'second attempt: %d of %d unverified occurrence(s) resolved, %d dropped',
-            [Fixed, Retry.Count, Dropped.Count]);
-      finally
-        Dropped.Free;
+            'second attempt: %d of %d unverified occurrence(s) resolved, %d ' +
+            'pointed elsewhere (kept, marked)', [Fixed, Retry.Count, Elsewhere]);
       end;
     end;
 

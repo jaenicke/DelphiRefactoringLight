@@ -46,6 +46,7 @@ type
   private
     FLspExePath: string;
     FExtraArgs: string;
+    FServerType: string;
     FProcessHandle: THandle;
     FStdinWrite: THandle;
     FStdoutRead: THandle;
@@ -78,6 +79,13 @@ type
     FKnownFiles: TDictionary<string, string>;
     FAutoCompleteUnits: Boolean;
     FDiagnosticsCount: Integer;
+    // $/progress of the server: token -> title. While one is running (the
+    // 12-30 s "Loading project" of a big project) every request is aborted
+    // after 10 s by the controller, so a scan must WAIT instead of reading
+    // the failures as results (issue #13).
+    FProgress: TDictionary<string, string>;
+    FProgressLock: TCriticalSection;
+    FProgressSeen: Integer;
     // Pushes per file (see GetFileDiagnosticsVersion).
     FFileDiagVersion: TDictionary<string, Integer>;
     // Files this session did not analyse within a waiter's timeout, with
@@ -100,9 +108,13 @@ type
     procedure DispatchResponse(AMsg: TJSONObject);
     procedure HandleServerRequest(AMsg: TJSONObject);
     procedure HandlePublishDiagnostics(AParams: TJSONObject);
+    procedure HandleProgress(AParams: TJSONObject);
     procedure Log(const ADirection, AMethod, ABody: string);
   public
     constructor Create(const ALspExePath: string);
+    /// <summary>initializationOptions.serverType of the next Initialize -
+    ///  '' = the DelphiLsp default (controller). See issue #13.</summary>
+    property ServerType: string read FServerType write FServerType;
     /// <summary>Extra command line for DelphiLsp.exe, e.g. '-LogModes 255'
     ///  (writes %TEMP%\DelphiLSP\DelphiLSP.log). Set before Start.</summary>
     property ExtraArgs: string read FExtraArgs write FExtraArgs;
@@ -176,6 +188,19 @@ type
     ///  (its per-file version moved past ABefore - take it BEFORE sending).
     ///  AKeepWaiting is called between the polls (pump messages there;
     ///  return False to give up). False on timeout / give-up.</summary>
+    /// <summary>What the server is busy with right now ("Loading project
+    ///  Foo.dpr"), '' when nothing is running. While it is busy the
+    ///  controller aborts every request after 10 s, so asking is pointless
+    ///  (issue #13).</summary>
+    function BusyWith: string;
+    /// <summary>True when the server has ever reported progress - only then
+    ///  does BusyWith carry information.</summary>
+    function ReportsProgress: Boolean;
+    /// <summary>Waits while the server reports work in progress. Returns
+    ///  True when it is idle (or never reported any), False on timeout or
+    ///  when AKeepWaiting said stop.</summary>
+    function WaitServerIdle(ATimeoutMs: Cardinal;
+      const AKeepWaiting: TFunc<Boolean> = nil): Boolean;
     function WaitFileAnalysed(const AFilePath: string; ABefore: Integer;
       ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean> = nil): Boolean;
 
@@ -463,6 +488,8 @@ begin
   FAutoCompleteUnits := True;
   FFilesWithDiagnostics := TDictionary<string, Boolean>.Create;
   FFileDiagVersion := TDictionary<string, Integer>.Create;
+  FProgress := TDictionary<string, string>.Create;
+  FProgressLock := TCriticalSection.Create;
   FAnalysisHopeless := TDictionary<string, Integer>.Create;
   FProcessHandle := INVALID_HANDLE_VALUE;
   FStdinWrite := INVALID_HANDLE_VALUE;
@@ -507,6 +534,8 @@ begin
   FInactiveRangesLock.Free;
   FFilesWithDiagnostics.Free;
   FFileDiagVersion.Free;
+  FProgress.Free;
+  FProgressLock.Free;
   FAnalysisHopeless.Free;
   inherited;
 end;
@@ -535,7 +564,17 @@ begin
   begin
     var Method := AMsg.GetValue<string>('method', '');
     Log('<--', Method, AMsg.ToJSON);
-    if SameText(Method, 'textDocument/publishDiagnostics') then
+    if SameText(Method, '$/progress') then
+    begin
+      var PObj: TJSONObject;
+      if AMsg.TryGetValue<TJSONObject>('params', PObj) then
+      try
+        HandleProgress(PObj);
+      except
+        // must never kill the reader thread
+      end;
+    end
+    else if SameText(Method, 'textDocument/publishDiagnostics') then
     begin
       // Count every publishDiagnostics notification we get, regardless
       // of whether the inner extraction succeeds. The count is the
@@ -905,7 +944,7 @@ begin
   Params.AddPair('rootPath', ARootPath);
   Params.AddPair('capabilities', TLspProtocol.BuildClientCapabilities);
   Params.AddPair('initializationOptions',
-    TLspProtocol.BuildInitializationOptions(ADprojPath, ASearchPath));
+    TLspProtocol.BuildInitializationOptions(ADprojPath, ASearchPath, FServerType));
 
   Response := SendRequest('initialize', Params);
   try
@@ -1066,6 +1105,57 @@ end;
 function TLspClient.SyncDocument(const AFilePath: string): Boolean;
 begin
   Result := SyncDocumentWith(AFilePath, ReadLiveContent(AFilePath));
+end;
+
+procedure TLspClient.HandleProgress(AParams: TJSONObject);
+var
+  Token, Kind, Text: string;
+begin
+  if not ParseProgressNotification(AParams, Token, Kind, Text) then Exit;
+  FProgressLock.Enter;
+  try
+    if Kind = 'begin' then
+    begin
+      TInterlocked.Increment(FProgressSeen);
+      if Text = '' then Text := 'working';
+      FProgress.AddOrSetValue(Token, Text);
+    end
+    else if Kind = 'end' then
+      FProgress.Remove(Token)
+    else if (Text <> '') and FProgress.ContainsKey(Token) then
+      FProgress.AddOrSetValue(Token, Text);   // 'report' refines the text
+  finally
+    FProgressLock.Leave;
+  end;
+end;
+
+function TLspClient.BusyWith: string;
+begin
+  Result := '';
+  FProgressLock.Enter;
+  try
+    for var P in FProgress do
+      Exit(P.Value);
+  finally
+    FProgressLock.Leave;
+  end;
+end;
+
+function TLspClient.ReportsProgress: Boolean;
+begin
+  Result := TInterlocked.CompareExchange(FProgressSeen, 0, 0) > 0;
+end;
+
+function TLspClient.WaitServerIdle(ATimeoutMs: Cardinal;
+  const AKeepWaiting: TFunc<Boolean>): Boolean;
+begin
+  var Deadline := GetTickCount64 + ATimeoutMs;
+  repeat
+    if BusyWith = '' then Exit(True);
+    if Assigned(AKeepWaiting) and not AKeepWaiting() then Exit(False);
+    Sleep(100);
+  until GetTickCount64 > Deadline;
+  Result := BusyWith = '';
 end;
 
 function TLspClient.WaitFileAnalysed(const AFilePath: string; ABefore: Integer;

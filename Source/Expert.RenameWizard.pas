@@ -1087,6 +1087,23 @@ begin
     IncCtx := TLspIncludeContext.Create(Client, EditorOrDiskReader());
     IncCtx.RegisterFiles(ProjFiles);
 
+
+  // The server may be BUSY (a big project takes 12-30 s to load). While it
+  // is, the DelphiLSP controller aborts every request after 10 s, so asking
+  // produces failures, not answers - waiting for its own "$/progress ...
+  // end" is the honest readiness signal (issue #13).
+  if Client.BusyWith <> '' then
+  begin
+    FHost.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+    Client.WaitServerIdle(180000,
+      function: Boolean
+      begin
+        FHost.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+        Application.ProcessMessages;
+        Result := not FHost.ScanCancelled;
+      end);
+  end;
+
     // Hand the current content to DelphiLSP when it changed since the last
     // send, and wait for the unit's analysis then (see VerifyWithLsp for
     // why a blind re-open + fixed sleep loses answers). An include file is
@@ -2011,7 +2028,14 @@ begin
         end;
       except
         on E: Exception do
-          DiagLine := DiagLine + 'ERROR: ' + E.Message + ' -> SKIP';
+        begin
+          // AN ERROR IS NOT A NEGATIVE ANSWER (issue #13). The DelphiLSP
+          // controller aborts requests after 10 s while a big project is
+          // loading; skipping such an occurrence would rename everything
+          // EXCEPT it, which does not compile and leaves no trace.
+          DiagLine := DiagLine + 'ERROR: ' + E.Message + ' -> UNVERIFIED (not renamed)';
+          Unverified(C, 'DelphiLSP reported an error: ' + E.Message);
+        end;
       end;
 
       FDiagLog := FDiagLog + DiagLine + sLineBreak;

@@ -103,8 +103,16 @@ type
     /// <summary>Builds the initializationOptions payload. The actual
     ///  per-project configuration is pushed later via
     ///  workspace/didChangeConfiguration.</summary>
-    class function BuildInitializationOptions(const ADprojPath: string; const ASearchPath: string = ''): TJSONObject; static;
+    class function BuildInitializationOptions(const ADprojPath: string;
+      const ASearchPath: string = ''; const AServerType: string = ''): TJSONObject; static;
   end;
+
+/// <summary>Reads a "$/progress" notification's params: the token (which
+///  identifies the task), its kind ('begin' / 'report' / 'end') and the
+///  text to show ("Loading project Foo.dpr"). False when it is not a
+///  usable progress notification. Pure - see issue #13.</summary>
+function ParseProgressNotification(AParams: TJSONObject;
+  out AToken, AKind, AText: string): Boolean;
 
 implementation
 
@@ -362,14 +370,51 @@ begin
   Workspace := TJSONObject.Create;
   Workspace.AddPair('workspaceEdit', WsEdit);
 
+  // window.workDoneProgress: without it the server need not report its
+  // progress at all - and "$/progress: Loading project ... kind=end" is the
+  // only honest signal that a request has a chance of being answered
+  // (issue #13: during the 12-30 s project load every request is aborted).
+  var Window := TJSONObject.Create;
+  Window.AddPair('workDoneProgress', TJSONBool.Create(True));
+
   Result := TJSONObject.Create;
   Result.AddPair('textDocument', TextDoc);
   Result.AddPair('workspace', Workspace);
+  Result.AddPair('window', Window);
 end;
 
-class function TLspProtocol.BuildInitializationOptions(const ADprojPath: string; const ASearchPath: string = ''): TJSONObject;
+function ParseProgressNotification(AParams: TJSONObject;
+  out AToken, AKind, AText: string): Boolean;
+var
+  ValObj: TJSONObject;
+begin
+  Result := False;
+  AToken := '';
+  AKind := '';
+  AText := '';
+  if AParams = nil then Exit;
+  // the token may be a string OR a number - both identify the same task
+  var TV := AParams.GetValue('token');
+  if TV <> nil then AToken := TV.Value;
+  if AToken = '' then Exit;
+  if not AParams.TryGetValue<TJSONObject>('value', ValObj) then Exit;
+  AKind := LowerCase(ValObj.GetValue<string>('kind', ''));
+  if (AKind <> 'begin') and (AKind <> 'report') and (AKind <> 'end') then Exit;
+  AText := Trim(ValObj.GetValue<string>('title', '') + ' ' +
+                ValObj.GetValue<string>('message', ''));
+  Result := True;
+end;
+
+class function TLspProtocol.BuildInitializationOptions(const ADprojPath: string;
+  const ASearchPath: string; const AServerType: string): TJSONObject;
 begin
   Result := TJSONObject.Create;
+  // 'agent' (issue #13): without a serverType DelphiLsp starts as the
+  // CONTROLLER, which spawns agent processes, adds a second serial queue
+  // and aborts every request after 10 s - not configurable. Measured
+  // before switching anything.
+  if AServerType <> '' then
+    Result.AddPair('serverType', AServerType);
   // BEWUSST KEIN serverType=controller. Empirisch verifiziert
   // (TestHoverModes.dpr in C:\Beispiele\DelphiLspRename): in
   // controller-Mode antwortet DelphiLSP konsistent mit

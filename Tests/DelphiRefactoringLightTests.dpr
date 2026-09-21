@@ -23,6 +23,7 @@ uses
   DUnitX.TestFramework,
   Delphi.FileEncoding in '..\Source\Delphi.FileEncoding.pas',
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
+  Lsp.Protocol in '..\Source\Lsp.Protocol.pas',
   Expert.WithScanner in '..\Source\Expert.WithScanner.pas',
   Expert.WithRewriter in '..\Source\Expert.WithRewriter.pas',
   Expert.UnitIndex in '..\Source\Expert.UnitIndex.pas',

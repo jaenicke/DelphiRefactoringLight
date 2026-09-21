@@ -98,6 +98,18 @@ type
     [Test] procedure Start_ReportsThePipeItReallyCreated;
   end;
 
+  /// <summary>Issue #13: while DelphiLSP loads a big project (12-30 s) its
+  ///  controller aborts every request after 10 s. The only honest signal
+  ///  that it is busy is its own "$/progress" notification - which we
+  ///  ignored, so the first search after opening a project read the
+  ///  failures as results ("1 of 341 candidate(s) verified").</summary>
+  [TestFixture]
+  TLspProgressTests = class
+  public
+    [Test] procedure ProgressNotification_BeginReportEnd;
+    [Test] procedure ProgressNotification_RejectsWhatIsNotProgress;
+  end;
+
 implementation
 
 uses
@@ -105,7 +117,7 @@ uses
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
-  Winapi.Windows, Mcp.PipeServer;
+  Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol;
 
 const
   NL = sLineBreak;
@@ -502,6 +514,60 @@ begin
   end;
 end;
 
+{ TLspProgressTests }
+
+procedure TLspProgressTests.ProgressNotification_BeginReportEnd;
+
+  function Parse(const AJson: string; out AToken, AKind, AText: string): Boolean;
+  begin
+    var O := TJSONObject.ParseJSONValue(AJson) as TJSONObject;
+    try
+      Result := ParseProgressNotification(O, AToken, AKind, AText);
+    finally
+      O.Free;
+    end;
+  end;
+
+var
+  Token, Kind, Text: string;
+begin
+  // what DelphiLSP sends while it loads a project
+  Assert.IsTrue(Parse('{"token":"1","value":{"kind":"begin","title":"Loading project",' +
+    '"message":"Rezepturen.dpr"}}', Token, Kind, Text));
+  Assert.AreEqual('1', Token);
+  Assert.AreEqual('begin', Kind);
+  Assert.AreEqual('Loading project Rezepturen.dpr', Text);
+  // a NUMERIC token identifies the same task
+  Assert.IsTrue(Parse('{"token":7,"value":{"kind":"report","message":"units"}}',
+    Token, Kind, Text));
+  Assert.AreEqual('7', Token);
+  Assert.AreEqual('report', Kind);
+  Assert.IsTrue(Parse('{"token":7,"value":{"kind":"end"}}', Token, Kind, Text));
+  Assert.AreEqual('end', Kind);
+  Assert.AreEqual('', Text, 'an end carries no text');
+end;
+
+procedure TLspProgressTests.ProgressNotification_RejectsWhatIsNotProgress;
+var
+  Token, Kind, Text: string;
+
+  function Parse(const AJson: string): Boolean;
+  begin
+    var O := TJSONObject.ParseJSONValue(AJson) as TJSONObject;
+    try
+      Result := ParseProgressNotification(O, Token, Kind, Text);
+    finally
+      O.Free;
+    end;
+  end;
+
+begin
+  Assert.IsFalse(Parse('{"value":{"kind":"begin"}}'), 'no token');
+  Assert.IsFalse(Parse('{"token":"1"}'), 'no value');
+  Assert.IsFalse(Parse('{"token":"1","value":{"kind":"whatever"}}'), 'unknown kind');
+  Assert.IsFalse(ParseProgressNotification(nil, Token, Kind, Text), 'nil params');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -511,5 +577,6 @@ initialization
   TDUnitX.RegisterTestFixture(TMiscRegressionTests);
   TDUnitX.RegisterTestFixture(TVersionTests);
   TDUnitX.RegisterTestFixture(TMcpPipeRegressionTests);
+  TDUnitX.RegisterTestFixture(TLspProgressTests);
 
 end.

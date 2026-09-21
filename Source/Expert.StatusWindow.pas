@@ -53,7 +53,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
   ToolsAPI, DesignIntf,   // DesignIntf: TEditState / TEditAction
-  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager,
+  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager, Expert.PluginSettings,
   Expert.AutoImport, Expert.ContextMenu, Expert.IdeThemes, Expert.DialogHelper,
   Expert.BlameGutter, Expert.BlameDialogs, Expert.VcsBlame,
   Expert.MessagesReader, Expert.StructureErrors, Expert.McpServer, Lsp.Client,
@@ -432,6 +432,7 @@ begin
       'Tools > Options > IDE > Environment Variables');
 
   // ---- LSP session --------------------------------------------------------
+  Client := nil;   // a local object reference is NOT zero-initialised
   if not TLspManager.Instance.IsAlive then
     Row('DelphiLSP session', 'not started',
       'starts on the first request (rename, completion, quick fixes)')
@@ -458,6 +459,26 @@ begin
   end;
   if TLspManager.Instance.ProjectIndexed then S := 'yes' else S := 'no';
   Row('  project indexed', S, 'the LSP has seen this project once');
+  // What the server is doing RIGHT NOW: while it loads a project (12-30 s
+  // for a big one) the controller aborts every request after 10 s, so this
+  // row explains a search that seems to find nothing (issue #13).
+  S := '';
+  if Client <> nil then
+    try S := Client.BusyWith; except end;
+  if S <> '' then
+    Row('  server busy', S,
+      'requests are aborted while this runs - the scans wait for it')
+  else if (Client <> nil) and not Client.ReportsProgress then
+    Row('  server busy', 'no (it reports no progress)',
+      'this server does not send $/progress, so "busy" cannot be seen')
+  else
+    Row('  server busy', 'no', 'it answers requests');
+  if TPluginSettings.LspLogging then
+    Row('  session log', 'on',
+      TPath.Combine(TPath.Combine(TPath.GetTempPath, 'DelphiLSP'),
+        'RefactoringLight*.log') + ' - every request with its duration')
+  else
+    Row('  session log', 'off', 'switch it on in the options to diagnose a slow session');
 
   // ---- live quick-fix checker --------------------------------------------
   LiveStatusInfo(LiveFile, Analysing, Resolving, FromLsp, Fresh, FixCount);

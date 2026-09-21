@@ -663,6 +663,7 @@ begin
     var Graph := TTypeGraph.Create(Ctx.ScopeFiles, nil);
     Links := CollectLinkedTargets(Graph, OwnerTypeName, Ctx.Identifier, Linked);
     var PreSkipped := 0;
+    var LspErrors := 0;
     var Cands := TList<TFindReferenceItem>.Create;
     try
       for var SF in Ctx.ScopeFiles do
@@ -856,7 +857,13 @@ begin
             Answer := Format('leads to %s:%d', [TLspUri.FileUriToPath(D[0].Uri),
               D[0].Range.Start.Line + 1]);
         except
-          on E: Exception do Answer := E.ClassName + ': ' + E.Message;
+          on E: Exception do
+          begin
+            // an ERROR is not a negative answer (issue #13) - it is counted
+            // so the caller can see a degraded session instead of guessing
+            Answer := 'NO ANSWER, the server reported an error: ' + E.Message;
+            Inc(LspErrors);
+          end;
         end;
         if Answer <> '' then
         begin
@@ -902,6 +909,10 @@ begin
       if SentCount > 0 then
         Method := Method + Format('; %d file(s) (re)sent to DelphiLSP and ' +
           'waited for', [SentCount]);
+      if LspErrors > 0 then
+        Method := Method + Format('; WARNING: %d request(s) came back as an ' +
+          'ERROR (the server was busy - those occurrences are unverified, ' +
+          'not absent; run again)', [LspErrors]);
       if TimedOut > 0 then
         Method := Method + Format(' - %d analysis wait(s) TIMED OUT', [TimedOut]);
       if Cands.Count >= MaxCandidates then

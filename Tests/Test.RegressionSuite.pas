@@ -148,6 +148,21 @@ type
     [Test] procedure AlignDeclaration_KeepsDirectivesAndTrailingDefaults;
   end;
 
+  /// <summary>The uses-graph SCC pass used to recurse once per unit along
+  ///  the chain, so a deep enough graph overflowed the stack - and a stack
+  ///  overflow inside a design-time BPL takes the IDE with it rather than
+  ///  failing the analysis. Measured on the recursive version through this
+  ///  same seam: 6,000 units passed, 7,000 raised EStackOverflow.</summary>
+  [TestFixture]
+  TUsesGraphDepthTests = class
+  public
+    [Test] procedure DeepCycle_DoesNotOverflowTheStack;
+    [Test] procedure Components_AreStillCorrectOnASmallGraph;
+    [Test] procedure DeepEnumerateCycles_DoesNotOverflowTheStack;
+    [Test] procedure DeepEnumerateCyclesThrough_DoesNotOverflowTheStack;
+    [Test] procedure DeepEdgeLevers_DoesNotOverflowTheStack;
+  end;
+
 implementation
 
 uses
@@ -156,7 +171,7 @@ uses
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
-  System.Win.Registry, Expert.PluginSettings;
+  System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph;
 
 const
   NL = sLineBreak;
@@ -799,6 +814,127 @@ begin
   Assert.IsFalse(PlanDeclToImplAlign(L2, 4, 7, NewLines), 'never strip the parameters');
 end;
 
+{ TUsesGraphDepthTests }
+
+// A ring of AUnits units - U0 uses U1 ... U(n-1) uses U0 - built entirely
+// through Analyze's own AReader seam, so the test touches no disk and no
+// IDE. One ring is ONE strongly connected component, which is the worst
+// case for the SCC pass: it must reach the whole chain before it can close
+// a single component.
+function RingResult(AUnits: Integer): TUsesCycleResult;
+var
+  Files: TArray<string>;
+begin
+  SetLength(Files, AUnits);
+  for var I := 0 to AUnits - 1 do
+    Files[I] := 'C:\ring\U' + IntToStr(I) + '.pas';
+  Result := TUsesGraphAnalyzer.Analyze(Files, nil,
+    function(APath: string): string
+    var
+      Idx: Integer;
+    begin
+      Idx := StrToIntDef(ChangeFileExt(ExtractFileName(APath), '').Substring(1), -1);
+      if Idx < 0 then Exit('');
+      Result := 'unit U' + IntToStr(Idx) + ';'#13#10 +
+                'interface'#13#10 +
+                'uses U' + IntToStr((Idx + 1) mod AUnits) + ';'#13#10 +
+                'implementation'#13#10 +
+                'end.';
+    end);
+end;
+
+procedure TUsesGraphDepthTests.DeepCycle_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+begin
+  // 20,000 is roughly three times the depth at which the recursive version
+  // died. That margin IS the test, so do not lower it casually: anything at
+  // or under ~6,000 passes either way and proves nothing.
+  Res := RingResult(20000);
+  try
+    Assert.AreEqual<Integer>(20000, Length(Res.UnitNames), 'every unit is in the graph');
+    Assert.AreEqual<Integer>(20000, Length(Res.Edges), 'a ring of N units has N cycle edges');
+    Assert.AreEqual<Integer>(1, Length(Res.GroupInfos), 'the ring is a single component');
+    Assert.AreEqual<Integer>(20000, Res.GroupInfos[0].UnitCount, 'and it spans every unit');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.Components_AreStillCorrectOnASmallGraph;
+var
+  Res: TUsesCycleResult;
+begin
+  // The companion to the depth test: the rewrite must still compute the
+  // SAME partition. A 5-unit ring is small enough to check by hand - one
+  // group, five units, five edges, girth five.
+  Res := RingResult(5);
+  try
+    Assert.AreEqual<Integer>(1, Length(Res.GroupInfos), 'one group');
+    Assert.AreEqual<Integer>(5, Res.GroupInfos[0].UnitCount, 'five units in it');
+    Assert.AreEqual<Integer>(5, Res.GroupInfos[0].ShortestCycle, 'the girth of a 5-ring is 5');
+    Assert.AreEqual<Integer>(5, Length(Res.Edges), 'five cycle edges');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEnumerateCycles_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+  Trunc: Boolean;
+begin
+  // The cycle enumerator recurses once per unit ON THE CURRENT PATH, and on
+  // a ring the path is the whole ring. Its ceiling was LOWER than the SCC
+  // pass's - it overflowed at 6,000 where StrongConnect reached 7,000 -
+  // because the frame carries more locals. 12,000 is past both.
+  Res := RingResult(12000);
+  try
+    var Cycles := Res.EnumerateCycles(10, Trunc, 0);
+    Assert.AreEqual<Integer>(1, Length(Cycles), 'a ring has exactly one simple cycle');
+    Assert.AreEqual<Integer>(12000, Length(Cycles[0].Units), 'and it spans every unit');
+    Assert.IsFalse(Trunc, 'well under the count cap, so nothing was truncated');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEnumerateCyclesThrough_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+  Trunc: Boolean;
+begin
+  // Same walk, rooted at one unit - the Path tab of the results dialog.
+  Res := RingResult(12000);
+  try
+    var Cycles := Res.EnumerateCyclesThrough('U0', 10, Trunc, 0);
+    Assert.AreEqual<Integer>(1, Length(Cycles), 'one cycle through U0');
+    Assert.AreEqual<Integer>(12000, Length(Cycles[0].Units), 'spanning every unit');
+  finally
+    Res.Free;
+  end;
+end;
+
+procedure TUsesGraphDepthTests.DeepEdgeLevers_DoesNotOverflowTheStack;
+var
+  Res: TUsesCycleResult;
+begin
+  // EdgeLevers runs CountCycleNodes once per unique dependency, so this is
+  // N+1 full SCC passes - the slowest test here by far, and the reason the
+  // ring is 11,000 rather than larger. The recursive form of that pass
+  // reached 8,000 and died at 10,000.
+  Res := RingResult(11000);
+  try
+    var Levers := Res.EdgeLevers;
+    Assert.AreEqual<Integer>(11000, Length(Levers), 'one lever per edge of the ring');
+    // Removing any single edge of a ring breaks the whole cycle, so every
+    // unit leaves the cyclic set - the same answer for every lever.
+    Assert.AreEqual<Integer>(11000, Levers[0].UnitsFreed, 'cutting one edge frees the whole ring');
+  finally
+    Res.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -812,5 +948,6 @@ initialization
   TDUnitX.RegisterTestFixture(TSettingsRobustnessTests);
   TDUnitX.RegisterTestFixture(TPartnerQueryTests);
   TDUnitX.RegisterTestFixture(TAlignSignatureFixTests);
+  TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
 
 end.

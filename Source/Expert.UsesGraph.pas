@@ -695,28 +695,66 @@ var
   Counter, CompCount, I: Integer;
   Sizes: TArray<Integer>;
 
-  procedure SC(V: Integer);
-  var K, W: Integer;
-  begin
-    Idx[V] := Counter; Lowlink[V] := Counter; Inc(Counter);
-    Stk.Push(V); OnStk[V] := True;
-    for K := 0 to FAdjTo[V].Count - 1 do
-    begin
-      W := FAdjTo[V][K];
-      if (V = AExFrom) and (W = AExTo) then Continue;  // excluded dependency
-      if Idx[W] < 0 then
-      begin
-        SC(W);
-        if Lowlink[W] < Lowlink[V] then Lowlink[V] := Lowlink[W];
-      end
-      else if OnStk[W] then
-        if Idx[W] < Lowlink[V] then Lowlink[V] := Idx[W];
+  // ITERATIVE, for the same reason as the SCC pass in Analyze: recursion
+  // here is one frame per unit on the chain, and a stack overflow in a
+  // design-time BPL kills the IDE rather than the analysis. This one is
+  // also the HOT path - EdgeLevers calls it once per unique dependency,
+  // so it runs a full Tarjan per edge.
+  procedure SC(ARoot: Integer);
+  type
+    TFrame = record
+      V: Integer;      // node being expanded
+      K: Integer;      // next index into FAdjTo[V]
     end;
-    if Lowlink[V] = Idx[V] then
-      repeat
-        W := Stk.Pop; OnStk[W] := False; Comp[W] := CompCount;
-      until W = V;
-    if Lowlink[V] = Idx[V] then Inc(CompCount);
+  var
+    Frames: TArray<TFrame>;
+    Top, V, W, Parent: Integer;
+  begin
+    SetLength(Frames, 64);
+    Top := 0;
+    Frames[0].V := ARoot;
+    Frames[0].K := 0;
+    Idx[ARoot] := Counter; Lowlink[ARoot] := Counter; Inc(Counter);
+    Stk.Push(ARoot); OnStk[ARoot] := True;
+
+    while Top >= 0 do
+    begin
+      V := Frames[Top].V;
+      if Frames[Top].K < FAdjTo[V].Count then
+      begin
+        W := FAdjTo[V][Frames[Top].K];
+        Inc(Frames[Top].K);
+        if (V = AExFrom) and (W = AExTo) then Continue;  // excluded dependency
+        if Idx[W] < 0 then
+        begin
+          // was: SC(W)
+          Idx[W] := Counter; Lowlink[W] := Counter; Inc(Counter);
+          Stk.Push(W); OnStk[W] := True;
+          Inc(Top);
+          if Top = Length(Frames) then SetLength(Frames, Top * 2);
+          Frames[Top].V := W;
+          Frames[Top].K := 0;
+        end
+        else if OnStk[W] then
+          if Idx[W] < Lowlink[V] then Lowlink[V] := Idx[W];
+      end
+      else
+      begin
+        if Lowlink[V] = Idx[V] then
+        begin
+          repeat
+            W := Stk.Pop; OnStk[W] := False; Comp[W] := CompCount;
+          until W = V;
+          Inc(CompCount);
+        end;
+        Dec(Top);
+        if Top >= 0 then
+        begin
+          Parent := Frames[Top].V;
+          if Lowlink[V] < Lowlink[Parent] then Lowlink[Parent] := Lowlink[V];
+        end;
+      end;
+    end;
   end;
 
 begin
@@ -940,13 +978,46 @@ var
     end;
   end;
 
-  procedure DFS(V: Integer);
-  var K, W, J: Integer;
+  // ITERATIVE backtracking walk. The recursive form nested one frame per
+  // unit ON THE CURRENT PATH, and a path can be as long as the component,
+  // so the same stack-overflow-kills-the-IDE risk applied here. The frame
+  // array mirrors Path exactly: pushing a frame and appending to Path
+  // happen together, and leaving a frame undoes both - which is what the
+  // recursive version did on the line after its DFS(W) call.
+  procedure DFS(ARoot: Integer);
+  type
+    TFrame = record
+      V: Integer;      // node being expanded
+      K: Integer;      // next index into FAdjTo[V]
+    end;
+  var
+    Frames: TArray<TFrame>;
+    Top, V, W, J: Integer;
   begin
     if Stop or Expired then Exit;
-    for K := 0 to FAdjTo[V].Count - 1 do
+    SetLength(Frames, 64);
+    Top := 0;
+    Frames[0].V := ARoot;
+    Frames[0].K := 0;
+
+    while Top >= 0 do
     begin
-      W := FAdjTo[V][K];
+      V := Frames[Top].V;
+      // Stop unwinds the whole walk, exactly as the chain of "if Stop then
+      // Exit" did - and each level still undoes its own Path entry.
+      if Stop or (Frames[Top].K >= FAdjTo[V].Count) then
+      begin
+        Dec(Top);
+        if Top >= 0 then
+        begin
+          Path.Delete(Path.Count - 1);
+          OnPath[V] := False;
+        end;
+        Continue;
+      end;
+
+      W := FAdjTo[V][Frames[Top].K];
+      Inc(Frames[Top].K);
       if W = Start then
       begin
         if Path.Count >= 2 then
@@ -957,16 +1028,21 @@ var
           Cycles.Add(CP);
           if (AMax > 0) and (Cycles.Count >= AMax) then
           begin
-            Stop := True; ATruncated := True; Exit;
+            Stop := True; ATruncated := True;
           end;
         end;
       end
       else if not OnPath[W] then
       begin
         OnPath[W] := True; Path.Add(W);
-        DFS(W);
-        Path.Delete(Path.Count - 1); OnPath[W] := False;
-        if Stop then Exit;
+        Inc(Top);
+        if Top = Length(Frames) then SetLength(Frames, Top * 2);
+        Frames[Top].V := W;
+        Frames[Top].K := 0;
+        // the recursive body's own entry guard, kept here so Expired is
+        // called exactly once per node visit and the budget is sampled on
+        // the same schedule as before
+        if Stop or Expired then Frames[Top].K := MaxInt;
       end;
     end;
   end;
@@ -1022,13 +1098,40 @@ var
     end;
   end;
 
-  procedure DFS(V: Integer);
-  var K, W, J: Integer;
+  // ITERATIVE - see the companion in EnumerateCyclesThrough. Same shape,
+  // plus the min-node rooting that keeps each simple cycle to one report.
+  procedure DFS(ARoot: Integer);
+  type
+    TFrame = record
+      V: Integer;      // node being expanded
+      K: Integer;      // next index into FAdjTo[V]
+    end;
+  var
+    Frames: TArray<TFrame>;
+    Top, V, W, J: Integer;
   begin
     if Stop or Expired then Exit;
-    for K := 0 to FAdjTo[V].Count - 1 do
+    SetLength(Frames, 64);
+    Top := 0;
+    Frames[0].V := ARoot;
+    Frames[0].K := 0;
+
+    while Top >= 0 do
     begin
-      W := FAdjTo[V][K];
+      V := Frames[Top].V;
+      if Stop or (Frames[Top].K >= FAdjTo[V].Count) then
+      begin
+        Dec(Top);
+        if Top >= 0 then
+        begin
+          Path.Delete(Path.Count - 1);
+          OnPath[V] := False;
+        end;
+        Continue;
+      end;
+
+      W := FAdjTo[V][Frames[Top].K];
+      Inc(Frames[Top].K);
       if W < Start then Continue;             // enforce min-node rooting
       if W = Start then
       begin
@@ -1040,16 +1143,18 @@ var
           Cycles.Add(CP);
           if (AMax > 0) and (Cycles.Count >= AMax) then
           begin
-            Stop := True; ATruncated := True; Exit;
+            Stop := True; ATruncated := True;
           end;
         end;
       end
       else if (W > Start) and (not OnPath[W]) then
       begin
         OnPath[W] := True; Path.Add(W);
-        DFS(W);
-        Path.Delete(Path.Count - 1); OnPath[W] := False;
-        if Stop then Exit;
+        Inc(Top);
+        if Top = Length(Frames) then SetLength(Frames, Top * 2);
+        Frames[Top].V := W;
+        Frames[Top].K := 0;
+        if Stop or Expired then Frames[Top].K := MaxInt;
       end;
     end;
   end;
@@ -1103,33 +1208,88 @@ var
   Counter, CompCount: Integer;
   CompSize: TArray<Integer>;
 
-  procedure StrongConnect(V: Integer);
-  var
-    W: Integer;
-  begin
-    Index[V] := Counter;
-    Lowlink[V] := Counter;
-    Inc(Counter);
-    Stack.Push(V);
-    OnStack[V] := True;
-    for W in Adj[V] do
-    begin
-      if Index[W] < 0 then
-      begin
-        StrongConnect(W);
-        if Lowlink[W] < Lowlink[V] then Lowlink[V] := Lowlink[W];
-      end
-      else if OnStack[W] then
-        if Index[W] < Lowlink[V] then Lowlink[V] := Index[W];
+  // ITERATIVE Tarjan, with the search stack on the HEAP.
+  //
+  // The recursive form nested one call frame per unit along the uses
+  // chain, so a deep enough graph overflowed the stack - and a stack
+  // overflow inside a design-time BPL is not something the IDE survives:
+  // the guard page is already gone by the time anything could handle it,
+  // so bds.exe dies with every unsaved project in it, instead of this
+  // analysis simply failing. Measured before this change, with a
+  // synthetic single-cycle chain fed through Analyze's AReader seam:
+  // 6,000 units completed, 7,000 raised EStackOverflow on a default 1 MB
+  // stack. The IDE has less headroom than that probe did, not more.
+  //
+  // The transformation is the textbook one: a frame remembers WHICH
+  // adjacency index it had reached, so the edge loop can resume after a
+  // child is pushed. Every other step - discovery numbering, the
+  // on-stack test, the lowlink propagation and the component pop -
+  // happens at exactly the point it did before, so the components come
+  // out identical, in the same order.
+  procedure StrongConnect(ARoot: Integer);
+  type
+    TFrame = record
+      V: Integer;      // the node being expanded
+      Edge: Integer;   // next index into Adj[V] still to visit
     end;
-    if Lowlink[V] = Index[V] then
+  var
+    Frames: TArray<TFrame>;
+    Top, V, W, Parent: Integer;
+  begin
+    SetLength(Frames, 64);
+    Top := 0;
+    Frames[0].V := ARoot;
+    Frames[0].Edge := 0;
+    Index[ARoot] := Counter;
+    Lowlink[ARoot] := Counter;
+    Inc(Counter);
+    Stack.Push(ARoot);
+    OnStack[ARoot] := True;
+
+    while Top >= 0 do
     begin
-      repeat
-        W := Stack.Pop;
-        OnStack[W] := False;
-        Comp[W] := CompCount;
-      until W = V;
-      Inc(CompCount);
+      V := Frames[Top].V;
+      if Frames[Top].Edge < Adj[V].Count then
+      begin
+        W := Adj[V][Frames[Top].Edge];
+        Inc(Frames[Top].Edge);
+        if Index[W] < 0 then
+        begin
+          // was: StrongConnect(W)
+          Index[W] := Counter;
+          Lowlink[W] := Counter;
+          Inc(Counter);
+          Stack.Push(W);
+          OnStack[W] := True;
+          Inc(Top);
+          if Top = Length(Frames) then
+            SetLength(Frames, Top * 2);
+          Frames[Top].V := W;
+          Frames[Top].Edge := 0;
+        end
+        else if OnStack[W] then
+          if Index[W] < Lowlink[V] then Lowlink[V] := Index[W];
+      end
+      else
+      begin
+        // V's edges are exhausted - this is the tail of the recursive body
+        if Lowlink[V] = Index[V] then
+        begin
+          repeat
+            W := Stack.Pop;
+            OnStack[W] := False;
+            Comp[W] := CompCount;
+          until W = V;
+          Inc(CompCount);
+        end;
+        // ...and this is the caller's line after StrongConnect(W) returned
+        Dec(Top);
+        if Top >= 0 then
+        begin
+          Parent := Frames[Top].V;
+          if Lowlink[V] < Lowlink[Parent] then Lowlink[Parent] := Lowlink[V];
+        end;
+      end;
     end;
   end;
 

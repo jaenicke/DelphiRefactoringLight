@@ -178,6 +178,23 @@ type
     [Test] procedure Cleanup_CountsAMemberCallAsUseOfTheHelperUnit;
   end;
 
+  /// <summary>Issue #16 (Ian Branch): the unit index cache wrote its
+  ///  counts with SizeOf of an INFERRED type - 8 bytes on Win64 - and read
+  ///  4, so the 64-bit IDE read four bytes of a unit name as an identifier
+  ///  count and zero-filled a 12-16 GB array (SetLength succeeds on Win64,
+  ///  so the "corrupt -> rebuild" handler never ran). A cache file must
+  ///  round-trip, and a malformed one must be REJECTED without allocating
+  ///  more than it holds.</summary>
+  [TestFixture]
+  TUnitIndexCacheTests = class
+  public
+    [Test] procedure RoundTrip_KeepsUnitsAndIdentifiers;
+    [Test] procedure Win64ShapedCounts_AreRejected;
+    [Test] procedure AbsurdIdentifierCount_IsRejectedWithoutAllocating;
+    [Test] procedure AbsurdStringLength_IsRejected;
+    [Test] procedure TruncatedAndTrailing_AreRejected;
+  end;
+
 implementation
 
 uses
@@ -860,6 +877,200 @@ begin
   Assert.AreEqual(2, Found);
 end;
 
+{ TUnitIndexCacheTests }
+
+function CacheTempFile(const AName: string): string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath, 'RlIdxTest_' + AName + '.idx');
+end;
+
+function SampleUnits: TArray<TUnitSource>;
+begin
+  SetLength(Result, 2);
+  Result[0].UnitName := 'Unit1';
+  Result[0].Path := 'C:\x\Unit1.pas';
+  Result[0].Idents := TArray<string>.Create('TFoo', 'Bar', '.Dummy', 'TList<');
+  Result[0].HasInit := True;
+  Result[1].UnitName := 'Ümlaut.Unit';
+  Result[1].Path := 'C:\x\Ümlaut.Unit.pas';
+  Result[1].Idents := nil;
+  Result[1].HasInit := False;
+end;
+
+// The magic block (length + text) of the CURRENT format, taken from a file
+// the production writer produced - the test must not know the constant.
+function MagicPrefix: TBytes;
+var
+  F: string;
+  B: TBytes;
+  L: Integer;
+begin
+  F := CacheTempFile('magic');
+  WriteUnitIndexCacheFile(F, nil);
+  try
+    B := TFile.ReadAllBytes(F);
+  finally
+    TFile.Delete(F);
+  end;
+  Move(B[0], L, 4);
+  Result := Copy(B, 0, 4 + L);
+end;
+
+procedure AppendInt(var B: TBytes; V: Integer);
+begin
+  var P := Length(B);
+  SetLength(B, P + 4);
+  Move(V, B[P], 4);
+end;
+
+procedure AppendInt64(var B: TBytes; V: Int64);
+begin
+  var P := Length(B);
+  SetLength(B, P + 8);
+  Move(V, B[P], 8);
+end;
+
+procedure AppendStr(var B: TBytes; const S: string);
+begin
+  var U := TEncoding.UTF8.GetBytes(S);
+  AppendInt(B, Length(U));
+  var P := Length(B);
+  SetLength(B, P + Length(U));
+  if Length(U) > 0 then Move(U[0], B[P], Length(U));
+end;
+
+// One entry's fixed part in the CURRENT layout, up to (not including) the
+// include count.
+procedure AppendEntryHead(var B: TBytes; const APath, AUnit: string);
+begin
+  AppendInt(B, $494E4455);        // entry sentinel
+  AppendStr(B, APath);
+  AppendStr(B, AUnit);
+  AppendInt64(B, 0);              // MTime
+  AppendInt64(B, 0);              // Size
+  var P := Length(B);
+  SetLength(B, P + 1); B[P] := 0; // HasInit
+  AppendInt64(B, 0);              // IncStamp
+end;
+
+procedure TUnitIndexCacheTests.RoundTrip_KeepsUnitsAndIdentifiers;
+var
+  F: string;
+  R: TArray<TUnitSource>;
+begin
+  F := CacheTempFile('roundtrip');
+  WriteUnitIndexCacheFile(F, SampleUnits);
+  try
+    Assert.IsFalse(TFile.Exists(F + '.tmp'), 'the temporary file is renamed into place');
+    R := ReadUnitIndexCacheFile(F);
+  finally
+    TFile.Delete(F);
+  end;
+  Assert.AreEqual<Integer>(2, Length(R));
+  for var S in R do
+    if SameText(S.UnitName, 'Unit1') then
+    begin
+      Assert.AreEqual('TFoo|Bar|.Dummy|TList<', string.Join('|', S.Idents));
+      Assert.IsTrue(S.HasInit);
+    end
+    else
+    begin
+      Assert.AreEqual('Ümlaut.Unit', S.UnitName, 'UTF-8 names survive');
+      Assert.AreEqual<Integer>(0, Length(S.Idents));
+    end;
+end;
+
+procedure TUnitIndexCacheTests.Win64ShapedCounts_AreRejected;
+var
+  B: TBytes;
+  F: string;
+begin
+  // exactly what the old writer produced on Win64: every count 8 bytes wide
+  B := MagicPrefix;
+  AppendInt64(B, 1);                              // unit count, 8 bytes
+  AppendEntryHead(B, 'C:\x\A.pas', 'A');
+  AppendInt64(B, 0);                              // include count, 8 bytes
+  AppendInt64(B, 1);                              // identifier count, 8 bytes
+  AppendStr(B, 'TFoo');
+  AppendInt(B, $444E4549);
+  F := CacheTempFile('win64');
+  TFile.WriteAllBytes(F, B);
+  try
+    Assert.AreEqual<Integer>(0, Length(ReadUnitIndexCacheFile(F)),
+      'out of step from the first entry - rebuild, never half-read');
+  finally
+    TFile.Delete(F);
+  end;
+end;
+
+procedure TUnitIndexCacheTests.AbsurdIdentifierCount_IsRejectedWithoutAllocating;
+var
+  B: TBytes;
+  F: string;
+begin
+  // the value measured in the report: four bytes of ASCII as a count
+  B := MagicPrefix;
+  AppendInt(B, 1);
+  AppendEntryHead(B, 'C:\x\A.pas', 'A');
+  AppendInt(B, 0);                                // no includes
+  AppendInt(B, 1635069299);                       // identifier count
+  AppendStr(B, 'TFoo');
+  F := CacheTempFile('absurd');
+  TFile.WriteAllBytes(F, B);
+  try
+    var T0 := GetTickCount64;
+    var R := ReadUnitIndexCacheFile(F);
+    // before the fix this line allocated ~13 GB on Win64 (and raised
+    // EOutOfMemory on Win32); now the count is checked against the bytes
+    // that are left before anything is allocated
+    Assert.AreEqual<Integer>(0, Length(R));
+    Assert.IsTrue(GetTickCount64 - T0 < 2000, 'rejected at once');
+  finally
+    TFile.Delete(F);
+  end;
+end;
+
+procedure TUnitIndexCacheTests.AbsurdStringLength_IsRejected;
+var
+  B: TBytes;
+  F: string;
+begin
+  B := MagicPrefix;
+  AppendInt(B, 1);
+  AppendInt(B, $494E4455);
+  AppendInt(B, 2000000000);                       // path "length"
+  F := CacheTempFile('strlen');
+  TFile.WriteAllBytes(F, B);
+  try
+    Assert.AreEqual<Integer>(0, Length(ReadUnitIndexCacheFile(F)));
+  finally
+    TFile.Delete(F);
+  end;
+end;
+
+procedure TUnitIndexCacheTests.TruncatedAndTrailing_AreRejected;
+var
+  F: string;
+  B: TBytes;
+begin
+  F := CacheTempFile('cut');
+  WriteUnitIndexCacheFile(F, SampleUnits);
+  try
+    B := TFile.ReadAllBytes(F);
+    // an IDE killed while writing - the old in-place writer left exactly this
+    TFile.WriteAllBytes(F, Copy(B, 0, Length(B) - 7));
+    Assert.AreEqual<Integer>(0, Length(ReadUnitIndexCacheFile(F)), 'truncated');
+    // bytes behind the end sentinel mean the reader is out of step
+    TFile.WriteAllBytes(F, B + [1, 2, 3, 4]);
+    Assert.AreEqual<Integer>(0, Length(ReadUnitIndexCacheFile(F)), 'trailing bytes');
+    // and the untouched file still loads
+    TFile.WriteAllBytes(F, B);
+    Assert.AreEqual<Integer>(2, Length(ReadUnitIndexCacheFile(F)), 'intact');
+  finally
+    TFile.Delete(F);
+  end;
+end;
+
 { TPartnerQueryTests }
 
 procedure TPartnerQueryTests.NameColumn_ImplementationHeaderPrefersTheMember;
@@ -1145,5 +1356,6 @@ initialization
   TDUnitX.RegisterTestFixture(TAlignSignatureFixTests);
   TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
   TDUnitX.RegisterTestFixture(THelperUsageTests);
+  TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
 
 end.

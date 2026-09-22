@@ -148,8 +148,8 @@ type
     function GetSnapshot: IUnitSnapshot;
     procedure EnsureWorker;
     procedure PublishSnapshot(ARebuildGlobal, ARebuildProject: Boolean);
-    procedure LoadCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>);
-    procedure SaveCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>);
+    class procedure LoadCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>); static;
+    class procedure SaveCache(const APath: string; ADict: TObjectDictionary<string, TIndexedUnit>); static;
     procedure CurrentSources(out AGlobalDirs, AProjectDirs, AProjectFiles: TArray<string>;
       out AGlobalCache, AProjectCache: string);
     procedure WorkerLoop;
@@ -200,6 +200,13 @@ type
 ///  old build held two extra dictionaries of the whole identifier set.
 ///  Exposed for the console tests and the memory measurement.</summary>
 function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
+
+/// <summary>Test seams for the on-disk cache format (issue #16): write
+///  AUnits through the production SaveCache, and read a file back through
+///  the production LoadCache - an empty result for a missing, foreign or
+///  CORRUPT file (which must never allocate more than the file holds).</summary>
+procedure WriteUnitIndexCacheFile(const APath: string; const AUnits: TArray<TUnitSource>);
+function ReadUnitIndexCacheFile(const APath: string): TArray<TUnitSource>;
 
 const
   /// <summary>Prefix of a CLASS/RECORD HELPER member in the identifier
@@ -390,7 +397,14 @@ const
   //      body skip - together: "no indexed unit declares TcxButton"
   //  08: parser fixes of 08-30/09-01 (case/enums/generics/parameters)
   //  07: IDE path variables ($(DXVCL)) expand
-  CacheMagic    = 'RLUIDX' + IndexParserVersion;
+  // THE FILE LAYOUT has its own number (issue #16): the magic used to carry
+  // only the PARSER version, so two builds with different record layouts
+  // but the same parser version read each other's files out of step. Bump
+  // CacheFormatVersion whenever SaveCache / LoadCache change what they
+  // write - a stale identifier list is merely wrong, a layout mismatch
+  // desynchronises every entry.
+  CacheFormatVersion = '2';   // 2: fixed 4-byte counts + entry/end sentinels
+  CacheMagic    = 'RLUIDX' + IndexParserVersion + 'F' + CacheFormatVersion;
   // Snapshot map entries are unit indexes with this flag bit set for
   // GENERIC declarations (MaxFiles stays far below the bit).
   GenericBit    = $40000000;
@@ -3056,97 +3070,254 @@ end;
 
 // ---- persistence (WORKER THREAD) ------------------------------------------
 
-procedure TUnitIndex.SaveCache(const APath: string;
+// ON-DISK LAYOUT (issue #16, Ian Branch): every count is written as
+// EXACTLY 4 bytes. The old code wrote "var Cnt := ADict.Count" and
+// "var IC := Length(...)" with SizeOf of the INFERRED type - NativeInt, 8
+// bytes on Win64 - while the reader read a 4-byte Integer. Every file the
+// 64-bit IDE wrote was out of step from its first entry on, and since both
+// IDEs share the cache folder, they also read each other's files. The
+// result was not a rejected cache but four bytes of a unit name taken as an
+// identifier count and a 12-16 GB SetLength that SUCCEEDS on Win64 - so the
+// "corrupt cache -> rebuild" handler never ran, and the IDE froze while the
+// allocation was zero-filled.
+// Hence: fixed-width counts (WInt / RInt), a sentinel in front of every
+// entry and after the last one (a desync is caught at the entry that
+// causes it), every length and count checked against the bytes that are
+// actually left BEFORE anything is allocated, and the file written under a
+// temporary name and renamed into place (a killed IDE leaves no half
+// cache). Changing this layout requires bumping CacheFormatVersion.
+const
+  CacheEntrySentinel: Integer = $494E4455;   // 'UDNI'
+  CacheEndSentinel: Integer   = $444E4549;   // 'IEND'
+
+class procedure TUnitIndex.SaveCache(const APath: string;
   ADict: TObjectDictionary<string, TIndexedUnit>);
 var
-  FS: TFileStream;
+  FS: TMemoryStream;   // built in memory, written in one piece
+  Tmp: string;
+
+  procedure WInt(const AValue: Integer);
+  begin
+    FS.WriteBuffer(AValue, SizeOf(Integer));   // never SizeOf(AValue)
+  end;
 
   procedure WStr(const S: string);
-  var B: TBytes; L: Integer;
+  var B: TBytes;
   begin
     B := TEncoding.UTF8.GetBytes(S);
-    L := Length(B);
-    FS.WriteBuffer(L, SizeOf(L));
-    if L > 0 then FS.WriteBuffer(B[0], L);
+    WInt(Length(B));
+    if Length(B) > 0 then FS.WriteBuffer(B[0], Length(B));
   end;
 
 begin
   if APath = '' then Exit;
+  Tmp := APath + '.tmp';
   try
     TDirectory.CreateDirectory(ExtractFilePath(APath));
-    FS := TFileStream.Create(APath, fmCreate);
+    FS := TMemoryStream.Create;
     try
       WStr(CacheMagic);
-      var Cnt := ADict.Count;
-      FS.WriteBuffer(Cnt, SizeOf(Cnt));
+      WInt(ADict.Count);
       for var U in ADict.Values do
       begin
+        WInt(CacheEntrySentinel);
         WStr(U.Path); WStr(U.UnitName);
-        FS.WriteBuffer(U.MTime, SizeOf(U.MTime));
-        FS.WriteBuffer(U.Size, SizeOf(U.Size));
-        FS.WriteBuffer(U.HasInit, SizeOf(U.HasInit));
-        FS.WriteBuffer(U.IncStamp, SizeOf(U.IncStamp));
-        var NC := Length(U.Includes);
-        FS.WriteBuffer(NC, SizeOf(NC));
+        FS.WriteBuffer(U.MTime, SizeOf(TDateTime));
+        FS.WriteBuffer(U.Size, SizeOf(Int64));
+        FS.WriteBuffer(U.HasInit, SizeOf(Boolean));
+        FS.WriteBuffer(U.IncStamp, SizeOf(TDateTime));
+        WInt(Length(U.Includes));
         for var IncF in U.Includes do WStr(IncF);
-        var IC := Length(U.Idents);
-        FS.WriteBuffer(IC, SizeOf(IC));
+        WInt(Length(U.Idents));
         for var Id in U.Idents do WStr(Id);
       end;
+      WInt(CacheEndSentinel);
+      FS.SaveToFile(Tmp);
     finally
       FS.Free;
     end;
+    // replace the old file in one step - a reader sees the old or the new
+    // cache, never a half-written one
+    if not MoveFileEx(PChar(Tmp), PChar(APath),
+      MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH) then
+      System.SysUtils.DeleteFile(Tmp);
   except
     // cache is an optimization - ignore failures
+    try System.SysUtils.DeleteFile(Tmp); except end;
   end;
 end;
 
-procedure TUnitIndex.LoadCache(const APath: string;
+type
+  ECacheCorrupt = class(Exception);
+
+class procedure TUnitIndex.LoadCache(const APath: string;
   ADict: TObjectDictionary<string, TIndexedUnit>);
 var
-  FS: TFileStream;
+  // The whole file is read into memory first: ~240k fields one ReadBuffer
+  // each on a file stream cost seconds, and every bounds check below needs
+  // the remaining size - cheap on a memory stream, three seeks on a file.
+  FS: TMemoryStream;
+
+  function Remaining: Int64;
+  begin
+    Result := FS.Size - FS.Position;
+  end;
+
+  procedure Corrupt(const AWhat: string; const AValue: Int64);
+  begin
+    raise ECacheCorrupt.CreateFmt('%s: %s = %d at offset %d',
+      [ExtractFileName(APath), AWhat, AValue, FS.Position]);
+  end;
+
+  function RInt: Integer;
+  begin
+    if Remaining < SizeOf(Integer) then Corrupt('truncated, bytes left', Remaining);
+    FS.ReadBuffer(Result, SizeOf(Integer));
+  end;
+
+  procedure RRaw(var ABuf; ASize: Integer);
+  begin
+    if Remaining < ASize then Corrupt('truncated, bytes left', Remaining);
+    FS.ReadBuffer(ABuf, ASize);
+  end;
 
   function RStr: string;
   var B: TBytes; L: Integer;
   begin
-    FS.ReadBuffer(L, SizeOf(L));
-    if L <= 0 then Exit('');
+    L := RInt;
+    if L = 0 then Exit('');
+    // checked BEFORE the allocation: a length the file cannot hold is a
+    // desync, not a string
+    if (L < 0) or (L > Remaining) then Corrupt('string length', L);
     SetLength(B, L);
     FS.ReadBuffer(B[0], L);
     Result := TEncoding.UTF8.GetString(B);
   end;
 
+  // A count of items that each take at least AMinBytes in the file can
+  // never exceed what is left divided by that.
+  function RCount(const AWhat: string; AMinBytes: Integer): Integer;
+  begin
+    Result := RInt;
+    if (Result < 0) or (Result > Remaining div AMinBytes) then
+      Corrupt(AWhat, Result);
+  end;
+
+const
+  // sentinel + two string lengths + MTime + Size + HasInit + IncStamp +
+  // two counts: the smallest entry the writer can produce
+  MinEntryBytes = 4 + 4 + 4 + 8 + 8 + 1 + 8 + 4 + 4;
+var
+  Loaded: TDictionary<string, TIndexedUnit>;   // does NOT own its values
 begin
   if (APath = '') or not TFile.Exists(APath) then Exit;
+  // read into a private dictionary and publish only a COMPLETE file -
+  // a rejected cache must leave nothing half-loaded behind
+  Loaded := TDictionary<string, TIndexedUnit>.Create;
   try
-    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
     try
-      if RStr <> CacheMagic then Exit;
-      var Cnt: Integer;
-      FS.ReadBuffer(Cnt, SizeOf(Cnt));
-      for var I := 0 to Cnt - 1 do
-      begin
-        var U := TIndexedUnit.Create;
-        U.Path := RStr; U.UnitName := RStr;
-        FS.ReadBuffer(U.MTime, SizeOf(U.MTime));
-        FS.ReadBuffer(U.Size, SizeOf(U.Size));
-        FS.ReadBuffer(U.HasInit, SizeOf(U.HasInit));
-        FS.ReadBuffer(U.IncStamp, SizeOf(U.IncStamp));
-        var NC: Integer;
-        FS.ReadBuffer(NC, SizeOf(NC));
-        SetLength(U.Includes, NC);
-        for var J := 0 to NC - 1 do U.Includes[J] := RStr;
-        var IC: Integer;
-        FS.ReadBuffer(IC, SizeOf(IC));
-        SetLength(U.Idents, IC);
-        for var J := 0 to IC - 1 do U.Idents[J] := RStr;
-        ADict.AddOrSetValue(UpperCase(U.Path), U);
+      FS := TMemoryStream.Create;
+      try
+        var FileStream := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+        try
+          FS.CopyFrom(FileStream, 0);
+        finally
+          FileStream.Free;
+        end;
+        FS.Position := 0;
+        if FS.Size < SizeOf(Integer) then Exit;
+        // the magic is read with its own bound: an old or foreign file is
+        // simply not ours, which is no error
+        var ML: Integer := RInt;
+        if ML <> Length(TEncoding.UTF8.GetBytes(CacheMagic)) then Exit;
+        FS.Position := 0;
+        if RStr <> CacheMagic then Exit;
+        var Cnt := RCount('unit count', MinEntryBytes);
+        for var I := 0 to Cnt - 1 do
+        begin
+          var S := RInt;
+          if S <> CacheEntrySentinel then Corrupt('entry sentinel', S);
+          var Path := RStr;
+          var UName := RStr;
+          var MTime: TDateTime; RRaw(MTime, SizeOf(TDateTime));
+          var Size: Int64;      RRaw(Size, SizeOf(Int64));
+          var HasInit: Boolean; RRaw(HasInit, SizeOf(Boolean));
+          var IncStamp: TDateTime; RRaw(IncStamp, SizeOf(TDateTime));
+          var Incs: TArray<string>;
+          SetLength(Incs, RCount('include count', SizeOf(Integer)));
+          for var J := 0 to High(Incs) do Incs[J] := RStr;
+          var Ids: TArray<string>;
+          // every identifier costs at least its own 4-byte length prefix
+          SetLength(Ids, RCount('identifier count', SizeOf(Integer)));
+          for var J := 0 to High(Ids) do Ids[J] := RStr;
+          // the object is created LAST: nothing leaks when a read fails
+          var U := TIndexedUnit.Create;
+          U.Path := Path; U.UnitName := UName;
+          U.MTime := MTime; U.Size := Size; U.HasInit := HasInit;
+          U.IncStamp := IncStamp; U.Includes := Incs; U.Idents := Ids;
+          var Old: TIndexedUnit;
+          if Loaded.TryGetValue(UpperCase(U.Path), Old) then Old.Free;
+          Loaded.AddOrSetValue(UpperCase(U.Path), U);
+        end;
+        var E := RInt;
+        if E <> CacheEndSentinel then Corrupt('end sentinel', E);
+        if Remaining <> 0 then Corrupt('trailing bytes', Remaining);
+      finally
+        FS.Free;
       end;
-    finally
-      FS.Free;
+    except
+      // corrupt cache -> rebuild from scratch; free what was read so far
+      for var V in Loaded.Values do V.Free;
+      Loaded.Clear;
+      Exit;
     end;
-  except
-    ADict.Clear;   // corrupt cache -> rebuild from scratch
+    // hand the units over (ADict owns them from here)
+    for var Pair in Loaded do
+      ADict.AddOrSetValue(Pair.Key, Pair.Value);
+  finally
+    Loaded.Free;
+  end;
+end;
+
+/// <summary>Test seam for the cache format: writes AUnits as a unit index
+///  cache file and reads a file back, reporting what it found. The
+///  production paths are exactly TUnitIndex.SaveCache / LoadCache.</summary>
+procedure WriteUnitIndexCacheFile(const APath: string; const AUnits: TArray<TUnitSource>);
+var
+  D: TObjectDictionary<string, TUnitIndex.TIndexedUnit>;
+begin
+  D := TObjectDictionary<string, TUnitIndex.TIndexedUnit>.Create([doOwnsValues]);
+  try
+    for var S in AUnits do
+    begin
+      var U := TUnitIndex.TIndexedUnit.Create;
+      U.Path := S.Path; U.UnitName := S.UnitName; U.Idents := S.Idents;
+      U.HasInit := S.HasInit;
+      D.AddOrSetValue(UpperCase(S.Path), U);
+    end;
+    TUnitIndex.SaveCache(APath, D);
+  finally
+    D.Free;
+  end;
+end;
+
+function ReadUnitIndexCacheFile(const APath: string): TArray<TUnitSource>;
+var
+  D: TObjectDictionary<string, TUnitIndex.TIndexedUnit>;
+begin
+  Result := nil;
+  D := TObjectDictionary<string, TUnitIndex.TIndexedUnit>.Create([doOwnsValues]);
+  try
+    TUnitIndex.LoadCache(APath, D);
+    for var U in D.Values do
+    begin
+      var S: TUnitSource;
+      S.UnitName := U.UnitName; S.Path := U.Path; S.Idents := U.Idents;
+      S.HasInit := U.HasInit;
+      Result := Result + [S];
+    end;
+  finally
+    D.Free;
   end;
 end;
 

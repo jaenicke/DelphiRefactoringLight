@@ -618,6 +618,13 @@ begin
     try
     IncCtx.RegisterFiles(Ctx.ScopeFiles);
     var Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
+    if Length(Decl) > 0 then
+    begin
+      var CL0 := Ctx.Content.Replace(#13#10, #10).Split([#10]);
+      if (L1 - 1 <= High(CL0)) and DeclarationAnswerIsForeign(CL0[L1 - 1], Ctx.Identifier, F,
+        TLspUri.FileUriToPath(Decl[0].Uri)) then
+        Decl := nil;   // another symbol of that name - the caret is the declaration
+    end;
     var DeclFile := '';
     var DeclLine: Integer;
     var DeclCol := 0;

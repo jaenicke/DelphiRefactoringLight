@@ -55,6 +55,8 @@ type
     FListView: TListView;
     FBtnGoto: TButton;
     FBtnClose: TButton;
+    FBtnCopy: TButton;
+    FReport: string;
     FItems: TFindReferenceItems;
     FOnGotoLocation: TProc<TFindReferenceItem>;
     FOnDialogClose: TNotifyEvent;
@@ -65,6 +67,7 @@ type
     procedure DoListDblClick(Sender: TObject);
     procedure DoBtnGotoClick(Sender: TObject);
     procedure DoBtnCloseClick(Sender: TObject);
+    procedure DoBtnCopyClick(Sender: TObject);
     procedure DoFormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure DoListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -79,6 +82,12 @@ type
 
     procedure SetStatus(const AText: string);
     procedure SetProgress(ACurrent, ATotal: Integer);
+
+    /// <summary>How the result came about (session state, target positions,
+    ///  one line per candidate). "Copy report" puts it on the clipboard
+    ///  together with the result rows - the way to compare a first run
+    ///  with a second one (forum 2026-09-22).</summary>
+    procedure SetReport(const AText: string);
 
     /// <summary>Switches the dialog into "review mode": from now on,
     ///  closing the dialog actually frees it.</summary>
@@ -98,8 +107,8 @@ type
 implementation
 
 uses
-  System.IOUtils, System.Types, Expert.IdeThemes, Expert.DialogHelper, Expert.ListViewSort,
-  Expert.ReferenceKind;
+  System.IOUtils, System.Types, Vcl.Clipbrd, Expert.IdeThemes, Expert.DialogHelper,
+  Expert.ListViewSort, Expert.ReferenceKind;
 
 procedure AssignReferenceKinds(var AItems: TFindReferenceItems; const AName,
   ADeclFile: string; ADeclLine: Integer; const AReadContent: TFunc<string, string>);
@@ -241,6 +250,19 @@ begin
   FBtnGoto.Default := True;
   FBtnGoto.Enabled := False;
 
+  FBtnCopy := TButton.Create(Self);
+  FBtnCopy.Parent := BtnPanel;
+  FBtnCopy.Caption := 'Copy report';
+  FBtnCopy.Width := 100;
+  FBtnCopy.Height := 28;
+  FBtnCopy.Top := 6;
+  FBtnCopy.Left := 8;
+  FBtnCopy.Hint := 'Copies how this result came about (session state, one line ' +
+    'per candidate) and the rows to the clipboard - for a bug report.';
+  FBtnCopy.ShowHint := True;
+  FBtnCopy.OnClick := DoBtnCopyClick;
+  FBtnCopy.Visible := False;   // only for searches that record a report
+
   // ListView in the middle
   FListView := TListView.Create(Self);
   FListView.Parent := Self;
@@ -348,6 +370,31 @@ end;
 procedure TFindReferencesDialog.SetStatus(const AText: string);
 begin
   FStatusLabel.Caption := AText;
+end;
+
+procedure TFindReferencesDialog.SetReport(const AText: string);
+begin
+  FReport := AText;
+  FBtnCopy.Visible := AText <> '';
+end;
+
+procedure TFindReferencesDialog.DoBtnCopyClick(Sender: TObject);
+var
+  SB: TStringBuilder;
+begin
+  SB := TStringBuilder.Create;
+  try
+    SB.AppendLine(FReport);
+    SB.AppendLine('Status: ' + FStatusLabel.Caption);
+    SB.AppendLine(Format('Result rows (%d):', [Length(FItems)]));
+    for var It in FItems do
+      SB.AppendLine(Format('  %s:%d:%d | %s | %s | %s', [It.FilePath, It.Line + 1,
+        It.Col + 1, It.Kind, Trim(It.Relation + ' ' + It.Note), Trim(It.Preview)]));
+    Clipboard.AsText := SB.ToString;
+  finally
+    SB.Free;
+  end;
+  FBtnCopy.Caption := 'Copied';
 end;
 
 procedure TFindReferencesDialog.SetProgress(ACurrent, ATotal: Integer);

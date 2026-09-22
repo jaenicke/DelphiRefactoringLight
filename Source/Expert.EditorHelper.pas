@@ -137,6 +137,9 @@ type
 
 implementation
 
+uses
+  Expert.PascalScanner;
+
 function TIDEEditorHelper.GetActiveFileName: string;
 var
   EditorServices: IOTAEditorServices;
@@ -609,28 +612,18 @@ begin
   // event-handler rename (it renames the declaration itself), and a blind
   // delete would then cut into the NEW name and the text after it.
   // Already the new text -> done; not the old text -> refuse.
+  // The OLD text is checked FIRST, and both as a WHOLE word: "TestX" back
+  // to "Test" did nothing, because "Test" - the first four characters of
+  // "TestX" - counted as "already the new text" (forum 2026-09-22). The
+  // other way round, a designer-renamed "TestX" would have passed as the
+  // old "Test" and been renamed a second time ("TestXX").
   if (LinearPos >= 0) and (AOldText <> '') then
-  begin
-    var NewLen := Length(UTF8Encode(ANewText));
-    var Raw: RawByteString;
-    if (ANewText <> '') and not SameText(ANewText, AOldText)
-      and (LinearPos + NewLen <= BytesRead) then
+    if not Utf8BufferHoldsAt(Buf, BytesRead, LinearPos, AOldText, True) then
     begin
-      SetLength(Raw, NewLen);
-      Move(Buf[LinearPos], Raw[1], NewLen);
-      SetCodePage(Raw, CP_UTF8, False);
-      if string(Raw) = ANewText then
-        Exit(True);
+      if (ANewText <> '') and Utf8BufferHoldsAt(Buf, BytesRead, LinearPos, ANewText, True) then
+        Exit(True);   // the designer renamed it already
+      Exit(False);
     end;
-    if LinearPos + OldTextLen > BytesRead then
-      Exit(False);
-    SetLength(Raw, OldTextLen);
-    Move(Buf[LinearPos], Raw[1], OldTextLen);
-    SetCodePage(Raw, CP_UTF8, False);
-    if not SameText(StringReplace(string(Raw), #13, '', [rfReplaceAll]),
-      StringReplace(AOldText, #13, '', [rfReplaceAll])) then
-      Exit(False);
-  end;
 
   // UndoableWriter: CopyTo(Start), DeleteTo(Ende), Insert(NeuText)
   Writer := SourceEditor.CreateUndoableWriter;

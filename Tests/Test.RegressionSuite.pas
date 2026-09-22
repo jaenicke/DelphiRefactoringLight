@@ -195,6 +195,27 @@ type
     [Test] procedure TruncatedAndTrailing_AreRejected;
   end;
 
+  /// <summary>Forum: "Move to unit" moved only the FIRST line of a
+  ///  routine declaration whose parameter list wraps - the declaration was
+  ///  cut at the first ';', which sits inside the parameter list.</summary>
+  [TestFixture]
+  TMoveDeclarationRangeTests = class
+  public
+    [Test] procedure WrappedParameterList_IsMovedWhole;
+    [Test] procedure ConstantsAndTypesWithInnerSemicolons;
+  end;
+
+  /// <summary>Two rename reports (forum 2026-09-22): "TestX" renamed back
+  ///  to "Test" showed the right preview but changed nothing, and a field
+  ///  named "ABC" could not be renamed at all once the unit used
+  ///  Winapi.Windows ("declared in the RAD Studio installation").</summary>
+  [TestFixture]
+  TRenameGuardTests = class
+  public
+    [Test] procedure EditGuard_MatchesWholeWordsOnly;
+    [Test] procedure ForeignAnswerAtADeclaration_IsRecognised;
+  end;
+
 implementation
 
 uses
@@ -204,7 +225,7 @@ uses
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
-  Expert.UsesCleanup;
+  Expert.UsesCleanup, Expert.MoveToUnit, Expert.SafeDeletePlan;
 
 const
   NL = sLineBreak;
@@ -1071,6 +1092,143 @@ begin
   end;
 end;
 
+{ TMoveDeclarationRangeTests }
+
+procedure TMoveDeclarationRangeTests.WrappedParameterList_IsMovedWhole;
+const
+  // the forum example verbatim
+  Src =
+    'unit UnitA;'#13#10 +                        // 1
+    ''#13#10 +                                   // 2
+    'interface'#13#10 +                          // 3
+    ''#13#10 +                                   // 4
+    ' procedure Test( AParam1: Integer;'#13#10 + // 5
+    '                 AParam2: Integer);'#13#10 +// 6
+    ''#13#10 +                                   // 7
+    'implementation'#13#10 +                     // 8
+    ''#13#10 +
+    'procedure Test( AParam1,'#13#10 +
+    '                AParam2: Integer);'#13#10 +
+    'begin'#13#10 +
+    ''#13#10 +
+    'end;'#13#10 +
+    'end.';
+var
+  S, E: Integer;
+begin
+  Assert.IsTrue(LocateMoveDeclaration('Test', Src, S, E), 'found: Test');
+  Assert.AreEqual(5, S);
+  Assert.AreEqual(6, E, 'the second parameter line belongs to the declaration');
+  // a directive on its own line after a wrapped header still goes along
+  Assert.IsTrue(LocateMoveDeclaration('Run',
+    'unit U;'#13#10'interface'#13#10 +
+    'procedure Run(A: Integer;'#13#10 +          // 3
+    '  B: string);'#13#10 +                      // 4
+    '  overload;'#13#10 +                        // 5
+    'procedure Other;'#13#10 +
+    'implementation'#13#10'end.', S, E));
+  Assert.AreEqual(3, S);
+  Assert.AreEqual(5, E);
+end;
+
+procedure TMoveDeclarationRangeTests.ConstantsAndTypesWithInnerSemicolons;
+const
+  Src =
+    'unit U;'#13#10 +                                        // 1
+    'interface'#13#10 +                                      // 2
+    'type'#13#10 +                                           // 3
+    '  TProc2 = procedure(A: Integer;'#13#10 +               // 4
+    '    B: Integer);'#13#10 +                               // 5
+    '  TFoo ='#13#10 +                                       // 6
+    '    class(TObject)'#13#10 +                             // 7
+    '    procedure X;'#13#10 +                               // 8
+    '  end;'#13#10 +                                         // 9
+    '  TRec = packed record'#13#10 +                         // 10
+    '    A: Integer;'#13#10 +                                // 11
+    '    B: string;'#13#10 +                                 // 12
+    '  end;'#13#10 +                                         // 13
+    '  TRef = class of TFoo;'#13#10 +                        // 14
+    '  TFwd = class;'#13#10 +                                // 15
+    '  TOuter = class(TObject)'#13#10 +                      // 16
+    '  public type'#13#10 +                                  // 17
+    '    TInner = class'#13#10 +                             // 18
+    '      procedure Y;'#13#10 +                             // 19
+    '    end;'#13#10 +                                       // 20
+    '    TLater = class;'#13#10 +                            // 21
+    '  public'#13#10 +                                       // 22
+    '    procedure Z;'#13#10 +                               // 23
+    '  end;'#13#10 +                                         // 24
+    '  TFwd = class(TFoo)'#13#10 +                           // 25
+    '  end;'#13#10 +                                         // 26
+    '  TOnlyFwd = class;'#13#10 +                            // 27
+    'const'#13#10 +                                          // 28
+    '  R: TPoint = (X: 1;'#13#10 +                           // 29
+    '    Y: 2);'#13#10 +                                     // 30
+    '  S = ''a;b'';'#13#10 +                                 // 31
+    'implementation'#13#10 +
+    'end.';
+var
+  S, E: Integer;
+begin
+  Assert.IsTrue(LocateMoveDeclaration('TProc2', Src, S, E), 'found: TProc2');
+  Assert.AreEqual(4, S); Assert.AreEqual(5, E, 'procedural type with a wrapped list');
+  Assert.IsTrue(LocateMoveDeclaration('TFoo', Src, S, E), 'found: TFoo');
+  Assert.AreEqual(6, S); Assert.AreEqual(9, E, '"TFoo =" with the class on the next line');
+  Assert.IsTrue(LocateMoveDeclaration('TRec', Src, S, E), 'found: TRec');
+  Assert.AreEqual(10, S); Assert.AreEqual(13, E, 'a record runs to its end, not to its first field');
+  Assert.IsTrue(LocateMoveDeclaration('TRef', Src, S, E), 'found: TRef');
+  Assert.AreEqual(14, S); Assert.AreEqual(14, E, '"class of" has no body');
+  Assert.IsTrue(LocateMoveDeclaration('TFwd', Src, S, E), 'found: TFwd');
+  Assert.AreEqual(25, S); Assert.AreEqual(26, E, 'the real declaration wins over the forward one');
+  Assert.IsTrue(LocateMoveDeclaration('TOnlyFwd', Src, S, E), 'found: TOnlyFwd');
+  Assert.AreEqual(27, S); Assert.AreEqual(27, E, 'a forward declaration has no body');
+  Assert.IsTrue(LocateMoveDeclaration('TOuter', Src, S, E), 'found: TOuter');
+  Assert.AreEqual(16, S); Assert.AreEqual(24, E, 'nested class opens a level, nested forward does not');
+  Assert.IsTrue(LocateMoveDeclaration('R', Src, S, E), 'found: R');
+  Assert.AreEqual(29, S); Assert.AreEqual(30, E, 'record constant');
+  Assert.IsTrue(LocateMoveDeclaration('S', Src, S, E), 'found: S');
+  Assert.AreEqual(31, S); Assert.AreEqual(31, E, 'a ";" inside a string does not count');
+end;
+
+{ TRenameGuardTests }
+
+procedure TRenameGuardTests.EditGuard_MatchesWholeWordsOnly;
+var
+  B: TBytes;
+begin
+  B := TEncoding.UTF8.GetBytes('    TestX: Integer;'#13#10'  Größe: Test;');
+  // the report: the position holds "TestX" - "Test" is NOT there
+  Assert.IsFalse(Utf8BufferHoldsAt(B, Length(B), 4, 'Test', True),
+    '"Test" is only the start of "TestX"');
+  Assert.IsTrue(Utf8BufferHoldsAt(B, Length(B), 4, 'TestX', True));
+  Assert.IsTrue(Utf8BufferHoldsAt(B, Length(B), 4, 'testx', True), 'case-insensitive');
+  // behind a non-ASCII identifier the byte offsets still fit ("Größe" is 7 bytes)
+  var P := Length(TEncoding.UTF8.GetBytes('    TestX: Integer;'#13#10'  Größe: '));
+  Assert.IsTrue(Utf8BufferHoldsAt(B, Length(B), P, 'Test', True), 'followed by ";"');
+  Assert.IsFalse(Utf8BufferHoldsAt(B, Length(B), P, 'Tes', True), 'a prefix is no match');
+  // a multi-line old text (with rewriter) - line breaks compared without #13
+  Assert.IsTrue(Utf8BufferHoldsAt(B, Length(B), 4, 'TestX: Integer;'#13#10, True));
+  Assert.IsFalse(Utf8BufferHoldsAt(B, Length(B), Length(B) - 2, 'Test;', True), 'beyond the end');
+end;
+
+procedure TRenameGuardTests.ForeignAnswerAtADeclaration_IsRecognised;
+const
+  Unit1 = 'C:\x\Unit1.pas';
+  Win = 'C:\RAD\source\rtl\win\Winapi.Windows.pas';
+begin
+  // measured: DelphiLSP answers the FIELD declaration with Windows' type ABC
+  Assert.IsTrue(DeclarationAnswerIsForeign('    ABC: Integer;', 'ABC', Unit1, Win));
+  Assert.IsTrue(DeclarationAnswerIsForeign('    property ABC: Integer read FABC;', 'ABC', Unit1, Win));
+  Assert.IsTrue(DeclarationAnswerIsForeign('    procedure ABC;', 'ABC', Unit1, Win));
+  // the same file is the partner (declaration <-> implementation)
+  Assert.IsFalse(DeclarationAnswerIsForeign('    procedure ABC;', 'ABC', Unit1, Unit1));
+  // a use is no declaration - its answer stands
+  Assert.IsFalse(DeclarationAnswerIsForeign('  C.ABC := 1;', 'ABC', Unit1, Win));
+  // these really belong to the ancestor
+  Assert.IsFalse(DeclarationAnswerIsForeign('    procedure Paint; override;', 'Paint', Unit1, Win));
+  Assert.IsFalse(DeclarationAnswerIsForeign('    property Caption;', 'Caption', Unit1, Win));
+end;
+
 { TPartnerQueryTests }
 
 procedure TPartnerQueryTests.NameColumn_ImplementationHeaderPrefersTheMember;
@@ -1357,5 +1515,7 @@ initialization
   TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
   TDUnitX.RegisterTestFixture(THelperUsageTests);
   TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
+  TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
+  TDUnitX.RegisterTestFixture(TRenameGuardTests);
 
 end.

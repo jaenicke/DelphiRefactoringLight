@@ -63,6 +63,19 @@ function PlanSafeDeleteSymbol(const ALines: TArray<string>; ADeclLine0: Integer;
 ///  "X = ..."). Used when DelphiLSP gives no definition at the caret.</summary>
 function LineDeclaresName(const ALine, AName: string): Boolean;
 
+/// <summary>DelphiLSP's definition for a caret that sits ON a declaration
+///  names ANOTHER symbol: the caret line declares AName itself, and the
+///  answer lies in another file. Measured (forum 2026-09-22): for the field
+///  "ABC: Integer;" of a class in a unit that uses Winapi.Windows, DelphiLSP
+///  answers Winapi.Windows.pas:20496 - the global type ABC - and rename
+///  refused "declared in the RAD Studio installation". A declaration and
+///  its implementation live in ONE unit, so a cross-file answer cannot be
+///  its partner. Not foreign: an override and a typeless property
+///  redeclaration ("property Caption;") - those really belong to the
+///  ancestor.</summary>
+function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,
+  AAnswerFile: string): Boolean;
+
 /// <summary>ALines after AEdits (applied bottom-up; overlapping edits are
 ///  not expected - the planner never produces them).</summary>
 function ApplySafeDeleteEdits(const ALines: TArray<string>;
@@ -353,6 +366,19 @@ begin
     if (N = '') or not IsValidIdent(N) then Exit(nil);
     Result := Result + [N];
   end;
+end;
+
+function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,
+  AAnswerFile: string): Boolean;
+begin
+  Result := False;
+  if (AAnswerFile = '') or (ACaretFile = '') then Exit;
+  if SameText(ExpandFileName(AAnswerFile), ExpandFileName(ACaretFile)) then Exit;
+  if not LineDeclaresName(ACaretLine, AName) then Exit;
+  var Code := LowerCase(Trim(StripLineComment(ACaretLine)));
+  if HasWholeWordCI(Code, 'override') then Exit;
+  if StartsText('property', Code) and (Pos(':', Code) = 0) then Exit;
+  Result := True;
 end;
 
 function LineDeclaresName(const ALine, AName: string): Boolean;

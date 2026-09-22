@@ -1160,6 +1160,29 @@ begin
     var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
     var DefLine := 0;
     var DefCol := 0;
+    // An answer in ANOTHER file for a caret that declares the name is a
+    // same-named symbol elsewhere (forum: field "ABC" -> Winapi.Windows'
+    // type ABC, "cannot be renamed") - the caret is the declaration then.
+    var CaretDeclares := False;
+    begin
+      var CaretText: string;
+      if EditorOrDiskReader()(FContext.FileName, CaretText) then
+      begin
+        var CL := CaretText.Replace(#13#10, #10).Split([#10]);
+        if LspLine <= High(CL) then
+        begin
+          CaretDeclares := LineDeclaresName(CL[LspLine], FContext.WordAtCursor);
+          if (Length(DefLocs) > 0) and DeclarationAnswerIsForeign(CL[LspLine],
+            FContext.WordAtCursor, FContext.FileName, TLspUri.FileUriToPath(DefLocs[0].Uri)) then
+          begin
+            FDiagLog := FDiagLog + 'LSP answered ' + TLspUri.FileUriToPath(DefLocs[0].Uri) +
+              ' although the caret line declares the name - another symbol of that ' +
+              'name, the caret is the declaration.' + sLineBreak;
+            DefLocs := nil;
+          end;
+        end;
+      end;
+    end;
 
     if Length(DefLocs) > 0 then
     begin
@@ -1176,7 +1199,7 @@ begin
       // "<file>:1:1", found no owner type and skipped the implementing
       // classes in other units (renaming IRenameHost.SetStatus left
       // THeadlessRenameHost.SetStatus behind - did not compile).
-      if CaretOnDeclaration(FContext.FileName, LspLine, LspCol) then
+      if CaretDeclares or CaretOnDeclaration(FContext.FileName, LspLine, LspCol) then
       begin
         DefLine := LspLine;
         DefCol := LspCol;

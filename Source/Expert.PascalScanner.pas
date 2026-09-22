@@ -119,6 +119,16 @@ function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 ///  end), else 0.</summary>
 function MultiLineStringOpener(const AText: string; AIndex: Integer): Integer;
 
+/// <summary>Does the UTF-8 buffer hold ATEXT at byte offset APos - as a
+///  WHOLE word when AText ends in an identifier character? Case-insensitive
+///  (Pascal identifiers); line breaks compared without #13 when
+///  AIgnoreCR. The edit guard of the editor helper: "TestX" renamed back to
+///  "Test" did nothing, because the guard found "Test" at the position -
+///  the first four characters of "TestX" - and reported the rename as
+///  already done (forum 2026-09-22).</summary>
+function Utf8BufferHoldsAt(const ABuf: TBytes; ABufLen, APos: Integer;
+  const AText: string; AIgnoreCR: Boolean): Boolean;
+
 implementation
 
 uses
@@ -547,6 +557,38 @@ begin
   for var L := 0 to High(ALines) do
     if Copy(Buf, Starts[L], Length(ALines[L])) <> ALines[L] then
       Result[L] := Copy(Buf, Starts[L], Length(ALines[L]));
+end;
+
+
+function Utf8BufferHoldsAt(const ABuf: TBytes; ABufLen, APos: Integer;
+  const AText: string; AIgnoreCR: Boolean): Boolean;
+var
+  Bytes: TBytes;
+  Raw: RawByteString;
+begin
+  Result := False;
+  if (AText = '') or (APos < 0) then Exit;
+  Bytes := TEncoding.UTF8.GetBytes(AText);
+  if APos + Length(Bytes) > ABufLen then Exit;
+  SetLength(Raw, Length(Bytes));
+  Move(ABuf[APos], Raw[1], Length(Bytes));
+  SetCodePage(Raw, CP_UTF8, False);
+  var Here := string(Raw);
+  var Want := AText;
+  if AIgnoreCR then
+  begin
+    Here := StringReplace(Here, #13, '', [rfReplaceAll]);
+    Want := StringReplace(Want, #13, '', [rfReplaceAll]);
+  end;
+  if not SameText(Here, Want) then Exit;
+  // a whole word: an identifier must not continue behind it
+  if IsIdentChar(AText[Length(AText)]) and (APos + Length(Bytes) < ABufLen) then
+  begin
+    var B := ABuf[APos + Length(Bytes)];
+    if (B >= $80) or CharInSet(Char(B), ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+      Exit;
+  end;
+  Result := True;
 end;
 
 end.

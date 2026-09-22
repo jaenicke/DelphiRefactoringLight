@@ -168,6 +168,8 @@ type
     ///  IFoo" / "call via class TFoo"; '' when not linked.</summary>
     function CallLabel(const AFile: string; ALine: Integer): string;
     function Count: Integer;
+    /// <summary>Every linked position with its type, for diagnostics.</summary>
+    function Text: string;
   end;
 
 /// <summary>Fills ATargets for the symbol AMember of AOwnerType: when
@@ -1191,6 +1193,16 @@ end;
 function TLinkedTargets.Count: Integer;
 begin
   Result := FTypes.Count;
+end;
+
+function TLinkedTargets.Text: string;
+begin
+  Result := '';
+  for var P in FTypes do
+  begin
+    if Result <> '' then Result := Result + '; ';
+    Result := Result + P.Key + ' (' + P.Value + ')';
+  end;
 end;
 
 function CollectLinkedTargets(AGraph: TTypeGraph; const AOwnerType, AMember: string;

@@ -97,6 +97,13 @@ type
     ProblemDetail: string;
   end;
 
+/// <summary>The declaration range "Move to unit" takes for ASymbol from
+///  the interface section of ASource (1-based lines, inclusive). Pure -
+///  exposed for the tests.</summary>
+function LocateMoveDeclaration(const ASymbol, ASource: string;
+  out AStartLine, AEndLine: Integer): Boolean;
+
+type
   TLspMoveToUnit = class
   private
     class function ReadFile(const APath: string): string;
@@ -485,6 +492,35 @@ begin
   Result := ChangeFileExt(ExtractFileName(AFile), '');
 end;
 
+// Does ALine contain the ';' that ENDS a declaration - the first one
+// outside ( ) and [ ]? ADepth carries the bracket depth from line to line.
+// The plain "first ';'" cut a wrapped parameter list after its first
+// parameter (forum: "procedure Test( AParam1: Integer;" / "AParam2:
+// Integer);" was moved as its first line only), and the same held for a
+// record constant "R: TRec = (A: 1; B: 2);" and a procedural type
+// "TProc = procedure(A: Integer; B: Integer);". ALine has comments and
+// strings removed already.
+function LineEndsDeclaration(const ALine: string; var ADepth: Integer): Boolean;
+begin
+  for var C in ALine do
+    case C of
+      '(', '[': Inc(ADepth);
+      ')', ']': if ADepth > 0 then Dec(ADepth);
+      ';': if ADepth = 0 then Exit(True);
+    end;
+  Result := False;
+end;
+
+function LocateMoveDeclaration(const ASymbol, ASource: string;
+  out AStartLine, AEndLine: Integer): Boolean;
+var
+  Kind: TMoveSymbolKind;
+  ClassLine: Integer;
+begin
+  Result := TLspMoveToUnit.LocateDeclaration(ASymbol, ASource, Kind,
+    AStartLine, AEndLine, ClassLine);
+end;
+
 class function TLspMoveToUnit.LocateDeclaration(const ASymbol: string;
   const ASource: string; out AKind: TMoveSymbolKind;
   out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer): Boolean;
@@ -501,6 +537,108 @@ var
   Line: string;
   TrimmedLow: string;
   SymU: string;
+  FwdStart, FwdEnd: Integer;   // a forward declaration of the symbol, if seen
+
+  // Last line (0-based) of the TYPE declaration starting at AFrom. What
+  // follows the '=' decides the shape (forum round 2026-09-22, which
+  // exposed more than the reported case):
+  // * a BODY - class / object / interface / dispinterface / record, also
+  //   "packed record" and with the keyword on the line AFTER "TFoo =" -
+  //   runs to its matching 'end' (records used to count as simple types
+  //   and were cut after their first field);
+  // * "class of TFoo" and a forward "TFoo = class;" / "TFoo =
+  //   class(TBar);" have NO body (they used to swallow everything up to
+  //   the next class's 'end');
+  // * anything else (alias, procedural type, set, range, ...) ends at the
+  //   first ';' outside brackets.
+  function TypeDeclEnd(AFrom: Integer; out AIsBody, AIsForward: Boolean): Integer;
+  var
+    BodyDepth, ParenDepth, J: Integer;
+    RhsSeen: Boolean;
+  begin
+    AIsBody := False;
+    AIsForward := False;
+    BodyDepth := 0;
+    ParenDepth := 0;
+    RhsSeen := False;
+    Result := LastIntfLine;
+    J := AFrom;
+    while J <= LastIntfLine do
+    begin
+      var LJ := Stripped[J];
+      if not AIsBody then
+      begin
+        var Rhs := '';
+        if J = AFrom then
+        begin
+          var EqP := Pos('=', LJ);
+          if EqP > 0 then Rhs := Copy(LJ, EqP + 1, MaxInt);
+        end
+        else
+          Rhs := LJ;
+        var R := AnsiLowerCase(Trim(Rhs));
+        if (not RhsSeen) and (R <> '') then
+        begin
+          RhsSeen := True;
+          if StartsWithKeyword(R, 'packed') then R := Trim(Copy(R, 7, MaxInt));
+          var Opener := (StartsWithKeyword(R, 'class') and not StartsWithKeyword(Trim(Copy(R, 6, MaxInt)), 'of'))
+            or StartsWithKeyword(R, 'object') or StartsWithKeyword(R, 'interface')
+            or StartsWithKeyword(R, 'dispinterface') or StartsWithKeyword(R, 'record');
+          if Opener then
+          begin
+            // forward / short form: a ';' outside brackets and no 'end'
+            var PD := 0;
+            if (not HasWord(LJ, 'end')) and LineEndsDeclaration(Rhs, PD) then
+            begin
+              AIsForward := True;
+              Exit(J);
+            end;
+            AIsBody := True;
+            BodyDepth := 1;
+            if HasWord(LJ, 'end') then Exit(J);   // "TFoo = class end;"
+            Inc(J);
+            Continue;
+          end;
+        end;
+        if LineEndsDeclaration(LJ, ParenDepth) then Exit(J);
+      end
+      else
+      begin
+        // inside the body: nested records and nested type bodies open a
+        // level, 'end' closes one
+        if HasWord(LJ, 'record') then Inc(BodyDepth)
+        else if HasWord(LJ, '=') and not HasWord(LJ, 'end') and
+          (HasWord(LJ, 'class') or HasWord(LJ, 'interface') or HasWord(LJ, 'object')) then
+        begin
+          var NR := AnsiLowerCase(Trim(Copy(LJ, Pos('=', LJ) + 1, MaxInt)));
+          var NPD := 0;
+          if not (StartsWithKeyword(Trim(Copy(NR, 6, MaxInt)), 'of')
+                  or LineEndsDeclaration(NR, NPD)) then
+            Inc(BodyDepth);
+        end;
+        if HasWord(LJ, 'end') then
+        begin
+          Dec(BodyDepth);
+          if BodyDepth <= 0 then Exit(J);
+        end;
+      end;
+      Inc(J);
+    end;
+  end;
+
+  // Last line (0-based) of a const / var / resourcestring declaration:
+  // the first ';' outside brackets (a record or array constant has its
+  // own inside).
+  function SimpleDeclEnd(AFrom: Integer): Integer;
+  var
+    Depth: Integer;
+  begin
+    Depth := 0;
+    for var J := AFrom to LastIntfLine do
+      if LineEndsDeclaration(Stripped[J], Depth) then Exit(J);
+    Result := LastIntfLine;
+  end;
+
 begin
   Result := False;
   AKind := mskUnknown;
@@ -512,6 +650,8 @@ begin
   if Length(Stripped) = 0 then Exit;
 
   SymU := AnsiUpperCase(ASymbol);
+  FwdStart := -1;
+  FwdEnd := -1;
 
   // Bracket the interface section.
   InInterface := False;
@@ -544,93 +684,50 @@ begin
     else if StartsWithKeyword(Line, 'var') then Section := 'var'
     else if StartsWithKeyword(Line, 'resourcestring') then Section := 'resourcestring'
     else if StartsWithKeyword(Line, 'type') then Section := 'type'
-    else if (TrimmedLow <> '') and (Section <> '') then
+    else if (TrimmedLow <> '') and (Section <> '') and
+      not (StartsWithKeyword(Line, 'procedure') or StartsWithKeyword(Line, 'function')) then
     begin
-      // Inside a section; look for our symbol.
-      // For const/var: "Name = expr;" or "Name: Type = expr;" or "Name: Type;"
-      // For type: "TName = ..."
-      if HasWord(Line, ASymbol) then
+      // EVERY declaration of the section is measured, ours or not: its
+      // continuation lines are no declarations of their own. Before, a
+      // METHOD line inside a class body ended the type section (so every
+      // type after a class with methods could not be moved at all), and a
+      // continuation line of a wrapped constant looked like a declaration.
+      var FNS := FirstNonSpace(Line);
+      var IsBody := False;
+      var IsForward := False;
+      var DeclEnd: Integer;
+      if Section = 'type' then
+        DeclEnd := TypeDeclEnd(I, IsBody, IsForward)
+      else
+        DeclEnd := SimpleDeclEnd(I);
+      // the whole name, not a prefix of a longer one ("TFoo" vs "TFooBar")
+      var AfterName := FNS + Length(ASymbol);
+      if (FNS > 0) and SameText(Copy(Line, FNS, Length(ASymbol)), ASymbol) and
+        ((AfterName > Length(Line)) or not IsIdCh(Line[AfterName])) then
       begin
-        // Verify the line declares it (starts with the identifier).
-        var FNS := FirstNonSpace(Line);
-        if (FNS > 0) and SameText(Copy(Line, FNS, Length(ASymbol)), ASymbol) then
+        // A FORWARD declaration ("TStatusBar = class;") is not what is
+        // moved - the real one further down is. Remember it and keep
+        // looking; it is the answer only when no real one follows.
+        if IsForward then
         begin
-          AStartLine := I + 1; // 1-based
-
-          // Type/class detection: scan forward looking for "class" keyword
-          // on declaration line, and find matching `end;`.
-          if Section = 'type' then
-          begin
-            AClassDeclLine := AStartLine;
-            // Scan declaration text forward until we see ';' at top level
-            // or '= class' meaning it's a class definition with body.
-            var IsClass := False;
-            var DepthBegin := 0;
-            var EndLine: Integer := I;
-            var J: Integer := I;
-            while J <= LastIntfLine do
-            begin
-              var LJ := Stripped[J];
-              if (not IsClass) and HasWord(LJ, 'class') and HasWord(LJ, '=') then
-                IsClass := True;
-              if (not IsClass) and HasWord(LJ, 'interface') and (J > I) and HasWord(LJ, '=') then
-                IsClass := True; // treat interface decl same way
-              if IsClass then
-              begin
-                // class can have nested record types - track 'record'..'end' too
-                // simple approach: count 'record' and 'class ... =' (no 'class of')
-                // and balance 'end' tokens.
-                // Tokenize by spaces and common delimiters.
-                // For robustness we look for word 'end' on the line.
-                if HasWord(LJ, 'record') then Inc(DepthBegin);
-                // Class declaration body itself opens one level too.
-                if (J = I) then Inc(DepthBegin);
-                if HasWord(LJ, 'end') then
-                begin
-                  Dec(DepthBegin);
-                  if DepthBegin <= 0 then
-                  begin
-                    EndLine := J;
-                    Break;
-                  end;
-                end;
-              end
-              else
-              begin
-                // Simple type alias: ends at first ';'
-                if Pos(';', LJ) > 0 then
-                begin
-                  EndLine := J;
-                  Break;
-                end;
-              end;
-              Inc(J);
-            end;
-            AEndLine := EndLine + 1;
-            if IsClass then AKind := mskClass else AKind := mskType;
-            Exit(True);
-          end
-          else
-          begin
-            // const/var/resourcestring: declaration ends at the first ';'
-            var J := I;
-            while J <= LastIntfLine do
-            begin
-              if Pos(';', Stripped[J]) > 0 then
-              begin
-                AEndLine := J + 1;
-                Break;
-              end;
-              Inc(J);
-            end;
-            if AEndLine = 0 then AEndLine := AStartLine;
-            if Section = 'const' then AKind := mskConst
-            else if Section = 'var' then AKind := mskVar
-            else AKind := mskResourceString;
-            Exit(True);
-          end;
+          if FwdStart < 0 then begin FwdStart := I; FwdEnd := DeclEnd; end;
+          I := DeclEnd + 1;
+          Continue;
         end;
+        AStartLine := I + 1;         // 1-based
+        AEndLine := DeclEnd + 1;
+        if Section = 'type' then
+        begin
+          AClassDeclLine := AStartLine;
+          if IsBody then AKind := mskClass else AKind := mskType;
+        end
+        else if Section = 'const' then AKind := mskConst
+        else if Section = 'var' then AKind := mskVar
+        else AKind := mskResourceString;
+        Exit(True);
       end;
+      I := DeclEnd + 1;
+      Continue;
     end;
 
     // Procedure/function declaration at top level of interface.
@@ -655,10 +752,12 @@ begin
           if SameText(Name, ASymbol) then
           begin
             AStartLine := I + 1;
+            // the header ends at the first ';' OUTSIDE the parameter list
             var J := I;
+            var RDepth := 0;
             while J <= LastIntfLine do
             begin
-              if Pos(';', Stripped[J]) > 0 then
+              if LineEndsDeclaration(Stripped[J], RDepth) then
               begin
                 // skip ";" directives like "; overload;" - scan all directives
                 AEndLine := J + 1;
@@ -693,6 +792,15 @@ begin
     end;
 
     Inc(I);
+  end;
+  // only a forward declaration exists (the real one sits elsewhere)
+  if FwdStart >= 0 then
+  begin
+    AStartLine := FwdStart + 1;
+    AEndLine := FwdEnd + 1;
+    AClassDeclLine := AStartLine;
+    AKind := mskType;
+    Result := True;
   end;
 end;
 

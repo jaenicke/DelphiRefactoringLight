@@ -13,7 +13,8 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles, Expert.UnitIndex,
-  Expert.IncludeExpansion, Expert.InterfaceLinks, Expert.ImplementationFinder;
+  Expert.IncludeExpansion, Expert.InterfaceLinks, Expert.ImplementationFinder,
+  System.StrUtils, Expert.Version;
 
 type
   TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}
@@ -29,6 +30,12 @@ type
     FSecondPassNote: string;
     // requests DelphiLSP answered with an error (-32800 & co)
     FLspErrors: Integer;
+    // "Copy report" (forum 2026-09-22: "wrong entries on the first run,
+    // none on the second - what can I send you?"): how the result came
+    // about, one line per decision, with the time since the search began
+    FTrace: TStringList;
+    FTraceT0: UInt64;
+    procedure Trace(const AText: string);
     procedure DoGotoLocation(AItem: TFindReferenceItem);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
@@ -125,6 +132,10 @@ begin
   // what gives us multiple-dialogs-at-once support.
   PrevDialog := FDialog;
   PrevContext := FContext;
+  var PrevTrace := FTrace;
+  var PrevT0 := FTraceT0;
+  FTrace := TStringList.Create;
+  FTraceT0 := GetTickCount64;
   try
     FContext := Ctx;
     FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm, Ctx.WordAtCursor);
@@ -148,12 +159,23 @@ begin
     // Hand off ownership: from now on closing the dialog frees it. If
     // the user already clicked X / Close during the scan, this
     // releases it now.
+    if (FDialog <> nil) and not FDialog.CloseRequested then
+      FDialog.SetReport(FTrace.Text);
     if FDialog <> nil then
       FDialog.SetClosable;
   finally
+    FTrace.Free;
+    FTrace := PrevTrace;
+    FTraceT0 := PrevT0;
     FDialog := PrevDialog;
     FContext := PrevContext;
   end;
+end;
+
+procedure TLspFindReferencesWizard.Trace(const AText: string);
+begin
+  if FTrace <> nil then
+    FTrace.Add(Format('%7d ms  %s', [GetTickCount64 - FTraceT0, AText]));
 end;
 
 function TLspFindReferencesWizard.Aborted: Boolean;
@@ -182,6 +204,10 @@ begin
   FPreSkipped := 0;
   FSecondPassNote := '';
   FLspErrors := 0;
+  Trace(Format('Find references - %s %s, %s', [PluginName, PluginVersion,
+    FormatDateTime('yyyy-mm-dd hh:nn:ss', Now)]));
+  Trace(Format('symbol "%s" at %s:%d:%d', [FContext.WordAtCursor, FContext.FileName,
+    FContext.Line, FContext.Column]));
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
@@ -207,6 +233,10 @@ begin
 
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
+  Trace(Format('session: %s, project %s, diagnostics pushed so far: %d, ' +
+    'server busy: "%s", reports progress: %s', [IfThen(WasRunning, 'was running',
+    'STARTED NOW'), ExtractFileName(FContext.ProjectFile), Client.GetDiagnosticsCount,
+    Client.BusyWith, BoolToStr(Client.ReportsProgress, True)]));
 
 
   // The server may be BUSY (a big project takes 12-30 s to load). While it
@@ -216,6 +246,7 @@ begin
   if Client.BusyWith <> '' then
   begin
     FDialog.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+    Trace('waiting for the server to go idle (' + Client.BusyWith + ')');
     Client.WaitServerIdle(180000,
       function: Boolean
       begin
@@ -242,6 +273,8 @@ begin
     // session stays silent for it, the client remembers that and the next
     // run does not wait at all (forum 2026-09-20: 20-30 s before every
     // single run).
+    Trace(Format('start file: sent=%s, diagnostics version before=%d',
+      [BoolToStr(Sent, True), StartBefore]));
     if (Sent or (StartBefore = 0)) and WasRunning then
       Client.WaitFileAnalysed(FContext.FileName, StartBefore,
         IfThen(Sent, 30000, 8000),
@@ -255,6 +288,8 @@ begin
         end);
   end;
 
+  Trace(Format('start file: diagnostics version now=%d',
+    [Client.GetFileDiagnosticsVersion(FContext.FileName)]));
   if Aborted then Exit;
   LspLine := FContext.Line - 1;
   LspCol := FContext.Column - 1;
@@ -267,6 +302,7 @@ begin
       if Aborted then Exit;
       FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
+      Trace(Format('cold start: readiness probe %d', [Retry]));
       try
         var H := Client.GetHover(FContext.FileName, LspLine, LspCol);
         if H <> '' then Break;
@@ -317,6 +353,8 @@ begin
   ProjFiles := ProjectScopeFiles(FContext.FileName);
 
   var TextCandidates := FindCandidatesByText(FContext.WordAtCursor, ProjFiles);
+  Trace(Format('text search: %d file(s) in scope, %d candidate(s)',
+    [Length(ProjFiles), Length(TextCandidates)]));
   if Aborted then Exit;
 
   if Length(TextCandidates) = 0 then
@@ -343,6 +381,10 @@ begin
     if EditorOrDiskReader()(FContext.FileName, StartContent) then
       VClient.SyncDocumentWith(FContext.FileName, StartContent);
   end;
+  if VClient <> Client then
+    Trace('verification: separate session (' + VClient.ServerType + ')')
+  else
+    Trace('verification: main session');
   var IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
   try
     IncCtx.RegisterFiles(ProjFiles);
@@ -350,6 +392,28 @@ begin
     // Resolve the declaration (for verification comparison)
     FDialog.SetStatus('Finding declaration...');
     var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
+    // a caret ON a declaration: an answer in another file is a same-named
+    // symbol elsewhere (see DeclarationAnswerIsForeign)
+    if Length(DefLocs) > 0 then
+    begin
+      var CaretText: string;
+      if EditorOrDiskReader()(FContext.FileName, CaretText) then
+      begin
+        var CL := CaretText.Replace(#13#10, #10).Split([#10]);
+        if (LspLine <= High(CL)) and DeclarationAnswerIsForeign(CL[LspLine],
+          FContext.WordAtCursor, FContext.FileName, TLspUri.FileUriToPath(DefLocs[0].Uri)) then
+        begin
+          Trace('declaration: DelphiLSP -> ' + TLspUri.FileUriToPath(DefLocs[0].Uri) +
+            ' is another symbol of that name (the caret line declares it)');
+          DefLocs := nil;
+        end;
+      end;
+    end;
+    if Length(DefLocs) > 0 then
+      Trace(Format('declaration: DelphiLSP -> %s:%d:%d', [TLspUri.FileUriToPath(DefLocs[0].Uri),
+        DefLocs[0].Range.Start.Line + 1, DefLocs[0].Range.Start.Character + 1]))
+    else
+      Trace('declaration: no answer - the caret is taken as the declaration');
     // The symbol = its declaration + implementation (see TLspSymbolTargets).
     var Targets: TLspSymbolTargets;
     var DefLine := LspLine;
@@ -402,6 +466,9 @@ begin
         end;
         var Owner := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
         Links := CollectLinkedTargets(Graph, Owner, FContext.WordAtCursor, Linked);
+        Trace('owner type: ' + IfThen(Owner = '', '(none)', Owner));
+        Trace('symbol positions: ' + Targets.Text);
+        if Linked.Count > 0 then Trace('linked positions: ' + Linked.Text);
 
         // Verify each candidate via GotoDefinition
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
@@ -445,6 +512,9 @@ begin
   for var It in Items do
     if It.Note <> '' then Inc(Unverified);
   FDialog.SetItems(Items);
+  Trace(Format('done: %d row(s), %d unverified, %d decided from the sources, ' +
+    '%d aborted request(s), diagnostics pushed so far: %d', [Length(Items), Unverified,
+    FPreSkipped, FLspErrors, Client.GetDiagnosticsCount]));
   // how many candidates never needed a DelphiLSP request (their qualifier's
   // declared type already said they belong to another type)
   var NotAnalysed := '';
@@ -630,6 +700,8 @@ begin
     begin
       C := ACandidates[I];
       if Aborted then Break;
+      var Where := Format('%s:%d:%d', [ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
+      var How := '';
       FDialog.SetProgress(I + 1, System.Length(ACandidates));
       if (I mod 3 = 0) then
       begin
@@ -657,6 +729,8 @@ begin
           end, PreLink) = uuOtherSymbol then
         begin
           Inc(FPreSkipped);
+          Trace(Where + '  pre-check: member of ' + PreLink.TypeName +
+            ' -> skipped, no request');
           Continue;
         end;
       end;
@@ -672,15 +746,22 @@ begin
         if not AIncludes.OwnsDocument(C.FilePath) then
         begin
           if AClient.ServerType <> '' then
+          begin
             // AGENT session: it pushes no diagnostics, so there is nothing
             // to wait for - measured (21 candidates in 13 units): it answers
             // straight after the didOpen, with the same answers the main
             // session gives after its analysis wait.
-            AClient.SyncDocumentWith(C.FilePath, FileContent(C.FilePath))
+            var SentA := AClient.SyncDocumentWith(C.FilePath, FileContent(C.FilePath));
+            Trace(ExtractFileName(C.FilePath) + '  file: ' +
+              IfThen(SentA, 'sent to the agent session', 'already current'));
+          end
           else
           begin
             var Before := AClient.GetFileDiagnosticsVersion(C.FilePath);
-            if AClient.SyncDocument(C.FilePath) then
+            var SentM := AClient.SyncDocument(C.FilePath);
+            Trace(Format('%s  file: %s, diagnostics version %d', [ExtractFileName(C.FilePath),
+              IfThen(SentM, 'sent', 'already current'), Before]));
+            if SentM then
             begin
               var Name := ExtractFileName(C.FilePath);
               AClient.WaitFileAnalysed(C.FilePath, Before, 30000,
@@ -696,6 +777,7 @@ begin
         end;
       end;
 
+      var TReq := GetTickCount64;   // how long DelphiLSP took for this one
       var Matches := False;
       var ErrText := '';
       // Outside the try: the handler below clears it, and "no answer" is
@@ -744,11 +826,15 @@ begin
         // counterpart), or DelphiLSP takes it to one of them. The FILE
         // alone says nothing: several same-named methods in one unit.
         if ATargets.Contains(C.FilePath, C.Line) then
-          Matches := True
+        begin
+          Matches := True;
+          How := 'is a position of the symbol';
+        end
         else if ALinked.Contains(C.FilePath, C.Line) then
         begin
           // the declaration in the interface / the implementing class
           Matches := True;
+          How := 'is a linked position';
           C.Relation := ALinked.DeclLabel(C.FilePath, C.Line);
         end
         else if System.Length(Defs) > 0 then
@@ -756,9 +842,11 @@ begin
           var DF := TLspUri.FileUriToPath(Defs[0].Uri);
           var DL := Defs[0].Range.Start.Line;
           Matches := ATargets.Contains(DF, DL);
+          if Matches then How := 'answer is a position of the symbol';
           if not Matches and ALinked.Contains(DF, DL) then
           begin
             Matches := True;
+            How := 'answer is a linked position';
             C.Relation := ALinked.CallLabel(DF, DL);
           end;
         end;
@@ -780,6 +868,15 @@ begin
         end;
       end;
       var NoAnswer := System.Length(Defs) = 0;
+      var Answer: string;
+      if not NoAnswer then
+        Answer := Format('DelphiLSP -> %s:%d', [ExtractFileName(TLspUri.FileUriToPath(Defs[0].Uri)),
+          Defs[0].Range.Start.Line + 1])
+      else if ErrText <> '' then
+        Answer := 'DelphiLSP ERROR: ' + ErrText
+      else
+        Answer := 'DelphiLSP: no answer';
+      Answer := Answer + Format(' (%d ms)', [GetTickCount64 - TReq]);
 
       // DelphiLSP said nothing: resolve the use site through the declared
       // type of its qualifier. Its NEGATIVE answer is the valuable one -
@@ -801,11 +898,16 @@ begin
           uuOurs:
             begin
               Matches := True;
+              How := 'sources: member of ' + Link.TypeName;
               C.Note := Format('verified via %s (no answer from DelphiLSP)',
                 [Link.TypeName]);
             end;
           uuOtherSymbol:
-            Continue;      // belongs to another type - not a reference
+            begin
+              Trace(Where + '  ' + Answer + ' | sources: member of ' + Link.TypeName +
+                ' -> dropped');
+              Continue;      // belongs to another type - not a reference
+            end;
           uuOverloaded:
             C.Note := Format('UNVERIFIED - overload of %s, DelphiLSP gave no answer',
               [Link.TypeName]);
@@ -813,14 +915,21 @@ begin
       end;
 
       if Matches then
-        Verified.Add(C)
+      begin
+        Trace(Where + '  ' + Answer + ' -> LISTED (' + How + ')');
+        Verified.Add(C);
+      end
       else if NoAnswer and (C.Note <> '') then
-        Verified.Add(C)            // classified above (overload of our type)
+      begin
+        Trace(Where + '  ' + Answer + ' -> LISTED, ' + C.Note);
+        Verified.Add(C);            // classified above (overload of our type)
+      end
       else if NoAnswer and IsIncludeFile(C.FilePath) then
       begin
         // never drop a hit in an include file silently: DelphiLSP could not
         // tell (the including unit may not compile on its own)
         C.Note := 'UNVERIFIED - no answer inside this include file';
+        Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (include file)');
         Verified.Add(C);
       end
       else if NoAnswer and not LineDeclaresName(C.Preview, AOldName) then
@@ -833,9 +942,14 @@ begin
           C.Note := 'UNVERIFIED - DelphiLSP reported an error: ' + ErrText
         else
           C.Note := 'UNVERIFIED - no answer from DelphiLSP';
+        Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED');
         Retry.Add(TPair<Integer, Integer>.Create(Verified.Count, I));
         Verified.Add(C);
-      end;
+      end
+      else if NoAnswer then
+        Trace(Where + '  ' + Answer + ' -> dropped (declares another symbol)')
+      else
+        Trace(Where + '  ' + Answer + ' -> dropped (leads to another symbol)');
     end;
 
     // SECOND ATTEMPT for everything DelphiLSP stayed silent about. On a
@@ -859,9 +973,18 @@ begin
           var VIdx := Retry[R].Key;
           var Cand := ACandidates[Retry[R].Value];
           var Defs2 := AIncludes.Definition(Cand.FilePath, Cand.Line, Cand.Col);
-          if System.Length(Defs2) = 0 then Continue;
+          var Where2 := Format('%s:%d:%d', [ExtractFileName(Cand.FilePath), Cand.Line + 1,
+            Cand.Col + 1]);
+          if System.Length(Defs2) = 0 then
+          begin
+            Trace(Where2 + '  second attempt: still no answer');
+            Continue;
+          end;
           var DF2 := TLspUri.FileUriToPath(Defs2[0].Uri);
           var DL2 := Defs2[0].Range.Start.Line;
+          Trace(Format('%s  second attempt: DelphiLSP -> %s:%d -> %s', [Where2,
+            ExtractFileName(DF2), DL2 + 1, IfThen(ATargets.Contains(DF2, DL2) or
+            ALinked.Contains(DF2, DL2), 'resolved', 'elsewhere (kept, marked)')]));
           var Row := Verified[VIdx];
           if ATargets.Contains(DF2, DL2) then
           begin

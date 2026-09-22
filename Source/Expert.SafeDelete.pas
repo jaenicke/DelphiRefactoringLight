@@ -354,6 +354,12 @@ begin
       Sleep(300);
       D := IncCtx.Definition(AIn.FileName, AIn.Line0, IdentCol);
     end;
+    // a caret ON a declaration: an answer in another file is a same-named
+    // symbol elsewhere (see DeclarationAnswerIsForeign)
+    if (Length(D) > 0) and (AIn.Line0 <= High(StartLines)) and
+       DeclarationAnswerIsForeign(StartLines[AIn.Line0], Res.Identifier, AIn.FileName,
+         TLspUri.FileUriToPath(D[0].Uri)) then
+      D := nil;
     if Length(D) > 0 then
     begin
       Res.DeclFile := ExpandFileName(TLspUri.FileUriToPath(D[0].Uri));

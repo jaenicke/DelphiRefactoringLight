@@ -47,7 +47,6 @@ type
       State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure GotoSelected;
-    function PickReference(const AEntries: TSignatureEntries): string;
     procedure DoBtnAlignClick(Sender: TObject);
     procedure DoListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
     function SelectedIndex: Integer;
@@ -203,43 +202,13 @@ begin
   EnableListViewSorting(FListView);
 end;
 
-function TSignatureCheckDialog.PickReference(const AEntries: TSignatureEntries): string;
-var
-  Counts: TDictionary<string, Integer>;
-  Best: string;
-  BestCount: Integer;
-  Pair: TPair<string, Integer>;
-begin
-  Result := '';
-  if Length(AEntries) = 0 then Exit;
-  Counts := TDictionary<string, Integer>.Create;
-  try
-    for var E in AEntries do
-      if Counts.ContainsKey(E.Normalized) then
-        Counts[E.Normalized] := Counts[E.Normalized] + 1
-      else
-        Counts.Add(E.Normalized, 1);
-    Best := AEntries[0].Normalized;
-    BestCount := 0;
-    for Pair in Counts do
-      if Pair.Value > BestCount then
-      begin
-        Best := Pair.Key;
-        BestCount := Pair.Value;
-      end;
-    Result := Best;
-  finally
-    Counts.Free;
-  end;
-end;
-
 procedure TSignatureCheckDialog.SetEntries(const AEntries: TSignatureEntries);
 var
   LI: TListItem;
   IsMatch: Boolean;
 begin
   FEntries := AEntries;
-  FReferenceNormalized := PickReference(AEntries);
+  FReferenceNormalized := TSignatureChecker.PickReference(AEntries);
 
   FListView.Items.BeginUpdate;
   try
@@ -281,40 +250,16 @@ begin
   if (Result < 0) or (Result > High(FEntries)) then Result := -1;
 end;
 
-// The entry the others are aligned to: one carrying the majority signature,
-// a DECLARATION preferred (its text has no "TClass." qualifier and its
-// parameter names are the documented ones).
+// Both live in TSignatureChecker now - the MCP tool aligns through the
+// same rules (2026-09-29).
 function TSignatureCheckDialog.ReferenceEntry(out AEntry: TSignatureEntry): Boolean;
 begin
-  Result := False;
-  for var Pass := 0 to 1 do
-    for var E in FEntries do
-      if (E.Normalized = FReferenceNormalized)
-        and ((Pass = 1) or (E.Role in [srInterfaceDecl, srClassDecl])) then
-      begin
-        AEntry := E;
-        Exit(True);
-      end;
+  Result := TSignatureChecker.ReferenceEntry(FEntries, FReferenceNormalized, AEntry);
 end;
 
-// '' when the row at AIdx can be aligned, else why not.
 function TSignatureCheckDialog.AlignBlocker(AIdx: Integer): string;
-var
-  Ref: TSignatureEntry;
 begin
-  if AIdx < 0 then Exit('select a row');
-  if FEntries[AIdx].Normalized = FReferenceNormalized then
-    Exit('this row already matches');
-  if not ReferenceEntry(Ref) then Exit('no reference signature');
-  if FEntries[AIdx].Role = srImplementation then
-    // the implementation is aligned with the class declaration of ITS unit
-    // - which must be the right one first
-    for var E in FEntries do
-      if (E.Role = srClassDecl) and SameText(E.FilePath, FEntries[AIdx].FilePath)
-        and SameText(E.Container, FEntries[AIdx].Container)
-        and (E.Normalized <> FReferenceNormalized) then
-        Exit('align the class declaration first');
-  Result := '';
+  Result := TSignatureChecker.AlignBlocker(FEntries, AIdx, FReferenceNormalized);
 end;
 
 procedure TSignatureCheckDialog.UpdateAlignButton;

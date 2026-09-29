@@ -74,6 +74,20 @@ type
 
     class function RoleToString(ARole: TSignatureRole): string;
 
+    /// <summary>The normalized signature MOST entries carry - what the
+    ///  others are aligned to.</summary>
+    class function PickReference(const AEntries: TSignatureEntries): string;
+    /// <summary>The entry that carries AREFERENCE, a DECLARATION preferred
+    ///  (its text has no "TClass." qualifier and its parameter names are the
+    ///  documented ones).</summary>
+    class function ReferenceEntry(const AEntries: TSignatureEntries;
+      const AReference: string; out AEntry: TSignatureEntry): Boolean;
+    /// <summary>'' when the entry at AIdx can be aligned to AREFERENCE, else
+    ///  why not. Lives here, not in the dialog, because the MCP tool aligns
+    ///  through the same rules (user request 2026-09-29).</summary>
+    class function AlignBlocker(const AEntries: TSignatureEntries; AIdx: Integer;
+      const AReference: string): string;
+
     /// <summary>ARaw (a signature as read from the source: keyword, name,
     ///  parameters, result - no directives) with its routine NAME
     ///  re-qualified: the qualifier of the name ("TFoo." / "TFoo.TInner.")
@@ -474,6 +488,70 @@ begin
   for I := 1 to High(AEntries) do
     if AEntries[I].Normalized <> AEntries[0].Normalized then
       Exit(False);
+end;
+
+class function TSignatureChecker.PickReference(
+  const AEntries: TSignatureEntries): string;
+var
+  Counts: TDictionary<string, Integer>;
+  Best: string;
+  BestCount: Integer;
+  Pair: TPair<string, Integer>;
+begin
+  Result := '';
+  if Length(AEntries) = 0 then Exit;
+  Counts := TDictionary<string, Integer>.Create;
+  try
+    for var E in AEntries do
+      if Counts.ContainsKey(E.Normalized) then
+        Counts[E.Normalized] := Counts[E.Normalized] + 1
+      else
+        Counts.Add(E.Normalized, 1);
+    Best := AEntries[0].Normalized;
+    BestCount := 0;
+    for Pair in Counts do
+      if Pair.Value > BestCount then
+      begin
+        Best := Pair.Key;
+        BestCount := Pair.Value;
+      end;
+    Result := Best;
+  finally
+    Counts.Free;
+  end;
+end;
+
+class function TSignatureChecker.ReferenceEntry(const AEntries: TSignatureEntries;
+  const AReference: string; out AEntry: TSignatureEntry): Boolean;
+begin
+  Result := False;
+  for var Pass := 0 to 1 do
+    for var E in AEntries do
+      if (E.Normalized = AReference)
+        and ((Pass = 1) or (E.Role in [srInterfaceDecl, srClassDecl])) then
+      begin
+        AEntry := E;
+        Exit(True);
+      end;
+end;
+
+class function TSignatureChecker.AlignBlocker(const AEntries: TSignatureEntries;
+  AIdx: Integer; const AReference: string): string;
+var
+  Ref: TSignatureEntry;
+begin
+  if (AIdx < 0) or (AIdx > High(AEntries)) then Exit('select a row');
+  if AEntries[AIdx].Normalized = AReference then Exit('this row already matches');
+  if not ReferenceEntry(AEntries, AReference, Ref) then Exit('no reference signature');
+  if AEntries[AIdx].Role = srImplementation then
+    // the implementation is aligned with the class declaration of ITS unit
+    // - which must be the right one first
+    for var E in AEntries do
+      if (E.Role = srClassDecl) and SameText(E.FilePath, AEntries[AIdx].FilePath)
+        and SameText(E.Container, AEntries[AIdx].Container)
+        and (E.Normalized <> AReference) then
+        Exit('align the class declaration first');
+  Result := '';
 end;
 
 class function TSignatureChecker.RoleToString(ARole: TSignatureRole): string;

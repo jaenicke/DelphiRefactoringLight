@@ -41,6 +41,9 @@ uses
   Expert.SafeDeletePlan, Expert.StatementRefactor, Expert.WithRefactorWizard,
   Expert.WithRewriter, Expert.WithScanner, Expert.FindOriginalSymbolWizard,
   Expert.UnitReferencesWizard, Expert.UnitReferencesDialog,
+  Expert.InterfaceGuidCheck, Expert.DfmEventCheck, Expert.DfmEventCheckDialog,
+  Expert.SignatureCheck, Expert.SignatureCheckWizard,
+  Expert.ExtractInterface, Expert.ExtractInterfaceWizard, Expert.ExtractMethod,
   Lsp.Client, Lsp.Protocol, Lsp.Uri,
   Delphi.FileEncoding, Expert.PascalScanner, Expert.McpTools;
 
@@ -2536,8 +2539,454 @@ begin
   Result := McpOk(Res);
 end;
 
+// ---------------------------------------------------------------------------
+//  Project checks: interface GUIDs, DFM event handlers
+// ---------------------------------------------------------------------------
+
+function ToolInterfaceGuids(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Entries: TArray<TInterfaceGuidEntry>;
+  Err: string;
+  Files: TArray<string>;
+begin
+  var OnlyProblems := ArgBool(AArgs, 'only_problems', True);
+  Files := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      if Editor <> nil then Files := Editor.GetProjectSourceFiles;
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if Length(Files) = 0 then Exit(McpErr('no project loaded / no source files'));
+  Entries := TInterfaceGuidChecker.Scan(Files);
+  var Arr := TJSONArray.Create;
+  var Dupes := 0;
+  var Missing := 0;
+  for var E in Entries do
+  begin
+    if E.IsDuplicate then Inc(Dupes);
+    if not E.HasGuid then Inc(Missing);
+    if OnlyProblems and not E.IsDuplicate and E.HasGuid then Continue;
+    var O := TJSONObject.Create;
+    O.AddPair('interface', E.InterfaceName);
+    O.AddPair('file', E.FileName);
+    O.AddPair('line', TJSONNumber.Create(E.Line));
+    if E.HasGuid then O.AddPair('guid', E.Guid)
+    else O.AddPair('guid', TJSONNull.Create);
+    if E.IsDuplicate then O.AddPair('duplicate', TJSONBool.Create(True));
+    if E.IsDispInterface then O.AddPair('dispinterface', TJSONBool.Create(True));
+    Arr.Add(O);
+  end;
+  var Res := TJSONObject.Create;
+  Res.AddPair('interfaces', TJSONNumber.Create(Length(Entries)));
+  Res.AddPair('duplicateGuids', TJSONNumber.Create(Dupes));
+  Res.AddPair('withoutGuid', TJSONNumber.Create(Missing));
+  Res.AddPair('entries', Arr);
+  Res.AddPair('note', 'A duplicate GUID makes Supports/QueryInterface return the ' +
+    'WRONG object. An interface paired with a dispinterface on the same GUID is ' +
+    'a type-library import and not counted. Read-only.' +
+    IfThen(OnlyProblems, ' Only problems are listed - pass only_problems=false ' +
+    'for every interface.', ''));
+  Result := McpOk(Res);
+end;
+
+// One id per issue so apply can name them; bound to the place, not to an
+// index, so it survives a re-check as long as the issue does.
+function DfmIssueId(const AIssue: TDfmEventIssue): string;
+begin
+  Result := IntToHex(PreviewContentHash(LowerCase(AIssue.DfmFile) + '|' +
+    AIssue.ComponentName + '|' + AIssue.EventName), 8);
+end;
+
+function ToolDfmEvents(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Issues: TArray<TDfmEventIssue>;
+  Files, SigFiles, WantIds: TArray<string>;
+  Err, RunErr: string;
+  DoApply: Boolean;
+begin
+  DoApply := ArgBool(AArgs, 'apply');
+  WantIds := nil;
+  var IdArr := AArgs.GetValue<TJSONArray>('fix_ids', nil);
+  if IdArr <> nil then
+    for var V in IdArr do WantIds := WantIds + [UpperCase(Trim(V.Value))];
+  if DoApply and (Length(WantIds) = 0) then
+    Exit(McpErr('apply needs "fix_ids" - list the issues first and pick the ' +
+      'ones to fix (a generated empty handler can shadow an inherited one)'));
+  Files := nil;
+  SigFiles := nil;
+  RunErr := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      if Editor = nil then Exit;
+      Files := Editor.GetProjectSourceFiles;
+      SigFiles := GatherSignatureFiles;
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if Length(Files) = 0 then Exit(McpErr('no project loaded / no source files'));
+  Issues := TDfmEventChecker.CheckProject(Files, nil, SigFiles);
+
+  var Applied := TDictionary<string, string>.Create;   // id -> result
+  try
+    if DoApply then
+      if not McpRunOnMain(
+        procedure
+        begin
+          var Ctx := TFixContext.Create;
+          try
+            for var Iss in Issues do
+            begin
+              var Id := UpperCase(DfmIssueId(Iss));
+              var Wanted := False;
+              for var W in WantIds do
+                if W = Id then Wanted := True;
+              if not Wanted then Continue;
+              var Reason := '';
+              if TDfmEventChecker.ApplyFix(Iss, Reason, Ctx) then
+                Applied.AddOrSetValue(Id, 'fixed')
+              else
+                Applied.AddOrSetValue(Id, 'NOT fixed: ' + Reason);
+            end;
+          finally
+            Ctx.Free;
+          end;
+        end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+
+    var Arr := TJSONArray.Create;
+    var Missing := 0;
+    var Mismatch := 0;
+    for var Iss in Issues do
+    begin
+      if Iss.Kind = eikMissingHandler then Inc(Missing) else Inc(Mismatch);
+      var O := TJSONObject.Create;
+      var Id := DfmIssueId(Iss);
+      O.AddPair('id', Id);
+      if Iss.Kind = eikMissingHandler then O.AddPair('kind', 'missing_handler')
+      else O.AddPair('kind', 'signature_mismatch');
+      O.AddPair('form', Iss.DfmFile);
+      O.AddPair('unit', Iss.PasFile);
+      O.AddPair('component', Iss.ComponentName);
+      O.AddPair('componentType', Iss.ComponentType);
+      O.AddPair('event', Iss.EventName);
+      O.AddPair('handler', Iss.HandlerName);
+      O.AddPair('formLine', TJSONNumber.Create(Iss.DfmLine));
+      if Iss.PasLine > 0 then O.AddPair('unitLine', TJSONNumber.Create(Iss.PasLine));
+      if Iss.Expected <> '' then O.AddPair('expected', Iss.Expected);
+      if Iss.Actual <> '' then O.AddPair('actual', Iss.Actual);
+      O.AddPair('fixable', TJSONBool.Create(
+        (Iss.Kind = eikMissingHandler) or (Iss.ExpectedRawParams <> '')));
+      var R: string;
+      if Applied.TryGetValue(UpperCase(Id), R) then O.AddPair('result', R);
+      Arr.Add(O);
+    end;
+    var Res := TJSONObject.Create;
+    Res.AddPair('applied', TJSONBool.Create(DoApply));
+    Res.AddPair('missingHandlers', TJSONNumber.Create(Missing));
+    Res.AddPair('signatureMismatches', TJSONNumber.Create(Mismatch));
+    Res.AddPair('issues', Arr);
+    if DoApply then
+      Res.AddPair('note', 'Fixed handlers are in the IDE buffers (not saved). ' +
+        'A missing handler is generated as an EMPTY method - in an inherited ' +
+        'form that shadows the ancestor''s handler, which is why nothing is ' +
+        'fixed without naming its id.')
+    else
+      Res.AddPair('note', 'Nothing was changed. Pass apply=true with "fix_ids" ' +
+        'to generate the missing handlers / correct the parameter lists.');
+    Result := McpOk(Res);
+  finally
+    Applied.Free;
+  end;
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Align method signature
+// ---------------------------------------------------------------------------
+//
+// Every declaration and implementation of the method at the position -
+// interface, class, implementation header - with the one they disagree
+// about. apply=true aligns the divergent ones to the majority signature
+// through the wizard's own step, in the order the rules require (a class
+// declaration before its implementation).
+function ToolSignatureCheck(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Err, Method: string;
+  L1, C1: Integer;
+  Ctx: TPosContext;
+  Entries: TSignatureEntries;
+  DoApply: Boolean;
+  Results: TDictionary<Integer, string>;
+begin
+  if not RequireFilePos(AArgs, F, L1, C1, Err) then Exit(McpErr(Err));
+  if not GatherPosContext(F, L1, C1, True, AStop, Ctx, Err) then Exit(McpErr(Err));
+  if Ctx.Client = nil then
+    Exit(McpErr('no DelphiLSP session - the signature check resolves the ' +
+      'declarations through it (see get_status)'));
+  Method := Ctx.Identifier;
+  DoApply := ArgBool(AArgs, 'apply');
+  Entries := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      Entries := TSignatureChecker.Collect(Ctx.Client, F, Method);
+    end, True, AStop, Err, 300000) then Exit(McpErr(Err));
+  if Length(Entries) = 0 then
+    Exit(McpErr('no declaration of "' + Method + '" was found'));
+
+  var Reference := TSignatureChecker.PickReference(Entries);
+  var Ref: TSignatureEntry;
+  var HaveRef := TSignatureChecker.ReferenceEntry(Entries, Reference, Ref);
+  Results := TDictionary<Integer, string>.Create;
+  try
+    if DoApply and HaveRef then
+      if not McpRunOnMain(
+        procedure
+        begin
+          // class declarations first: an implementation is aligned with the
+          // declaration of ITS unit, which must be right before it
+          for var Pass := 0 to 1 do
+            for var I := 0 to High(Entries) do
+            begin
+              if (Pass = 0) <> (Entries[I].Role in [srInterfaceDecl, srClassDecl]) then
+                Continue;
+              if Entries[I].Normalized = Reference then Continue;
+              var Blocker := TSignatureChecker.AlignBlocker(Entries, I, Reference);
+              if Blocker <> '' then
+              begin
+                Results.AddOrSetValue(I, 'not aligned: ' + Blocker);
+                Continue;
+              end;
+              var Why := AlignSignatureEntry(Entries[I], Ref);
+              if Why = '' then Results.AddOrSetValue(I, 'aligned')
+              else Results.AddOrSetValue(I, 'not aligned: ' + Why);
+            end;
+        end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+
+    var Arr := TJSONArray.Create;
+    var Diverging := 0;
+    for var I := 0 to High(Entries) do
+    begin
+      var E := Entries[I];
+      var O := TJSONObject.Create;
+      O.AddPair('role', TSignatureChecker.RoleToString(E.Role));
+      O.AddPair('container', E.Container);
+      O.AddPair('file', E.FilePath);
+      O.AddPair('line', TJSONNumber.Create(E.Line + 1));
+      O.AddPair('signature', E.RawSignature);
+      var Matches := E.Normalized = Reference;
+      O.AddPair('matches', TJSONBool.Create(Matches));
+      if not Matches then
+      begin
+        Inc(Diverging);
+        var B := TSignatureChecker.AlignBlocker(Entries, I, Reference);
+        if B <> '' then O.AddPair('blocked', B);
+      end;
+      var R: string;
+      if Results.TryGetValue(I, R) then O.AddPair('result', R);
+      Arr.Add(O);
+    end;
+    var Res := TJSONObject.Create;
+    Res.AddPair('method', Method);
+    Res.AddPair('applied', TJSONBool.Create(DoApply));
+    Res.AddPair('entries', Arr);
+    Res.AddPair('diverging', TJSONNumber.Create(Diverging));
+    if HaveRef then
+      Res.AddPair('reference', TJSONObject.Create
+        .AddPair('file', Ref.FilePath)
+        .AddPair('line', TJSONNumber.Create(Ref.Line + 1))
+        .AddPair('signature', Ref.RawSignature));
+    if Diverging = 0 then
+      Res.AddPair('note', 'Every declaration and implementation agrees.')
+    else if DoApply then
+      Res.AddPair('note', 'Changed in the IDE buffers (not saved). An ' +
+        'implementation header keeps its parameter NAMES - the body uses them.')
+    else
+      Res.AddPair('note', 'Nothing was changed. apply=true aligns the ' +
+        'diverging entries with the reference signature (class declarations ' +
+        'first, then the implementations).');
+    Result := McpOk(Res);
+  finally
+    Results.Free;
+  end;
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Extract interface
+// ---------------------------------------------------------------------------
+//
+// apply=false answers with the interface text that WOULD be written - which
+// is the actual review question here ("are these the right members?"), not a
+// line diff: the change creates a unit (or extends one) and adds the
+// interface to the class' ancestor list.
+function ToolExtractInterface(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, IntfName, Target, Err, RunErr, Text: string;
+  L1: Integer;
+  Members: TArray<string>;
+  AddExisting, DoApply, Ok: Boolean;
+  Info: TExtractInterfaceInfo;
+begin
+  F := ArgStr(AArgs, 'file');
+  L1 := ArgInt(AArgs, 'line');
+  if (F = '') or (L1 < 1) then
+    Exit(McpErr('arguments "file" and "line" (1-based, inside or at the class ' +
+      'declaration) are required'));
+  F := ExpandFileName(F);
+  IntfName := Trim(ArgStr(AArgs, 'interface_name'));
+  Target := Trim(ArgStr(AArgs, 'target_file'));
+  AddExisting := ArgBool(AArgs, 'add_to_existing');
+  DoApply := ArgBool(AArgs, 'apply');
+  Members := nil;
+  var MArr := AArgs.GetValue<TJSONArray>('members', nil);
+  if MArr <> nil then
+    for var V in MArr do Members := Members + [Trim(V.Value)];
+  Ok := False;
+  RunErr := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      Ok := ExtractInterfaceHeadless(F, L1, AddExisting, IntfName, Target,
+        Members, not DoApply, Info, Text, RunErr);
+    end, not DoApply, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(RunErr));
+  var Sel := TJSONArray.Create;
+  for var M in Info.Members do
+    if M.Selected then Sel.Add(M.Name);
+  var Res := TJSONObject.Create;
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('class', Info.ClassName);
+  Res.AddPair('interface', Info.InterfaceName);
+  Res.AddPair('members', Sel);
+  if AddExisting then
+  begin
+    Res.AddPair('target', Info.ExistingFile);
+    Res.AddPair('targetLine', TJSONNumber.Create(Info.ExistingDeclLine));
+  end
+  else
+    Res.AddPair('target', Info.TargetFile);
+  Res.AddPair('interfaceText', Text);
+  if DoApply then
+    Res.AddPair('note', 'The interface was written, the class got it in its ' +
+      'ancestor list and the uses clauses were updated. Files open in the IDE ' +
+      'were changed in the buffer (not saved).')
+  else
+    Res.AddPair('note', 'Nothing was written. "interfaceText" is what the ' +
+      'interface would look like; "members" what it would carry (pass ' +
+      '"members" to choose, the default is every public and published method ' +
+      'and property). Call again with apply=true to write it.');
+  Result := McpOk(Res);
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Extract method
+// ---------------------------------------------------------------------------
+//
+// The block is given as whole lines (an agent has no editor selection).
+// apply=false answers with the GENERATED CODE - the routine, the call that
+// replaces the block and the declaration line - because that is what has to
+// be judged here; the write itself is four editor operations, not a line
+// diff, and the applier is the dialog's.
+function ToolExtractMethod(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Name, Err, RunErr: string;
+  From1, To1: Integer;
+  DoApply, Ok: Boolean;
+  Prev: TExtractMethodPreview;
+begin
+  F := ArgStr(AArgs, 'file');
+  From1 := ArgInt(AArgs, 'from_line');
+  To1 := ArgInt(AArgs, 'to_line', From1);
+  Name := Trim(ArgStr(AArgs, 'name'));
+  if (F = '') or (From1 < 1) or (To1 < From1) then
+    Exit(McpErr('arguments "file" and "from_line" (1-based) are required; ' +
+      '"to_line" defaults to from_line'));
+  if Name = '' then Name := 'ExtractedMethod';
+  F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Ok := False;
+  RunErr := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      Ok := ExtractMethodHeadless(F, From1, To1, Name, DoApply, Prev, RunErr);
+    end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(RunErr));
+  var Res := TJSONObject.Create;
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('name', Name);
+  Res.AddPair('file', F);
+  Res.AddPair('fromLine', TJSONNumber.Create(From1));
+  Res.AddPair('toLine', TJSONNumber.Create(To1));
+  if Prev.EnclosingClass <> '' then Res.AddPair('class', Prev.EnclosingClass);
+  Res.AddPair('parameters', TJSONNumber.Create(Prev.ParamCount));
+  Res.AddPair('localVariables', TJSONNumber.Create(Prev.LocalCount));
+  Res.AddPair('method', Prev.MethodText);
+  Res.AddPair('call', Prev.CallText);
+  if Prev.DeclText <> '' then Res.AddPair('declaration', Prev.DeclText);
+  Res.AddPair('insertAtLine', TJSONNumber.Create(Prev.InsertLine));
+  if Prev.ClassDeclLine > 0 then
+    Res.AddPair('declarationAtLine', TJSONNumber.Create(Prev.ClassDeclLine));
+  if DoApply then
+    Res.AddPair('note', 'Changed in the IDE buffer (not saved, undoable with ' +
+      'Ctrl+Z). The variables that moved into the new routine were removed ' +
+      'from the old one''s var section.')
+  else
+    Res.AddPair('note', 'Nothing was written. "method" is the routine that ' +
+      'would be inserted, "call" what replaces the block, "declaration" the ' +
+      'line added to the class. Which variables become parameters and which ' +
+      'become locals was resolved with DelphiLSP. Call again with apply=true ' +
+      'to write it.');
+  Result := McpOk(Res);
+end;
+
+// Adds IInterface support (FRefCount, QueryInterface, _AddRef, _Release and
+// the NewInstance / AfterConstruction pair) to a class that does not descend
+// from TInterfacedObject. apply=false returns the code it would add.
+function ToolAddIInterface(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Err, Report, RunErr: string;
+  L1: Integer;
+  DoApply, Ok: Boolean;
+begin
+  F := ArgStr(AArgs, 'file');
+  L1 := ArgInt(AArgs, 'line');
+  if (F = '') or (L1 < 1) then
+    Exit(McpErr('arguments "file" and "line" (1-based, inside or at the class ' +
+      'declaration) are required'));
+  F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Ok := False;
+  RunErr := '';
+  Report := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      Ok := DelegateIInterfaceHeadless(F, L1, not DoApply, Report, RunErr);
+    end, not DoApply, AStop, Err, 120000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(RunErr));
+  var Res := TJSONObject.Create;
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('file', F);
+  Res.AddPair('report', Report);
+  if DoApply then
+    Res.AddPair('note', 'Changed in the IDE buffer when the file is open (not ' +
+      'saved), otherwise on disk. Hold the instance as an interface from now ' +
+      'on - it frees itself when the last reference drops.')
+  else
+    Res.AddPair('note', 'Nothing was written. "report" shows the declaration ' +
+      'and implementation that would be added. Call again with apply=true.');
+  Result := McpOk(Res);
+end;
+
 initialization
   RegisterMcpTool('find_unit', ToolFindUnit);
+  RegisterMcpTool('add_iinterface', ToolAddIInterface);
+  RegisterMcpTool('extract_method', ToolExtractMethod);
+  RegisterMcpTool('extract_interface', ToolExtractInterface);
+  RegisterMcpTool('signature_check', ToolSignatureCheck);
+  RegisterMcpTool('interface_guids', ToolInterfaceGuids);
+  RegisterMcpTool('dfm_events', ToolDfmEvents);
   RegisterMcpTool('find_unit_references', ToolFindUnitReferences);
   RegisterMcpTool('find_original_symbol', ToolFindOriginalSymbol);
   RegisterMcpTool('remove_with', ToolRemoveWith);

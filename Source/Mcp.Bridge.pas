@@ -126,7 +126,9 @@ begin
      (AName = 'move_to_new_unit') or (AName = 'apply_quick_fixes') or
      (AName = 'move_to_unit') or (AName = 'remove_with') or
      (AName = 'find_unit_references') or (AName = 'cleanup_uses') or
-     (AName = 'find_original_symbol') then
+     (AName = 'find_original_symbol') or (AName = 'dfm_events') or
+     (AName = 'interface_guids') or (AName = 'signature_check') or
+     (AName = 'extract_interface') or (AName = 'extract_method') then
     Result := 300000
   else
     Result := ToolTimeoutMs;

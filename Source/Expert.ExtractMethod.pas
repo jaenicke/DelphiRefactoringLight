@@ -15,6 +15,20 @@ uses
   Expert.SelectionValidator, Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
 
 type
+  /// <summary>What an extraction would produce - the review question here
+  ///  is the generated CODE, so the tool answers with it (user request
+  ///  2026-09-29).</summary>
+  TExtractMethodPreview = record
+    MethodText: string;      // the new routine
+    CallText: string;        // what replaces the block
+    DeclText: string;        // the class declaration line, '' for a routine
+    InsertLine: Integer;     // 1-based, where the routine goes
+    ClassDeclLine: Integer;  // 1-based, where the declaration goes (0 = none)
+    EnclosingClass: string;
+    ParamCount: Integer;
+    LocalCount: Integer;
+  end;
+
   /// <summary>How a parameter is passed to the extracted method.
   ///  pmNone = no modifier (Delphi default: by value, callee may modify
   ///  its local copy). pmConst/pmVar/pmOut map to the matching Delphi
@@ -61,7 +75,8 @@ type
 
   TLspExtractMethodWizard = class
   private
-    FDialog: TExtractMethodDialog;
+    FDialog: TExtractMethodDialog;      // nil = headless (MCP)
+    FHeadlessError: string;
     FCurrentInfo: TExtractMethodInfo;
     FInfoReady: Boolean;
     procedure UpdatePreview;
@@ -87,12 +102,25 @@ type
     ///  of the original method (between InsertLine and StartLine).</summary>
     procedure RemoveLocalVarsFromDeclaration(const AInfo: TExtractMethodInfo);
     procedure DoAnalyzeAndPreview(var AInfo: TExtractMethodInfo);
+    /// <summary>The four editor writes of one extraction - shared by the
+    ///  dialog path and the headless one, so both write the SAME way
+    ///  (user request 2026-09-29).</summary>
+    procedure ApplyExtraction(const AInfo: TExtractMethodInfo;
+      const AMethodText, ACallText, ADeclText: string);
+    procedure Status(const AText: string);
   public
     procedure Execute;
   end;
 
 var
   ExtractMethodInstance: TLspExtractMethodWizard;
+
+/// <summary>Extract method without any UI: analyses the block
+///  AFromLine1..AToLine1 (whole lines) exactly as the dialog does and
+///  returns the code it would write; AAPPLY also writes it. MAIN THREAD.</summary>
+function ExtractMethodHeadless(const AFile: string; AFromLine1, AToLine1: Integer;
+  const AMethodName: string; AApply: Boolean; out APreview: TExtractMethodPreview;
+  out AError: string): Boolean;
 
 implementation
 
@@ -1480,21 +1508,120 @@ begin
   UpdatePreview;
 end;
 
+// Status text: into the dialog when there is one, dropped otherwise.
+function ExtractMethodHeadless(const AFile: string; AFromLine1, AToLine1: Integer;
+  const AMethodName: string; AApply: Boolean; out APreview: TExtractMethodPreview;
+  out AError: string): Boolean;
+var
+  W: TLspExtractMethodWizard;
+  Info: TExtractMethodInfo;
+  Lines: TArray<string>;
+begin
+  Result := False;
+  AError := '';
+  APreview := Default(TExtractMethodPreview);
+  if not FileExists(AFile) then
+  begin
+    AError := 'file not found: ' + AFile;
+    Exit;
+  end;
+  Lines := TDelphiFileEncoding.ReadLines(AFile);
+  if (AFromLine1 < 1) or (AToLine1 < AFromLine1) or (AToLine1 > Length(Lines)) then
+  begin
+    AError := Format('the block %d..%d is not inside the file (%d lines)',
+      [AFromLine1, AToLine1, Length(Lines)]);
+    Exit;
+  end;
+  Info := Default(TExtractMethodInfo);
+  Info.FileName := AFile;
+  Info.StartLine := AFromLine1;
+  Info.EndLine := AToLine1;
+  Info.StartCol := 1;
+  Info.EndCol := 1;
+  Info.MethodName := AMethodName;
+  // whole lines, like a selection the user drags over them
+  var Sel := '';
+  var MinIndent := MaxInt;
+  for var I := AFromLine1 - 1 to AToLine1 - 1 do
+  begin
+    Sel := Sel + Lines[I] + #10;
+    if Trim(Lines[I]) <> '' then
+    begin
+      var C := 0;
+      while (C < Length(Lines[I])) and CharInSet(Lines[I][C + 1], [' ', #9]) do Inc(C);
+      if C < MinIndent then MinIndent := C;
+    end;
+  end;
+  if MinIndent = MaxInt then
+  begin
+    AError := 'the block is empty';
+    Exit;
+  end;
+  Info.SelectedText := Sel;
+  Info.Indent := StringOfChar(' ', MinIndent);
+  W := TLspExtractMethodWizard.Create;
+  try
+    W.FDialog := nil;
+    W.DoAnalyzeAndPreview(Info);
+    if not W.FInfoReady then
+    begin
+      AError := W.FHeadlessError;
+      if AError = '' then AError := 'the block could not be analysed';
+      Exit;
+    end;
+    APreview.MethodText := W.GenerateMethod(Info);
+    APreview.CallText := W.GenerateCall(Info);
+    if Info.EnclosingClass <> '' then
+      APreview.DeclText := W.GenerateClassDeclaration(Info);
+    APreview.InsertLine := Info.InsertLine;
+    APreview.ClassDeclLine := Info.ClassDeclLine;
+    APreview.EnclosingClass := Info.EnclosingClass;
+    APreview.ParamCount := Length(Info.Params);
+    APreview.LocalCount := Length(Info.LocalVars);
+    if AApply then
+      W.ApplyExtraction(Info, APreview.MethodText, APreview.CallText,
+        APreview.DeclText);
+    Result := True;
+  finally
+    W.Free;
+  end;
+end;
+
+procedure TLspExtractMethodWizard.Status(const AText: string);
+begin
+  if FDialog <> nil then FDialog.SetStatus(AText);
+end;
+
 procedure TLspExtractMethodWizard.DoAnalyzeAndPreview(var AInfo: TExtractMethodInfo);
 var
   Client: TLspClient;
   DJ, RP: string;
 begin
+  FHeadlessError := '';
   DJ := Editor.FindDelphiLspJson;
-  if DJ='' then begin FDialog.SetPreviewText('No .delphilsp.json found.'); FDialog.SetStatus('Error'); Exit; end;
+  if DJ='' then
+  begin
+    FHeadlessError := 'no .delphilsp.json found for this project';
+    if FDialog <> nil then
+    begin
+      FDialog.SetPreviewText('No .delphilsp.json found.');
+      FDialog.SetStatus('Error');
+    end;
+    Exit;
+  end;
   RP := Editor.GetProjectRoot;
   if RP='' then RP := ExtractFilePath(AInfo.FileName);
-  AInfo.MethodName := FDialog.GetMethodName;
-  if AInfo.MethodName='' then begin FDialog.SetPreviewText('Please enter a method name.'); Exit; end;
-  FDialog.SetBusy(True);
+  if FDialog <> nil then AInfo.MethodName := FDialog.GetMethodName;
+  if AInfo.MethodName='' then
+  begin
+    FHeadlessError := 'no method name';
+    if FDialog <> nil then FDialog.SetPreviewText('Please enter a method name.');
+    Exit;
+  end;
+  if FDialog <> nil then FDialog.SetBusy(True);
   try
-    FDialog.SetStatus('Saving files...'); Editor.SaveAllFiles;
-    FDialog.SetStatus('Connecting to LSP...');
+    Status('Saving files...'); Editor.SaveAllFiles;
+    Status('Connecting to LSP...');
     Client := TLspManager.Instance.GetClient(RP, Editor.GetCurrentProjectDproj, DJ);
 
     // Einheitlicher Warmup ueber alle Wizards. Die Status-Callbacks
@@ -1505,14 +1632,14 @@ begin
       {ADiagnosticsTimeoutMs:} 15000,
       procedure(S: string)
       begin
-        FDialog.SetStatus(S);
-        Application.ProcessMessages;
+        Status(S);
+        if FDialog <> nil then Application.ProcessMessages;
       end);
 
-    FDialog.SetStatus('Finding insertion point...'); FindInsertPoint(AInfo);
+    Status('Finding insertion point...'); FindInsertPoint(AInfo);
 
     // Validation: is the selected block sensible?
-    FDialog.SetStatus('Validating selection...');
+    Status('Validating selection...');
     var FileLines := TDelphiFileEncoding.ReadLines(AInfo.FileName);
     var ValidResult := TSelectionValidator.Validate(AInfo.SelectedText,
       FileLines, AInfo.StartLine, AInfo.EndLine, AInfo.InsertLine,
@@ -1521,36 +1648,82 @@ begin
       ValidResult.FormatIssues + sLineBreak;
     if ValidResult.HasErrors then
     begin
-      FDialog.SetPreviewText('The selection cannot be sensibly extracted:' + sLineBreak +
-        sLineBreak + ValidResult.FormatIssues + sLineBreak +
-        'Please correct the selection and try again.');
-      FDialog.SetStatus(Format('Validation failed: %d error(s).',
-        [ValidResult.ErrorCount]));
-      FDialog.EnableExtract(False);
+      FHeadlessError := 'the selection cannot be sensibly extracted: ' +
+        ValidResult.FormatIssues;
+      if FDialog <> nil then
+      begin
+        FDialog.SetPreviewText('The selection cannot be sensibly extracted:' + sLineBreak +
+          sLineBreak + ValidResult.FormatIssues + sLineBreak +
+          'Please correct the selection and try again.');
+        FDialog.SetStatus(Format('Validation failed: %d error(s).',
+          [ValidResult.ErrorCount]));
+        FDialog.EnableExtract(False);
+      end;
       FInfoReady := False;
       Exit;
     end;
 
-    if AInfo.EnclosingClass<>'' then FDialog.SetStatus('Class: '+AInfo.EnclosingClass+'. Analyzing...')
-    else FDialog.SetStatus('Analyzing...');
+    if AInfo.EnclosingClass<>'' then Status('Class: '+AInfo.EnclosingClass+'. Analyzing...')
+    else Status('Analyzing...');
     AnalyzeVariables(AInfo, Client);
-    FDialog.SetStatus('Generating code...');
+    Status('Generating code...');
     // Store results for later live updates
     FCurrentInfo := AInfo;
     FInfoReady := True;
-    UpdatePreview;
-    FDialog.EnableExtract(True);
-    FDialog.SetStatus(Format('Ready: %d parameter(s), %d local variable(s).',[Length(AInfo.Params),Length(AInfo.LocalVars)]));
+    if FDialog <> nil then
+    begin
+      UpdatePreview;
+      FDialog.EnableExtract(True);
+      FDialog.SetStatus(Format('Ready: %d parameter(s), %d local variable(s).',[Length(AInfo.Params),Length(AInfo.LocalVars)]));
+    end;
   except
-    on E: Exception do begin FDialog.SetPreviewText('ERROR: '+E.ClassName+': '+E.Message+sLineBreak+sLineBreak+AInfo.DiagLog); FDialog.SetStatus('Error.'); end;
+    on E: Exception do
+    begin
+      FHeadlessError := E.ClassName + ': ' + E.Message;
+      FInfoReady := False;
+      if FDialog <> nil then
+      begin
+        FDialog.SetPreviewText('ERROR: '+E.ClassName+': '+E.Message+sLineBreak+sLineBreak+AInfo.DiagLog);
+        FDialog.SetStatus('Error.');
+      end;
+    end;
   end;
-  FDialog.SetBusy(False);
+  if FDialog <> nil then FDialog.SetBusy(False);
+end;
+
+procedure TLspExtractMethodWizard.ApplyExtraction(const AInfo: TExtractMethodInfo;
+  const AMethodText, ACallText, ADeclText: string);
+var
+  Client: TLspClient;
+begin
+  // Replace the block with the call, byte-exact via Writer (no auto-indent).
+  // Delete from (StartLine, 1) to the start of the line after EndLine so that
+  // indentation and the trailing newline of the block are removed too.
+  Editor.ReplaceSelection(AInfo.FileName,
+    AInfo.StartLine, 1, AInfo.EndLine + 1, 1,
+    ACallText + #13#10);
+
+  // Insert the new method and class declaration via a direct Writer
+  // (avoids the IDE's auto-indent)
+  Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.InsertLine, AMethodText);
+  if (AInfo.ClassDeclLine>0) and (ADeclText<>'') then
+    Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.ClassDeclLine, ADeclText);
+
+  // Remove the moved variables from the var declaration of the old method
+  if Length(AInfo.LocalVars)>0 then
+    RemoveLocalVarsFromDeclaration(AInfo);
+
+  // Notify the form designer about class changes
+  Editor.NotifyClassStructureChanged(AInfo.FileName);
+
+  try Client := TLspManager.Instance.GetClient(Editor.GetProjectRoot,
+    Editor.GetCurrentProjectDproj, Editor.FindDelphiLspJson);
+    Client.RefreshDocument(AInfo.FileName); except end;
 end;
 
 procedure TLspExtractMethodWizard.Execute;
 var
   Info: TExtractMethodInfo;
-  Client: TLspClient;
   NMC, CC, CDC: string;
 begin
   if not GetSelectedBlock(Info) then Exit;
@@ -1570,30 +1743,7 @@ begin
     if Info.MethodName='' then Exit;
     NMC := GenerateMethod(Info); CC := GenerateCall(Info);
     if Info.EnclosingClass<>'' then CDC := GenerateClassDeclaration(Info) else CDC := '';
-
-    // Replace the block with the call, byte-exact via Writer (no auto-indent).
-    // Delete from (StartLine, 1) to the start of the line after EndLine so that
-    // indentation and the trailing newline of the block are removed too.
-    Editor.ReplaceSelection(Info.FileName,
-      Info.StartLine, 1, Info.EndLine + 1, 1,
-      CC + #13#10);
-
-    // Insert the new method and class declaration via a direct Writer
-    // (avoids the IDE's auto-indent)
-    Editor.InsertTextAtLineStart(Info.FileName, Info.InsertLine, NMC);
-    if (Info.ClassDeclLine>0) and (CDC<>'') then
-      Editor.InsertTextAtLineStart(Info.FileName, Info.ClassDeclLine, CDC);
-
-    // Remove the moved variables from the var declaration of the old method
-    if Length(Info.LocalVars)>0 then
-      RemoveLocalVarsFromDeclaration(Info);
-
-    // Notify the form designer about class changes
-    Editor.NotifyClassStructureChanged(Info.FileName);
-
-    try Client := TLspManager.Instance.GetClient(Editor.GetProjectRoot,
-      Editor.GetCurrentProjectDproj, Editor.FindDelphiLspJson);
-      Client.RefreshDocument(Info.FileName); except end;
+    ApplyExtraction(Info, NMC, CC, CDC);
     MessageDlg('Method "'+Info.MethodName+'" extracted. Ctrl+Z to undo.', mtInformation, [mbOK], 0);
   finally FDialog.Free; FDialog := nil; end;
 end;

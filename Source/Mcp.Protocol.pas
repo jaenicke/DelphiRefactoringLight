@@ -786,6 +786,70 @@ const
     '"1-based."},"column":{"type":"integer","description":"1-based."},' + InstanceProp +
     '},"required":["file","line","column"]}}' +
     ',' +
+    '{"name":"extract_method","description":"Extracts the lines from_line..to_line ' +
+    'into a new method of the enclosing class (or a local routine): which variables ' +
+    'become parameters, which become locals and which one becomes the Result is resolved ' +
+    'with DelphiLSP. apply=false (the default) answers with the generated code - the ' +
+    'routine, the call that replaces the block and the declaration line - since that is ' +
+    'what has to be judged; the write itself is not a line diff.","inputSchema":{"type":' +
+    '"object","properties":{"file":{"type":"string"},"from_line":{"type":"integer",' +
+    '"description":"1-based first line of the block."},"to_line":{"type":"integer",' +
+    '"description":"1-based last line. Default: from_line."},"name":{"type":"string",' +
+    '"description":"Name of the new method. Default ExtractedMethod."},' + ApplyProp + ',' +
+    InstanceProp + '},"required":["file","from_line"]}}' +
+    ',' +
+    '{"name":"extract_interface","description":"Extracts an interface from the class at ' +
+    'a line: a new unit with \"IXxx = interface\" plus a GUID, the class gets the ' +
+    'interface in its ancestor list and both uses clauses are updated. ' +
+    'add_to_existing=true adds the members to an interface that already exists ' +
+    '(\"interface_name\"). apply=false (the default) answers with the interface text ' +
+    'that would be written.","inputSchema":{"type":"object","properties":{"file":' +
+    '{"type":"string"},"line":{"type":"integer","description":"1-based line inside ' +
+    'or at the class declaration."},"interface_name":{"type":"string","description":' +
+    '"Name of the interface. Default: the class name with T replaced by I. Required ' +
+    'with add_to_existing."},"target_file":{"type":"string","description":"The new ' +
+    'unit (path or a name next to the source)."},"members":{"type":"array","items":' +
+    '{"type":"string"},"description":"Member names to include. Default: every public ' +
+    'and published method and property."},"add_to_existing":{"type":"boolean"},' +
+    ApplyProp + ',' + InstanceProp + '},"required":["file","line"]}}' +
+    ',' +
+    '{"name":"add_iinterface","description":"Adds IInterface support to a class that ' +
+    'does not descend from TInterfacedObject: IInterface in the ancestor list, an ' +
+    'FRefCount field, QueryInterface / _AddRef / _Release and the NewInstance / ' +
+    'AfterConstruction pair that mirrors TInterfacedObject''s initial-refcount trick. ' +
+    'Afterwards the instance frees itself when the last interface reference drops. ' +
+    'apply=false (the default) returns the code it would add.","inputSchema":{"type":' +
+    '"object","properties":{"file":{"type":"string"},"line":{"type":"integer",' +
+    '"description":"1-based line inside or at the class declaration."},' + ApplyProp +
+    ',' + InstanceProp + '},"required":["file","line"]}}' +
+    ',' +
+    '{"name":"signature_check","description":"Every declaration and implementation of ' +
+    'the method at a position - interface, class, implementation header - and whether ' +
+    'they agree. apply=true aligns the diverging ones with the majority signature ' +
+    '(class declarations first, then the implementations, which keep their parameter ' +
+    'NAMES because the body uses them).","inputSchema":{"type":"object","properties":' +
+    '{"file":{"type":"string"},"line":{"type":"integer","description":"1-based."},' +
+    '"column":{"type":"integer","description":"1-based."},' + ApplyProp + ',' +
+    InstanceProp + '},"required":["file","line","column"]}}' +
+    ',' +
+    '{"name":"dfm_events","description":"Checks every form of the project: an event ' +
+    'assigned in the .dfm whose handler is MISSING in the unit, or whose parameter list ' +
+    'does not match the event type (the cause of hard-to-find stack corruption). Each ' +
+    'issue carries an id; apply=true with \"fix_ids\" generates the missing handlers / ' +
+    'corrects the parameter lists. Nothing is fixed without naming ids - a generated ' +
+    'empty handler shadows an inherited one.","inputSchema":{"type":"object",' +
+    '"properties":{"fix_ids":{"type":"array","items":{"type":"string"},' +
+    '"description":"Ids from a previous call."},' + ApplyProp + ',' + InstanceProp +
+    '}}}' +
+    ',' +
+    '{"name":"interface_guids","description":"Every interface declaration of the ' +
+    'project with its GUID, flagging DUPLICATE GUIDs (which make Supports / ' +
+    'QueryInterface return the wrong object) and interfaces without one. An interface ' +
+    'paired with a dispinterface on the same GUID is a type-library import and not ' +
+    'flagged. Read-only.","inputSchema":{"type":"object","properties":' +
+    '{"only_problems":{"type":"boolean","description":"Default true."},' +
+    InstanceProp + '}}}' +
+    ',' +
     '{"name":"add_unit","description":"Adds a unit to the uses clause of a file (interface or i' +
     'mplementation), minimal edit, IDE buffer when the file is open. Refuses units only on the ' +
     'browsing path. apply=false (the default) only shows the change.","inputSchema":{"type":"object","properties":{"file":{"type":"string","desc' +

@@ -31,6 +31,9 @@ unit Expert.ExtractInterfaceWizard;
 
 interface
 
+uses
+  Expert.ExtractInterface;
+
 procedure ExtractInterfaceFromClass;
 procedure AddToExistingInterface;
 /// <summary>For a class that does NOT descend from TInterfacedObject,
@@ -43,6 +46,24 @@ procedure AddToExistingInterface;
 ///  reference drops.</summary>
 procedure DelegateInterfaceImplementation;
 
+/// <summary>Extract-interface without any UI: APREVIEW returns the
+///  interface text that WOULD be written (AInterfaceText) and the parsed
+///  class in AInfo, otherwise the same apply the dialog triggers runs.
+///  AMEMBERS (member names) replaces the dialog's selection; empty = the
+///  dialog's default (public + published methods and properties).
+/// <summary>Adds IInterface support to the class at (AFile, ALine1) without
+///  any UI. APREVIEW writes nothing and returns the generated declaration
+///  and implementation in AReport; otherwise AReport is the summary the menu
+///  entry shows. MAIN THREAD.</summary>
+function DelegateIInterfaceHeadless(const AFile: string; ALine1: Integer;
+  APreview: Boolean; out AReport, AError: string): Boolean;
+
+///  MAIN THREAD.</summary>
+function ExtractInterfaceHeadless(const AFile: string; ALine1: Integer;
+  AAddToExisting: Boolean; const AInterfaceName, ATargetFile: string;
+  const AMembers: TArray<string>; APreview: Boolean;
+  out AInfo: TExtractInterfaceInfo; out AInterfaceText, AError: string): Boolean;
+
 implementation
 
 uses
@@ -51,7 +72,7 @@ uses
   System.UITypes,
   Vcl.Dialogs, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
   {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF} 
-  Expert.EditorHelperIntf, Expert.ExtractInterface, Expert.ExtractInterfaceDialog,
+  Expert.EditorHelperIntf, Expert.ExtractInterfaceDialog,   // engine: interface uses
   Expert.DialogHelper, Expert.LspManager, Lsp.Client, Lsp.Uri, Lsp.Protocol,
   Delphi.FileEncoding, Expert.PascalScanner;
 
@@ -1235,6 +1256,134 @@ begin
   WriteSourceLines(AInfo.SourceFile, SrcLines);
 end;
 
+
+// ---------------------------------------------------------------------------
+//  The same extraction without the dialog (MCP, user request 2026-09-29)
+// ---------------------------------------------------------------------------
+//
+// Builds the SAME TExtractInterfaceInfo RunWizard builds (parse the class,
+// preselect the public/published methods and properties) and hands it to
+// the SAME ApplyExtractNew / ApplyAddToExisting. Only the member choice
+// comes from arguments instead of a list box.
+function ExtractInterfaceHeadless(const AFile: string; ALine1: Integer;
+  AAddToExisting: Boolean; const AInterfaceName, ATargetFile: string;
+  const AMembers: TArray<string>; APreview: Boolean;
+  out AInfo: TExtractInterfaceInfo; out AInterfaceText, AError: string): Boolean;
+var
+  Lines: TArray<string>;
+  Info: TExtractInterfaceInfo;
+  Stats: TResolveUsesStats;
+
+  function Wanted(const AName: string): Boolean;
+  begin
+    Result := False;
+    for var W in AMembers do
+      if SameText(W, AName) then Exit(True);
+  end;
+
+begin
+  Result := False;
+  AError := '';
+  AInterfaceText := '';
+  AInfo := Default(TExtractInterfaceInfo);
+  Editor.SaveAllFiles;
+  if not TFile.Exists(AFile) then
+  begin
+    AError := 'file not found: ' + AFile;
+    Exit;
+  end;
+  Lines := ReadSourceLines(AFile);
+  if not TExtractInterfaceEngine.ParseClassAtLine(Lines, AFile, ALine1, Info) then
+  begin
+    AError := Format('no class declaration found around line %d', [ALine1]);
+    Exit;
+  end;
+  if AAddToExisting then Info.Mode := eimAddToExisting
+  else Info.Mode := eimExtractNew;
+
+  // Default selection: all public + published methods and properties -
+  // the dialog's default. A given list picks exactly those members.
+  var Picked := 0;
+  for var I := 0 to High(Info.Members) do
+  begin
+    var M := Info.Members[I];
+    if Length(AMembers) > 0 then
+      Info.Members[I].Selected := Wanted(M.Name)
+    else
+      Info.Members[I].Selected :=
+        (M.Visibility in [mvPublic, mvPublished]) and (M.Kind <> mkField);
+    if Info.Members[I].Selected then Inc(Picked);
+  end;
+  if Picked = 0 then
+  begin
+    if Length(AMembers) > 0 then
+      AError := 'none of the given members is declared in ' + Info.ClassName
+    else
+      AError := Info.ClassName + ' declares no public or published method or ' +
+        'property to extract';
+    Exit;
+  end;
+
+  if AAddToExisting then
+  begin
+    if AInterfaceName = '' then
+    begin
+      AError := 'pass "interface_name" - the interface to extend';
+      Exit;
+    end;
+    var Found := False;
+    for var Loc in TProjectInterfaceScanner.ScanProject(Editor.GetProjectSourceFiles) do
+      if SameText(Loc.InterfaceName, AInterfaceName) then
+      begin
+        Info.InterfaceName := Loc.InterfaceName;
+        Info.ExistingFile := Loc.FileName;
+        Info.ExistingDeclLine := Loc.DeclLine;
+        Info.ExistingEndLine := Loc.EndLine;
+        Found := True;
+        Break;
+      end;
+    if not Found then
+    begin
+      AError := 'no interface "' + AInterfaceName + '" in the project';
+      Exit;
+    end;
+  end
+  else
+  begin
+    Info.InterfaceName := AInterfaceName;
+    if Info.InterfaceName = '' then
+      Info.InterfaceName := TExtractInterfaceEngine.SuggestInterfaceName(Info.ClassName);
+    Info.Guid := TExtractInterfaceEngine.NewGuidLiteral;
+    Info.TargetFile := ATargetFile;
+    if Info.TargetFile = '' then
+      Info.TargetFile := TExtractInterfaceEngine.SuggestTargetFile(AFile,
+        Info.InterfaceName)
+    else if ExtractFilePath(Info.TargetFile) = '' then
+      Info.TargetFile := ExtractFilePath(AFile) + Info.TargetFile;
+    if ExtractFileExt(Info.TargetFile) = '' then
+      Info.TargetFile := Info.TargetFile + '.pas';
+  end;
+
+  AInterfaceText := TExtractInterfaceEngine.BuildInterfaceText(Info);
+  AInfo := Info;
+  if APreview then Exit(True);
+
+  if not AAddToExisting and TFile.Exists(Info.TargetFile) then
+  begin
+    // the dialog asks here; without one, refusing is the only honest answer
+    AError := Info.TargetFile + ' already exists - pass "target_file" with ' +
+      'another name, or use add_to_existing';
+    Exit;
+  end;
+  try
+    if AAddToExisting then ApplyAddToExisting(Info, Stats, nil)
+    else ApplyExtractNew(Info, Stats, nil);
+    Result := True;
+  except
+    on E: Exception do AError := E.ClassName + ': ' + E.Message;
+  end;
+end;
+
 procedure RunWizard(AMode: TInterfaceMode);
 var
   Src: string;
@@ -1471,6 +1620,25 @@ end;
 
 procedure DelegateInterfaceImplementation;
 var
+  Src, Report, Error: string;
+  CurLine: Integer;
+begin
+  Editor.SaveAllFiles;
+  if not GetEditorCursorLine(Src, CurLine) then
+  begin
+    ShowThemedMessage('No editor file at cursor.'); Exit;
+  end;
+  if not DelegateIInterfaceHeadless(Src, CurLine, False, Report, Error) then
+    ShowThemedMessage(Error)
+  else
+    ShowThemedMessage(Report);
+end;
+
+// The work itself - shared with the MCP tool (user request 2026-09-29), so
+// the agent adds the SAME code the menu entry does.
+function DelegateIInterfaceHeadless(const AFile: string; ALine1: Integer;
+  APreview: Boolean; out AReport, AError: string): Boolean;
+var
   Src, BaseClass: string;
   CurLine, InsertBefore, ClassEndAfter, I: Integer;
   Lines: TArray<string>;
@@ -1480,15 +1648,21 @@ var
   OverrideKW, BaseDesc, ExtraNote: string;
   InjectNewInstOK, InjectAfterCtorOK: Boolean;
 begin
-  Editor.SaveAllFiles;
-  if not GetEditorCursorLine(Src, CurLine) then
+  Result := False;
+  AReport := '';
+  AError := '';
+  Src := AFile;
+  CurLine := ALine1;
+  if not FileExists(Src) then
   begin
-    ShowThemedMessage('No editor file at cursor.'); Exit;
+    AError := 'file not found: ' + Src;
+    Exit;
   end;
   Lines := ReadSourceLines(Src);
   if not TExtractInterfaceEngine.ParseClassAtLine(Lines, Src, CurLine, Info) then
   begin
-    ShowThemedMessage('No class declaration found around the cursor.'); Exit;
+    AError := Format('no class declaration found around line %d', [CurLine]);
+    Exit;
   end;
 
   // Skip if the class already lists IInterface / IUnknown.
@@ -1497,9 +1671,9 @@ begin
   for var A in Ancestors do
     if SameText(A, 'IInterface') or SameText(A, 'IUnknown') then
     begin
-      ShowThemedMessage(Format(
-        'Class %s already lists %s in its ancestor list - nothing to do.',
-        [Info.ClassName, A]));
+      AError := Format(
+        'class %s already lists %s in its ancestor list - nothing to do',
+        [Info.ClassName, A]);
       Exit;
     end;
 
@@ -1658,7 +1832,7 @@ begin
     end;
   end;
 
-  WriteSourceLines(Src, Lines);
+  if not APreview then WriteSourceLines(Src, Lines);
 
   if BaseIsTObjectLike then
     BaseDesc := 'TObject-like base (' +
@@ -1686,10 +1860,20 @@ begin
         '- WARNING: could not locate the existing AfterConstruction body. ' +
         'Add  AtomicDecrement(FRefCount);  manually.';
 
-  ShowThemedMessage(Format(
-    'Class %s now implements IInterface (%s).' + sLineBreak +
-    'The instance frees itself when the last interface reference is dropped.%s',
-    [Info.ClassName, BaseDesc, ExtraNote]));
+  if APreview then
+    AReport := Format(
+      'Class %s would implement IInterface (%s).' + sLineBreak +
+      'The instance then frees itself when the last interface reference is ' +
+      'dropped.%s' + sLineBreak + sLineBreak +
+      'Declaration:' + sLineBreak + '%s' + sLineBreak + sLineBreak +
+      'Implementation:' + sLineBreak + '%s',
+      [Info.ClassName, BaseDesc, ExtraNote, DeclBlock, ImplBlock])
+  else
+    AReport := Format(
+      'Class %s now implements IInterface (%s).' + sLineBreak +
+      'The instance frees itself when the last interface reference is dropped.%s',
+      [Info.ClassName, BaseDesc, ExtraNote]);
+  Result := True;
 end;
 
 end.

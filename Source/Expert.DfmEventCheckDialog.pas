@@ -19,6 +19,12 @@ interface
 
 procedure CheckDfmEventHandlers;
 
+/// <summary>The files whose event-type declarations the check resolves
+///  signatures from (project sources + the IDE's library/browsing paths).
+///  Exported for the MCP tool, which runs the same check without the
+///  dialog (user request 2026-09-29).</summary>
+function GatherSignatureFiles: TArray<string>;
+
 implementation
 
 uses

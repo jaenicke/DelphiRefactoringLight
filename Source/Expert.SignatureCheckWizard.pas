@@ -40,6 +40,12 @@ type
     procedure Execute;
   end;
 
+/// <summary>Aligns AENTRY with AREF: an implementation header keeps its
+///  parameter NAMES (the body uses them), a declaration takes the reference
+///  signature verbatim. '' on success, else the reason. Shared by the dialog
+///  and the MCP tool (user request 2026-09-29).</summary>
+function AlignSignatureEntry(const AEntry, ARef: TSignatureEntry): string;
+
 var
   SignatureCheckInstance: TLspSignatureCheckWizard;
 
@@ -82,6 +88,11 @@ end;
 // kept (the body uses them). Declaration: the reference signature
 // replaces the declared one, directives after it stay.
 function TLspSignatureCheckWizard.DoAlign(AEntry, ARef: TSignatureEntry): string;
+begin
+  Result := AlignSignatureEntry(AEntry, ARef);
+end;
+
+function AlignSignatureEntry(const AEntry, ARef: TSignatureEntry): string;
 var
   Content, NewSig: string;
   Lines, NewLines: TArray<string>;

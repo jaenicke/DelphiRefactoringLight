@@ -38,7 +38,10 @@ uses
   Expert.VcsBlame, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
   Expert.PluginSettings, Expert.IncludeExpansion, Expert.InterfaceLinks,
   Expert.SemanticReplace, Expert.SemanticReplaceWizard, Expert.MoveToUnit, Expert.SafeDelete,
-  Expert.SafeDeletePlan, Lsp.Client, Lsp.Protocol, Lsp.Uri,
+  Expert.SafeDeletePlan, Expert.StatementRefactor, Expert.WithRefactorWizard,
+  Expert.WithRewriter, Expert.WithScanner, Expert.FindOriginalSymbolWizard,
+  Expert.UnitReferencesWizard, Expert.UnitReferencesDialog,
+  Lsp.Client, Lsp.Protocol, Lsp.Uri,
   Delphi.FileEncoding, Expert.PascalScanner, Expert.McpTools;
 
 // ---------------------------------------------------------------------------
@@ -1851,8 +1854,697 @@ begin
   Result := McpOk(Res);
 end;
 
+
+// ---------------------------------------------------------------------------
+//  Statement refactorings: extract variable / wrap in try..finally
+// ---------------------------------------------------------------------------
+//
+// Both planners are pure and were written for the editor entry points; the
+// tools below feed them the same way but take the selection as arguments
+// (user request 2026-09-29: every refactoring reachable through the bridge,
+// with the preview of 1.12.0).
+
+// One place for "a planner produced new content -> preview or write".
+function ContentResult(const AFile, AOld, ANewContent, ATool: string;
+  ADoApply: Boolean; const AToken: string; AExtra: TJSONObject): string;
+var
+  SL: TStringList;
+  NewContent, Problem, Token: string;
+begin
+  Token := AToken;
+  NewContent := ANewContent;
+  SL := TStringList.Create;
+  try
+    if ADoApply then
+    begin
+      if (Token <> '') and not CheckPreviewToken(Token, ATool,
+        function(AF: string): string
+        begin
+          if not McpReadContent(AF, Result) then Result := '';
+        end, Problem) then
+      begin
+        AExtra.Free;
+        Exit(McpErr(Problem));
+      end;
+      SL.Text := NewContent;
+      if not ApplyLinesMinimal(AFile, SL, AOld) then
+      begin
+        AExtra.Free;
+        Exit(McpErr('the change could not be written'));
+      end;
+    end
+    else
+      Token := NewPreviewToken(ATool, [AFile], [AOld]);
+  finally
+    SL.Free;
+  end;
+  var Res := AExtra;
+  if Res = nil then Res := TJSONObject.Create;
+  Res.AddPair('file', AFile);
+  Res.AddPair('applied', TJSONBool.Create(ADoApply));
+  var Total := 0;
+  var Ch := DiffToChanges(AFile, AOld, NewContent, 40, Total);
+  Res.AddPair('changes', ChangesToJson(Ch));
+  if Total > Length(Ch) then
+    Res.AddPair('changesTruncated', TJSONNumber.Create(Total));
+  if ADoApply then
+    Res.AddPair('note', 'Changed in the IDE buffer when the file is open (not ' +
+      'saved), otherwise on disk.')
+  else
+  begin
+    Res.AddPair('token', Token);
+    Res.AddPair('note', 'Nothing was written. Call again with apply=true (and ' +
+      'this token) to make the change.');
+  end;
+  Result := McpOk(Res);
+end;
+
+// A planner that works on LINES: joined the way SplitContentLines splits,
+// so a trailing empty element stays the file's final line break.
+function LinesResult(const AFile, AOld: string; const ANewLines: TArray<string>;
+  const ATool: string; ADoApply: Boolean; const AToken: string;
+  AExtra: TJSONObject): string;
+var
+  LB: string;
+begin
+  if Pos(#13#10, AOld) > 0 then LB := #13#10
+  else if Pos(#10, AOld) > 0 then LB := #10
+  else LB := sLineBreak;
+  Result := ContentResult(AFile, AOld, string.Join(LB, ANewLines), ATool,
+    ADoApply, AToken, AExtra);
+end;
+
+function ToolExtractVariable(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Expr, Name, Err, Msg: string;
+  L1, Col1: Integer;
+  DoApply: Boolean;
+  Plan: TExtractVarPlan;
+  Planned: Boolean;
+begin
+  F := ArgStr(AArgs, 'file');
+  L1 := ArgInt(AArgs, 'line');
+  Expr := ArgStr(AArgs, 'expression');
+  Col1 := ArgInt(AArgs, 'column');
+  Name := Trim(ArgStr(AArgs, 'name'));
+  var EndCol1 := ArgInt(AArgs, 'end_column');
+  if (F = '') or (L1 < 1) then
+    Exit(McpErr('arguments "file" and "line" (1-based) are required'));
+  if (Expr = '') and ((Col1 < 1) or (EndCol1 <= Col1)) then
+    Exit(McpErr('pass "expression" (the text to extract) or "column" + ' +
+      '"end_column" (1-based, end exclusive)'));
+  F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Msg := '';
+  Planned := False;
+  var Content := '';
+  var Why := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      if not McpReadContent(F, Content) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      var Lines := Content.Replace(#13#10, #10).Split([#10]);
+      if L1 > Length(Lines) then
+      begin
+        Msg := Format('line %d is beyond the file (%d lines)', [L1, Length(Lines)]);
+        Exit;
+      end;
+      var LineText := Lines[L1 - 1];
+      var Start0: Integer;
+      var End0: Integer;
+      if Expr <> '' then
+      begin
+        // locate the expression on the line - at "column" when given,
+        // else its first occurrence
+        var P := 0;
+        if Col1 >= 1 then P := Pos(Expr, LineText, Col1);
+        if P = 0 then P := Pos(Expr, LineText);
+        if P = 0 then
+        begin
+          Msg := 'the expression is not on line ' + IntToStr(L1);
+          Exit;
+        end;
+        Start0 := P - 1;
+        End0 := Start0 + Length(Expr);
+      end
+      else
+      begin
+        Start0 := Col1 - 1;
+        End0 := EndCol1 - 1;
+        if End0 > Length(LineText) then
+        begin
+          Msg := 'end_column is beyond the line';
+          Exit;
+        end;
+        Expr := Copy(LineText, Start0 + 1, End0 - Start0);
+      end;
+      if Name = '' then Name := SuggestVariableName(Expr);
+      if not IsValidIdent(Name) then
+      begin
+        Msg := '"' + Name + '" is not a valid identifier';
+        Exit;
+      end;
+      Planned := PlanExtractVariable(Lines, L1 - 1, Start0, End0, Name, Plan, Why);
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if Msg <> '' then Exit(McpErr(Msg));
+  if not Planned then
+    Exit(McpErr('extract variable is not possible here: ' + Why));
+  var Extra := TJSONObject.Create;
+  Extra.AddPair('name', Name);
+  Extra.AddPair('expression', Expr);
+  Extra.AddPair('declaredBeforeLine', TJSONNumber.Create(Plan.StatementLine + 1));
+  Extra.AddPair('declaration', Trim(Plan.DeclText));
+  Result := LinesResult(F, Content, Plan.NewLines, 'extract_variable', DoApply,
+    ArgStr(AArgs, 'token'), Extra);
+end;
+
+function ToolWrapTryFinally(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Cleanup, Err, Msg, Why, Content: string;
+  From1, To1: Integer;
+  DoApply, Planned, HadCleanup: Boolean;
+  NewLines: TArray<string>;
+begin
+  F := ArgStr(AArgs, 'file');
+  From1 := ArgInt(AArgs, 'from_line');
+  To1 := ArgInt(AArgs, 'to_line', From1);
+  Cleanup := Trim(ArgStr(AArgs, 'cleanup'));
+  HadCleanup := Cleanup <> '';
+  if (F = '') or (From1 < 1) or (To1 < From1) then
+    Exit(McpErr('arguments "file" and "from_line" (1-based) are required; ' +
+      '"to_line" defaults to from_line'));
+  F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Msg := '';
+  Planned := False;
+  Content := '';
+  Why := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      if not McpReadContent(F, Content) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      var Lines := Content.Replace(#13#10, #10).Split([#10]);
+      if To1 > Length(Lines) then
+      begin
+        Msg := Format('to_line %d is beyond the file (%d lines)', [To1, Length(Lines)]);
+        Exit;
+      end;
+      if not HadCleanup then
+        // the statement before the range names what to release
+        for var I := From1 - 2 downto 0 do
+          if Trim(Lines[I]) <> '' then
+          begin
+            Cleanup := InferCleanup(Lines[I]);
+            Break;
+          end;
+      Planned := PlanWrapTryFinally(Lines, From1 - 1, To1 - 1, Cleanup, NewLines, Why);
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if Msg <> '' then Exit(McpErr(Msg));
+  if not Planned then
+    Exit(McpErr('wrap in try..finally is not possible here: ' + Why));
+  var Extra := TJSONObject.Create;
+  if Cleanup <> '' then
+  begin
+    Extra.AddPair('cleanup', Cleanup);
+    if not HadCleanup then
+      Extra.AddPair('cleanupFrom', 'inferred from the statement before the range - ' +
+        'pass "cleanup" to override it');
+  end
+  else
+    Extra.AddPair('cleanup', 'none - a TODO comment is inserted instead; pass ' +
+      '"cleanup" with the statement that releases what the block acquires');
+  Result := LinesResult(F, Content, NewLines, 'wrap_try_finally', DoApply,
+    ArgStr(AArgs, 'token'), Extra);
+end;
+
+// apply=false reports the plan only (user request 2026-09-29).
+function ToolMoveToUnit(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Target, Err, Token: string;
+  L1, C1: Integer;
+  Plan: TMovePlan;
+  DoApply: Boolean;
+begin
+  F := ExpandFileName(ArgStr(AArgs, 'file'));
+  L1 := ArgInt(AArgs, 'line');
+  C1 := ArgInt(AArgs, 'column');
+  Target := ArgStr(AArgs, 'target_file');
+  if (ArgStr(AArgs, 'file') = '') or (L1 < 1) or (C1 < 1) or (Target = '') then
+    Exit(McpErr('arguments "file", "line", "column" (1-based) and ' +
+      '"target_file" are required'));
+  if ExtractFilePath(Target) = '' then Target := ExtractFilePath(F) + Target;
+  if SameText(ExtractFileExt(Target), '') then Target := Target + '.pas';
+  Target := ExpandFileName(Target);
+  DoApply := ArgBool(AArgs, 'apply');
+  Token := ArgStr(AArgs, 'token');
+  var Ok := False;
+  var Ident := '';
+  var Msg := '';
+  Plan := Default(TMovePlan);
+  if not McpRunOnMain(
+    procedure
+    var
+      C: string;
+      Col0: Integer;
+    begin
+      if not McpReadContent(F, C) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      Ident := IdentifierAtPos(C.Replace(#13#10, #10).Split([#10]), L1 - 1, C1 - 1, Col0);
+      if Ident = '' then
+      begin
+        Msg := 'there is no identifier at that position';
+        Exit;
+      end;
+      if DoApply and (Token <> '') and not CheckPreviewToken(Token, 'move_to_unit',
+        function(AFile: string): string
+        begin
+          if not McpReadContent(AFile, Result) then Result := '';
+        end, Msg) then Exit;
+      Ok := TLspMoveToUnit.ExecuteToExistingUnit(Ident, F, Target, not DoApply,
+        Plan, Msg);
+      if Ok and not DoApply then
+        Token := NewPreviewToken('move_to_unit', [F], [C]);
+    end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(Msg));
+  var Res := TJSONObject.Create;
+  Res.AddPair('moved', Ident);
+  Res.AddPair('target', Target);
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('moves', MovePlanToJson(Plan));
+  if Msg <> '' then Res.AddPair('note', Msg);
+  if DoApply then
+    Res.AddPair('saved', 'The edits are in the IDE buffers (not saved) for ' +
+      'units open in the IDE, on disk for the others.')
+  else
+  begin
+    Res.AddPair('token', Token);
+    Res.AddPair('note2', 'Nothing was written. Call again with apply=true (and ' +
+      'this token) to move.');
+  end;
+  Result := McpOk(Res);
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Uses cleanup: the dialog's verdicts as an edit
+// ---------------------------------------------------------------------------
+//
+// analyze_uses reported the verdicts and left the caller to rebuild the
+// edit out of remove_unit / add_unit calls. This runs what the dialog runs
+// (user request 2026-09-29): UNUSED entries are removed, MOVABLE ones move
+// to the implementation uses - each through the same pure planners the
+// uses editor writes with, chained over one content so the preview is the
+// whole change. Anything the analysis is unsure about stays untouched, and
+// the answer says why per entry.
+function ToolCleanupUses(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Err, C: string;
+  Found, DoApply, DoRemove, DoMove: Boolean;
+  Cycle0: Integer;
+  Entries: TArray<TUsesEntryInfo>;
+begin
+  F := ArgStr(AArgs, 'file');
+  if F = '' then Exit(McpErr('argument "file" is required'));
+  F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  DoRemove := ArgBool(AArgs, 'remove_unused', True);
+  DoMove := ArgBool(AArgs, 'move_to_implementation', False);
+  Found := False;
+  Cycle0 := TUnitIndex.Instance.ScanCycle;
+  if not McpRunOnMain(
+    procedure
+    begin
+      Found := McpReadContent(F, C);
+      TUnitIndex.Instance.RefreshSourcesFromEditor;
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if not Found then Exit(McpErr('file not found: ' + F));
+  // the index parses from DISK - wait for one full cycle like the dialog
+  var Waited := 0;
+  while (TUnitIndex.Instance.ScanCycle = Cycle0) and (Waited < 5000) do
+  begin
+    if WaitForSingleObject(AStop, 50) = WAIT_OBJECT_0 then Exit(McpErr('shutting down'));
+    Inc(Waited, 50);
+  end;
+  var Snap := TUnitIndex.Instance.Snapshot;
+  if (Snap = nil) or (Snap.IdentCount = 0) then
+    Exit(McpErr('the identifier index is not ready yet - see get_status'));
+  Entries := AnalyzeUses(C,
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      for var H in Snap.Lookup(AIdent) do Result := Result + [H.UnitName];
+    end,
+    function(const AUnitName: string): Boolean
+    begin
+      Result := Snap.HasUnit(AUnitName);
+    end,
+    function(const AUnitName: string): Boolean
+    begin
+      Result := Snap.HasInitCode(AUnitName);
+    end);
+
+  var Content := C;
+  var Rows := TJSONArray.Create;
+  var Removed := 0;
+  var Moved := 0;
+  for var E in Entries do
+  begin
+    var Row := TJSONObject.Create;
+    Row.AddPair('unit', E.UnitName);
+    Row.AddPair('verdict', VerdictNames[E.Verdict]);
+    var Action := 'kept';
+    var Next := '';
+    if (E.Verdict = uvUnused) and DoRemove then
+    begin
+      if PlanRemoveUnitFromUsesText(Content, E.UnitName, Next) then
+      begin
+        Content := Next;
+        Action := 'removed';
+        Inc(Removed);
+      end
+      else
+        Action := 'kept: the uses clause could not be edited safely';
+    end
+    else if (E.Verdict = uvMovable) and DoMove then
+    begin
+      // remove from the interface, add to the implementation - the same two
+      // steps the dialog does, and both must succeed
+      if PlanRemoveUnitFromUsesText(Content, E.UnitName, Next)
+        and PlanAddUnitToUsesText(Next, E.UnitName, usImplementation, Next) then
+      begin
+        Content := Next;
+        Action := 'moved to the implementation uses';
+        Inc(Moved);
+      end
+      else
+        Action := 'kept: the move could not be planned safely';
+    end
+    else if E.Verdict = uvUnused then
+      Action := 'kept: remove_unused is off'
+    else if E.Verdict = uvMovable then
+      Action := 'kept: move_to_implementation is off';
+    Row.AddPair('action', Action);
+    Rows.Add(Row);
+  end;
+
+  var Extra := TJSONObject.Create;
+  Extra.AddPair('entries', Rows);
+  Extra.AddPair('removed', TJSONNumber.Create(Removed));
+  Extra.AddPair('movedToImplementation', TJSONNumber.Create(Moved));
+  if Content = C then
+  begin
+    Extra.AddPair('file', F);
+    Extra.AddPair('applied', TJSONBool.Create(False));
+    Extra.AddPair('changes', TJSONArray.Create);
+    Extra.AddPair('note', 'Nothing to clean up with these options. init_code, ' +
+      'ide_managed and unknown entries are kept deliberately; class helpers, ' +
+      'operators and initialization side effects are invisible to a textual ' +
+      'analysis.');
+    Exit(McpOk(Extra));
+  end;
+  Result := ContentResult(F, C, Content, 'cleanup_uses', DoApply,
+    ArgStr(AArgs, 'token'), Extra);
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Remove with
+// ---------------------------------------------------------------------------
+//
+// One occurrence (file + line), a file, a list or the whole project. The
+// rewrite itself is the wizard's - only the dialog is replaced by this
+// answer (user request 2026-09-29). apply=false is the default; an
+// occurrence the rewriter cannot handle is listed with the reason, never
+// rewritten half way.
+function ToolRemoveWith(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Files: TArray<string>;
+  Results: TArray<TWithRewriteResult>;
+  F, Err, RunErr, Token: string;
+  L1, Applied, Failed, SkippedNested: Integer;
+  DoApply, Inline_, Ok: Boolean;
+begin
+  F := ArgStr(AArgs, 'file');
+  if F <> '' then F := ExpandFileName(F);
+  L1 := ArgInt(AArgs, 'line');
+  Files := nil;
+  if F <> '' then Files := [F];
+  var Arr := AArgs.GetValue<TJSONArray>('files', nil);
+  if Arr <> nil then
+    for var V in Arr do Files := Files + [ExpandFileName(V.Value)];
+  var Project := ArgBool(AArgs, 'project');
+  if (Length(Files) = 0) and not Project then
+    Exit(McpErr('pass "file" (optionally with "line" for a single ' +
+      'with-statement), "files" or "project": true'));
+  DoApply := ArgBool(AArgs, 'apply');
+  Inline_ := ArgBool(AArgs, 'inline_vars', True);
+  Token := ArgStr(AArgs, 'token');
+  Ok := False;
+  RunErr := '';
+  Applied := 0;
+  Failed := 0;
+  SkippedNested := 0;
+  var Contents: TArray<string> := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      var All := Files;
+      if Project and (Editor <> nil) then All := All + Editor.GetProjectSourceFiles;
+      if DoApply and (Token <> '') and not CheckPreviewToken(Token, 'remove_with',
+        function(AFile: string): string
+        begin
+          if not McpReadContent(AFile, Result) then Result := '';
+        end, RunErr) then Exit;
+      Ok := RunRemoveWithHeadless(All, F, L1, DoApply, Inline_, Results,
+        Applied, Failed, SkippedNested, RunErr);
+      if Ok and not DoApply then
+      begin
+        // the token pins the files the preview actually describes
+        var Seen := TStringList.Create;
+        try
+          Seen.CaseSensitive := False;
+          for var R in Results do
+            if R.IsAutoRewritable and (Seen.IndexOf(R.FileName) < 0) then
+              Seen.Add(R.FileName);
+          var Pin: TArray<string> := nil;
+          for var I := 0 to Seen.Count - 1 do
+          begin
+            var C: string;
+            if McpReadContent(Seen[I], C) then
+            begin
+              Pin := Pin + [Seen[I]];
+              Contents := Contents + [C];
+            end;
+          end;
+          if Length(Pin) > 0 then Token := NewPreviewToken('remove_with', Pin, Contents);
+        finally
+          Seen.Free;
+        end;
+      end;
+    end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then Exit(McpErr(RunErr));
+  var Rows := TJSONArray.Create;
+  var Rewritable := 0;
+  for var R in Results do
+  begin
+    var O := TJSONObject.Create;
+    O.AddPair('file', R.FileName);
+    O.AddPair('line', TJSONNumber.Create(R.Occurrence.KeywordPos.Line));
+    O.AddPair('column', TJSONNumber.Create(R.Occurrence.KeywordPos.Col));
+    var Targets := TJSONArray.Create;
+    for var Tg in R.Occurrence.Targets do Targets.Add(Tg.Expression);
+    O.AddPair('targets', Targets);
+    if R.IsAutoRewritable then
+    begin
+      Inc(Rewritable);
+      O.AddPair('rewritable', TJSONBool.Create(True));
+      O.AddPair('before', R.OriginalText);
+      O.AddPair('after', R.NewText);
+    end
+    else
+    begin
+      O.AddPair('rewritable', TJSONBool.Create(False));
+      O.AddPair('reason', WithRewriteIssueText(R.Issues));
+    end;
+    Rows.Add(O);
+  end;
+  var Res := TJSONObject.Create;
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('found', TJSONNumber.Create(Length(Results)));
+  Res.AddPair('rewritable', TJSONNumber.Create(Rewritable));
+  Res.AddPair('occurrences', Rows);
+  if DoApply then
+  begin
+    Res.AddPair('written', TJSONNumber.Create(Applied));
+    if Failed > 0 then Res.AddPair('failed', TJSONNumber.Create(Failed));
+    if SkippedNested > 0 then
+      Res.AddPair('skippedEnclosing', TJSONNumber.Create(SkippedNested));
+    Res.AddPair('note', 'Changed in the IDE buffers (not saved) for open units, ' +
+      'on disk for the others.' + IfThen(SkippedNested > 0,
+      ' An enclosing with-statement that contains another rewritten one is ' +
+      'skipped - call again for it.', ''));
+  end
+  else
+  begin
+    if Token <> '' then Res.AddPair('token', Token);
+    Res.AddPair('note', 'Nothing was written. "before"/"after" is the whole ' +
+      'with-statement as it would be replaced; call again with apply=true ' +
+      '(and this token) to rewrite the rewritable ones.');
+  end;
+  Result := McpOk(Res);
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Find original symbol
+// ---------------------------------------------------------------------------
+//
+// Read-only. The chain is the menu entry's (DelphiLSP, then the qualifier's
+// type, then the identifier index) - ResolveOriginalSymbol is shared, so an
+// answer here is the place the menu would jump to (user request 2026-09-29).
+// lsp_definition alone is NOT the same: it stops where DelphiLSP is silent,
+// which is exactly the RSS-5463 overload case this resolves.
+function ToolFindOriginalSymbol(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Err, Note, Ident: string;
+  L1, C1: Integer;
+  Hits: TArray<TOriginalSymbolHit>;
+  Ctx: TPosContext;
+begin
+  if not RequireFilePos(AArgs, F, L1, C1, Err) then Exit(McpErr(Err));
+  if not GatherPosContext(F, L1, C1, True, AStop, Ctx, Err) then Exit(McpErr(Err));
+  Ident := Ctx.Identifier;
+  Note := '';
+  Hits := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      ResolveOriginalSymbol(Ctx.Client, F, L1 - 1, Ctx.IdentCol0, Ident,
+        Hits, Note);
+    end, True, AStop, Err, 120000) then Exit(McpErr(Err));
+  var Res := TJSONObject.Create;
+  Res.AddPair('identifier', Ident);
+  var Arr := TJSONArray.Create;
+  for var H in Hits do
+  begin
+    var O := TJSONObject.Create;
+    O.AddPair('file', H.FilePath);
+    O.AddPair('line', TJSONNumber.Create(H.Line + 1));
+    O.AddPair('column', TJSONNumber.Create(H.Col + 1));
+    O.AddPair('via', H.Via);
+    if H.TypeName <> '' then O.AddPair('type', H.TypeName);
+    Arr.Add(O);
+  end;
+  Res.AddPair('declarations', Arr);
+  if Length(Hits) = 0 then
+  begin
+    if Note = '' then Note := 'no declaration found, and the identifier index ' +
+      'does not know it either';
+    Res.AddPair('note', Note);
+  end
+  else if Length(Hits) > 1 then
+    Res.AddPair('note', 'several units declare this identifier - the menu entry ' +
+      'hands this case to the Find-Unit dialog; find_unit lists the same ' +
+      'candidates with their declarations')
+  else if Note <> '' then
+    Res.AddPair('note', Note);
+  Result := McpOk(Res);
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Find unit references
+// ---------------------------------------------------------------------------
+//
+// Which units use the given unit, and WHERE - every hit verified with
+// DelphiLSP, plus one "(unused)" row per unit that lists it in its uses
+// clause without referencing anything of it. Read-only. Shares the wizard's
+// search (user request 2026-09-29).
+function ToolFindUnitReferences(AArgs: TJSONObject; AStop: THandle): string;
+var
+  F, Err, Status, RunErr: string;
+  Items: TUnitRefItems;
+  Ok: Boolean;
+  Max: Integer;
+begin
+  F := ArgStr(AArgs, 'file');
+  if F = '' then Exit(McpErr('argument "file" is required (the unit whose ' +
+    'references you want)'));
+  F := ExpandFileName(F);
+  Max := ArgInt(AArgs, 'max', 400);
+  Ok := False;
+  RunErr := '';
+  Status := '';
+  if not McpRunOnMain(
+    procedure
+    begin
+      if not FileExists(F) then
+      begin
+        RunErr := 'file not found: ' + F;
+        Exit;
+      end;
+      Ok := FindUnitReferencesHeadless(F, Items, Status, RunErr);
+    end, False, AStop, Err, 300000) then Exit(McpErr(Err));
+  if not Ok then
+  begin
+    if RunErr = '' then RunErr := 'the search did not finish';
+    Exit(McpErr(RunErr));
+  end;
+  var Arr := TJSONArray.Create;
+  var Dead := 0;
+  var Shown := 0;
+  for var It in Items do
+  begin
+    if It.IsDead then Inc(Dead);
+    if (Max > 0) and (Shown >= Max) then Continue;
+    Inc(Shown);
+    var O := TJSONObject.Create;
+    O.AddPair('file', It.FilePath);
+    if It.IsDead then
+      O.AddPair('unused', TJSONBool.Create(True))
+    else
+    begin
+      O.AddPair('identifier', It.Identifier);
+      O.AddPair('line', TJSONNumber.Create(It.Line + 1));
+      O.AddPair('column', TJSONNumber.Create(It.Col + 1));
+    end;
+    O.AddPair('preview', Trim(It.Preview));
+    Arr.Add(O);
+  end;
+  var Res := TJSONObject.Create;
+  Res.AddPair('unit', ChangeFileExt(ExtractFileName(F), ''));
+  Res.AddPair('total', TJSONNumber.Create(Length(Items)));
+  Res.AddPair('unusedEntries', TJSONNumber.Create(Dead));
+  Res.AddPair('references', Arr);
+  if Shown < Length(Items) then
+    Res.AddPair('truncated', TJSONNumber.Create(Length(Items) - Shown));
+  if Status <> '' then Res.AddPair('summary', Status);
+  Res.AddPair('note', 'A row with "unused": true means the unit is in that ' +
+    'file''s uses clause but nothing of it is referenced there. Every other ' +
+    'row was verified with DelphiLSP (its definition leads into this unit).');
+  Result := McpOk(Res);
+end;
+
 initialization
   RegisterMcpTool('find_unit', ToolFindUnit);
+  RegisterMcpTool('find_unit_references', ToolFindUnitReferences);
+  RegisterMcpTool('find_original_symbol', ToolFindOriginalSymbol);
+  RegisterMcpTool('remove_with', ToolRemoveWith);
+  RegisterMcpTool('cleanup_uses', ToolCleanupUses);
+  RegisterMcpTool('move_to_unit', ToolMoveToUnit);
+  RegisterMcpTool('extract_variable', ToolExtractVariable);
+  RegisterMcpTool('wrap_try_finally', ToolWrapTryFinally);
   RegisterMcpTool('add_unit', ToolAddUnit);
   RegisterMcpTool('remove_unit', ToolRemoveUnit);
   RegisterMcpTool('analyze_uses', ToolAnalyzeUses);

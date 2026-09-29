@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.12.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.13.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -490,6 +490,16 @@ Further scripts:
 registers it with Claude Code. It connects Claude Code to every running IDE
 with the plugin, so rename, find references, quick fixes and the rest work
 on the IDE's live buffers.
+
+Every refactoring of this plugin whose planner is shared with the dialogs is
+reachable through the bridge: rename, change signature, safe delete, convert
+properties, semantic replace, move to a new or an existing unit, extract
+variable, wrap in try..finally, remove with, uses cleanup, expand includes,
+add / remove unit and the quick fixes &mdash; plus the read-only searches
+(find references, implementations, unit references, original symbol, unit for
+an identifier, uses paths and cycles, blame). Extract method, the interface
+features, the DFM event check and the interface GUID check are still
+IDE-only.
 
 **Nothing is written without being shown first.** Every tool that changes
 code takes `apply` (default `false`): the answer then lists the changes as

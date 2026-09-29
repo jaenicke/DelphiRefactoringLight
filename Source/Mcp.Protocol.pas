@@ -710,6 +710,82 @@ const
     'use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}},"required"' +
     ':["identifier"]}}' +
     ',' +
+    '{"name":"extract_variable","description":"Extracts the selected expression into an ' +
+    'inline variable (\"var LName := <expr>;\") right before the statement that contains it ' +
+    'and replaces the expression with the name. Refused where hoisting would change behaviour ' +
+    '(after a short-circuit and/or, in a loop condition, as the sole statement of a branch, ' +
+    'inside a with). apply=false (the default) only shows the change.","inputSchema":{"type":' +
+    '"object","properties":{"file":{"type":"string"},"line":{"type":"integer",' +
+    '"description":"1-based line of the expression."},"expression":{"type":"string",' +
+    '"description":"The text to extract; located on that line. Alternative to column + ' +
+    'end_column."},"column":{"type":"integer","description":"1-based start column ' +
+    '(with end_column), or where to start looking for \"expression\"."},"end_column":' +
+    '{"type":"integer","description":"1-based, exclusive."},"name":{"type":"string",' +
+    '"description":"Name of the new variable. Default: derived from the expression."},' +
+    ApplyProp + ',' + TokenProp + ',' + InstanceProp + '},"required":["file","line"]}}' +
+    ',' +
+    '{"name":"wrap_try_finally","description":"Wraps the lines from_line..to_line in a ' +
+    'try..finally block. The cleanup is inferred from the statement right before them ' +
+    '(\"X := TFoo.Create\" -> X.Free, BeginUpdate -> EndUpdate, Enter/Acquire/Lock -> the ' +
+    'counterpart), otherwise a TODO comment is inserted - pass \"cleanup\" to say it ' +
+    'yourself. Only wrapper lines are added. apply=false (the default) only shows the ' +
+    'change.","inputSchema":{"type":"object","properties":{"file":{"type":"string"},' +
+    '"from_line":{"type":"integer","description":"1-based first line."},"to_line":' +
+    '{"type":"integer","description":"1-based last line. Default: from_line."},"cleanup":' +
+    '{"type":"string","description":"The statement for the finally block, e.g. ' +
+    '\"List.Free;\"."},' + ApplyProp + ',' + TokenProp + ',' + InstanceProp + '},' +
+    '"required":["file","from_line"]}}' +
+    ',' +
+    '{"name":"move_to_unit","description":"Moves the declaration at a position (type, ' +
+    'class incl. its method implementations, routine, const, var) into an EXISTING unit and ' +
+    'updates the uses clauses of both units and of every unit using the symbol. Use ' +
+    'move_to_new_unit when the target does not exist yet. apply=false (the default) reports ' +
+    'the plan.","inputSchema":{"type":"object","properties":{"file":{"type":"string"},' +
+    '"line":{"type":"integer","description":"1-based line of the identifier."},' +
+    '"column":{"type":"integer","description":"1-based column."},"target_file":' +
+    '{"type":"string","description":"The unit to move into (path, or a name next to ' +
+    'the source)."},' + ApplyProp + ',' + TokenProp + ',' + InstanceProp + '},"required":' +
+    '["file","line","column","target_file"]}}' +
+    ',' +
+    '{"name":"remove_with","description":"Rewrites \"with X do\" statements: every ' +
+    'member of the body is qualified explicitly, verified per identifier with DelphiLSP. ' +
+    'Pass file (+ line for the one statement enclosing it), files or project=true. An ' +
+    'occurrence the rewriter cannot handle (several targets, unresolved type, inactive ' +
+    '{$IFDEF} region) is listed with the reason and left alone. apply=false (the default) ' +
+    'shows before/after per statement.","inputSchema":{"type":"object","properties":{' +
+    '"file":{"type":"string"},"line":{"type":"integer","description":"1-based line ' +
+    'inside the with-statement; without it the whole file is scanned."},"files":{"type":' +
+    '"array","items":{"type":"string"}},"project":{"type":"boolean"},"inline_vars":' +
+    '{"type":"boolean","description":"Introduce inline variables for complex targets ' +
+    '(Delphi 10.3+). Default true."},' + ApplyProp + ',' + TokenProp + ',' + InstanceProp +
+    '}}}' +
+    ',' +
+    '{"name":"cleanup_uses","description":"Runs what the uses-cleanup dialog runs: ' +
+    'removes entries no identifier of which is used and (move_to_implementation) moves ' +
+    'interface entries that are only needed in the implementation. Entries with ' +
+    'initialization code, IDE-managed units and anything the analysis is unsure about are ' +
+    'kept, and the answer says so per entry. apply=false (the default) only shows the ' +
+    'change.","inputSchema":{"type":"object","properties":{"file":{"type":"string"},' +
+    '"remove_unused":{"type":"boolean","description":"Default true."},' +
+    '"move_to_implementation":{"type":"boolean","description":"Default false."},' +
+    ApplyProp + ',' + TokenProp + ',' + InstanceProp + '},"required":["file"]}}' +
+    ',' +
+    '{"name":"find_unit_references","description":"Which units use the given unit, and ' +
+    'where: every hit verified with DelphiLSP, plus one row with \"unused\": true per unit ' +
+    'that lists it in its uses clause without referencing anything of it. Read-only.",' +
+    '"inputSchema":{"type":"object","properties":{"file":{"type":"string",' +
+    '"description":"Absolute path of the unit whose references you want."},"max":' +
+    '{"type":"integer","description":"Maximum rows (default 400)."},' + InstanceProp +
+    '},"required":["file"]}}' +
+    ',' +
+    '{"name":"find_original_symbol","description":"Where the identifier at a position is ' +
+    'DECLARED - DelphiLSP first, then the type of its qualifier, then the identifier index. ' +
+    'Answers in cases lsp_definition does not: a private/public overload pair (Delphi 13.1 ' +
+    'RSS-5463) or a unit that is not open. Read-only.","inputSchema":{"type":"object",' +
+    '"properties":{"file":{"type":"string"},"line":{"type":"integer","description":' +
+    '"1-based."},"column":{"type":"integer","description":"1-based."},' + InstanceProp +
+    '},"required":["file","line","column"]}}' +
+    ',' +
     '{"name":"add_unit","description":"Adds a unit to the uses clause of a file (interface or i' +
     'mplementation), minimal edit, IDE buffer when the file is open. Refuses units only on the ' +
     'browsing path. apply=false (the default) only shows the change.","inputSchema":{"type":"object","properties":{"file":{"type":"string","desc' +

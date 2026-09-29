@@ -162,6 +162,12 @@ type
     class function Execute(const ASymbol: string;
       const ASourceFile, ATargetFile: string;
       const AContext: TEditorContext): Boolean;
+    /// <summary>The same move into an EXISTING unit without any dialog:
+    ///  APREVIEW plans and reports only, AError carries the refusal
+    ///  (user request 2026-09-29 - the MCP tool needs both).</summary>
+    class function ExecuteToExistingUnit(const ASymbol, ASourceFile,
+      ATargetFile: string; APreview: Boolean; out APlan: TMovePlan;
+      out AError: string): Boolean;
     /// <summary>"Move to NEW unit": creates ANewFile (an empty unit, UTF-8
     ///  with BOM, CRLF), refuses BEFORE any edit when the declaration
     ///  itself needs identifiers of the source unit (the new unit would
@@ -2093,6 +2099,34 @@ begin
     Exit;
   end;
   Result := ApplyPlan(Plan);
+end;
+
+class function TLspMoveToUnit.ExecuteToExistingUnit(const ASymbol, ASourceFile,
+  ATargetFile: string; APreview: Boolean; out APlan: TMovePlan;
+  out AError: string): Boolean;
+var
+  Plan: TMovePlan;
+begin
+  Result := False;
+  AError := '';
+  APlan := Default(TMovePlan);
+  if not FileExists(ATargetFile) then
+  begin
+    AError := ATargetFile + ' does not exist - use "move to new unit" to create it';
+    Exit;
+  end;
+  Editor.SaveAllFiles;
+  if not BuildPlan(ASymbol, ASourceFile, ATargetFile, Plan) then
+  begin
+    AError := Plan.ProblemDetail;
+    if AError = '' then
+      AError := 'the declaration of ' + ASymbol + ' was not found';
+    Exit;
+  end;
+  APlan := Plan;
+  if APreview then Exit(True);
+  Result := ApplyPlan(Plan);
+  if not Result then AError := 'the move could not be applied';
 end;
 
 end.

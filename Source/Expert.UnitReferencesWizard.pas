@@ -57,6 +57,16 @@ type
     FTraceFile: TStreamWriter;
     FTraceLock: TCriticalSection;
     FTraceStart: TDateTime;
+    FHeadless: Boolean;              // no dialog: the MCP tool collects
+    FHeadlessItems: TUnitRefItems;
+    FHeadlessStatus: string;
+    /// <summary>Status / progress / cancel go through these three, so the
+    ///  SAME search runs with a dialog (menu) and without one (MCP, user
+    ///  request 2026-09-29) - a second implementation would be free to
+    ///  resolve references differently than the one the user reviews.</summary>
+    procedure Status(const AText: string);
+    procedure Progress(ACurrent, ATotal: Integer);
+    function Cancelled: Boolean;
     procedure DoGotoLocation(AItem: TUnitRefItem);
     procedure DoDialogClose(Sender: TObject);
     procedure SearchAndShow;
@@ -84,6 +94,12 @@ type
     {$ENDIF}
     procedure Execute;
   end;
+
+/// <summary>The same search without any window: AITEMS are the references
+///  of the unit AFile (including its "(unused)" rows), ASTATUS is the
+///  summary line the dialog would show. MAIN THREAD.</summary>
+function FindUnitReferencesHeadless(const AFile: string;
+  out AItems: TUnitRefItems; out AStatus, AError: string): Boolean;
 
 var
   UnitReferencesInstance: TLspFindUnitReferencesWizard;
@@ -199,11 +215,30 @@ begin
   except
     on E: Exception do
       if FDialog <> nil then
-        FDialog.SetStatus('Error: ' + E.Message);
+        Status('Error: ' + E.Message);
   end;
   // Hand off ownership: from now on closing the dialog frees it.
   if FDialog <> nil then
     FDialog.SetClosable;
+end;
+
+procedure TLspFindUnitReferencesWizard.Status(const AText: string);
+begin
+  FHeadlessStatus := AText;
+  if FDialog <> nil then Status(AText);
+end;
+
+procedure TLspFindUnitReferencesWizard.Progress(ACurrent, ATotal: Integer);
+begin
+  if FDialog <> nil then Progress(ACurrent, ATotal);
+end;
+
+function TLspFindUnitReferencesWizard.Cancelled: Boolean;
+begin
+  // a closed window IS a cancel (the scan runs on the main thread and would
+  // otherwise keep the IDE busy); headless: only a shutdown stops it
+  Result := Application.Terminated
+    or (not FHeadless and ((FDialog = nil) or FDialog.CloseRequested));
 end;
 
 procedure TLspFindUnitReferencesWizard.DoDialogClose(Sender: TObject);
@@ -221,6 +256,43 @@ begin
   except end;
   CloseTrace;
   FDialog := nil;
+end;
+
+function FindUnitReferencesHeadless(const AFile: string;
+  out AItems: TUnitRefItems; out AStatus, AError: string): Boolean;
+var
+  W: TLspFindUnitReferencesWizard;
+begin
+  Result := False;
+  AItems := nil;
+  AStatus := '';
+  AError := '';
+  if not SameText(ExtractFileExt(AFile), '.pas') then
+  begin
+    AError := 'find unit references works on a .pas file';
+    Exit;
+  end;
+  W := TLspFindUnitReferencesWizard.Create;
+  try
+    W.FHeadless := True;
+    W.FDialog := nil;
+    W.FContext := Editor.GetCurrentContext;     // project root / dproj
+    W.FContext.FileName := AFile;
+    try
+      W.SearchAndShow;
+      AItems := W.FHeadlessItems;
+      AStatus := W.FHeadlessStatus;
+      Result := True;
+    except
+      on E: Exception do AError := E.Message;
+    end;
+  finally
+    // DoDialogClose is what detaches our log hook from the SHARED client and
+    // closes the trace - without it the freed wizard stays installed as
+    // Client.OnLog and the next LSP message calls into unmapped code.
+    W.DoDialogClose(nil);
+    W.Free;
+  end;
 end;
 
 procedure TLspFindUnitReferencesWizard.DoGotoLocation(AItem: TUnitRefItem);
@@ -646,7 +718,7 @@ begin
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
-    FDialog.SetStatus('No .delphilsp.json found - enable Tools > Options > '
+    Status('No .delphilsp.json found - enable Tools > Options > '
       + 'Editor > Language > Code Insight > "Generate LSP Config".');
     Exit;
   end;
@@ -658,14 +730,14 @@ begin
   TargetExpanded := ExpandFileName(FContext.FileName);
 
   // Save editor changes so the LSP sees the same content.
-  FDialog.SetStatus('Saving all files...');
+  Status('Saving all files...');
   Editor.SaveAllFiles;
 
   WasRunning := TLspManager.Instance.IsAlive;
   if WasRunning then
-    FDialog.SetStatus('LSP already running. Opening file...')
+    Status('LSP already running. Opening file...')
   else
-    FDialog.SetStatus('Starting LSP server (one-time)...');
+    Status('Starting LSP server (one-time)...');
 
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
@@ -692,8 +764,8 @@ begin
     for var Retry := 1 to 30 do
     begin
       // the window may be gone by now - the scan runs on the main thread
-      if (FDialog = nil) or FDialog.CloseRequested or Application.Terminated then Exit;
-      FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
+      if Cancelled then Exit;
+      Status(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
       var ProbeOk := False;
       try
@@ -718,7 +790,7 @@ begin
   // to find every file that lists the target unit. This works
   // even when LSP can't resolve a symbol and finds dead uses.
   // ============================================================
-  FDialog.SetStatus('Scanning project files for uses of ' + TargetUnitName + '...');
+  Status('Scanning project files for uses of ' + TargetUnitName + '...');
   Application.ProcessMessages;
 
   // Project + the current unit + open units / units via uses per settings.
@@ -732,12 +804,12 @@ begin
   LineCache := TDictionary<string, TArray<string>>.Create;
   FinalItems := TList<TUnitRefItem>.Create;
   try
-    FDialog.SetProgress(0, System.Length(ProjFiles));
+    Progress(0, System.Length(ProjFiles));
     for I := 0 to High(ProjFiles) do
     begin
       var ExpProj := ExpandFileName(ProjFiles[I]);
-      FDialog.SetProgress(I + 1, System.Length(ProjFiles));
-      FDialog.SetStatus(Format('Scanning uses clauses %d/%d...',
+      Progress(I + 1, System.Length(ProjFiles));
+      Status(Format('Scanning uses clauses %d/%d...',
         [I + 1, System.Length(ProjFiles)]));
       Application.ProcessMessages;
 
@@ -760,11 +832,11 @@ begin
 
     if UsingFiles.Count = 0 then
     begin
-      FDialog.SetItems(nil);
-      FDialog.SetStatus(Format(
+      if FDialog <> nil then FDialog.SetItems(nil);
+      Status(Format(
         'No project file uses %s. (scanned %d file(s))',
         [TargetUnitName, System.Length(ProjFiles)]));
-      FDialog.SetProgress(0, 1);
+      Progress(0, 1);
       Exit;
     end;
 
@@ -774,7 +846,7 @@ begin
     // are not used because DelphiLSP's findReferences doesn't react
     // to positions derived from selectionRange.
     // ============================================================
-    FDialog.SetStatus('Querying unit symbols...');
+    Status('Querying unit symbols...');
     Application.ProcessMessages;
 
     SymbolsJson := nil;
@@ -782,7 +854,7 @@ begin
       SymbolsJson := Client.GetDocumentSymbols(FContext.FileName);
     except
       on E: Exception do
-        FDialog.SetStatus('LSP error on documentSymbol: ' + E.Message);
+        Status('LSP error on documentSymbol: ' + E.Message);
     end;
 
     try
@@ -879,7 +951,7 @@ begin
       // identifier names (Create, Free, etc.) that may resolve to
       // a different unit's symbol.
       // ============================================================
-      FDialog.SetProgress(0, UsingFiles.Count);
+      Progress(0, UsingFiles.Count);
 
       // Collect all candidates first, then verify with progress so
       // the user sees per-candidate feedback during the LSP roundtrips.
@@ -888,8 +960,8 @@ begin
         for I := 0 to UsingFiles.Count - 1 do
         begin
           var UF := UsingFiles[I];
-          FDialog.SetProgress(I + 1, UsingFiles.Count);
-          FDialog.SetStatus(Format('Scanning %d/%d: %s',
+          Progress(I + 1, UsingFiles.Count);
+          Status(Format('Scanning %d/%d: %s',
             [I + 1, UsingFiles.Count, ExtractFileName(UF)]));
           Application.ProcessMessages;
 
@@ -926,7 +998,7 @@ begin
         // main LSP client. The parallel worker-pool path was removed
         // because DelphiLSP doesn't tolerate concurrent load (server
         // not responding / internal errors / request removed).
-        FDialog.SetProgress(0, AllCandidates.Count);
+        Progress(0, AllCandidates.Count);
         var DroppedNotResolving: Integer := 0;
 
         var LastRefreshedFile: string := '';
@@ -946,10 +1018,10 @@ begin
             EditorOrDiskReader()));
         for I := 0 to AllCandidates.Count - 1 do
         begin
-          if FDialog.CloseRequested then Break;
+          if Cancelled then Break;
           Item := AllCandidates[I];
-          FDialog.SetProgress(I + 1, AllCandidates.Count);
-          FDialog.SetStatus(Format('Verifying %d/%d (%s)...',
+          Progress(I + 1, AllCandidates.Count);
+          Status(Format('Verifying %d/%d (%s)...',
             [I + 1, AllCandidates.Count, Item.Identifier]));
           Application.ProcessMessages;
 
@@ -1076,10 +1148,11 @@ begin
       end;
     end;
 
-    FDialog.SetItems(FinalItems.ToArray);
+    FHeadlessItems := FinalItems.ToArray;
+    if FDialog <> nil then FDialog.SetItems(FHeadlessItems);
 
     var LiveCount: Integer := UsingFiles.Count - DeadCount;
-    FDialog.SetStatus(Format(
+    Status(Format(
       '%d using unit(s): %d active, %d dead.  ' +
       '[symbols=%d, raw matches=%d, verified-elsewhere=%d]',
       [UsingFiles.Count, LiveCount, DeadCount,

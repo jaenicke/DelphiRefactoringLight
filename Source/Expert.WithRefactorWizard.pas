@@ -32,7 +32,7 @@ interface
 
 uses
   System.Classes, System.SysUtils, System.Generics.Collections,
-  Vcl.Forms{$IFNDEF STANDALONE_BUILD}, ToolsAPI{$ENDIF};
+  Vcl.Forms, Expert.WithRewriter{$IFNDEF STANDALONE_BUILD}, ToolsAPI{$ENDIF};
 
 type
   /// <summary>Scope of a remove-with run. Determines which source
@@ -87,6 +87,19 @@ type
       const AExtraFiles: TArray<string>);
   end;
 
+/// <summary>Runs remove-with over AFILES without any UI: every occurrence
+///  is scanned and rewritten exactly as the dialog does, AAPPLY writes the
+///  auto-rewritable ones. ALIMITLINE1 > 0 restricts the run to the
+///  with-statement enclosing that line of ALimitFile. MAIN THREAD (it
+///  talks to the editor).</summary>
+function RunRemoveWithHeadless(const AFiles: TArray<string>;
+  const ALimitFile: string; ALimitLine1: Integer; AApply, AUseInlineVars: Boolean;
+  out AResults: TArray<TWithRewriteResult>;
+  out AApplied, AFailed, ASkipped: Integer; out AError: string): Boolean;
+
+/// <summary>Short text for the issues of one rewrite ('' = rewritable).</summary>
+function WithRewriteIssueText(const AIssues: TWithRewriteIssues): string;
+
 var
   WithRefactorInstance: TLspWithRefactorWizard;
 
@@ -96,7 +109,7 @@ uses
   System.UITypes, System.IOUtils, System.Math, System.JSON,
   Vcl.Dialogs, Vcl.Controls,
   Expert.EditorHelperIntf, Expert.LspManager, Lsp.Client,
-  Expert.WithScanner, Expert.WithRewriter, Expert.WithRefactorDialog;
+  Expert.WithScanner, Expert.WithRefactorDialog;   // WithRewriter: interface uses
 
 {$IFNDEF STANDALONE_BUILD}
 { TLspWithRefactorWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
@@ -533,6 +546,166 @@ var
 begin
   Ext := LowerCase(ExtractFileExt(APath));
   Result := (Ext = '.pas') or (Ext = '.dpr') or (Ext = '.dpk');
+end;
+
+
+// ---------------------------------------------------------------------------
+//  The same run without a dialog (MCP, user request 2026-09-29)
+// ---------------------------------------------------------------------------
+//
+// Deliberately the SAME steps RunWithScope takes - scan, analysis wait,
+// inactive-region check, TWithRewriter.Rewrite, DropEnclosingWithItems,
+// ApplyEdits - only the dialog and its progress texts are missing. A second
+// implementation would be free to rewrite code differently than the one the
+// user reviews in the dialog.
+function RunRemoveWithHeadless(const AFiles: TArray<string>;
+  const ALimitFile: string; ALimitLine1: Integer; AApply, AUseInlineVars: Boolean;
+  out AResults: TArray<TWithRewriteResult>;
+  out AApplied, AFailed, ASkipped: Integer; out AError: string): Boolean;
+var
+  ScanFiles: TArray<string>;
+  Client: TLspClient;
+  Source: string;
+  Occs, Picked: TArray<TWithOccurrence>;
+  Rewrite: TWithRewriteResult;
+begin
+  Result := False;
+  AResults := nil;
+  AApplied := 0;
+  AFailed := 0;
+  ASkipped := 0;
+  AError := '';
+  for var F in AFiles do
+    if IsScannableSource(F) and TFile.Exists(F) then
+      ScanFiles := ScanFiles + [F];
+  if Length(ScanFiles) = 0 then
+  begin
+    AError := 'no scannable .pas/.dpr/.dpk file in the given scope';
+    Exit;
+  end;
+  Editor.SaveAllFiles;
+  var LspJson := Editor.FindDelphiLspJson;
+  if LspJson = '' then
+  begin
+    AError := 'no .delphilsp.json found - the target types cannot be resolved ' +
+      '(Tools > Options > Editor > Language > Code Insight > "Generate LSP Config")';
+    Exit;
+  end;
+  var RootPath := Editor.GetProjectRoot;
+  var ProjFile := Editor.GetCurrentProjectDproj;
+  if RootPath = '' then RootPath := ExtractFilePath(ProjFile);
+  try
+    Client := TLspManager.Instance.GetClient(RootPath, ProjFile, LspJson);
+  except
+    on E: Exception do
+    begin
+      AError := 'LSP startup failed: ' + E.Message;
+      Exit;
+    end;
+  end;
+  try
+    TLspManager.Instance.EnsureProjectIndexed(ScanFiles, nil);
+  except
+    // partial indexing is not fatal - the per-file wait below still runs
+  end;
+  for var FileIdx := 0 to High(ScanFiles) do
+  begin
+    try
+      Source := TFile.ReadAllText(ScanFiles[FileIdx]);
+    except
+      Continue;
+    end;
+    Occs := TWithScanner.ScanSource(Source);
+    if Length(Occs) = 0 then Continue;
+    // one line given: only the with-statement that encloses it
+    if (ALimitLine1 > 0) and SameText(ALimitFile, ScanFiles[FileIdx]) then
+    begin
+      Picked := nil;
+      for var O in Occs do
+        if (ALimitLine1 >= O.KeywordPos.Line) and (ALimitLine1 <= O.BodyRange.EndPos.Line) then
+          Picked := Picked + [O];
+      if Length(Picked) = 0 then
+      begin
+        AError := Format('no with-statement encloses line %d of %s',
+          [ALimitLine1, ExtractFileName(ScanFiles[FileIdx])]);
+        Exit;
+      end;
+      Occs := Picked;
+    end;
+    // DelphiLSP must have analysed the file before we can tell whether an
+    // occurrence sits in an inactive {$IFDEF} region
+    Client.EnsureFileAnalysed(ScanFiles[FileIdx], 30000, 10000, nil);
+    var FileHasDiagnostics: Boolean :=
+      Client.HasReceivedDiagnostics(ScanFiles[FileIdx])
+      or not TWithScanner.SourceHasConditionals(Source);
+    for var Occ in Occs do
+    begin
+      if not FileHasDiagnostics then
+      begin
+        Rewrite := Default(TWithRewriteResult);
+        Rewrite.FileName := ScanFiles[FileIdx];
+        Rewrite.Occurrence := Occ;
+        Include(Rewrite.Issues, wriLspNoDiagnostics);
+        AResults := AResults + [Rewrite];
+        Continue;
+      end;
+      if Client.IsLineInactive(ScanFiles[FileIdx], Occ.KeywordPos.Line - 1) then
+      begin
+        Rewrite := Default(TWithRewriteResult);
+        Rewrite.FileName := ScanFiles[FileIdx];
+        Rewrite.Occurrence := Occ;
+        Include(Rewrite.Issues, wriInactiveRegion);
+        AResults := AResults + [Rewrite];
+        Continue;
+      end;
+      try
+        Rewrite := TWithRewriter.Rewrite(Client, ScanFiles[FileIdx], Source, Occ,
+          TWithRewriteSettings.Defaults);
+      except
+        on E: Exception do
+        begin
+          Rewrite := Default(TWithRewriteResult);
+          Rewrite.FileName := ScanFiles[FileIdx];
+          Rewrite.Occurrence := Occ;
+          Include(Rewrite.Issues, wriTypeUnresolved);
+        end;
+      end;
+      AResults := AResults + [Rewrite];
+    end;
+  end;
+  Result := True;
+  if not AApply then Exit;
+  var Auto: TArray<TWithRewriteResult>;
+  for var Item in AResults do
+    if Item.IsAutoRewritable then Auto := Auto + [Item];
+  if Length(Auto) = 0 then Exit;
+  // nested withs overlap - the inner ones go first, the enclosing ones need
+  // a second run on the updated source (same rule as the dialog)
+  var ToApply := DropEnclosingWithItems(Auto, ASkipped);
+  ApplyEdits(ToApply, AUseInlineVars, AApplied, AFailed);
+end;
+
+function WithRewriteIssueText(const AIssues: TWithRewriteIssues): string;
+begin
+  if wriLspNoDiagnostics in AIssues then
+    Result := 'DelphiLSP delivered no diagnostics for the file - cannot tell ' +
+      'whether the statement is inside an inactive {$IFDEF} region, skipped'
+  else if wriInactiveRegion in AIssues then
+    Result := 'inside an inactive {$IFDEF} region, skipped'
+  else if wriCommentInHeader in AIssues then
+    Result := 'a comment or compiler directive stands before the body - manual review'
+  else if wriMultipleTargets in AIssues then
+    Result := 'several targets ("with A, B do") - manual review'
+  else if wriTypeUnresolved in AIssues then
+    Result := 'the target type could not be resolved'
+  else if wriClassRangeUnknown in AIssues then
+    Result := 'the class range could not be determined'
+  else if wriNameClash in AIssues then
+    Result := 'the inline variable would shadow an existing name'
+  else if wriRequiresInlineVar in AIssues then
+    Result := 'needs an inline variable (Delphi 10.3+); pass inline_vars=true'
+  else
+    Result := '';
 end;
 
 procedure TLspWithRefactorWizard.Execute;

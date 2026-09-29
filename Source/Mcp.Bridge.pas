@@ -123,7 +123,10 @@ begin
      (AName = 'analyze_uses') or (AName = 'debug_consistency') or
      (AName = 'blame') or (AName = 'commit_info') or (AName = 'safe_delete') or
      (AName = 'change_signature') or (AName = 'semantic_replace') or
-     (AName = 'move_to_new_unit') or (AName = 'apply_quick_fixes') then
+     (AName = 'move_to_new_unit') or (AName = 'apply_quick_fixes') or
+     (AName = 'move_to_unit') or (AName = 'remove_with') or
+     (AName = 'find_unit_references') or (AName = 'cleanup_uses') or
+     (AName = 'find_original_symbol') then
     Result := 300000
   else
     Result := ToolTimeoutMs;

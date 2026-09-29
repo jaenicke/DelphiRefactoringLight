@@ -645,8 +645,21 @@ begin
   if not IsIncludeFile(F) then
   begin
     if VClient <> Ctx.Client then
-      VClient.SyncDocumentWith(F, Ctx.Content)   // no diagnostics to wait for
-    else
+    begin
+      VClient.SyncDocumentWith(F, Ctx.Content);
+      // An agent session pushes no diagnostics, so there is no counter that
+      // could say whether it is READY - and a freshly started one answers
+      // every request with null while it loads the project (forum
+      // 2026-09-30). documentSymbol is the signal that works without
+      // diagnostics; when it stays silent, the main session verifies.
+      if not VClient.WaitUnitParsed(F, 120000,
+           function: Boolean
+           begin
+             Result := WaitForSingleObject(AStop, 0) <> WAIT_OBJECT_0;
+           end) then
+        VClient := Ctx.Client;
+    end;
+    if VClient = Ctx.Client then
     begin
       var StartBefore := Ctx.Client.GetFileDiagnosticsVersion(F);
       if McpSyncLspContent(Ctx.Client, F, Ctx.Content) then
@@ -722,14 +735,40 @@ begin
     begin
       // DelphiLSP answers null AT a declaration - then the position IS it
       var CL := Ctx.Content.Replace(#13#10, #10).Split([#10]);
-      if (L1 - 1 <= High(CL)) and LineDeclaresName(CL[L1 - 1], Ctx.Identifier) then
+      var CaretDeclLine := '';
+      if L1 - 1 <= High(CL) then CaretDeclLine := CL[L1 - 1];
+      if not DeclarationAnchorUnknown(False, CaretDeclLine, Ctx.Identifier) then
       begin
         DeclFile := F;
         DeclLine := L1 - 1;
         DeclCol := Ctx.IdentCol0;
       end
       else
-        Exit(McpErr('DelphiLSP knows no declaration for ' + Ctx.Identifier + ' at that position'));
+      begin
+        // No anchor: a caret on a USE whose declaration DelphiLSP did not
+        // resolve. Guessing the caret would make every correctly resolved
+        // candidate look foreign - the forum case of 2026-09-30 (29 of 327
+        // references on a cold session). One more attempt, then refuse.
+        var Deadline := GetTickCount64 + 20000;
+        while (Length(Decl) = 0) and (GetTickCount64 < Deadline) do
+        begin
+          if WaitForSingleObject(AStop, 500) = WAIT_OBJECT_0 then Break;
+          Decl := IncCtx.Definition(F, L1 - 1, Ctx.IdentCol0);
+        end;
+        if Length(Decl) > 0 then
+        begin
+          DeclFile := TLspUri.FileUriToPath(Decl[0].Uri);
+          DeclLine := Decl[0].Range.Start.Line;
+          DeclCol := Decl[0].Range.Start.Character;
+        end
+        else
+          Exit(McpErr('DelphiLSP did not resolve the declaration of ' +
+            Ctx.Identifier + ' at that position, and the line declares nothing - ' +
+            'the session is probably still analysing the project (get_status ' +
+            'shows whether it is busy). Without the declaration every ' +
+            'occurrence would be judged against a guess, so nothing is ' +
+            'reported; try again in a moment.'));
+      end;
     end;
     DeclFileOut := DeclFile;
     DeclLineOut := DeclLine;

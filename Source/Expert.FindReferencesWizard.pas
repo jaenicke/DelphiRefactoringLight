@@ -35,6 +35,10 @@ type
     // about, one line per decision, with the time since the search began
     FTrace: TStringList;
     FTraceT0: UInt64;
+    /// <summary>Set while the declaration could not be resolved and the
+    ///  caret is no declaration either: nothing may be filtered out then
+    ///  (forum 2026-09-30).</summary>
+    FNoAnchor: Boolean;
     procedure Trace(const AText: string);
     procedure DoGotoLocation(AItem: TFindReferenceItem);
 
@@ -290,6 +294,27 @@ begin
 
   Trace(Format('start file: diagnostics version now=%d',
     [Client.GetFileDiagnosticsVersion(FContext.FileName)]));
+  // A session that has never pushed a diagnostic may simply still be loading
+  // the project - and then EVERY position request answers null, which the
+  // scan used to take for "no declaration" (forum 2026-09-30: 29 of 327
+  // references). documentSymbol is a readiness signal that does not depend on
+  // diagnostics: the server can only answer it once it has parsed the unit.
+  if Client.GetFileDiagnosticsVersion(FContext.FileName) = 0 then
+  begin
+    FDialog.SetStatus('DelphiLSP has not analysed ' +
+      ExtractFileName(FContext.FileName) + ' yet - waiting for it...');
+    if Client.WaitUnitParsed(FContext.FileName, 90000,
+         function: Boolean
+         begin
+           Application.ProcessMessages;
+           Result := not Aborted;
+         end) then
+      Trace('main session: ready (documentSymbol answered for the start file)')
+    else
+      Trace('main session: NOT READY - documentSymbol for the start file went ' +
+        'unanswered for 90 s, so null answers below mean "not analysed", not ' +
+        '"no declaration"');
+  end;
   if Aborted then Exit;
   LspLine := FContext.Line - 1;
   LspCol := FContext.Column - 1;
@@ -382,8 +407,39 @@ begin
       VClient.SyncDocumentWith(FContext.FileName, StartContent);
   end;
   if VClient <> Client then
-    Trace('verification: separate session (' + VClient.ServerType + ')')
-  else
+  begin
+    // THE SESSION THAT ANSWERS MUST BE THE ONE WE CHECK (forum 2026-09-30):
+    // every readiness test above ran on the MAIN session, while a FRESHLY
+    // STARTED agent session did the answering - and an agent pushes no
+    // diagnostics at all, so nothing could have noticed that it was still
+    // loading the project. In the report it answered null for the first
+    // ~55 s; the declaration query fell into that window, the caret became
+    // the anchor and 298 correctly resolved references were dropped as
+    // "another symbol".
+    FDialog.SetStatus('Preparing the verification session (DelphiLsp is ' +
+      'loading the project)...');
+    Trace('verification: separate session (' + VClient.ServerType +
+      ') - probing whether it can answer');
+    if VClient.WaitUnitParsed(FContext.FileName, 120000,
+         function: Boolean
+         begin
+           FDialog.SetStatus('Preparing the verification session (DelphiLsp is ' +
+             'loading the project)...');
+           Application.ProcessMessages;
+           Result := not Aborted;
+         end) then
+      Trace('verification session: ready (documentSymbol answered)')
+    else
+    begin
+      // It cannot answer. The MAIN session has been running with the IDE and
+      // passed its own check, so it verifies instead - the same fallback
+      // VerificationClient already uses when the agent cannot be STARTED.
+      Trace('verification session: NOT READY after 120 s (documentSymbol ' +
+        'unanswered) - the main session verifies instead');
+      VClient := Client;
+    end;
+  end;
+  if VClient = Client then
     Trace('verification: main session');
   var IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
   try
@@ -409,9 +465,46 @@ begin
         end;
       end;
     end;
+    // No answer AND the caret declares nothing: we have no anchor. The
+    // caret is then a USE, and taking it as the declaration makes every
+    // correctly resolved candidate look foreign (forum 2026-09-30: 29 of
+    // 327 references, on a cold session).
+    FNoAnchor := False;
+    if Length(DefLocs) = 0 then
+    begin
+      var CaretText2: string;
+      var CaretLine2 := '';
+      if EditorOrDiskReader()(FContext.FileName, CaretText2) then
+      begin
+        var CL2 := CaretText2.Replace(#13#10, #10).Split([#10]);
+        if LspLine <= High(CL2) then CaretLine2 := CL2[LspLine];
+      end;
+      FNoAnchor := DeclarationAnchorUnknown(False, CaretLine2, FContext.WordAtCursor);
+      if FNoAnchor then
+      begin
+        // one more try - a session that is still analysing often answers a
+        // few seconds later, and this single answer decides the whole result
+        FDialog.SetStatus('Waiting for DelphiLSP to resolve the declaration...');
+        var Dl := GetTickCount64 + 20000;
+        while (Length(DefLocs) = 0) and (GetTickCount64 < Dl) and not Aborted do
+        begin
+          Sleep(500);
+          Application.ProcessMessages;
+          DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
+        end;
+        if Length(DefLocs) > 0 then
+        begin
+          FNoAnchor := False;
+          Trace('declaration: answered on a second attempt');
+        end;
+      end;
+    end;
     if Length(DefLocs) > 0 then
       Trace(Format('declaration: DelphiLSP -> %s:%d:%d', [TLspUri.FileUriToPath(DefLocs[0].Uri),
         DefLocs[0].Range.Start.Line + 1, DefLocs[0].Range.Start.Character + 1]))
+    else if FNoAnchor then
+      Trace('declaration: NO ANSWER and the caret line declares nothing - no ' +
+        'anchor, so NOTHING is filtered out (every candidate is listed, marked)')
     else
       Trace('declaration: no answer - the caret is taken as the declaration');
     // The symbol = its declaration + implementation (see TLspSymbolTargets).
@@ -471,6 +564,9 @@ begin
         if Linked.Count > 0 then Trace('linked positions: ' + Linked.Text);
 
         // Verify each candidate via GotoDefinition
+        if FNoAnchor then
+          FDialog.SetStatus('DelphiLSP did not resolve the declaration - NOTHING ' +
+            'is filtered out, every occurrence is listed and marked...');
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
           VClient, IncCtx, Graph, Owner);
         // the window is gone: stop here, but let the finally blocks below
@@ -903,6 +999,12 @@ begin
                 [Link.TypeName]);
             end;
           uuOtherSymbol:
+            if FNoAnchor then
+              // no anchor: "another type" is measured against a target set
+              // we do not have - keep it, marked (forum 2026-09-30)
+              C.Note := Format('UNVERIFIED - the sources place it in %s, but the ' +
+                'declaration of the searched symbol is unknown', [Link.TypeName])
+            else
             begin
               Trace(Where + '  ' + Answer + ' | sources: member of ' + Link.TypeName +
                 ' -> dropped');
@@ -948,6 +1050,16 @@ begin
       end
       else if NoAnswer then
         Trace(Where + '  ' + Answer + ' -> dropped (declares another symbol)')
+      else if FNoAnchor then
+      begin
+        // The declaration of the searched symbol is unknown, so "leads
+        // elsewhere" cannot be judged - dropping here is what turned 327
+        // references into 29 on a cold session (forum 2026-09-30).
+        C.Note := 'UNVERIFIED - ' + Answer + ', and the declaration of the ' +
+          'searched symbol is unknown';
+        Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (no anchor)');
+        Verified.Add(C);
+      end
       else
         Trace(Where + '  ' + Answer + ' -> dropped (leads to another symbol)');
     end;
@@ -963,6 +1075,7 @@ begin
     begin
       var Fixed := 0;
       var Elsewhere := 0;
+      var Dropped: TArray<Integer> := nil;
       begin
         for var R := 0 to Retry.Count - 1 do
         begin
@@ -999,22 +1112,41 @@ begin
             Verified[VIdx] := Row;
             Inc(Fixed);
           end
-          else
+          else if FNoAnchor or (FLspErrors > 0) then
           begin
-            // NOT dropped (issue #13): these rows exist because the server
-            // was silent the first time, so this answer comes from exactly
-            // the session state we do not trust. Say where it led and let
-            // the user judge - removing a real reference is the worse error.
+            // KEPT (issue #13): with a degraded session (aborted requests)
+            // this answer comes from exactly the state we do not trust, and
+            // without an anchor there is nothing to compare it against. Say
+            // where it led and let the user judge - removing a real
+            // reference is the worse error.
             Row.Note := Format('UNVERIFIED - DelphiLSP resolved it to %s:%d',
               [ExtractFileName(DF2), DL2 + 1]);
             Verified[VIdx] := Row;
             Inc(Elsewhere);
+          end
+          else
+          begin
+            // DROPPED: the session answered every other request of this run
+            // without a single abort, and it answers THIS one with another
+            // symbol's declaration - the row is foreign. The forum log of
+            // 2026-09-30 ends with exactly two such rows
+            // ("GlobalConfig.Formulare.BTB" -> UGlobalRomConfig.pas:1586),
+            // which the warm run does not list at all.
+            Dropped := Dropped + [VIdx];
           end;
         end;
-        if (Fixed > 0) or (Elsewhere > 0) then
+        // bottom-up, so the indices of the rows still to remove stay valid
+        for var D := High(Dropped) downto 0 do
+          Verified.Delete(Dropped[D]);
+        if System.Length(Dropped) > 0 then
+          Trace(Format('second attempt: %d occurrence(s) dropped - the answer ' +
+            'names another symbol''s declaration and the session reported no ' +
+            'aborted request', [System.Length(Dropped)]));
+        if (Fixed > 0) or (Elsewhere > 0) or (System.Length(Dropped) > 0) then
           FSecondPassNote := Format(
             'second attempt: %d of %d unverified occurrence(s) resolved, %d ' +
-            'pointed elsewhere (kept, marked)', [Fixed, Retry.Count, Elsewhere]);
+            'pointed elsewhere (kept, marked), %d dropped (another symbol)',
+            [Fixed, Retry.Count, Elsewhere, System.Length(Dropped)]);
       end;
     end;
 

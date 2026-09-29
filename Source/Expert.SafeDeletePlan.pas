@@ -76,6 +76,20 @@ function LineDeclaresName(const ALine, AName: string): Boolean;
 function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,
   AAnswerFile: string): Boolean;
 
+/// <summary>True when a scan has NO anchor for the symbol: DelphiLSP did not
+///  answer the declaration query AND the caret line does not declare the
+///  name, so the caret is a USE whose declaration is unknown.
+///  WHY IT MATTERS (forum 2026-09-30, with both logs): on a cold session the
+///  declaration query came back empty for a use of GlobalConfig.Formulare.BTB,
+///  the caret was taken as the declaration, and every one of the 341
+///  candidates that DelphiLSP later resolved CORRECTLY to the real
+///  declaration was dropped as "leads to another symbol" - 29 hits instead of
+///  327, two of them wrong. The same run two minutes later, session warm, was
+///  right. An unknown anchor must SUPPRESS the filtering, never guess an
+///  anchor.</summary>
+function DeclarationAnchorUnknown(AHasDefinition: Boolean;
+  const ACaretLine, AName: string): Boolean;
+
 /// <summary>ALines after AEdits (applied bottom-up; overlapping edits are
 ///  not expected - the planner never produces them).</summary>
 function ApplySafeDeleteEdits(const ALines: TArray<string>;
@@ -366,6 +380,12 @@ begin
     if (N = '') or not IsValidIdent(N) then Exit(nil);
     Result := Result + [N];
   end;
+end;
+
+function DeclarationAnchorUnknown(AHasDefinition: Boolean;
+  const ACaretLine, AName: string): Boolean;
+begin
+  Result := (not AHasDefinition) and not LineDeclaresName(ACaretLine, AName);
 end;
 
 function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,

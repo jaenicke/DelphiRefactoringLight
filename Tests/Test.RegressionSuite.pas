@@ -216,6 +216,21 @@ type
     [Test] procedure ForeignAnswerAtADeclaration_IsRecognised;
   end;
 
+  /// <summary>A forum report (2026-09-30) came with both logs: the first
+  ///  Find-References run of a session listed 29 of 327 references, two of
+  ///  them wrong; the second run, two minutes later, was right. The logs
+  ///  name the cause - the declaration query answered nothing on the cold
+  ///  session, the CARET was taken as the declaration, and every candidate
+  ///  DelphiLSP later resolved correctly to the real declaration was dropped
+  ///  as "leads to another symbol". An unanswered declaration on a USE line
+  ///  is NO anchor.</summary>
+  [TestFixture]
+  TDeclarationAnchorTests = class
+  public
+    [Test] procedure NoAnswerOnAUseLine_IsNoAnchor;
+    [Test] procedure NoAnswerOnADeclaration_IsTheAnchor;
+  end;
+
   /// <summary>A forum report (2026-09-30): two event handlers sat on the
   ///  SAME line as the field declared before them
   ///  ("b_Cancel: TButton;procedure FormCreate(Sender: TObject);"), and the
@@ -1220,6 +1235,36 @@ begin
   Assert.AreEqual(31, S); Assert.AreEqual(31, E, 'a ";" inside a string does not count');
 end;
 
+{ TDeclarationAnchorTests }
+
+procedure TDeclarationAnchorTests.NoAnswerOnAUseLine_IsNoAnchor;
+begin
+  // the reported lines, verbatim
+  Assert.IsTrue(DeclarationAnchorUnknown(False,
+    '  lCds.FieldByName(''WERT'').AsString := GlobalConfig.Formulare.BTB;', 'BTB'),
+    'a use of a nested record field');
+  Assert.IsTrue(DeclarationAnchorUnknown(False,
+    '  BTB(Format(_(''%s: Kunde %s gespeichert''), A, B));', 'BTB'), 'a call');
+  // an answer always wins - there IS an anchor then
+  Assert.IsFalse(DeclarationAnchorUnknown(True,
+    '  lCds.FieldByName(''WERT'').AsString := GlobalConfig.Formulare.BTB;', 'BTB'));
+  // a declaration line of ANOTHER name is no anchor for ours
+  Assert.IsTrue(DeclarationAnchorUnknown(False,
+    '    procedure SetStatus(const AText: string);', 'BTB'));
+end;
+
+procedure TDeclarationAnchorTests.NoAnswerOnADeclaration_IsTheAnchor;
+begin
+  // DelphiLSP answers null AT a declaration - the caret IS the symbol there,
+  // which is what makes renaming an interface method from its declaration
+  // work (IRenameHost.SetStatus); this must not regress
+  Assert.IsFalse(DeclarationAnchorUnknown(False,
+    '    procedure SetStatus(const AText: string);', 'SetStatus'));
+  Assert.IsFalse(DeclarationAnchorUnknown(False, '    BTB: string;', 'BTB'));
+  Assert.IsFalse(DeclarationAnchorUnknown(False,
+    '    property BTB: string read FBTB write SetBTB;', 'BTB'));
+end;
+
 { TDfmGluedDeclarationTests }
 
 procedure TDfmGluedDeclarationTests.DeclarationStarts_AfterASemicolonOnTheSameLine;
@@ -1695,5 +1740,6 @@ initialization
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);
   TDUnitX.RegisterTestFixture(TDfmGluedDeclarationTests);
+  TDUnitX.RegisterTestFixture(TDeclarationAnchorTests);
 
 end.

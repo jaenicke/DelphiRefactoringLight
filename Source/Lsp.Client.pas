@@ -235,10 +235,21 @@ type
     /// <summary>Requests code completion. Returns a JSON array of items.</summary>
     function GetCompletion(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
 
+    /// <summary>True as soon as the server can answer about AFilePath:
+    ///  documentSymbol returns a non-empty list, which it can only do once
+    ///  the unit is parsed. The ONLY readiness signal available for the
+    ///  agent session - it never pushes diagnostics (forum 2026-09-30: a
+    ///  freshly started verification session answered null for a minute and
+    ///  the scan took that for "no declaration"). AKeepWaiting is polled
+    ///  between attempts (pump the UI / cancel).</summary>
+    function WaitUnitParsed(const AFilePath: string; ATimeoutMs: Cardinal;
+      const AKeepWaiting: TFunc<Boolean> = nil): Boolean;
+
     /// <summary>Returns the document's symbol tree (textDocument/documentSymbol).
-    ///  Caller owns the returned array and must free it.</summary>
+    ///  Caller owns the returned array and must free it. VIRTUAL: the
+    ///  readiness probe above is built on it, and a test scripts it.</summary>
     function GetDocumentSymbols(const AFilePath: string;
-      ATimeoutMs: Cardinal = 60000): TJSONArray;
+      ATimeoutMs: Cardinal = 60000): TJSONArray; virtual;
 
     /// <summary>Returns the server capabilities as a JSON string (debugging).</summary>
     function GetServerCapabilities: string;
@@ -1584,6 +1595,41 @@ begin
   Response := SendRequest('textDocument/completion', Params);
   // Ownership passes to the caller
   Result := Response;
+end;
+
+// READINESS WITHOUT DIAGNOSTICS (forum 2026-09-30, both logs): a session
+// that is still loading the project answers every position request with
+// null, and the caller cannot tell that from "there is no declaration". The
+// diagnostics counter does not help for the AGENT session used for
+// verification - it never pushes a single diagnostic by design (measured,
+// issue #13). documentSymbol does: the server can only answer it once it has
+// parsed the unit, and it is one request.
+function TLspClient.WaitUnitParsed(const AFilePath: string;
+  ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean>): Boolean;
+var
+  Deadline: UInt64;
+  Sym: TJSONArray;
+begin
+  Result := False;
+  if AFilePath = '' then Exit;
+  Deadline := GetTickCount64 + ATimeoutMs;
+  repeat
+    Sym := nil;
+    try
+      // a short per-attempt timeout: a server that is busy loading does not
+      // answer at all, and we want to come back to AKeepWaiting (cancel /
+      // message pump) rather than block for the whole budget
+      Sym := GetDocumentSymbols(AFilePath, 5000);
+      Result := (Sym <> nil) and (Sym.Count > 0);
+    except
+      Result := False;   // timeout / error: not ready
+    end;
+    if Sym <> nil then Sym.Free;
+    if Result then Exit;
+    if Assigned(AKeepWaiting) and not AKeepWaiting() then Exit;
+    if GetTickCount64 >= Deadline then Exit;
+    Sleep(500);
+  until False;
 end;
 
 function TLspClient.GetDocumentSymbols(const AFilePath: string;

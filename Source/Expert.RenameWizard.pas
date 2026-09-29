@@ -1096,6 +1096,26 @@ begin
       var StartContent: string;
       if EditorOrDiskReader()(FContext.FileName, StartContent) then
         VClient.SyncDocumentWith(FContext.FileName, StartContent);
+      // A FRESHLY STARTED agent session is still loading the project and
+      // answers every request with null - and it pushes no diagnostics, so
+      // no counter can tell. documentSymbol can (forum 2026-09-30). Without
+      // this, a rename would verify against null answers: the declaration
+      // unresolved, the caret taken as the anchor, and only a fraction of
+      // the occurrences renamed.
+      FHost.SetStatus('Preparing the verification session (DelphiLsp is ' +
+        'loading the project)...');
+      if not VClient.WaitUnitParsed(FContext.FileName, 120000,
+           function: Boolean
+           begin
+             FHost.SetProgress(0, 0);     // pumps the dialog
+             Result := not FHost.ScanCancelled;
+           end) then
+      begin
+        FDiagLog := FDiagLog + 'The verification session could not answer ' +
+          'documentSymbol within 120 s (still loading the project) - the main ' +
+          'session verifies instead.' + sLineBreak;
+        VClient := Client;
+      end;
     end;
     IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
     IncCtx.RegisterFiles(ProjFiles);
@@ -1158,8 +1178,11 @@ begin
     var LspLine := FContext.Line - 1;
     var LspCol := FContext.Column - 1;
     var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
-    var DefLine := 0;
-    var DefCol := 0;
+    // no initial 0 any more: every path either has a real declaration or
+    // refuses (forum 2026-09-30) - a "line 0" guess was what silently
+    // turned the target set into a wrong anchor
+    var DefLine: Integer;
+    var DefCol: Integer;
     // An answer in ANOTHER file for a caret that declares the name is a
     // same-named symbol elsewhere (forum: field "ABC" -> Winapi.Windows'
     // type ABC, "cannot be renamed") - the caret is the declaration then.
@@ -1205,6 +1228,50 @@ begin
         DefCol := LspCol;
         FDiagLog := FDiagLog + 'LSP gave no definition - the caret is on a ' +
           'declaration, using it.' + sLineBreak;
+      end
+      else
+      begin
+        // NO ANCHOR: the caret is a USE and its declaration is unknown, so
+        // the verification would judge every candidate against a target set
+        // that is a guess. In find references that produced 29 of 327 rows
+        // (forum 2026-09-30, cold session); here it would RENAME a fraction
+        // of the occurrences and leave code that does not compile. One more
+        // attempt - a session that is still analysing often answers a few
+        // seconds later - and otherwise refuse.
+        FHost.SetStatus('Waiting for DelphiLSP to resolve the declaration...');
+        var DeadL := GetTickCount64 + 20000;
+        while (Length(DefLocs) = 0) and (GetTickCount64 < DeadL)
+          and not FHost.ScanCancelled do
+        begin
+          Sleep(500);
+          FHost.SetProgress(0, 0);        // pumps the dialog
+          DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
+        end;
+        if Length(DefLocs) > 0 then
+        begin
+          DefFilePath := TLspUri.FileUriToPath(DefLocs[0].Uri);
+          DefLine := DefLocs[0].Range.Start.Line;
+          DefCol := DefLocs[0].Range.Start.Character;
+          FDiagLog := FDiagLog + 'Declaration answered on a second attempt.' + sLineBreak;
+        end
+        else
+        begin
+          FDiagLog := FDiagLog + 'Refused: DelphiLSP did not resolve the ' +
+            'declaration of "' + FContext.WordAtCursor + '", and the caret line ' +
+            'declares nothing - without the declaration a rename would verify ' +
+            'every occurrence against a guess and could rename a fraction of ' +
+            'them.' + sLineBreak;
+          FreeAndNil(IncCtx);
+          FHost.SetPreviewItems(nil);
+          FHost.SetDetailsText(FDiagLog);
+          FHost.SetStatus(Format('DelphiLSP did not resolve the declaration of ' +
+            '"%s" (the session was still busy). Nothing was renamed - try again ' +
+            'in a moment; "Find references" lists the occurrences meanwhile.',
+            [FContext.WordAtCursor]));
+          FHost.EnableRename(False);
+          FHost.SetBusy(False);
+          Exit;
+        end;
       end;
     end;
 

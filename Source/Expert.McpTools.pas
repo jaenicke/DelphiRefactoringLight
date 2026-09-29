@@ -20,7 +20,8 @@ unit Expert.McpTools;
 interface
 
 uses
-  System.SysUtils, System.JSON, Lsp.Protocol, Expert.AutoImport;
+  System.SysUtils, System.JSON, System.Generics.Collections,
+  Lsp.Protocol, Expert.AutoImport;
 
 type
   /// <summary>'in_project' / 'search_path' / 'dcu' / 'browsing_only' /
@@ -34,21 +35,215 @@ function FixDescription(const AFix: TQuickFix): string;
 function MakeFixId(AHash: Cardinal; AIndex: Integer): string;
 function ParseFixId(const AId: string; out AHash: Cardinal; out AIndex: Integer): Boolean;
 
+type
+  /// <summary>One changed line of a PREVIEW. Line is 1-based in the OLD
+  ///  content; Before = '' marks a line the edit inserts there, After = ''
+  ///  a line it deletes. Every writing MCP tool answers in this shape, so
+  ///  a caller can judge (or reproduce) an edit without applying it
+  ///  (user request 2026-09-24).</summary>
+  TPreviewChange = record
+    FilePath: string;
+    Line: Integer;
+    Before: string;
+    After: string;
+  end;
+
+/// <summary>The line changes between AOld and ANew: common prefix and
+///  suffix are skipped, the rest is paired up. At most AMax changes are
+///  returned, ATotal says how many there are.</summary>
+function DiffToChanges(const AFile, AOld, ANew: string; AMax: Integer;
+  out ATotal: Integer): TArray<TPreviewChange>;
+function ChangesToJson(const AChanges: TArray<TPreviewChange>): TJSONArray;
+
+/// <summary>FNV-1a over the content - the revision a preview was computed
+///  for (the same shape the fix ids use).</summary>
+function PreviewContentHash(const AContent: string): Cardinal;
+
+/// <summary>Remembers which files a preview describes and how they looked.
+///  "apply" with that token refuses when a buffer changed meanwhile - the
+///  caller then sees a stale preview instead of an edit it never saw.
+///  AReadContent answers '' for a file that cannot be read.</summary>
+function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
+  const AContents: TArray<string>): string;
+function CheckPreviewToken(const AToken, ATool: string;
+  const AReadContent: TFunc<string, string>; out AProblem: string): Boolean;
+
 function DiagnosticsToJson(const AFile: string; AHash: Cardinal;
   const ADiags: TArray<TLspErrorDiag>; const ASources: TArray<string>;
   const AUsed, AStale, ANote: string): TJSONObject;
 
 /// <summary>ALine1 > 0 keeps only fixes anchored to that 1-based line.
 ///  AAvailability may be nil.</summary>
+/// <summary>ACONTENT is the buffer the fixes were resolved for: every fix
+///  then also carries its diagnostic, the affected line verbatim and the
+///  CHANGES it would make (user request 2026-09-24 - a caller has to be
+///  able to judge a fix before applying it). '' = the short form.</summary>
 function QuickFixesToJson(const AFile: string; AHash: Cardinal;
   const AFixes: TArray<TQuickFix>; ALine1: Integer;
   const AAvailability: TUnitAvailabilityFunc;
-  const ADiagCount: Integer; const AUsed, AStale, ANote: string): TJSONObject;
+  const ADiagCount: Integer; const AUsed, AStale, ANote: string;
+  const AContent: string = ''): TJSONObject;
 
 implementation
 
 uses
   System.TypInfo, System.StrUtils, Expert.UsesEditor;
+
+function PreviewContentHash(const AContent: string): Cardinal;
+begin
+  Result := 2166136261;
+  for var I := 1 to Length(AContent) do
+  begin
+    Result := Result xor Ord(AContent[I]);
+    Result := Cardinal((UInt64(Result) * 16777619) and $FFFFFFFF);
+  end;
+end;
+
+function SplitLinesLocal(const AText: string): TArray<string>;
+begin
+  Result := AText.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+end;
+
+function DiffToChanges(const AFile, AOld, ANew: string; AMax: Integer;
+  out ATotal: Integer): TArray<TPreviewChange>;
+var
+  O, N: TArray<string>;
+  P, SO, SN: Integer;
+
+  procedure Add(ALine: Integer; const ABefore, AAfter: string);
+  begin
+    Inc(ATotal);
+    if (AMax > 0) and (Length(Result) >= AMax) then Exit;
+    var C: TPreviewChange;
+    C.FilePath := AFile;
+    C.Line := ALine;
+    C.Before := ABefore;
+    C.After := AAfter;
+    Result := Result + [C];
+  end;
+
+begin
+  Result := nil;
+  ATotal := 0;
+  O := SplitLinesLocal(AOld);
+  N := SplitLinesLocal(ANew);
+  // common prefix
+  P := 0;
+  while (P <= High(O)) and (P <= High(N)) and (O[P] = N[P]) do Inc(P);
+  // common suffix (never back past the prefix)
+  SO := High(O);
+  SN := High(N);
+  while (SO >= P) and (SN >= P) and (O[SO] = N[SN]) do
+  begin
+    Dec(SO);
+    Dec(SN);
+  end;
+  var I := P;
+  var J := P;
+  while (I <= SO) or (J <= SN) do
+  begin
+    if (I <= SO) and (J <= SN) then
+    begin
+      Add(I + 1, O[I], N[J]);
+      Inc(I);
+      Inc(J);
+    end
+    else if I <= SO then
+    begin
+      Add(I + 1, O[I], '');      // deleted
+      Inc(I);
+    end
+    else
+    begin
+      Add(I + 1, '', N[J]);      // inserted before this line
+      Inc(J);
+    end;
+  end;
+end;
+
+function ChangesToJson(const AChanges: TArray<TPreviewChange>): TJSONArray;
+begin
+  Result := TJSONArray.Create;
+  for var C in AChanges do
+  begin
+    var O := TJSONObject.Create;
+    O.AddPair('file', C.FilePath);
+    O.AddPair('line', TJSONNumber.Create(C.Line));
+    O.AddPair('before', C.Before);
+    O.AddPair('after', C.After);
+    Result.Add(O);
+  end;
+end;
+
+type
+  TPreviewEntry = record
+    Tool: string;
+    Files: TArray<string>;
+    Hashes: TArray<Cardinal>;
+    Stamp: TDateTime;
+  end;
+
+var
+  GPreviews: TDictionary<string, TPreviewEntry> = nil;
+  GPreviewLock: TObject = nil;
+  GPreviewCounter: Integer = 0;
+
+function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
+  const AContents: TArray<string>): string;
+var
+  E: TPreviewEntry;
+begin
+  E.Tool := ATool;
+  E.Files := AFiles;
+  E.Hashes := nil;
+  for var C in AContents do E.Hashes := E.Hashes + [PreviewContentHash(C)];
+  E.Stamp := Now;
+  TMonitor.Enter(GPreviewLock);
+  try
+    Inc(GPreviewCounter);
+    Result := Format('%s-%d-%s', [ATool, GPreviewCounter,
+      IntToHex(PreviewContentHash(ATool + DateTimeToStr(E.Stamp) +
+        IntToStr(GPreviewCounter)), 8)]);
+    // keep the store small - a preview nobody applied is dead weight
+    if GPreviews.Count > 32 then GPreviews.Clear;
+    GPreviews.AddOrSetValue(Result, E);
+  finally
+    TMonitor.Exit(GPreviewLock);
+  end;
+end;
+
+function CheckPreviewToken(const AToken, ATool: string;
+  const AReadContent: TFunc<string, string>; out AProblem: string): Boolean;
+var
+  E: TPreviewEntry;
+begin
+  Result := False;
+  AProblem := '';
+  TMonitor.Enter(GPreviewLock);
+  try
+    if not GPreviews.TryGetValue(AToken, E) then
+    begin
+      AProblem := 'unknown token "' + AToken + '" - preview again (a token is ' +
+        'valid in this IDE session, and only until the buffer changes)';
+      Exit;
+    end;
+  finally
+    TMonitor.Exit(GPreviewLock);
+  end;
+  if not SameText(E.Tool, ATool) then
+  begin
+    AProblem := 'that token belongs to ' + E.Tool + ', not to ' + ATool;
+    Exit;
+  end;
+  for var I := 0 to High(E.Files) do
+    if PreviewContentHash(AReadContent(E.Files[I])) <> E.Hashes[I] then
+    begin
+      AProblem := ExtractFileName(E.Files[I]) + ' changed since the preview - ' +
+        'preview again and check the changes';
+      Exit;
+    end;
+  Result := True;
+end;
 
 function SeverityName(ASeverity: Integer): string;
 begin
@@ -200,11 +395,24 @@ end;
 function QuickFixesToJson(const AFile: string; AHash: Cardinal;
   const AFixes: TArray<TQuickFix>; ALine1: Integer;
   const AAvailability: TUnitAvailabilityFunc;
-  const ADiagCount: Integer; const AUsed, AStale, ANote: string): TJSONObject;
+  const ADiagCount: Integer; const AUsed, AStale, ANote: string;
+  const AContent: string): TJSONObject;
 var
   Arr: TJSONArray;
   I: Integer;
+  Lines: TArray<string>;
+
+  function LineText(ALine0: Integer): string;
+  begin
+    if (ALine0 >= 0) and (ALine0 <= High(Lines)) then
+      Result := Lines[ALine0]
+    else
+      Result := '';
+  end;
+
 begin
+  Lines := nil;
+  if AContent <> '' then Lines := SplitLinesLocal(AContent);
   Result := TJSONObject.Create;
   Result.AddPair('file', AFile);
   Result.AddPair('revision', IntToHex(AHash, 8));
@@ -241,6 +449,49 @@ begin
     if F.Kind = qfRemovePrivate then
       O.AddPair('note', 'A non-empty body is only removed after confirmation ' +
         'in the IDE; through this tool such a fix is refused.');
+    if F.DiagCode <> '' then
+    begin
+      var D := TJSONObject.Create;
+      D.AddPair('code', F.DiagCode);
+      D.AddPair('message', F.DiagMessage);
+      D.AddPair('line', TJSONNumber.Create(F.DiagLine + 1));
+      D.AddPair('column', TJSONNumber.Create(F.DiagCol + 1));
+      O.AddPair('diagnostic', D);
+    end;
+    if Lines <> nil then
+    begin
+      O.AddPair('before', LineText(F.Line));
+      // the second line a fix works on: where a ';' goes / where the
+      // implementation of an aligned declaration sits
+      if F.AuxLine > 0 then
+        case F.Kind of
+          qfInsertSemi, qfInitVar:
+            begin
+              O.AddPair('insertAtLine', TJSONNumber.Create(F.AuxLine + 1));
+              O.AddPair('beforeAux', LineText(F.AuxLine));
+            end;
+          qfAlignHeader, qfAlignDeclToImpl:
+            begin
+              O.AddPair('partnerLine', TJSONNumber.Create(F.AuxLine + 1));
+              O.AddPair('beforeAux', LineText(F.AuxLine));
+            end;
+        end;
+      if (F.NewText <> '') and not (F.Kind in [qfRemoveAssign, qfRemoveToken,
+        qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar]) then
+        O.AddPair('newText', F.NewText);
+      var Planned: string;
+      if PlanQuickFixText(AContent, F, 0, Planned) then
+      begin
+        var Total := 0;
+        var Ch := DiffToChanges(AFile, AContent, Planned, 20, Total);
+        O.AddPair('changes', ChangesToJson(Ch));
+        if Total > Length(Ch) then
+          O.AddPair('changesTruncated', TJSONNumber.Create(Total));
+      end
+      else
+        O.AddPair('changes', 'not computed for this kind - it generates code ' +
+          'from a header elsewhere in the file (see newText and line)');
+    end;
     Arr.Add(O);
   end;
   Result.AddPair('fixes', Arr);
@@ -251,5 +502,13 @@ begin
       'state, ignored)');
   if ANote <> '' then Result.AddPair('note', ANote);
 end;
+
+initialization
+  GPreviewLock := TObject.Create;
+  GPreviews := TDictionary<string, TPreviewEntry>.Create;
+
+finalization
+  GPreviews.Free;
+  GPreviewLock.Free;
 
 end.

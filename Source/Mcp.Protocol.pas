@@ -541,6 +541,13 @@ const
     '"refresh":{"type":"boolean","description":"Force a fresh analysis by the ' +
     'plugin''s own DelphiLSP session (slower, a few seconds). Done ' +
     'automatically when no current diagnostics exist for the buffer."}';
+  ApplyProp =
+    '"apply":{"type":"boolean","description":"Default false: nothing is ' +
+    'written and the answer lists the changes (file, line, before, after) ' +
+    'plus a token. true makes the change."}';
+  TokenProp =
+    '"token":{"type":"string","description":"The token of the preview this ' +
+    'call applies. The change is refused when a file changed since then."}';
 
   ToolsJson =
     '[' +
@@ -581,8 +588,11 @@ const
     '"description":"The automatic fixes Refactoring Light offers for the ' +
     'unit''s current diagnostics (add a unit to the uses clause, declare a ' +
     'variable, fix a misspelled identifier, insert a missing semicolon, ' +
-    'remove unused variables, ...). Each fix has an id for apply_quick_fix; ' +
-    'ids are bound to the buffer revision and expire with the next edit.",' +
+    'remove unused variables, ...). Each fix carries the diagnostic behind ' +
+    'it (code, message, position), the affected line verbatim and - where ' +
+    'the fix is a text edit - the changes it would make, so it can be judged ' +
+    'before it is applied. Each fix has an id for apply_quick_fix; ids are ' +
+    'bound to the buffer revision and expire with the next edit.",' +
     '"inputSchema":{"type":"object","properties":{' + FileProp + ',' +
     '"line":{"type":"integer","description":"Only fixes anchored to this ' +
     '1-based line."},' + RefreshProp + ',' + InstanceProp + '}}},' +
@@ -702,15 +712,18 @@ const
     ',' +
     '{"name":"add_unit","description":"Adds a unit to the uses clause of a file (interface or i' +
     'mplementation), minimal edit, IDE buffer when the file is open. Refuses units only on the ' +
-    'browsing path.","inputSchema":{"type":"object","properties":{"file":{"type":"string","desc' +
+    'browsing path. apply=false (the default) only shows the change.","inputSchema":{"type":"object","properties":{"file":{"type":"string","desc' +
     'ription":"Absolute path of the unit."},"unit":{"type":"string"},"section":{"type":"string"' +
-    ',"enum":["interface","implementation"]},"instance":{"type":"integer","description":"Proces' +
+    ',"enum":["interface","implementation"]},' + ApplyProp + ',' + TokenProp + ',' +
+    '"instance":{"type":"integer","description":"Proces' +
     's id of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instan' +
     'ces)."}},"required":["file","unit"]}}' +
     ',' +
-    '{"name":"remove_unit","description":"Removes a unit from the uses clause of a file.","inpu' +
+    '{"name":"remove_unit","description":"Removes a unit from the uses clause of a file. apply=' +
+    'false (the default) only shows the change.","inpu' +
     'tSchema":{"type":"object","properties":{"file":{"type":"string","description":"Absolute pa' +
-    'th of the unit."},"unit":{"type":"string"},"instance":{"type":"integer","description":"Pro' +
+    'th of the unit."},"unit":{"type":"string"},' + ApplyProp + ',' + TokenProp + ',' +
+    '"instance":{"type":"integer","description":"Pro' +
     'cess id of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_ins' +
     'tances)."}},"required":["file","unit"]}}' +
     ',' +
@@ -814,11 +827,13 @@ const
     'ds the needed uses (the source unit goes into the new unit''s implementation uses when only' +
     ' the moved implementation needs it) and updates the uses of the units using the symbol. Re' +
     'fused when the declaration itself needs identifiers of the source unit (circular unit refe' +
-    'rence) - nothing is created then.","inputSchema":{"type":"object","properties":{"file":{"t' +
+    'rence) - nothing is created then. apply=false (the default) runs every check and reports ' +
+    'what would move, without creating the unit.","inputSchema":{"type":"object","properties":{"file":{"t' +
     'ype":"string","description":"Absolute path of the unit."},"line":{"type":"integer","descri' +
     'ption":"1-based line of the identifier."},"column":{"type":"integer","description":"1-base' +
     'd column."},"new_unit":{"type":"string","description":"Name of the new unit (e.g. \"Custom' +
-    'er.List\") or a full path."},"instance":{"type":"integer","description":"Process id of the' +
+    'er.List\") or a full path."},' + ApplyProp + ',' + TokenProp + ',' +
+    '"instance":{"type":"integer","description":"Process id of the' +
     ' IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}},"r' +
     'equired":["file","line","column","new_unit"]}}' +
     ',' +
@@ -827,9 +842,11 @@ const
     'ep the original directive (// >>> include begin: ... / // <<< include end: ...). Nested in' +
     'cludes too. Files open in the IDE are changed in the editor buffer (not saved), closed fil' +
     'es ON DISK - revert with version control. Pass file, files, directory (recursive, .pas/.dp' +
-    'r/.dpk) or project=true.","inputSchema":{"type":"object","properties":{"file":{"type":"st' +
+    'r/.dpk) or project=true. apply=false (the default) only reports what would be expanded.","' +
+    'inputSchema":{"type":"object","properties":{"file":{"type":"st' +
     'ring"},"files":{"type":"array","items":{"type":"string"}},"directory":{"type":"string"},"p' +
-    'roject":{"type":"boolean"},"instance":{"type":"integer","description":"Process id of the I' +
+    'roject":{"type":"boolean"},' + ApplyProp + ',' +
+    '"instance":{"type":"integer","description":"Process id of the I' +
     'DE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}}}}' +
     ',' +
     '{"name":"convert_properties","description":"Converts the properties declared on lines f' +

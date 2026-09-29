@@ -216,6 +216,21 @@ type
     [Test] procedure ForeignAnswerAtADeclaration_IsRecognised;
   end;
 
+  /// <summary>The quick fixes as TEXT (user request 2026-09-24: the MCP
+  ///  tools preview a fix before it is applied). PlanQuickFixText is what
+  ///  ApplyQuickFix writes, so a preview can never describe something else
+  ///  than what happens.</summary>
+  [TestFixture]
+  TQuickFixPreviewTests = class
+  private
+    function Source: string;
+  public
+    [Test] procedure RemoveVar_KeepsTheSiblingsAndRefusesAStaleAnchor;
+    [Test] procedure RemoveLastVar_TakesTheVarKeywordLineAlong;
+    [Test] procedure DeclareVar_GoesBeforeBeginAndAddsItsUnit;
+    [Test] procedure GeneratingKinds_HaveNoTextPreview;
+  end;
+
 implementation
 
 uses
@@ -1190,6 +1205,108 @@ begin
   Assert.AreEqual(31, S); Assert.AreEqual(31, E, 'a ";" inside a string does not count');
 end;
 
+{ TQuickFixPreviewTests }
+
+function TQuickFixPreviewTests.Source: string;
+begin
+  Result :=
+    'unit QPrev;'#13#10 +
+    ''#13#10 +
+    'interface'#13#10 +
+    ''#13#10 +
+    'uses'#13#10 +
+    '  System.SysUtils;'#13#10 +
+    ''#13#10 +
+    'implementation'#13#10 +
+    ''#13#10 +
+    'procedure Foo;'#13#10 +
+    'var'#13#10 +
+    '  A, X, B: Integer;'#13#10 +
+    'begin'#13#10 +
+    '  A := 1;'#13#10 +
+    'end;'#13#10 +
+    ''#13#10 +
+    'end.'#13#10;
+end;
+
+procedure TQuickFixPreviewTests.RemoveVar_KeepsTheSiblingsAndRefusesAStaleAnchor;
+var
+  F: TQuickFix;
+  NewText: string;
+begin
+  F := Default(TQuickFix);
+  F.Kind := qfRemoveVar;
+  F.Line := 11;                       // '  A, X, B: Integer;'
+  F.Identifier := 'X';
+  Assert.IsTrue(PlanQuickFixText(Source, F, 0, NewText));
+  Assert.IsTrue(Pos('  A, B: Integer;', NewText) > 0, 'the siblings stay');
+  Assert.AreEqual(0, Pos(' X', NewText), 'X is gone');
+  // nothing else moved: exactly one line differs from the original
+  var Differs := 0;
+  var Old := Source.Split([#13#10]);
+  var New := NewText.Split([#13#10]);
+  Assert.AreEqual(Length(Old), Length(New), 'same line count');
+  for var I := 0 to High(Old) do
+    if Old[I] <> New[I] then Inc(Differs);
+  Assert.AreEqual(1, Differs);
+  // an anchor that no longer holds the name is stale - and writes nothing
+  F.Identifier := 'NotThere';
+  Assert.IsFalse(PlanQuickFixText(Source, F, 0, NewText));
+end;
+
+procedure TQuickFixPreviewTests.RemoveLastVar_TakesTheVarKeywordLineAlong;
+var
+  F: TQuickFix;
+  NewText: string;
+begin
+  var Src := StringReplace(Source, '  A, X, B: Integer;', '  X: Integer;', [rfReplaceAll]);
+  F := Default(TQuickFix);
+  F.Kind := qfRemoveVar;
+  F.Line := 11;
+  F.Identifier := 'X';
+  Assert.IsTrue(PlanQuickFixText(Src, F, 0, NewText));
+  Assert.AreEqual(0, Pos('X: Integer', NewText), 'the declaration is gone');
+  Assert.AreEqual(0, Pos(#13#10'var'#13#10, NewText), 'the empty var section too');
+  Assert.IsTrue(Pos('procedure Foo;'#13#10'begin', NewText) > 0);
+end;
+
+procedure TQuickFixPreviewTests.DeclareVar_GoesBeforeBeginAndAddsItsUnit;
+var
+  F: TQuickFix;
+  NewText: string;
+begin
+  var Src := StringReplace(Source, '  A := 1;', '  Q := TStringList.Create;',
+    [rfReplaceAll]);
+  F := Default(TQuickFix);
+  F.Kind := qfDeclareVar;
+  F.Line := 13;
+  F.Col := 2;
+  F.TokenLen := 1;
+  F.Identifier := 'Q';
+  F.NewText := 'TStringList';
+  F.FollowUpUnit := 'System.Classes';
+  F.Section := usInterface;
+  Assert.IsTrue(PlanQuickFixText(Src, F, 0, NewText));
+  Assert.IsTrue(Pos('  Q: TStringList;'#13#10'begin', NewText) > 0, 'declared before begin');
+  Assert.IsTrue(Pos('System.Classes', NewText) > 0, 'the unit comes with it');
+end;
+
+procedure TQuickFixPreviewTests.GeneratingKinds_HaveNoTextPreview;
+var
+  F: TQuickFix;
+  NewText: string;
+begin
+  // these build code out of a header elsewhere in the file - their
+  // appliers stay, and the preview says so instead of guessing
+  for var K in [qfImplStub, qfClassStub, qfImplIntfMethod, qfAlignHeader] do
+  begin
+    F := Default(TQuickFix);
+    F.Kind := K;
+    F.Line := 9;
+    Assert.IsFalse(PlanQuickFixText(Source, F, 0, NewText), QuickFixKindText(K));
+  end;
+end;
+
 { TRenameGuardTests }
 
 procedure TRenameGuardTests.EditGuard_MatchesWholeWordsOnly;
@@ -1517,5 +1634,6 @@ initialization
   TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
   TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
+  TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);
 
 end.

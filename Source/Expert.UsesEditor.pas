@@ -53,6 +53,16 @@ function AddUnitToUses(const AFilePath, AUnit: string;
 ///  (interface or implementation). Same layout handling and IFDEF safety
 ///  gate as the move logic in AddUnitToUses. False when the unit is not
 ///  listed or the clause cannot be rewritten safely.</summary>
+/// <summary>ACONTENT with AUnit added to / removed from its uses clause -
+///  the same decisions AddUnitToUses / RemoveUnitFromUses make, but as a
+///  pure text transformation: the MCP tools preview the result before
+///  anything is written (2026-09-24). False = nothing to do (already
+///  reachable, not listed, or the clause cannot be edited safely).</summary>
+function PlanAddUnitToUsesText(const AContent, AUnit: string;
+  ASection: TUsesSection; out ANewContent: string): Boolean;
+function PlanRemoveUnitFromUsesText(const AContent, AUnit: string;
+  out ANewContent: string): Boolean;
+
 function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 
 /// <summary>Writes ASL (an edited copy of AOriginal's lines) back to
@@ -540,25 +550,22 @@ begin
   // Exotic layout (comma-first style etc.) - leave the file untouched.
 end;
 
-function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
+function PlanRemoveUnitFromUsesText(const AContent, AUnit: string;
+  out ANewContent: string): Boolean;
 var
-  Content, Low: string;
+  Low: string;
   SL, M: TStringList;
   I, IntfIdx, ImplIdx, UsesIdx, SemiIdx: Integer;
   Removed: Boolean;
 begin
   Result := False;
-  if (AUnit = '') or (AFilePath = '') then Exit;
-  if (Editor = nil) or not Editor.ReadEditorContent(AFilePath, Content) then
-  begin
-    if not TFile.Exists(AFilePath) then Exit;
-    try Content := TFile.ReadAllText(AFilePath); except Exit; end;
-  end;
+  ANewContent := '';
+  if AUnit = '' then Exit;
 
   M := nil;
   SL := TStringList.Create;
   try
-    SL.Text := Content;
+    SL.Text := AContent;
     M := MaskLines(SL);
     // Anchor at the section keywords (like AddUnitToUses) so text above
     // 'interface' - the unit header comment, say - can never be mistaken
@@ -588,35 +595,54 @@ begin
       Removed := RemoveFromClause(SL, UsesIdx, SemiIdx, AUnit);
 
     if Removed then
-      Result := ApplyLinesMinimal(AFilePath, SL, Content);
+    begin
+      ANewContent := SL.Text;
+      Result := True;
+    end;
   finally
     M.Free;
     SL.Free;
   end;
 end;
 
-function AddUnitToUses(const AFilePath, AUnit: string;
-  ASection: TUsesSection): Boolean;
+function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 var
-  Content: string;
+  Content, NewContent: string;
+  SL: TStringList;
+begin
+  Result := False;
+  if (AUnit = '') or (AFilePath = '') then Exit;
+  if (Editor = nil) or not Editor.ReadEditorContent(AFilePath, Content) then
+  begin
+    if not TFile.Exists(AFilePath) then Exit;
+    try Content := TFile.ReadAllText(AFilePath); except Exit; end;
+  end;
+  if not PlanRemoveUnitFromUsesText(Content, AUnit, NewContent) then Exit;
+  SL := TStringList.Create;
+  try
+    SL.Text := NewContent;
+    Result := ApplyLinesMinimal(AFilePath, SL, Content);
+  finally
+    SL.Free;
+  end;
+end;
+
+function PlanAddUnitToUsesText(const AContent, AUnit: string;
+  ASection: TUsesSection; out ANewContent: string): Boolean;
+var
   SL, M: TStringList;
   I, IntfIdx, ImplIdx, StartIdx, EndIdx, UsesIdx, SemiIdx, P: Integer;
   Low: string;
   InIntf, InImpl: Boolean;
 begin
   Result := False;
-  if (AUnit = '') or (AFilePath = '') then Exit;
-
-  if (Editor = nil) or not Editor.ReadEditorContent(AFilePath, Content) then
-  begin
-    if not TFile.Exists(AFilePath) then Exit;
-    try Content := TFile.ReadAllText(AFilePath); except Exit; end;
-  end;
+  ANewContent := '';
+  if AUnit = '' then Exit;
 
   M := nil;
   SL := TStringList.Create;
   try
-    SL.Text := Content;
+    SL.Text := AContent;
     M := MaskLines(SL);
 
     // Section boundaries.
@@ -683,9 +709,33 @@ begin
     else
       SL.Insert(StartIdx + 1, 'uses ' + AUnit + ';');
 
-    Result := ApplyLinesMinimal(AFilePath, SL, Content);
+    ANewContent := SL.Text;
+    Result := True;
   finally
     M.Free;
+    SL.Free;
+  end;
+end;
+
+function AddUnitToUses(const AFilePath, AUnit: string;
+  ASection: TUsesSection): Boolean;
+var
+  Content, NewContent: string;
+  SL: TStringList;
+begin
+  Result := False;
+  if (AUnit = '') or (AFilePath = '') then Exit;
+  if (Editor = nil) or not Editor.ReadEditorContent(AFilePath, Content) then
+  begin
+    if not TFile.Exists(AFilePath) then Exit;
+    try Content := TFile.ReadAllText(AFilePath); except Exit; end;
+  end;
+  if not PlanAddUnitToUsesText(Content, AUnit, ASection, NewContent) then Exit;
+  SL := TStringList.Create;
+  try
+    SL.Text := NewContent;
+    Result := ApplyLinesMinimal(AFilePath, SL, Content);
+  finally
     SL.Free;
   end;
 end;

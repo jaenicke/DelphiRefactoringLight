@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.11.3** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.12.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -490,6 +490,16 @@ Further scripts:
 registers it with Claude Code. It connects Claude Code to every running IDE
 with the plugin, so rename, find references, quick fixes and the rest work
 on the IDE's live buffers.
+
+**Nothing is written without being shown first.** Every tool that changes
+code takes `apply` (default `false`): the answer then lists the changes as
+`file`, `line`, `before`, `after` and hands out a `token`. Passing that
+token with `apply: true` applies the change &mdash; and refuses when one of
+the files changed in the meantime, so an agent can never apply a change it
+was never shown. `get_quick_fixes` follows the same idea: each fix carries
+the diagnostic behind it (code, message, position), the affected line
+verbatim and, where the fix is a text edit, the very changes the apply
+would make.
 
 What it costs a session: Claude Code keeps the tool schemas out of the
 context until one is needed (tool search), so what is always loaded is the

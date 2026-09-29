@@ -66,6 +66,13 @@ type
     AuxLine: Integer;           // qfInitVar: 0-based line of the routine's 'begin';
                                 //  qfAlignHeader / qfAlignDeclToImpl anchored at a
                                 //  DECLARATION: its implementation line (> 0)
+    // The diagnostic this fix answers - stamped centrally in
+    // ResolveQuickFixes, so a caller (the MCP tools since 2026-09-24) can
+    // judge a fix by its CAUSE and not only by its caption.
+    DiagCode: string;
+    DiagMessage: string;
+    DiagLine: Integer;          // 0-based
+    DiagCol: Integer;           // 0-based
   end;
 
 /// <summary>Turns compiler diagnostics into concrete quick fixes. Pure
@@ -136,6 +143,15 @@ function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
 ///  for qfAddUnit (index into UnitNames).</summary>
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
   AUnitChoice: Integer): Boolean;
+
+/// <summary>The content AFix would produce - the SINGLE source of truth
+///  for the line-local fixes: ApplyQuickFix writes exactly this, and the
+///  MCP tools show it before anything is written (user request
+///  2026-09-24). False when the kind generates code from elsewhere in the
+///  file (implementation stub, interface method, align header) or when the
+///  buffer no longer matches what the fix was resolved for.</summary>
+function PlanQuickFixText(const AContent: string; const AFix: TQuickFix;
+  AUnitChoice: Integer; out ANewContent: string): Boolean;
 
 type
   /// <summary>Asked before each fix of a batch; return '' to apply it or
@@ -726,28 +742,6 @@ begin
   if not TSignatureChecker.ReplaceSignature(ALines, ADeclLine0, NewSig, ANewLines) then Exit;
   // nothing to do (a stale diagnostic) is no fix
   Result := string.Join(#10, ANewLines) <> string.Join(#10, ALines);
-end;
-
-// Applier of qfAlignDeclToImpl - the implementation is found again in the
-// CURRENT buffer (the fix may have been listed a while ago).
-function AlignDeclToImplHeader(const AFile: string; ADeclLine0: Integer): Boolean;
-var
-  Content: string;
-  Lines, NewLines: TArray<string>;
-begin
-  Result := False;
-  if not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  var Impl := FindImplementationOfDecl(Lines, ADeclLine0);
-  if Impl < 0 then Exit;
-  if not PlanDeclToImplAlign(Lines, ADeclLine0, Impl, NewLines) then Exit;
-  var SL := TStringList.Create;
-  try
-    for var L in NewLines do SL.Add(L);
-    Result := ApplyLinesMinimal(AFile, SL, Content);
-  finally
-    SL.Free;
-  end;
 end;
 
 // Turns the E2003 diagnostics for a buffer into missing-identifier records
@@ -2334,6 +2328,7 @@ begin
   try
     for var D in ADiags do
     begin
+      var BeforeCount := Res.Count;
       Key := Format('%s|%d|%d', [UpperCase(D.Code), D.Range.Start.Line,
         D.Range.Start.Character]);
       // E2291 reports EVERY missing method at the same class-header
@@ -2364,6 +2359,16 @@ begin
       else if SameText(D.Code, 'W1010') then AddW1010(D)
       else if SameText(D.Code, 'E2065') then AddE2065(D)
       else if SameText(D.Code, 'E2291') then AddE2291(D);
+      // whatever the providers added for THIS diagnostic carries it
+      for var I := BeforeCount to Res.Count - 1 do
+      begin
+        var Q := Res[I];
+        Q.DiagCode := D.Code;
+        Q.DiagMessage := D.Message;
+        Q.DiagLine := D.Range.Start.Line;
+        Q.DiagCol := D.Range.Start.Character;
+        Res[I] := Q;
+      end;
     end;
     // Several interface methods missing in the SAME class: one more fix
     // that implements all of them in one go.
@@ -2621,111 +2626,6 @@ begin
   for I := HdrEnd downto HdrStart + 1 do
     Editor.DeleteLineAt(AFile, I + 1);
   Result := True;
-end;
-
-// Replaces the CHARACTERS [ACol0, ACol0+ATokenLen) of the 0-based line
-// ALine0 with ANewText, via a whole-line rewrite. Deliberately NOT
-// Editor.ReplaceSelection: the IDE implementation of that computes BYTE
-// offsets in the UTF-8 buffer, so a non-ASCII character earlier on the
-// line (a German comment, say) would shift the replacement. ReplaceLineAt
-// is line-based and encoding-safe in both hosts.
-function ReplaceTokenInLine(const AFile: string; ALine0, ACol0,
-  ATokenLen: Integer; const ANewText: string): Boolean;
-var
-  Content, L: string;
-  Lines: TArray<string>;
-begin
-  Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  L := Lines[ALine0];
-  // Stale-buffer guard: the token must still fit where the fix expects it.
-  if ACol0 + ATokenLen > Length(L) then Exit;
-  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
-    Copy(L, 1, ACol0) + ANewText + Copy(L, ACol0 + ATokenLen + 1, MaxInt));
-end;
-
-// H2164 fix: removes the variable AIdent from the declaration line ALine0
-// ("A, X, B: Integer;" -> "A, B: Integer;"; a lone "X: Integer;" removes
-// the line, and a var block left empty loses its 'var' keyword line too).
-function RemoveVarFromDecl(const AFile, AIdent: string; ALine0: Integer): Boolean;
-
-  function LooksLikeDeclLine(const S: string): Boolean;
-  var
-    T: string;
-    P: Integer;
-  begin
-    // "name[, name]*: type;" - enough to recognise a sibling declaration.
-    T := Trim(StripLineComment(S));
-    Result := False;
-    if (T = '') or (Pos(':=', T) > 0) then Exit;
-    P := Pos(':', T);
-    if P <= 1 then Exit;
-    Result := CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']);
-  end;
-
-var
-  Content, L, Stripped, NamesPart, Rest, Rebuilt: string;
-  Lines: TArray<string>;
-  ColonP, PrevIdx, NextIdx: Integer;
-  Kept: TArray<string>;
-  HadVarPrefix, Found: Boolean;
-begin
-  Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  L := Lines[ALine0];
-  Stripped := StripLineComment(L);
-  if Pos(':=', Stripped) > 0 then Exit;   // initialized inline var - refuse
-
-  ColonP := Pos(':', Stripped);
-  if ColonP <= 1 then Exit;
-  NamesPart := Trim(Copy(Stripped, 1, ColonP - 1));
-  Rest := Copy(L, ColonP, MaxInt);        // ': type;' + any trailing comment
-
-  HadVarPrefix := StartsText('var ', NamesPart);
-  if HadVarPrefix then
-    NamesPart := Trim(Copy(NamesPart, 5, MaxInt));
-
-  Found := False;
-  Kept := nil;
-  for var N in NamesPart.Split([',']) do
-  begin
-    var Nm := Trim(N);
-    if Nm = '' then Continue;
-    if SameText(Nm, AIdent) then
-      Found := True
-    else
-      Kept := Kept + [Nm];
-  end;
-  if not Found then Exit;
-
-  if Length(Kept) > 0 then
-  begin
-    // Rebuild the line without the removed name.
-    Rebuilt := Copy(L, 1, Length(L) - Length(TrimLeft(L)));   // indentation
-    if HadVarPrefix then Rebuilt := Rebuilt + 'var ';
-    Rebuilt := Rebuilt + string.Join(', ', Kept) + Rest;
-    Exit(Editor.ReplaceLineAt(AFile, ALine0 + 1, Rebuilt));
-  end;
-
-  // The only name on the line -> remove the whole line ...
-  if not Editor.DeleteLineAt(AFile, ALine0 + 1) then Exit;
-  Result := True;
-  if HadVarPrefix then Exit;   // inline 'var X: T;' - nothing more to do
-
-  // ... and drop a now-empty 'var' keyword line above it: previous
-  // non-empty line must be exactly 'var', and the line that moved into
-  // the deleted slot must not be a sibling declaration.
-  PrevIdx := ALine0 - 1;
-  while (PrevIdx >= 0) and (Trim(Lines[PrevIdx]) = '') do Dec(PrevIdx);
-  if (PrevIdx < 0) or not SameText(Trim(StripLineComment(Lines[PrevIdx])), 'var') then Exit;
-  NextIdx := ALine0 + 1;   // in the ORIGINAL lines: the line after the deleted one
-  while (NextIdx <= High(Lines)) and (Trim(Lines[NextIdx]) = '') do Inc(NextIdx);
-  if (NextIdx <= High(Lines)) and LooksLikeDeclLine(Lines[NextIdx]) then Exit;
-  Editor.DeleteLineAt(AFile, PrevIdx + 1);
 end;
 
 // "<Name> = class..." / "<Name> = record..." opener that starts a type BODY
@@ -3246,92 +3146,6 @@ begin
   Result := Editor.InsertTextAtLineStart(AFile, ALine0 + 2, Text);
 end;
 
-// W1036 fix: inserts the Default() initialization right after 'begin'.
-function InsertInitAtBegin(const AFile, AStmtLine: string;
-  ABeginLine0: Integer): Boolean;
-var
-  Content: string;
-  Lines: TArray<string>;
-begin
-  Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ABeginLine0 < 0) or (ABeginLine0 >= High(Lines)) then Exit;
-  if not SameText(Trim(StripLineComment(Lines[ABeginLine0])), 'begin') then Exit;
-  Result := Editor.InsertTextAtLineStart(AFile, ABeginLine0 + 2,
-    AStmtLine + sLineBreak);
-end;
-
-// E2029/E2066 fix: inserts ';' right after the 0-based character index
-// ACol0 of line ALine0 - with the resolver's semantic guards REPEATED
-// against the current buffer, so a stale fix can never punch a ';' into
-// an arbitrary position.
-function InsertSemicolonAfter(const AFile: string; ALine0, ACol0: Integer): Boolean;
-var
-  Content, L: string;
-  Lines: TArray<string>;
-begin
-  Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  L := Lines[ALine0];
-  if (ACol0 < 0) or (ACol0 + 1 > Length(L)) then Exit;
-  // The marked character must still be a statement-end character (not
-  // whitespace / already terminated) and nothing may already follow it.
-  if CharInSet(L[ACol0 + 1], [' ', #9, ';', ',']) then Exit;
-  if (ACol0 + 2 <= Length(L)) and (L[ACol0 + 2] = ';') then Exit;
-  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
-    Copy(L, 1, ACol0 + 1) + ';' + Copy(L, ACol0 + 2, MaxInt));
-end;
-
-// H2077 fix: deletes the dead assignment line - only when the line still
-// contains the EXACT statement the fix was resolved for (AExpected), so a
-// stale/shifted buffer can never lose a live assignment.
-// E2029 stray-token fix: removes the token (plus the whitespace run
-// before it) from its line; a line left empty is deleted entirely.
-// AExpected = the line's text at resolve time - anything else means the
-// buffer changed and the fix is stale.
-function RemoveStrayToken(const AFile, AExpected, AToken: string;
-  ALine0, ACol0: Integer): Boolean;
-var
-  Content, L, NewL: string;
-  Lines: TArray<string>;
-  StartP, EndP: Integer;
-begin
-  Result := False;
-  if (Editor = nil) or (AToken = '') or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  L := Lines[ALine0];
-  if L <> AExpected then Exit;                            // buffer changed
-  StartP := ACol0 + 1;                                    // 1-based
-  if (StartP < 1) or (StartP + Length(AToken) - 1 > Length(L)) then Exit;
-  if not SameText(Copy(L, StartP, Length(AToken)), AToken) then Exit;
-  EndP := StartP + Length(AToken) - 1;
-  // Swallow the whitespace run before the token.
-  while (StartP > 1) and CharInSet(L[StartP - 1], [' ', #9]) do Dec(StartP);
-  NewL := Copy(L, 1, StartP - 1) + Copy(L, EndP + 1, MaxInt);
-  if Trim(NewL) = '' then
-    Result := Editor.DeleteLineAt(AFile, ALine0 + 1)
-  else
-    Result := Editor.ReplaceLineAt(AFile, ALine0 + 1, NewL);
-end;
-
-function RemoveDeadAssignment(const AFile, AExpected: string; ALine0: Integer): Boolean;
-var
-  Content: string;
-  Lines: TArray<string>;
-begin
-  Result := False;
-  if (Editor = nil) or (AExpected = '') or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  if Trim(StripLineComment(Lines[ALine0])) <> AExpected then Exit;
-  if IsSoleBranchStatement(Lines, ALine0) then Exit;
-  Result := Editor.DeleteLineAt(AFile, ALine0 + 1);
-end;
-
 function IsSoleBranchStatement(const ALines: TArray<string>; ALine0: Integer): Boolean;
 var
   M: TArray<string>;
@@ -3355,38 +3169,6 @@ begin
     W := UpperCase(Copy(S, Q + 1, P - Q));
     Exit((W = 'THEN') or (W = 'ELSE') or (W = 'DO'));
   end;
-end;
-
-// W1010 fix: appends ' reintroduce;' after the declaration's first
-// top-level ';' (reintroduce must be the first directive).
-function AddReintroduceAt(const AFile: string; ALine0: Integer): Boolean;
-var
-  Content, L, S: string;
-  Lines: TArray<string>;
-  I, Depth, SemiP: Integer;
-begin
-  Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
-  L := Lines[ALine0];
-  S := StripLineComment(L);
-  if Pos('REINTRODUCE', UpperCase(S)) > 0 then Exit;
-  Depth := 0;
-  SemiP := 0;
-  for I := 1 to Length(S) do
-    case S[I] of
-      '(', '[': Inc(Depth);
-      ')', ']': if Depth > 0 then Dec(Depth);
-      ';': if Depth = 0 then
-        begin
-          SemiP := I;
-          Break;
-        end;
-    end;
-  if SemiP = 0 then Exit;
-  Result := Editor.ReplaceLineAt(AFile, ALine0 + 1,
-    Copy(L, 1, SemiP) + ' reintroduce;' + Copy(L, SemiP + 1, MaxInt));
 end;
 
 // ---------------------------------------------------------------------------
@@ -3604,42 +3386,290 @@ begin
   end;
 end;
 
-// E2003 declare-variable fix: a local declaration in the routine's var
-// section (created when missing) or the inline "var X :=" form - both
-// re-validated against the current buffer, then the planned unit.
-function DeclareVariable(const AFile: string; const AFix: TQuickFix): Boolean;
+// ---------------------------------------------------------------------------
+//  The line-local fixes as ONE pure planner
+// ---------------------------------------------------------------------------
+//
+// Each of these fixes used to have its own applier that read the buffer,
+// repeated its stale guard and wrote through the editor. A PREVIEW was
+// impossible that way (user request 2026-09-24: check the places first),
+// and a second implementation written for the preview alone would be free
+// to drift from what is actually written. So this planner IS the fix:
+// ApplyQuickFix writes what it returns and the MCP tools show the same
+// text. The guards are unchanged - a buffer that no longer matches what
+// the fix was resolved for yields False, here and there.
+
+// "name[, name]*: type;" - enough to recognise a sibling declaration.
+function LooksLikeVarDeclLine(const S: string): Boolean;
 var
-  Content, S, Ident, Text: string;
+  T: string;
+  P: Integer;
+begin
+  T := Trim(StripLineComment(S));
+  Result := False;
+  if (T = '') or (Pos(':=', T) > 0) then Exit;
+  P := Pos(':', T);
+  if P <= 1 then Exit;
+  Result := CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']);
+end;
+
+function PlanQuickFixText(const AContent: string; const AFix: TQuickFix;
+  AUnitChoice: Integer; out ANewContent: string): Boolean;
+var
   Lines: TArray<string>;
-  InsLine: Integer;
+
+  // The exact inverse of SplitContentLines - a trailing empty element IS
+  // the file's final line break, so nothing is added and nothing is lost
+  // (a TStringList.Text here silently appended one, and the preview then
+  // reported a changed line at the end of every fix).
+  function Joined: string;
+  var
+    LB: string;
+  begin
+    if Pos(#13#10, AContent) > 0 then LB := #13#10
+    else if Pos(#10, AContent) > 0 then LB := #10
+    else LB := sLineBreak;
+    Result := string.Join(LB, Lines);
+  end;
+
+  function ReplaceToken(ALine0, ACol0, ALen: Integer; const ANew: string): Boolean;
+  var
+    L: string;
+  begin
+    Result := False;
+    if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+    L := Lines[ALine0];
+    if ACol0 + ALen > Length(L) then Exit;          // stale buffer
+    Lines[ALine0] := Copy(L, 1, ACol0) + ANew + Copy(L, ACol0 + ALen + 1, MaxInt);
+    Result := True;
+  end;
+
+  procedure InsertText(ABefore0: Integer; const AText: string);
+  var
+    Ins: TArray<string>;
+  begin
+    Ins := SplitContentLines(AText);
+    if (Length(Ins) > 0) and (Ins[High(Ins)] = '') then
+      SetLength(Ins, Length(Ins) - 1);
+    Insert(Ins, Lines, ABefore0);
+  end;
+
 begin
   Result := False;
-  if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
-  Lines := SplitContentLines(Content);
-  if (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
-  S := Lines[AFix.Line];
-  // stale guard: the identifier still starts the assignment
-  Ident := Copy(S, AFix.Col + 1, AFix.TokenLen);
-  if not SameText(Ident, AFix.Identifier) then Exit;
-  if Trim(Copy(S, 1, AFix.Col)) <> '' then Exit;
-  if not TrimLeft(Copy(S, AFix.Col + AFix.TokenLen + 1, MaxInt)).StartsWith(':=') then Exit;
-  if AFix.Kind = qfDeclareInlineVar then
-    Result := ReplaceTokenInLine(AFile, AFix.Line, AFix.Col, AFix.TokenLen, 'var ' + Ident)
+  ANewContent := '';
+  Lines := SplitContentLines(AContent);
+  case AFix.Kind of
+    qfAddUnit:
+      begin
+        if (AUnitChoice < 0) or (AUnitChoice > High(AFix.UnitNames)) then
+          AUnitChoice := 0;
+        if AUnitChoice > High(AFix.UnitNames) then Exit;
+        Result := PlanAddUnitToUsesText(AContent, AFix.UnitNames[AUnitChoice],
+          AFix.Section, ANewContent);
+        Exit;
+      end;
+    qfRemoveUses:
+      begin
+        Result := PlanRemoveUnitFromUsesText(AContent, AFix.OldUnit, ANewContent);
+        Exit;
+      end;
+    qfRemovePrivate:
+      begin
+        // the preview shows both removals; the APPLIER still asks first
+        var Info := Default(TPrivateMember);
+        if not FindRemovablePrivate(AContent, AFix.Line, AFix.Identifier, Info) then Exit;
+        ANewContent := RemovePrivateMemberText(AContent, Info);
+        Result := ANewContent <> AContent;
+        Exit;
+      end;
+    qfRenameIdent, qfFixUsesName:
+      if not ReplaceToken(AFix.Line, AFix.Col, AFix.TokenLen, AFix.NewText) then Exit;
+    qfInsertSemi:
+      begin
+        if (AFix.AuxLine < 0) or (AFix.AuxLine > High(Lines)) then Exit;
+        var SL0 := Lines[AFix.AuxLine];
+        if (AFix.Col < 0) or (AFix.Col + 1 > Length(SL0)) then Exit;
+        // the marked character must still end a statement and nothing may
+        // already follow it
+        if CharInSet(SL0[AFix.Col + 1], [' ', #9, ';', ',']) then Exit;
+        if (AFix.Col + 2 <= Length(SL0)) and (SL0[AFix.Col + 2] = ';') then Exit;
+        Lines[AFix.AuxLine] := Copy(SL0, 1, AFix.Col + 1) + ';' +
+          Copy(SL0, AFix.Col + 2, MaxInt);
+      end;
+    qfInitVar:
+      begin
+        if (AFix.AuxLine < 0) or (AFix.AuxLine >= High(Lines)) then Exit;
+        if not SameText(Trim(StripLineComment(Lines[AFix.AuxLine])), 'begin') then Exit;
+        InsertText(AFix.AuxLine + 1, AFix.NewText + sLineBreak);
+      end;
+    qfRemoveAssign:
+      begin
+        if (AFix.NewText = '') or (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
+        if Trim(StripLineComment(Lines[AFix.Line])) <> AFix.NewText then Exit;
+        if IsSoleBranchStatement(Lines, AFix.Line) then Exit;
+        Delete(Lines, AFix.Line, 1);
+      end;
+    qfRemoveToken:
+      begin
+        if (AFix.Identifier = '') or (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
+        var TL := Lines[AFix.Line];
+        if TL <> AFix.NewText then Exit;              // buffer changed
+        var StartP := AFix.Col + 1;                   // 1-based
+        if (StartP < 1) or (StartP + Length(AFix.Identifier) - 1 > Length(TL)) then Exit;
+        if not SameText(Copy(TL, StartP, Length(AFix.Identifier)), AFix.Identifier) then Exit;
+        var EndP := StartP + Length(AFix.Identifier) - 1;
+        while (StartP > 1) and CharInSet(TL[StartP - 1], [' ', #9]) do Dec(StartP);
+        var NewL := Copy(TL, 1, StartP - 1) + Copy(TL, EndP + 1, MaxInt);
+        if Trim(NewL) = '' then
+          Delete(Lines, AFix.Line, 1)
+        else
+          Lines[AFix.Line] := NewL;
+      end;
+    qfRemoveVar:
+      begin
+        if (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
+        var VL := Lines[AFix.Line];
+        var VS := StripLineComment(VL);
+        if Pos(':=', VS) > 0 then Exit;               // initialized inline var
+        var ColonP := Pos(':', VS);
+        if ColonP <= 1 then Exit;
+        var NamesPart := Trim(Copy(VS, 1, ColonP - 1));
+        var RestPart := Copy(VL, ColonP, MaxInt);     // ': type;' + comment
+        var HadVar := StartsText('var ', NamesPart);
+        if HadVar then NamesPart := Trim(Copy(NamesPart, 5, MaxInt));
+        var Kept: TArray<string> := nil;
+        var FoundName := False;
+        for var N in NamesPart.Split([',']) do
+        begin
+          var Nm := Trim(N);
+          if Nm = '' then Continue;
+          if SameText(Nm, AFix.Identifier) then
+            FoundName := True
+          else
+            Kept := Kept + [Nm];
+        end;
+        if not FoundName then Exit;
+        if Length(Kept) > 0 then
+          Lines[AFix.Line] := Copy(VL, 1, Length(VL) - Length(TrimLeft(VL))) +
+            IfThen(HadVar, 'var ') + string.Join(', ', Kept) + RestPart
+        else
+        begin
+          // the only name on the line -> the line goes, and a 'var' keyword
+          // line left without any declaration goes with it
+          var PrevIdx := AFix.Line - 1;
+          while (PrevIdx >= 0) and (Trim(Lines[PrevIdx]) = '') do Dec(PrevIdx);
+          var NextIdx := AFix.Line + 1;
+          while (NextIdx <= High(Lines)) and (Trim(Lines[NextIdx]) = '') do Inc(NextIdx);
+          var DropVarLine := not HadVar and (PrevIdx >= 0) and
+            SameText(Trim(StripLineComment(Lines[PrevIdx])), 'var') and
+            ((NextIdx > High(Lines)) or not LooksLikeVarDeclLine(Lines[NextIdx]));
+          Delete(Lines, AFix.Line, 1);
+          if DropVarLine then Delete(Lines, PrevIdx, 1);
+        end;
+      end;
+    qfAddReintroduce:
+      begin
+        if (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
+        var RL := Lines[AFix.Line];
+        var RS := StripLineComment(RL);
+        if Pos('REINTRODUCE', UpperCase(RS)) > 0 then Exit;
+        var Depth := 0;
+        var SemiP := 0;
+        for var I := 1 to Length(RS) do
+          case RS[I] of
+            '(', '[': Inc(Depth);
+            ')', ']': if Depth > 0 then Dec(Depth);
+            ';': if Depth = 0 then
+              begin
+                SemiP := I;
+                Break;
+              end;
+          end;
+        if SemiP = 0 then Exit;
+        Lines[AFix.Line] := Copy(RL, 1, SemiP) + ' reintroduce;' +
+          Copy(RL, SemiP + 1, MaxInt);
+      end;
+    qfDeclareVar, qfDeclareInlineVar:
+      begin
+        if (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
+        var DS := Lines[AFix.Line];
+        // stale guard: the identifier still starts the assignment
+        var DIdent := Copy(DS, AFix.Col + 1, AFix.TokenLen);
+        if not SameText(DIdent, AFix.Identifier) then Exit;
+        if Trim(Copy(DS, 1, AFix.Col)) <> '' then Exit;
+        if not TrimLeft(Copy(DS, AFix.Col + AFix.TokenLen + 1, MaxInt)).StartsWith(':=') then Exit;
+        if AFix.Kind = qfDeclareInlineVar then
+        begin
+          if not ReplaceToken(AFix.Line, AFix.Col, AFix.TokenLen, 'var ' + DIdent) then Exit;
+        end
+        else
+        begin
+          var InsLine: Integer;
+          var DText: string;
+          if not PlanLocalVarDecl(Lines, AFix.Line, DIdent, AFix.NewText,
+            InsLine, DText) then Exit;
+          InsertText(InsLine, DText);
+        end;
+      end;
+    qfAlignDeclToImpl:
+      begin
+        var ImplLine0 := FindImplementationOfDecl(Lines, AFix.Line);
+        if ImplLine0 < 0 then Exit;
+        var Aligned: TArray<string>;
+        if not PlanDeclToImplAlign(Lines, AFix.Line, ImplLine0, Aligned) then Exit;
+        Lines := Aligned;
+      end;
   else
-  begin
-    if not PlanLocalVarDecl(Lines, AFix.Line, Ident, AFix.NewText, InsLine, Text) then Exit;
-    Result := Editor.InsertTextAtLineStart(AFile, InsLine + 1, Text);
+    // qfAlignHeader / qfImplStub / qfClassStub / qfImplIntfMethod generate
+    // code from a header elsewhere in the file - their appliers stay
+    Exit;
   end;
-  if Result and (AFix.FollowUpUnit <> '') then
-    AddUnitToUses(AFile, AFix.FollowUpUnit, AFix.Section);
+  ANewContent := Joined;
+  if AFix.FollowUpUnit <> '' then
+  begin
+    var WithUnit: string;
+    if PlanAddUnitToUsesText(ANewContent, AFix.FollowUpUnit, AFix.Section, WithUnit) then
+      ANewContent := WithUnit;
+  end;
+  Result := ANewContent <> AContent;
+end;
+
+// Writes what the planner produced - one minimal edit for the whole fix.
+function WritePlannedFix(const AFile, AOld, ANew: string): Boolean;
+var
+  SL: TStringList;
+begin
+  Result := False;
+  if ANew = AOld then Exit;
+  SL := TStringList.Create;
+  try
+    SL.Text := ANew;
+    Result := ApplyLinesMinimal(AFile, SL, AOld);
+  finally
+    SL.Free;
+  end;
 end;
 
 // Executes one quick fix. AUnitChoice picks the candidate unit for
 // qfAddUnit (index into UnitNames).
+const
+  // everything PlanQuickFixText can express as text - one read, one write
+  PlannedFixKinds = [qfRenameIdent, qfFixUsesName, qfInsertSemi, qfInitVar,
+    qfRemoveAssign, qfRemoveToken, qfRemoveVar, qfAddReintroduce,
+    qfDeclareVar, qfDeclareInlineVar, qfAlignDeclToImpl];
+
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
   AUnitChoice: Integer): Boolean;
+var
+  Content, NewContent: string;
 begin
   Result := False;
+  if AFix.Kind in PlannedFixKinds then
+  begin
+    if (Editor = nil) or not ReadCurrentContent(AFile, Content) then Exit;
+    if not PlanQuickFixText(Content, AFix, AUnitChoice, NewContent) then Exit;
+    Exit(WritePlannedFix(AFile, Content, NewContent));
+  end;
   case AFix.Kind of
     qfAddUnit:
       begin
@@ -3648,16 +3678,6 @@ begin
         if AUnitChoice > High(AFix.UnitNames) then Exit;
         Result := AddUnitToUses(AFile, AFix.UnitNames[AUnitChoice], AFix.Section);
       end;
-    qfRenameIdent:
-      begin
-        Result := ReplaceTokenInLine(AFile, AFix.Line, AFix.Col,
-          AFix.TokenLen, AFix.NewText);
-        if Result and (AFix.FollowUpUnit <> '') then
-          AddUnitToUses(AFile, AFix.FollowUpUnit, AFix.Section);
-      end;
-    qfFixUsesName:
-      Result := ReplaceTokenInLine(AFile, AFix.Line, AFix.Col,
-        AFix.TokenLen, AFix.NewText);
     qfRemoveUses:
       Result := RemoveUnitFromUses(AFile, AFix.OldUnit);
     qfAlignHeader:
@@ -3675,27 +3695,10 @@ begin
       end
       else
         Result := AlignImplHeaderToDecl(AFile, AFix.Line);
-    qfAlignDeclToImpl:
-      Result := AlignDeclToImplHeader(AFile, AFix.Line);
-    qfRemoveVar:
-      Result := RemoveVarFromDecl(AFile, AFix.Identifier, AFix.Line);
-    qfInsertSemi:
-      Result := InsertSemicolonAfter(AFile, AFix.AuxLine, AFix.Col);
-    qfInitVar:
-      Result := InsertInitAtBegin(AFile, AFix.NewText, AFix.AuxLine);
-    qfRemoveAssign:
-      Result := RemoveDeadAssignment(AFile, AFix.NewText, AFix.Line);
-    qfAddReintroduce:
-      Result := AddReintroduceAt(AFile, AFix.Line);
     qfImplStub:
       Result := CreateImplStub(AFile, AFix.Line);
     qfClassStub:
       Result := CreateClassStub(AFile, AFix.Identifier, AFix.Line);
-    qfRemoveToken:
-      Result := RemoveStrayToken(AFile, AFix.NewText, AFix.Identifier,
-        AFix.Line, AFix.Col);
-    qfDeclareVar, qfDeclareInlineVar:
-      Result := DeclareVariable(AFile, AFix);
     qfImplIntfMethod:
       Result := ImplementInterfaceMethods(AFile, AFix.Line, AFix.NewText.Split([#10]));
     qfRemovePrivate:

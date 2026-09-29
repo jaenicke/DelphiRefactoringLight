@@ -29,8 +29,11 @@ type
   end;
 
 /// <summary>Expands the includes of AFiles (main thread - editor buffers).
-///  Files without an include directive are left alone.</summary>
-function ExpandIncludesInFiles(const AFiles: TArray<string>): TIncludeExpandResult;
+///  Files without an include directive are left alone. APREVIEW computes
+///  everything and writes NOTHING - the MCP tool answers with what would
+///  change first (user request 2026-09-24).</summary>
+function ExpandIncludesInFiles(const AFiles: TArray<string>;
+  APreview: Boolean = False): TIncludeExpandResult;
 
 /// <summary>AFiles that contain at least one include directive (cheap text
 ///  check, buffer or disk).</summary>
@@ -73,7 +76,15 @@ begin
       Result := Result + [F];
 end;
 
-function ExpandIncludesInFiles(const AFiles: TArray<string>): TIncludeExpandResult;
+function LineCountOf(const AText: string): Integer;
+begin
+  Result := 1;
+  for var I := 1 to Length(AText) do
+    if AText[I] = #10 then Inc(Result);
+end;
+
+function ExpandIncludesInFiles(const AFiles: TArray<string>;
+  APreview: Boolean): TIncludeExpandResult;
 var
   Original, Expanded: string;
   Count: Integer;
@@ -86,6 +97,15 @@ begin
     Expanded := ExpandIncludesMarked(Original, ExtractFileDir(ExpandFileName(F)),
       EditorOrDiskReader(), Count);
     if Count = 0 then Continue;
+    if APreview then
+    begin
+      Inc(Result.FilesChanged);
+      Inc(Result.Includes, Count);
+      Result.Report := Result.Report + Format('%s: %d include(s), %d -> %d lines',
+        [ExtractFileName(F), Count, LineCountOf(Original), LineCountOf(Expanded)]) +
+        sLineBreak;
+      Continue;
+    end;
     SL := TStringList.Create;
     try
       SL.Text := Expanded;
@@ -209,6 +229,7 @@ begin
   var Project := AArgs.GetValue<Boolean>('project', False);
   if (Length(Files) = 0) and not Project then
     Exit(McpErr('pass "file", "files", "directory" or "project": true'));
+  var DoApply := AArgs.GetValue<Boolean>('apply', False);
   RunErr := '';
   if not McpRunOnMain(
     procedure
@@ -216,19 +237,25 @@ begin
       try
         var All := Files;
         if Project and (Editor <> nil) then All := All + Editor.GetProjectSourceFiles;
-        R := ExpandIncludesInFiles(All);
+        R := ExpandIncludesInFiles(All, not DoApply);
       except
         on E: Exception do RunErr := E.Message;
       end;
-    end, False, AStop, Err) then Exit(McpErr(Err));
+    end, not DoApply, AStop, Err) then Exit(McpErr(Err));
   if RunErr <> '' then Exit(McpErr(RunErr));
   var J := TJSONObject.Create;
+  J.AddPair('applied', TJSONBool.Create(DoApply));
   J.AddPair('files_changed', TJSONNumber.Create(R.FilesChanged));
   J.AddPair('includes_expanded', TJSONNumber.Create(R.Includes));
   J.AddPair('failed', TJSONNumber.Create(R.Failed));
   J.AddPair('report', Trim(R.Report));
-  J.AddPair('note', 'open files were changed in the editor buffer (not saved), closed ' +
-    'files on disk; revert with the version control system');
+  if DoApply then
+    J.AddPair('note', 'open files were changed in the editor buffer (not saved), ' +
+      'closed files on disk; revert with the version control system')
+  else
+    J.AddPair('note', 'Nothing was written - this is what apply=true would expand. ' +
+      'Every {$I} is replaced by the include file''s content between marker ' +
+      'comments, which is why the units grow by the lines shown above.');
   Result := McpOk(J);
 end;
 

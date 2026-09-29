@@ -39,7 +39,7 @@ uses
   Expert.PluginSettings, Expert.IncludeExpansion, Expert.InterfaceLinks,
   Expert.SemanticReplace, Expert.SemanticReplaceWizard, Expert.MoveToUnit, Expert.SafeDelete,
   Expert.SafeDeletePlan, Lsp.Client, Lsp.Protocol, Lsp.Uri,
-  Delphi.FileEncoding, Expert.PascalScanner;
+  Delphi.FileEncoding, Expert.PascalScanner, Expert.McpTools;
 
 // ---------------------------------------------------------------------------
 //  Helpers
@@ -254,18 +254,27 @@ begin
   Result := McpOk(Res);
 end;
 
+// apply=false (the default since 2026-09-24) answers with the CHANGES the
+// edit would make and a token; apply=true writes, and with the token only
+// when the buffer still looks the way the preview described it.
 function ToolAddUnit(AArgs: TJSONObject; AStop: THandle): string;
 var
-  F, U, Sec, Err, Msg: string;
-  Ok: Boolean;
+  F, U, Sec, Err, Msg, NewContent, Token: string;
+  Ok, DoApply: Boolean;
+  Changes: TArray<TPreviewChange>;
+  Total: Integer;
 begin
   F := ArgStr(AArgs, 'file');
   U := Trim(ArgStr(AArgs, 'unit'));
   Sec := ArgStr(AArgs, 'section', 'interface');
   if (F = '') or (U = '') then Exit(McpErr('arguments "file" and "unit" are required'));
   F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Token := ArgStr(AArgs, 'token');
   Msg := '';
   Ok := False;
+  Changes := nil;
+  Total := 0;
   if not McpRunOnMain(
     procedure
     var
@@ -284,42 +293,111 @@ begin
           'compiler would not find it. Add it in the IDE (project or search path).';
         Exit;
       end;
-      if SameText(Sec, 'implementation') then
-        Ok := AddUnitToUses(F, U, usImplementation)
-      else
-        Ok := AddUnitToUses(F, U, usInterface);
-      if not Ok then
+      var Section := usInterface;
+      if SameText(Sec, 'implementation') then Section := usImplementation;
+      if not PlanAddUnitToUsesText(C, U, Section, NewContent) then
+      begin
         Msg := U + ' was not added - it is already reachable from that section, ' +
           'or the uses clause could not be edited safely (comments inside it)';
-    end, False, AStop, Err) then Exit(McpErr(Err));
+        Exit;
+      end;
+      Changes := DiffToChanges(F, C, NewContent, 40, Total);
+      if not DoApply then
+      begin
+        Token := NewPreviewToken('add_unit', [F], [C]);
+        Ok := True;
+        Exit;
+      end;
+      if (Token <> '') and not CheckPreviewToken(Token, 'add_unit',
+        function(AFile: string): string
+        begin
+          if not McpReadContent(AFile, Result) then Result := '';
+        end, Msg) then Exit;
+      Ok := AddUnitToUses(F, U, Section);
+      if not Ok then
+        Msg := U + ' could not be added (the buffer changed?)';
+    end, not DoApply, AStop, Err) then Exit(McpErr(Err));
   if Msg <> '' then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
   Res.AddPair('file', F);
-  Res.AddPair('added', U);
-  Res.AddPair('note', 'Edited in the IDE buffer when the file is open (not ' +
-    'saved), otherwise on disk.');
+  Res.AddPair('unit', U);
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('changes', ChangesToJson(Changes));
+  if Total > Length(Changes) then
+    Res.AddPair('changesTruncated', TJSONNumber.Create(Total));
+  if DoApply then
+    Res.AddPair('note', 'Edited in the IDE buffer when the file is open (not ' +
+      'saved), otherwise on disk.')
+  else
+  begin
+    Res.AddPair('token', Token);
+    Res.AddPair('note', 'Nothing was written. Call again with apply=true (and ' +
+      'this token) to make the change.');
+  end;
   Result := McpOk(Res);
 end;
 
 function ToolRemoveUnit(AArgs: TJSONObject; AStop: THandle): string;
 var
-  F, U, Err: string;
-  Ok: Boolean;
+  F, U, Err, Msg, NewContent, Token: string;
+  Ok, DoApply: Boolean;
+  Changes: TArray<TPreviewChange>;
+  Total: Integer;
 begin
   F := ArgStr(AArgs, 'file');
   U := Trim(ArgStr(AArgs, 'unit'));
   if (F = '') or (U = '') then Exit(McpErr('arguments "file" and "unit" are required'));
   F := ExpandFileName(F);
+  DoApply := ArgBool(AArgs, 'apply');
+  Token := ArgStr(AArgs, 'token');
   Ok := False;
+  Msg := '';
+  Changes := nil;
+  Total := 0;
   if not McpRunOnMain(
     procedure
+    var
+      C: string;
     begin
+      if not McpReadContent(F, C) then
+      begin
+        Msg := 'file not found: ' + F;
+        Exit;
+      end;
+      if not PlanRemoveUnitFromUsesText(C, U, NewContent) then
+      begin
+        Msg := U + ' could not be removed (not in a uses clause of ' + F + '?)';
+        Exit;
+      end;
+      Changes := DiffToChanges(F, C, NewContent, 40, Total);
+      if not DoApply then
+      begin
+        Token := NewPreviewToken('remove_unit', [F], [C]);
+        Ok := True;
+        Exit;
+      end;
+      if (Token <> '') and not CheckPreviewToken(Token, 'remove_unit',
+        function(AFile: string): string
+        begin
+          if not McpReadContent(AFile, Result) then Result := '';
+        end, Msg) then Exit;
       Ok := RemoveUnitFromUses(F, U);
-    end, False, AStop, Err) then Exit(McpErr(Err));
-  if not Ok then Exit(McpErr(U + ' could not be removed (not in a uses clause of ' + F + '?)'));
+      if not Ok then Msg := U + ' could not be removed (the buffer changed?)';
+    end, not DoApply, AStop, Err) then Exit(McpErr(Err));
+  if Msg <> '' then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
   Res.AddPair('file', F);
-  Res.AddPair('removed', U);
+  Res.AddPair('unit', U);
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('changes', ChangesToJson(Changes));
+  if Total > Length(Changes) then
+    Res.AddPair('changesTruncated', TJSONNumber.Create(Total));
+  if not DoApply then
+  begin
+    Res.AddPair('token', Token);
+    Res.AddPair('note', 'Nothing was written. Call again with apply=true (and ' +
+      'this token) to make the change.');
+  end;
   Result := McpOk(Res);
 end;
 
@@ -1675,10 +1753,41 @@ end;
 //  Move to new unit
 // ---------------------------------------------------------------------------
 
+function MovePlanToJson(const APlan: TMovePlan): TJSONObject;
+begin
+  Result := TJSONObject.Create;
+  Result.AddPair('source', APlan.SourceFile);
+  Result.AddPair('target', APlan.TargetFile);
+  Result.AddPair('declaration', TJSONObject.Create
+    .AddPair('fromLine', TJSONNumber.Create(APlan.DeclStartLine))
+    .AddPair('toLine', TJSONNumber.Create(APlan.DeclEndLine))
+    .AddPair('text', APlan.DeclarationText));
+  var Impl := TJSONArray.Create;
+  for var K := 0 to High(APlan.ImplBlocks) do
+    Impl.Add(TJSONObject.Create
+      .AddPair('fromLine', TJSONNumber.Create(APlan.ImplStartLines[K]))
+      .AddPair('toLine', TJSONNumber.Create(APlan.ImplEndLines[K])));
+  Result.AddPair('implementations', Impl);
+  var Cons := TJSONArray.Create;
+  for var S in APlan.Consumers do Cons.Add(S);
+  Result.AddPair('unitsThatGetTheNewUnitInUses', Cons);
+  var Drop := TJSONArray.Create;
+  for var S in APlan.SourceUsesToRemove do Drop.Add(S);
+  Result.AddPair('unitsThatLoseTheSourceUnit', Drop);
+  var Ed := TJSONArray.Create;
+  for var E in APlan.Edits do Ed.Add(ExtractFileName(E.FilePath) + ': ' + E.Description);
+  Result.AddPair('edits', Ed);
+end;
+
+// apply=false (the default since 2026-09-24) runs the plan and every
+// refusal check, deletes the empty target file again and answers with the
+// ranges that WOULD move.
 function ToolMoveToNewUnit(AArgs: TJSONObject; AStop: THandle): string;
 var
-  F, NewUnit, Err: string;
+  F, NewUnit, Err, Token: string;
   L1, C1: Integer;
+  Plan: TMovePlan;
+  DoApply: Boolean;
 begin
   F := ExpandFileName(AArgs.GetValue<string>('file', ''));
   L1 := AArgs.GetValue<Integer>('line', 0);
@@ -1690,9 +1799,12 @@ begin
   var NewFile := NewUnit;
   if ExtractFilePath(NewFile) = '' then NewFile := ExtractFilePath(F) + NewFile;
   NewFile := NewFile + '.pas';
+  DoApply := ArgBool(AArgs, 'apply');
+  Token := ArgStr(AArgs, 'token');
   var Ok := False;
   var Ident := '';
   var Msg := '';
+  Plan := Default(TMovePlan);
   if not McpRunOnMain(
     procedure
     var
@@ -1710,16 +1822,32 @@ begin
         Msg := 'there is no identifier at that position';
         Exit;
       end;
-      Ok := TLspMoveToUnit.ExecuteToNewUnit(Ident, F, NewFile, Msg);
+      if DoApply and (Token <> '') and not CheckPreviewToken(Token, 'move_to_new_unit',
+        function(AFile: string): string
+        begin
+          if not McpReadContent(AFile, Result) then Result := '';
+        end, Msg) then Exit;
+      Ok := TLspMoveToUnit.ExecuteToNewUnit(Ident, F, NewFile, not DoApply, Plan, Msg);
+      if Ok and not DoApply then
+        Token := NewPreviewToken('move_to_new_unit', [F], [C]);
     end, False, AStop, Err, 300000) then Exit(McpErr(Err));
   if not Ok then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
   Res.AddPair('moved', Ident);
   Res.AddPair('new_unit', NewFile);
+  Res.AddPair('applied', TJSONBool.Create(DoApply));
+  Res.AddPair('moves', MovePlanToJson(Plan));
   if Msg <> '' then Res.AddPair('note', Msg);
-  Res.AddPair('saved', 'The new unit was created on disk and added to the project; ' +
-    'its content and the edits of the other units are in the IDE buffers (not ' +
-    'saved) - units that are not open in the IDE were changed on disk.');
+  if DoApply then
+    Res.AddPair('saved', 'The new unit was created on disk and added to the project; ' +
+      'its content and the edits of the other units are in the IDE buffers (not ' +
+      'saved) - units that are not open in the IDE were changed on disk.')
+  else
+  begin
+    Res.AddPair('token', Token);
+    Res.AddPair('note2', 'Nothing was written and no file was created. Call again ' +
+      'with apply=true (and this token) to move.');
+  end;
   Result := McpOk(Res);
 end;
 

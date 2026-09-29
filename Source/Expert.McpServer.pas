@@ -608,7 +608,7 @@ begin
       begin
         if not Avail.TryGetValue(UpperCase(AUnit), Result) then Result := 'unknown';
       end,
-      Length(Snap.Diags), Snap.Used, Snap.Stale, Note));
+      Length(Snap.Diags), Snap.Used, Snap.Stale, Note, Snap.Content));
   finally
     Avail.Free;
   end;

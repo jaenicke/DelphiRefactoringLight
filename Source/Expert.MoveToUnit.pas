@@ -171,7 +171,12 @@ type
     ///  only the moved IMPLEMENTATION needs put the source unit into the
     ///  new unit's implementation uses. AError says why not.</summary>
     class function ExecuteToNewUnit(const ASymbol, ASourceFile, ANewFile: string;
-      out AError: string): Boolean;
+      out AError: string): Boolean; overload;
+    /// <summary>The same decisions and refusals, but APREVIEW writes
+    ///  nothing and deletes the empty target file again - APlan says what
+    ///  a real move would do (user request 2026-09-24).</summary>
+    class function ExecuteToNewUnit(const ASymbol, ASourceFile, ANewFile: string;
+      APreview: Boolean; out APlan: TMovePlan; out AError: string): Boolean; overload;
   end;
 
 /// <summary>Text of an empty unit AUnitName (CRLF line breaks).</summary>
@@ -1989,8 +1994,18 @@ class function TLspMoveToUnit.ExecuteToNewUnit(const ASymbol, ASourceFile,
 var
   Plan: TMovePlan;
 begin
+  Result := ExecuteToNewUnit(ASymbol, ASourceFile, ANewFile, False, Plan, AError);
+end;
+
+class function TLspMoveToUnit.ExecuteToNewUnit(const ASymbol, ASourceFile,
+  ANewFile: string; APreview: Boolean; out APlan: TMovePlan;
+  out AError: string): Boolean;
+var
+  Plan: TMovePlan;
+begin
   Result := False;
   AError := '';
+  APlan := Default(TMovePlan);
   var UnitName := ChangeFileExt(ExtractFileName(ANewFile), '');
   var NameProblem := CheckNewUnitName(UnitName);
   if NameProblem <> '' then
@@ -2039,6 +2054,13 @@ begin
            UnitNameOfFile(ASourceFile), UnitNameOfFile(ASourceFile), ASymbol]);
         Exit;
       end;
+    end;
+    APlan := Plan;
+    if APreview then
+    begin
+      // Keep stays False: the empty unit is deleted again below
+      Result := True;
+      Exit;
     end;
     Keep := True;
     if not Editor.AddFileToActiveProject(ANewFile) then

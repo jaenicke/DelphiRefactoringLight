@@ -31,6 +31,7 @@ uses
   Expert.UsesEditor in '..\Source\Expert.UsesEditor.pas',
   Expert.UsesCleanup in '..\Source\Expert.UsesCleanup.pas',
   Expert.AutoImport in '..\Source\Expert.AutoImport.pas',
+  Expert.DfmEventCheck in '..\Source\Expert.DfmEventCheck.pas',
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
   Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',

@@ -234,6 +234,19 @@ type
 ///  declaration the same way the DFM auto-fix does.</summary>
 function MergeParamNames(const ACurrent, AExpected: string): string;
 
+/// <summary>Every position (1-based) in ALINE at which a member
+///  declaration starts: the line's first token, and every token that
+///  follows a ';' at bracket depth 0. Delphi allows several declarations
+///  on one line, and a forum report showed exactly that shape -
+///  "b_Cancel: TButton;procedure FormCreate(Sender: TObject);" - where the
+///  scan saw only the field, reported both handlers as MISSING and would
+///  have generated a second declaration of each. Comments and strings are
+///  skipped; a 'procedure' inside a parameter list (a procedural
+///  parameter) sits at depth > 0 and is not a start. Recognises the same
+///  two keywords the old line-start scan did - procedure and function,
+///  'class' prefix allowed - so only the POSITION is new.</summary>
+function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
+
 implementation
 
 uses
@@ -625,6 +638,92 @@ end;
 // but takes each parameter's modifier and TYPE from the expected signature.
 // Falls back to AExpected unchanged when the arities differ (a real change of
 // parameter count, where names cannot be mapped positionally).
+function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
+var
+  I, Depth: Integer;
+  InStr: Boolean;
+  Expect: Boolean;
+
+  function WordAt(APos: Integer): string;
+  var
+    K: Integer;
+  begin
+    K := APos;
+    while (K <= Length(ALine)) and CharInSet(ALine[K], ['A'..'Z', 'a'..'z', '_']) do
+      Inc(K);
+    Result := UpperCase(Copy(ALine, APos, K - APos));
+  end;
+
+  // Deliberately the same two keywords the line-start scan recognised
+  // before this fix - only their POSITION is new. 'class procedure X' keeps
+  // answering with the position of 'procedure', so the name extraction
+  // downstream is unchanged.
+  function StartAt(APos: Integer; out AStart: Integer): Boolean;
+  var
+    W: string;
+    K: Integer;
+  begin
+    AStart := APos;
+    W := WordAt(APos);
+    if W = 'CLASS' then
+    begin
+      K := APos + 5;
+      while (K <= Length(ALine)) and CharInSet(ALine[K], [' ', #9]) do Inc(K);
+      AStart := K;
+      W := WordAt(K);
+    end;
+    Result := (W = 'PROCEDURE') or (W = 'FUNCTION');
+  end;
+
+begin
+  Result := nil;
+  Depth := 0;
+  InStr := False;
+  Expect := True;          // the line's first token is a candidate
+  I := 1;
+  while I <= Length(ALine) do
+  begin
+    var C := ALine[I];
+    if InStr then
+    begin
+      if C = '''' then InStr := False;
+      Inc(I);
+      Continue;
+    end;
+    case C of
+      '''': begin InStr := True; Inc(I); Continue; end;
+      '/': if (I < Length(ALine)) and (ALine[I + 1] = '/') then Break;   // comment
+      '{':
+        begin
+          while (I <= Length(ALine)) and (ALine[I] <> '}') do Inc(I);
+          Inc(I);
+          Continue;
+        end;
+      '(':
+        if (I < Length(ALine)) and (ALine[I + 1] = '*') then
+        begin
+          Inc(I, 2);
+          while (I < Length(ALine)) and not ((ALine[I] = '*') and (ALine[I + 1] = ')')) do
+            Inc(I);
+          Inc(I, 2);
+          Continue;
+        end
+        else
+          Inc(Depth);
+      '[': Inc(Depth);
+      ')', ']': if Depth > 0 then Dec(Depth);
+      ';': if Depth = 0 then Expect := True;
+    end;
+    if Expect and not CharInSet(C, [' ', #9, ';']) then
+    begin
+      Expect := False;
+      var St: Integer;
+      if StartAt(I, St) then Result := Result + [St];
+    end;
+    Inc(I);
+  end;
+end;
+
 function MergeParamNames(const ACurrent, AExpected: string): string;
 var
   Cur, Exp: TArray<TParamSpec>;
@@ -948,18 +1047,26 @@ begin
       if U.EndsWith('= RECORD') or U.EndsWith('= CLASS') then Inc(Depth)
       else if (U = 'END;') and (Depth > 0) then Dec(Depth);
 
-      if (Depth = 0) and (U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ')) then
+      // EVERY declaration on the line, not only one starting it: Delphi
+      // allows "b_Cancel: TButton;procedure FormCreate(Sender: TObject);"
+      // and a forum report (2026-09-30) hit exactly that - the handlers
+      // were reported missing although they are declared.
+      var Starts := DeclarationStartsOnLine(L);
+      var LastJ := I;
+      for var SIdx := 0 to High(Starts) do
+      if Depth = 0 then
       begin
         // Concatenate lines until the declaration is complete. NOTE:
         // multi-line declarations contain ';' inside the parameter
         // list, so "first ';'" is NOT a valid stop criterion.
-        Decl := StripLineComment(Trim(L));
+        Decl := StripLineComment(Trim(Copy(L, Starts[SIdx], MaxInt)));
         J := I;
         while (not DeclComplete(Decl)) and (J + 1 < Length(ALines)) do
         begin
           Inc(J);
           Decl := Decl + ' ' + StripLineComment(Trim(ALines[J]));
         end;
+        if J > LastJ then LastJ := J;
         // Extract name + params.
         var SP := Pos(' ', Decl);
         var Rest := Trim(Copy(Decl, SP + 1, MaxInt));
@@ -986,8 +1093,10 @@ begin
         if IsIdentifier(MName) and not AMethods.ContainsKey(UpperCase(MName)) then
           AMethods.Add(UpperCase(MName),
             TPair<Integer, string>.Create(I + 1, NormalizeParams(Params)));
-        I := J;
       end;
+      // only the LAST declaration of the line may continue on further
+      // lines - skip those, not the line itself
+      if Length(Starts) > 0 then I := LastJ;
     end;
     Inc(I);
   end;
@@ -2154,10 +2263,10 @@ var
     if HN = '' then Exit;
     for I := 0 to Lines.Count - 1 do
     begin
-      U := UpperCase(TrimLeft(Lines[I]));
       // Only implementation headers are class-qualified; the in-class
-      // declaration has no '.' and must not be matched here.
-      if not (U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ')) then Continue;
+      // declaration has no '.' and must not be matched here. The header
+      // does not have to START the line (forum 2026-09-30).
+      if Length(DeclarationStartsOnLine(Lines[I])) = 0 then Continue;
       U := UpperCase(Lines[I]);
       P := Pos('.' + HN, U);
       if P = 0 then Continue;
@@ -2188,23 +2297,27 @@ var
     HN := AIssue.HandlerName;
     if HN = '' then Exit;
     for I := 0 to Lines.Count - 1 do
-    begin
-      U := TrimLeft(Lines[I]);
-      if UpperCase(U).StartsWith('PROCEDURE ') then
-        Rest := Trim(Copy(U, Length('procedure ') + 1, MaxInt))
-      else if UpperCase(U).StartsWith('FUNCTION ') then
-        Rest := Trim(Copy(U, Length('function ') + 1, MaxInt))
-      else
-        Continue;
-      // Name is everything up to the first '(' / ':' / ';'.
-      CutPos := Length(Rest) + 1;
-      for K := 1 to Length(Rest) do
-        if CharInSet(Rest[K], ['(', ':', ';', ' ', #9]) then begin CutPos := K; Break; end;
-      NamePart := Trim(Copy(Rest, 1, CutPos - 1));
-      // In-class declaration only: qualified (T.Method) headers are the
-      // implementation and are handled by FindImplIndex.
-      if (Pos('.', NamePart) = 0) and SameText(NamePart, HN) then Exit(I);
-    end;
+      // EVERY declaration of the line: "b_Cancel: TButton;procedure Foo;"
+      // is legal Delphi, and missing it here would generate a SECOND
+      // declaration of a handler that already exists (forum 2026-09-30).
+      for var St in DeclarationStartsOnLine(Lines[I]) do
+      begin
+        U := Trim(Copy(Lines[I], St, MaxInt));
+        if UpperCase(U).StartsWith('PROCEDURE ') then
+          Rest := Trim(Copy(U, Length('procedure ') + 1, MaxInt))
+        else if UpperCase(U).StartsWith('FUNCTION ') then
+          Rest := Trim(Copy(U, Length('function ') + 1, MaxInt))
+        else
+          Continue;
+        // Name is everything up to the first '(' / ':' / ';'.
+        CutPos := Length(Rest) + 1;
+        for K := 1 to Length(Rest) do
+          if CharInSet(Rest[K], ['(', ':', ';', ' ', #9]) then begin CutPos := K; Break; end;
+        NamePart := Trim(Copy(Rest, 1, CutPos - 1));
+        // In-class declaration only: qualified (T.Method) headers are the
+        // implementation and are handled by FindImplIndex.
+        if (Pos('.', NamePart) = 0) and SameText(NamePart, HN) then Exit(I);
+      end;
   end;
 
   // True if AUnit already appears in any uses clause of Lines.
@@ -2454,6 +2567,37 @@ begin
     // Minimal write: only the changed lines are touched, so the IDE's
     // change bars mark the actual fix instead of the whole unit.
     Result := ApplyLinesMinimal(AIssue.PasFile, Lines, Content);
+    // A generated declaration that ends up glued behind another one would
+    // compile but is unreadable, and the check would not find it again -
+    // the state a forum report (2026-09-30) arrived in. Verify instead of
+    // trusting the write.
+    if Result and (AIssue.Kind = eikMissingHandler) then
+    begin
+      var Written: string;
+      if not Editor.ReadEditorContent(AIssue.PasFile, Written) then
+        try Written := TFile.ReadAllText(AIssue.PasFile); except Written := ''; end;
+      if Written <> '' then
+      begin
+        var OwnLine := False;
+        for var L in Written.Replace(#13#10, #10).Split([#10]) do
+        begin
+          var Starts := DeclarationStartsOnLine(L);
+          if (Length(Starts) = 1) and (Starts[0] = 1 + Length(L) - Length(TrimLeft(L)))
+            and ContainsText(L, AIssue.HandlerName) then
+          begin
+            OwnLine := True;
+            Break;
+          end;
+        end;
+        if not OwnLine then
+        begin
+          Result := False;
+          AFailReason := Format('the declaration of %s was written but does not ' +
+            'stand on its own line - please check the class declaration in %s',
+            [AIssue.HandlerName, ExtractFileName(AIssue.PasFile)]);
+        end;
+      end;
+    end;
     if not Result then
       AFailReason := 'write failed: ' + AIssue.PasFile;
   finally

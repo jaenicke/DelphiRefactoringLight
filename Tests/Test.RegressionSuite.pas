@@ -216,6 +216,20 @@ type
     [Test] procedure ForeignAnswerAtADeclaration_IsRecognised;
   end;
 
+  /// <summary>A forum report (2026-09-30): two event handlers sat on the
+  ///  SAME line as the field declared before them
+  ///  ("b_Cancel: TButton;procedure FormCreate(Sender: TObject);"), and the
+  ///  DFM check reported both as MISSING - it only ever looked at the first
+  ///  token of a line. Worse, its own "already declared?" guard looked the
+  ///  same way, so applying the fix would have added a SECOND declaration
+  ///  of each.</summary>
+  [TestFixture]
+  TDfmGluedDeclarationTests = class
+  public
+    [Test] procedure DeclarationStarts_AfterASemicolonOnTheSameLine;
+    [Test] procedure DeclarationStarts_IgnoreCommentsStringsAndParameters;
+  end;
+
   /// <summary>The quick fixes as TEXT (user request 2026-09-24: the MCP
   ///  tools preview a fix before it is applied). PlanQuickFixText is what
   ///  ApplyQuickFix writes, so a preview can never describe something else
@@ -236,6 +250,7 @@ implementation
 uses
   System.SysUtils, System.IOUtils, System.Classes, System.SyncObjs,
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
+  Expert.DfmEventCheck,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
@@ -1205,6 +1220,50 @@ begin
   Assert.AreEqual(31, S); Assert.AreEqual(31, E, 'a ";" inside a string does not count');
 end;
 
+{ TDfmGluedDeclarationTests }
+
+procedure TDfmGluedDeclarationTests.DeclarationStarts_AfterASemicolonOnTheSameLine;
+const
+  // the reported line, verbatim
+  Glued = '    b_Cancel: TButton;procedure FormCreate(Sender: TObject); ' +
+    'procedure ControlListBeforeDrawItem(AIndex: Integer; ACanvas: TCanvas;';
+var
+  Starts: TArray<Integer>;
+begin
+  Starts := DeclarationStartsOnLine(Glued);
+  Assert.AreEqual(2, Integer(Length(Starts)), 'both handlers are declarations');
+  Assert.AreEqual('procedure', Copy(Glued, Starts[0], 9));
+  Assert.AreEqual('procedure', Copy(Glued, Starts[1], 9));
+  // a field alone is none
+  Assert.AreEqual(0, Integer(Length(DeclarationStartsOnLine('    b_Cancel: TButton;'))));
+  // an ordinary declaration: one start, at the first non-blank character
+  Starts := DeclarationStartsOnLine('    procedure FormCreate(Sender: TObject);');
+  Assert.AreEqual(1, Integer(Length(Starts)));
+  Assert.AreEqual(5, Starts[0]);
+  // a continuation line of a wrapped header is no start
+  Assert.AreEqual(0, Integer(Length(DeclarationStartsOnLine(
+    '      ARect: TRect; AState: TOwnerDrawState);'))));
+end;
+
+procedure TDfmGluedDeclarationTests.DeclarationStarts_IgnoreCommentsStringsAndParameters;
+begin
+  // a PROCEDURAL PARAMETER is inside the list - not a second declaration
+  Assert.AreEqual(1, Integer(Length(DeclarationStartsOnLine(
+    '    procedure Run(P: procedure; A: Integer);'))), 'procedural parameter');
+  // 'class procedure' answers AT the procedure, so the name parsing
+  // downstream is unchanged
+  var CLine := '    class procedure Init; static;';
+  var CS := DeclarationStartsOnLine(CLine);
+  Assert.AreEqual(1, Integer(Length(CS)));
+  Assert.AreEqual('procedure', Copy(CLine, CS[0], 9), 'the class prefix is skipped');
+  // comments and strings open nothing
+  Assert.AreEqual(0, Integer(Length(DeclarationStartsOnLine('    // procedure Foo;'))));
+  Assert.AreEqual(0, Integer(Length(DeclarationStartsOnLine('    (* procedure Foo; *)'))));
+  Assert.AreEqual(0, Integer(Length(DeclarationStartsOnLine('    C := ''x;procedure Foo;'';'))));
+  Assert.AreEqual(1, Integer(Length(DeclarationStartsOnLine(
+    '    { procedure Foo; } procedure Bar;'))), 'only the real one');
+end;
+
 { TQuickFixPreviewTests }
 
 function TQuickFixPreviewTests.Source: string;
@@ -1635,5 +1694,6 @@ initialization
   TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);
+  TDUnitX.RegisterTestFixture(TDfmGluedDeclarationTests);
 
 end.

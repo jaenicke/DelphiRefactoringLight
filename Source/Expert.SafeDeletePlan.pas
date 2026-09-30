@@ -118,6 +118,30 @@ function DeclarationHeaderSpan(const ALines: TArray<string>; ALine0: Integer;
 function DominantAnswer(const AFiles: TArray<string>; const ALines: TArray<Integer>;
   out AFile: string; out ALine: Integer; AMinShare: Double = 0.6): Integer;
 
+type
+  /// <summary>What to do with an occurrence whose DelphiLSP answer names a
+  ///  position that is NOT one of the symbol's.</summary>
+  TForeignAnswerVerdict = (
+    favDrop,        // it belongs to another symbol - remove the row
+    favKeepMarked); // say where the answer led and let the user judge
+
+/// <summary>THE one rule for "the server answered, and it points elsewhere",
+///  whichever pass asked. A CLEAR answer is evidence: with an anchor to
+///  compare against and a session that aborted nothing, such a row belongs to
+///  another symbol and is dropped.
+///  It is kept and MARKED when there is no anchor (nothing to compare against)
+///  or when the session aborted a request (issue #13 - then the answer comes
+///  from exactly the degraded state we do not trust, and removing a real
+///  reference is the worse error).
+///  WHY THIS IS ONE FUNCTION: the third cold-session report (forum
+///  2026-09-30) had the SAME finding judged twice in one run - the
+///  derived-anchor pass KEPT three rows resolving to UGlobalRomConfig.pas:1586
+///  while the second attempt DROPPED two more of exactly that shape, so the
+///  cold run listed 339 rows where the warm one lists 336. A verdict must not
+///  depend on which pass happened to see the answer.</summary>
+function ForeignAnswerVerdict(AHaveAnchor: Boolean;
+  AAbortedRequests: Integer): TForeignAnswerVerdict;
+
 /// <summary>ALines after AEdits (applied bottom-up; overlapping edits are
 ///  not expected - the planner never produces them).</summary>
 function ApplySafeDeleteEdits(const ALines: TArray<string>;
@@ -457,6 +481,15 @@ begin
     if (Depth <= 0) and (Pos(';', Masked[I]) > 0) then Break;
   end;
   if ALast < ALine0 then ALast := ALine0;   // the answer itself always belongs
+end;
+
+function ForeignAnswerVerdict(AHaveAnchor: Boolean;
+  AAbortedRequests: Integer): TForeignAnswerVerdict;
+begin
+  if AHaveAnchor and (AAbortedRequests <= 0) then
+    Result := favDrop
+  else
+    Result := favKeepMarked;
 end;
 
 function DominantAnswer(const AFiles: TArray<string>; const ALines: TArray<Integer>;

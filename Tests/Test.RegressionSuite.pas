@@ -270,6 +270,12 @@ type
     /// <summary>...and the cold run marked all 341 hits unverified although
     ///  326 of its own answers named the declaration.</summary>
     [Test] procedure TheAnswersThemselvesNameTheDeclaration;
+    /// <summary>THIRD round of the same report: "beim ersten Durchlauf habe
+    ///  ich 3 UNVERIFIED Treffer die im zweiten Durchlauf nicht mehr da sind".
+    ///  The cold run listed 339 rows, the warm one 336 - and the three extra
+    ///  rows were the SAME finding the second attempt had already dropped two
+    ///  of, in the very same run. One rule for both passes.</summary>
+    [Test] procedure AForeignAnswerIsJudgedTheSameByBothPasses;
   end;
 
   /// <summary>A forum report (2026-09-30): two event handlers sat on the
@@ -2246,6 +2252,32 @@ begin
   Assert.AreEqual<TUsesVerdict>(uvIdeManaged, ResolveUnverified(Entry));
   Entry.Verdict := uvUsed;
   Assert.AreEqual<TUsesVerdict>(uvUsed, ResolveUnverified(Entry));
+end;
+
+procedure TDeclarationAnchorTests.AForeignAnswerIsJudgedTheSameByBothPasses;
+begin
+  // The reported cold run: 0 aborted requests, an anchor derived from 300
+  // agreeing answers - and three rows answering UGlobalRomConfig.pas:1586
+  // (the record field GlobalConfig.Formulare.BTB), which the warm run does
+  // not list at all. A clear answer naming another declaration is EVIDENCE,
+  // so it is dropped - exactly what the second attempt did with two more
+  // rows of that shape in the same run.
+  Assert.AreEqual<TForeignAnswerVerdict>(favDrop, ForeignAnswerVerdict(True, 0),
+    'an anchor and a healthy session: the answer decides');
+  // A DERIVED anchor is still an anchor - that is what made the cold and the
+  // warm run disagree by exactly three rows.
+  Assert.AreEqual<TForeignAnswerVerdict>(favDrop, ForeignAnswerVerdict(True, 0),
+    'the derived anchor counts too');
+  // Issue #13: an aborted request means the answers come from a degraded
+  // session, so nothing is removed on their word.
+  Assert.AreEqual<TForeignAnswerVerdict>(favKeepMarked, ForeignAnswerVerdict(True, 1),
+    'one aborted request is enough to stop dropping');
+  Assert.AreEqual<TForeignAnswerVerdict>(favKeepMarked, ForeignAnswerVerdict(True, 28));
+  // No anchor at all: there is nothing to measure "elsewhere" against, and
+  // dropping here is what turned 327 references into 29 (first report).
+  Assert.AreEqual<TForeignAnswerVerdict>(favKeepMarked, ForeignAnswerVerdict(False, 0),
+    'without an anchor nothing may be dropped');
+  Assert.AreEqual<TForeignAnswerVerdict>(favKeepMarked, ForeignAnswerVerdict(False, 5));
 end;
 
 initialization

@@ -1132,6 +1132,20 @@ begin
         Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (no anchor)');
         AddRow(C, AnsF, AnsL);
       end
+      else if ForeignAnswerVerdict(not FNoAnchor, FLspErrors) = favKeepMarked then
+      begin
+        // THE SAME RULE the two post-passes apply. It matters here because a
+        // session that has already aborted a request is degraded, and the
+        // status line promises exactly this ("those occurrences are marked,
+        // not dropped") - the main pass used to drop them anyway.
+        // FLspErrors grows DURING the pass, so rows seen before the first
+        // abort were judged on a healthy session; that is what the two
+        // post-passes are for.
+        C.Note := 'UNVERIFIED - ' + Answer + ', and DelphiLSP aborted ' +
+          'request(s) in this run - not dropped on a degraded session';
+        Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (session degraded)');
+        AddRow(C, AnsF, AnsL);
+      end
       else
         Trace(Where + '  ' + Answer + ' -> dropped (leads to another symbol)');
     end;
@@ -1146,6 +1160,12 @@ begin
     // everything the post-pass judges against; the derivation below may add to
     // it, the normal path uses it unchanged
     Anchors := ATargets;
+
+    // Rows BOTH post-passes decided to remove. Collected here and deleted
+    // ONCE at the end, because Retry holds INDICES into Verified - deleting
+    // inside the derivation would shift them under the second attempt.
+    var Dropped: TArray<Integer> := nil;
+    var DerivedDropped := 0;
 
     // NO ANCHOR, BUT THE ANSWERS AGREE (forum 2026-09-30, first log): the
     // declaration query stayed unanswered for the whole budget, so every one
@@ -1192,11 +1212,23 @@ begin
             Row.Note := '';
             Inc(Cleared);
           end
+          else if ForeignAnswerVerdict(True, FLspErrors) = favDrop then
+          begin
+            // THE SAME RULE THE SECOND ATTEMPT APPLIES (forum 2026-09-30,
+            // round three): the session answered this row clearly and named
+            // another symbol's declaration, and it aborted nothing in this
+            // run - so the row is foreign. The reported cold run kept three
+            // such rows (GlobalConfig.Formulare.BTB -> UGlobalRomConfig.pas
+            // :1586) while the second attempt dropped two more of exactly
+            // that shape; the warm run lists none of the five.
+            Dropped := Dropped + [R];
+            Inc(DerivedDropped);
+          end
           else
           begin
-            // KEPT, not dropped: this anchor is DERIVED, so a row that answers
-            // elsewhere is reported rather than removed - losing a real
-            // reference is the worse error of the two.
+            // A degraded session (aborted requests): its answers come from
+            // the state we do not trust, so the row is reported instead of
+            // removed - losing a real reference is the worse error.
             Row.Note := Format('UNVERIFIED - DelphiLSP resolved it to %s:%d, ' +
               'which is not the declaration the other answers agree on',
               [ExtractFileName(AnsFile[R]), AnsLine[R] + 1]);
@@ -1204,12 +1236,13 @@ begin
           end;
           Verified[R] := Row;
         end;
-        Trace(Format('derived anchor: %d row(s) verified against it, %d answer(s) ' +
-          'lead elsewhere (kept, marked)', [Cleared, Elsewhere2]));
+        Trace(Format('derived anchor: %d row(s) verified against it, %d dropped ' +
+          '(the answer names another symbol), %d kept and marked (degraded ' +
+          'session)', [Cleared, DerivedDropped, Elsewhere2]));
         FDialog.SetStatus(Format('DelphiLSP did not answer the declaration query - ' +
-          'it was derived from %d agreeing answers (%s:%d): %d verified, %d lead ' +
-          'elsewhere.', [Agree, ExtractFileName(DerFile), DerLine + 1, Cleared,
-          Elsewhere2]));
+          'it was derived from %d agreeing answers (%s:%d): %d verified, %d ' +
+          'dropped, %d lead elsewhere.', [Agree, ExtractFileName(DerFile),
+          DerLine + 1, Cleared, DerivedDropped, Elsewhere2]));
       end;
     end;
 
@@ -1217,7 +1250,6 @@ begin
     begin
       var Fixed := 0;
       var Elsewhere := 0;
-      var Dropped: TArray<Integer> := nil;
       begin
         for var R := 0 to Retry.Count - 1 do
         begin
@@ -1237,9 +1269,16 @@ begin
           end;
           var DF2 := TLspUri.FileUriToPath(Defs2[0].Uri);
           var DL2 := Defs2[0].Range.Start.Line;
+          // The trace must say what really happens to the row - it used to
+          // print "kept, marked" for rows the same pass then dropped.
+          var Verdict2 := 'resolved';
+          if not (Anchors.Contains(DF2, DL2) or ALinked.Contains(DF2, DL2)) then
+            if ForeignAnswerVerdict(not FNoAnchor, FLspErrors) = favDrop then
+              Verdict2 := 'elsewhere -> dropped (another symbol)'
+            else
+              Verdict2 := 'elsewhere (kept, marked)';
           Trace(Format('%s  second attempt: DelphiLSP -> %s:%d -> %s', [Where2,
-            ExtractFileName(DF2), DL2 + 1, IfThen(Anchors.Contains(DF2, DL2) or
-            ALinked.Contains(DF2, DL2), 'resolved', 'elsewhere (kept, marked)')]));
+            ExtractFileName(DF2), DL2 + 1, Verdict2]));
           var Row := Verified[VIdx];
           if Anchors.Contains(DF2, DL2) then
           begin
@@ -1254,7 +1293,15 @@ begin
             Verified[VIdx] := Row;
             Inc(Fixed);
           end
-          else if FNoAnchor or (FLspErrors > 0) then
+          else if ForeignAnswerVerdict(not FNoAnchor, FLspErrors) = favDrop then
+            // DROPPED: the session answered every other request of this run
+            // without a single abort, and it answers THIS one with another
+            // symbol's declaration - the row is foreign. The forum log of
+            // 2026-09-30 ends with exactly two such rows
+            // ("GlobalConfig.Formulare.BTB" -> UGlobalRomConfig.pas:1586),
+            // which the warm run does not list at all.
+            Dropped := Dropped + [VIdx]
+          else
           begin
             // KEPT (issue #13): with a degraded session (aborted requests)
             // this answer comes from exactly the state we do not trust, and
@@ -1265,30 +1312,34 @@ begin
               [ExtractFileName(DF2), DL2 + 1]);
             Verified[VIdx] := Row;
             Inc(Elsewhere);
-          end
-          else
-          begin
-            // DROPPED: the session answered every other request of this run
-            // without a single abort, and it answers THIS one with another
-            // symbol's declaration - the row is foreign. The forum log of
-            // 2026-09-30 ends with exactly two such rows
-            // ("GlobalConfig.Formulare.BTB" -> UGlobalRomConfig.pas:1586),
-            // which the warm run does not list at all.
-            Dropped := Dropped + [VIdx];
           end;
         end;
-        // bottom-up, so the indices of the rows still to remove stay valid
-        for var D := High(Dropped) downto 0 do
-          Verified.Delete(Dropped[D]);
-        if System.Length(Dropped) > 0 then
+        var SecondDropped := System.Length(Dropped) - DerivedDropped;
+        if SecondDropped > 0 then
           Trace(Format('second attempt: %d occurrence(s) dropped - the answer ' +
             'names another symbol''s declaration and the session reported no ' +
-            'aborted request', [System.Length(Dropped)]));
-        if (Fixed > 0) or (Elsewhere > 0) or (System.Length(Dropped) > 0) then
+            'aborted request', [SecondDropped]));
+        if (Fixed > 0) or (Elsewhere > 0) or (SecondDropped > 0) then
           FSecondPassNote := Format(
             'second attempt: %d of %d unverified occurrence(s) resolved, %d ' +
             'pointed elsewhere (kept, marked), %d dropped (another symbol)',
-            [Fixed, Retry.Count, Elsewhere, System.Length(Dropped)]);
+            [Fixed, Retry.Count, Elsewhere, SecondDropped]);
+      end;
+    end;
+
+    // BOTH post-passes removed rows, and their indices interleave - sort
+    // DESCENDING and delete once, or a deletion shifts the ones still to come.
+    if System.Length(Dropped) > 0 then
+    begin
+      var DropSet := TDictionary<Integer, Boolean>.Create;
+      try
+        for var D in Dropped do DropSet.AddOrSetValue(D, True);
+        // walk the ROWS from the end: every deletion only shifts indices
+        // above it, which are already done
+        for var R := Verified.Count - 1 downto 0 do
+          if DropSet.ContainsKey(R) then Verified.Delete(R);
+      finally
+        DropSet.Free;
       end;
     end;
 

@@ -144,6 +144,7 @@ type
     FTimer: TTimer;
     FDefs: TArray<TToolDef>;
     FDetailFor: string;    // tool + stats shown in the memo (skip rewrites)
+    FThemeTick: Integer;   // re-apply the theme every 10th tick, not every one
     procedure LoadDefs;
     procedure DoTick(Sender: TObject);
     procedure DoSelect(Sender: TObject; Item: TListItem; Selected: Boolean);
@@ -196,7 +197,7 @@ begin
   Name := '';   // the IDE names the embedded instance
   FC := TStatusCollector.Create;
 
-  FList := TListView.Create(Self);
+  FList := TThemedListView.Create(Self);
   FList.Parent := Self;
   FList.Align := alClient;
   FList.ViewStyle := vsReport;
@@ -230,6 +231,10 @@ begin
   FTimer.Interval := 1000;
   FTimer.OnTimer := DoTick;
   FTimer.Enabled := True;
+  // The IDE themes the form chrome around us but not this frame's children -
+  // measured: the item column stayed white while the custom-drawn cells were
+  // dark. So the colours are ours to set.
+  ApplyThemeToControls(Self);
   FC.Collect;
   Apply;
 end;
@@ -291,18 +296,34 @@ procedure TStatusFrame.DoDrawSubItem(Sender: TCustomListView; AItem: TListItem;
   ASubItem: Integer; AState: TCustomDrawState; var ADefaultDraw: Boolean);
 var
   Lvl: TStatusLevel;
+  Want: TColor;
 begin
   ADefaultDraw := True;
-  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
+  if cdsSelected in AState then Exit;   // the selection owns background AND text
+  // The control's OWN colour, not a freshly asked themed one: the columns this
+  // handler does not touch are painted by the control with exactly that, so
+  // taking it from there is the only way the row cannot end up two-toned.
+  Sender.Canvas.Brush.Color := TListView(Sender).Color;
+  // The VCL resets its Canvas.Font per subitem, but the control only
+  // RE-SELECTS the font into the device context when something really changed.
+  // Assigning the colour the canvas already holds is therefore a no-op, and
+  // the DC keeps what the STATUS cell selected - which is why the colour bled
+  // into the details column since 1.15.0. Forcing one different value first is
+  // what makes the reset arrive. (Found by rendering the list and measuring
+  // the text colour - the code reads correct either way.)
+  Want := TListView(Sender).Font.Color;
+  if Sender.Canvas.Font.Color = Want then
+    Sender.Canvas.Font.Color := TColor(Cardinal(Want) xor $010101);
+  Sender.Canvas.Font.Color := Want;
+  Sender.Canvas.Font.Style := Sender.Canvas.Font.Style - [fsBold];
   if (AItem = nil) or (AItem.Index < 0) or (AItem.Index > High(FLevels)) then Exit;
   // column 1 is "Status" - the one word the user should be able to read
   // without reading anything else
   if ASubItem <> 1 then Exit;
   Lvl := FLevels[AItem.Index];
   if Lvl = slNeutral then Exit;
-  if cdsSelected in AState then Exit;   // the selection owns its colours
   Sender.Canvas.Font.Color := StatusLevelColor(Lvl,
-    GetThemedColor(clWindow), GetThemedColor(clWindowText));
+    TListView(Sender).Color, TListView(Sender).Font.Color);
   Sender.Canvas.Font.Style := Sender.Canvas.Font.Style + [fsBold];
 end;
 
@@ -779,6 +800,9 @@ begin
   if not Visible then Exit;
   Inc(FC.FTicks);
   try
+    // a theme switch happens while we are open; re-applying only assigns what
+    // really differs, so in the steady state this touches no window at all
+    if FC.FTicks mod 10 = 0 then ApplyThemeToControls(Self);
     FC.Collect;
     Apply;   // writes only what changed - no flicker, keeps the selection
   except
@@ -842,7 +866,7 @@ begin
   Split.Align := alBottom;
   Split.Top := FDetail.Top - 1;   // above the memo, not below it
 
-  FList := TListView.Create(Self);
+  FList := TThemedListView.Create(Self);
   FList.Parent := Self;
   FList.Align := alClient;
   FList.ViewStyle := vsReport;
@@ -867,6 +891,7 @@ begin
   FTimer.Interval := 1000;
   FTimer.OnTimer := DoTick;
   FTimer.Enabled := True;
+  ApplyThemeToControls(Self);   // the frame's children are ours to theme
   RefreshRows;
 end;
 
@@ -908,7 +933,9 @@ procedure TMcpToolsFrame.DoTick(Sender: TObject);
 begin
   // plain WM_TIMER tick - state reads only, cells written when changed
   if not Visible then Exit;
+  Inc(FThemeTick);
   try
+    if FThemeTick mod 10 = 0 then ApplyThemeToControls(Self);
     RefreshRows;
   except
     // a status display must never disturb the IDE

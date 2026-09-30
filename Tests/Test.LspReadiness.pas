@@ -40,6 +40,12 @@ type
     [Test] procedure AnEmptySymbolListIsNotReady;
     [Test] procedure TheBudgetScalesWithTheProject;
     [Test] procedure StatusColoursAreReadableInBothThemes;
+    /// <summary>The status window in the IDE's DARK theme was a patchwork
+    ///  (report 2026-09-30): the theming service does not reach a frame's
+    ///  children, so the item column stayed white while the custom-drawn cells
+    ///  went dark. We paint the list ourselves now - body AND header.</summary>
+    [Test] procedure ListHeaderIsVisibleAgainstItsOwnBody;
+    [Test] procedure ThemedListOnlyRepaintsWhenSomethingChanged;
   end;
 
 implementation
@@ -200,6 +206,63 @@ begin
   // a plain row keeps the theme's text colour
   Assert.AreEqual(clBlack, StatusLevelColor(slNeutral, Light, clBlack));
   Assert.AreEqual(clWhite, StatusLevelColor(slNeutral, Dark, clWhite));
+end;
+
+procedure TLspReadinessTests.ListHeaderIsVisibleAgainstItsOwnBody;
+
+  function Lum(C: TColor): Integer;
+  var
+    RGBVal: Cardinal;
+  begin
+    RGBVal := ColorToRGB(C);
+    Result := (Integer(RGBVal and $FF) * 30 +
+      Integer((RGBVal shr 8) and $FF) * 59 +
+      Integer((RGBVal shr 16) and $FF) * 11) div 100;
+  end;
+
+var
+  Head, Line: TColor;
+begin
+  // The column header is a separate native control that no Color property
+  // reaches - we paint it, so its colour must be derived from the BODY. A
+  // theme whose button face equals its window colour would otherwise give a
+  // header nobody can see.
+  for var Back in [TColor($00FFFFFF), TColor($001E1E1E), TColor($00322F2D)] do
+  begin
+    ListHeaderColors(Back, Head, Line);
+    Assert.IsTrue(Abs(Lum(Head) - Lum(Back)) >= 10,
+      'the header must stand out from the rows');
+    Assert.IsTrue(Abs(Lum(Line) - Lum(Head)) >= 15,
+      'and its separator from the header');
+    // a dark body gets a LIGHTER header, a light body a darker one
+    if Lum(Back) < 128 then
+      Assert.IsTrue(Lum(Head) > Lum(Back), 'lighter on a dark theme')
+    else
+      Assert.IsTrue(Lum(Head) < Lum(Back), 'darker on a light theme');
+  end;
+end;
+
+procedure TLspReadinessTests.ThemedListOnlyRepaintsWhenSomethingChanged;
+var
+  LV: TThemedListView;
+begin
+  LV := TThemedListView.Create(nil);
+  try
+    Assert.IsFalse(LV.Themed, 'untouched until it is given colours');
+    Assert.IsTrue(LV.ApplyColors(TColor($00322F2D), TColor($00E8E8E8)),
+      'the first call changes something');
+    Assert.AreEqual(TColor($00322F2D), LV.Color);
+    // the native grid lines are a fixed light grey - a bright cage around
+    // every cell is exactly what a dark theme must not have
+    Assert.IsFalse(LV.GridLines, 'no grid lines on a dark body');
+    // the poll tick calls this every few seconds: it must be a no-op then
+    Assert.IsFalse(LV.ApplyColors(TColor($00322F2D), TColor($00E8E8E8)),
+      'the same colours again must not repaint the window');
+    Assert.IsTrue(LV.ApplyColors(clWindow, clWindowText), 'a theme switch does');
+    Assert.IsTrue(LV.GridLines, 'and brings the grid lines back on a light body');
+  finally
+    LV.Free;
+  end;
 end;
 
 initialization

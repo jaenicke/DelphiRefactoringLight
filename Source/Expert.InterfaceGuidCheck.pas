@@ -39,6 +39,20 @@ type
     IsDispInterface: Boolean;
   end;
 
+/// <summary>True when ALINE declares an interface: "IFoo = interface[(...)]"
+///  or "= dispinterface", with ANAME the declared name. Both tests matter and
+///  both were missing (found on a real project, 2026-09-30, where the check
+///  listed two of them as interfaces without a GUID):
+///  * the '=' must be a real one - "result := InterfaceArrayFind(...)"
+///    contains the text "= INTERFACE" but is an assignment;
+///  * the keyword must END at a word boundary - an alias
+///    "TFoo = Interfaces.GTIDLL.TFoo;" is not an interface declaration.
+///  A forward declaration ("= interface;") answers False: it carries no GUID,
+///  the full declaration elsewhere does.</summary>
+function IsInterfaceDeclLine(const ALine: string; out AName: string;
+  out AIsDisp: Boolean): Boolean;
+
+type
   TInterfaceGuidChecker = class
   public
     /// <summary>Scans AFiles (only .pas are considered) and returns
@@ -103,13 +117,65 @@ begin
   Result := Copy(ALine, P1 + 2, P2 - P1 - 1);  // {....}
 end;
 
+function IsInterfaceDeclLine(const ALine: string; out AName: string;
+  out AIsDisp: Boolean): Boolean;
+var
+  U: string;
+  P, Q, KwEnd: Integer;
+begin
+  Result := False;
+  AName := '';
+  AIsDisp := False;
+  U := UpperCase(ALine);
+  P := 1;
+  while True do
+  begin
+    P := PosEx('=', U, P);
+    if P = 0 then Exit;
+    // ':=' is an assignment, '<=' / '>=' comparisons - none of them declare
+    if (P > 1) and CharInSet(U[P - 1], [':', '<', '>']) then
+    begin
+      Inc(P);
+      Continue;
+    end;
+    Q := P + 1;
+    while (Q <= Length(U)) and CharInSet(U[Q], [' ', #9]) do Inc(Q);
+    if Copy(U, Q, Length('DISPINTERFACE')) = 'DISPINTERFACE' then
+    begin
+      AIsDisp := True;
+      KwEnd := Q + Length('DISPINTERFACE');
+    end
+    else if Copy(U, Q, Length('INTERFACE')) = 'INTERFACE' then
+    begin
+      AIsDisp := False;
+      KwEnd := Q + Length('INTERFACE');
+    end
+    else
+    begin
+      Inc(P);
+      Continue;
+    end;
+    // WORD BOUNDARY: "Interfaces.GTIDLL.TFoo" is an alias and
+    // "InterfaceArrayFind(" a call - neither is the keyword
+    if (KwEnd <= Length(U)) and CharInSet(U[KwEnd], ['A'..'Z', '0'..'9', '_']) then
+    begin
+      Inc(P);
+      Continue;
+    end;
+    if Trim(Copy(U, KwEnd, MaxInt)).StartsWith(';') then Exit;   // forward decl
+    AName := Trim(Copy(ALine, 1, P - 1));
+    if (AName = '') or not CharInSet(AName[1], ['A'..'Z', 'a'..'z', '_']) then Exit;
+    Exit(True);
+  end;
+end;
+
 class function TInterfaceGuidChecker.ScanSingleFile(
   const AFile: string): TArray<TInterfaceGuidEntry>;
 var
   Entries: TList<TInterfaceGuidEntry>;
-  L, U, Name, Guid: string;
+  L, Name, Guid: string;
   Lines: TArray<string>;
-  I, J, EqPos: Integer;
+  I, J: Integer;
   E: TInterfaceGuidEntry;
 begin
   Result := nil;
@@ -120,20 +186,8 @@ begin
     for I := 0 to High(Lines) do
     begin
       L := StripLineComment(Lines[I]);
-      U := UpperCase(L);
-      // "IFoo = interface" or "= dispinterface"; reject forward
-      // declarations ("= interface;") - they never carry the GUID,
-      // the full declaration elsewhere does.
-      EqPos := Pos('= INTERFACE', U);
-      if EqPos = 0 then EqPos := Pos('= DISPINTERFACE', U);
-      if EqPos = 0 then Continue;
-      var AfterKw := Trim(Copy(U, EqPos + Length('= INTERFACE'), MaxInt));
-      if U.Contains('= DISPINTERFACE') then
-        AfterKw := Trim(Copy(U, Pos('= DISPINTERFACE', U) + Length('= DISPINTERFACE'), MaxInt));
-      if AfterKw.StartsWith(';') then Continue; // forward decl
-
-      Name := Trim(Copy(L, 1, EqPos - 1));
-      if (Name = '') or not CharInSet(Name[1], ['A'..'Z', 'a'..'z', '_']) then Continue;
+      var IsDisp := False;
+      if not IsInterfaceDeclLine(L, Name, IsDisp) then Continue;
 
       // GUID on the same line or within the next 3 lines.
       Guid := ExtractGuid(L);
@@ -143,7 +197,9 @@ begin
         Inc(J);
         Guid := ExtractGuid(StripLineComment(Lines[J]));
         // Stop early if the next declaration starts.
-        if Pos('= INTERFACE', UpperCase(Lines[J])) > 0 then Break;
+        var NextName: string;
+        var NextDisp: Boolean;
+        if IsInterfaceDeclLine(StripLineComment(Lines[J]), NextName, NextDisp) then Break;
       end;
 
       E := Default(TInterfaceGuidEntry);
@@ -152,7 +208,7 @@ begin
       E.FileName := AFile;
       E.Line := I + 1;
       E.HasGuid := Guid <> '';
-      E.IsDispInterface := Pos('= DISPINTERFACE', U) > 0;
+      E.IsDispInterface := IsDisp;
       Entries.Add(E);
     end;
     Result := Entries.ToArray;

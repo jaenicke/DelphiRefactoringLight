@@ -216,6 +216,30 @@ type
     [Test] procedure ForeignAnswerAtADeclaration_IsRecognised;
   end;
 
+  /// <summary>Found by running the check on the user's real project
+  ///  (2026-09-30): it listed "result :" and "TAbortERezeptResult" as
+  ///  interfaces without a GUID. Both lines merely CONTAIN the text
+  ///  "= interface" - an assignment "result := InterfaceArrayFind(...)" and
+  ///  an alias "TFoo = Interfaces.GTIDLL.TFoo;".</summary>
+  [TestFixture]
+  TInterfaceDeclLineTests = class
+  public
+    [Test] procedure RealDeclarations_AreRecognised;
+    [Test] procedure AssignmentsAndAliases_AreNot;
+  end;
+
+  /// <summary>Found on the user's real project (2026-09-30): the signature
+  ///  check reported TGemTiFunctions.IsConnectorUnreachable as DIVERGING from
+  ///  a declaration it matches exactly. Normalize wanted to strip the
+  ///  "TClass." qualifier so a declaration and its implementation compare
+  ///  equal, but it copied from the dot onwards - taking the KEYWORD with it,
+  ///  so every implementation differed from its own declaration.</summary>
+  [TestFixture]
+  TSignatureQualifierTests = class
+  public
+    [Test] procedure ImplementationAndDeclaration_NormalizeEqual;
+  end;
+
   /// <summary>A forum report (2026-09-30) came with both logs: the first
   ///  Find-References run of a session listed 29 of 327 references, two of
   ///  them wrong; the second run, two minutes later, was right. The logs
@@ -265,7 +289,7 @@ implementation
 uses
   System.SysUtils, System.IOUtils, System.Classes, System.SyncObjs,
   Delphi.FileEncoding, Expert.UsesEditor, Expert.AutoImport, Expert.UnitIndex,
-  Expert.DfmEventCheck,
+  Expert.DfmEventCheck, Expert.SignatureCheck, Expert.InterfaceGuidCheck,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
@@ -1235,6 +1259,81 @@ begin
   Assert.AreEqual(31, S); Assert.AreEqual(31, E, 'a ";" inside a string does not count');
 end;
 
+{ TInterfaceDeclLineTests }
+
+procedure TInterfaceDeclLineTests.RealDeclarations_AreRecognised;
+var
+  Name: string;
+  Disp: Boolean;
+begin
+  Assert.IsTrue(IsInterfaceDeclLine('  IFoo = interface', Name, Disp));
+  Assert.AreEqual('IFoo', Name);
+  Assert.IsFalse(Disp);
+  Assert.IsTrue(IsInterfaceDeclLine('  IFoo = interface(IBase)', Name, Disp));
+  Assert.AreEqual('IFoo', Name);
+  Assert.IsTrue(IsInterfaceDeclLine('  IFoo = dispinterface', Name, Disp));
+  Assert.IsTrue(Disp, 'a dispinterface is one');
+  // generics, as the real project has them
+  Assert.IsTrue(IsInterfaceDeclLine('  IList<T: IObject> = interface', Name, Disp));
+  Assert.AreEqual('IList<T: IObject>', Name);
+  // a FORWARD declaration carries no GUID - the real one elsewhere does
+  Assert.IsFalse(IsInterfaceDeclLine('  IFoo = interface;', Name, Disp));
+end;
+
+procedure TInterfaceDeclLineTests.AssignmentsAndAliases_AreNot;
+var
+  Name: string;
+  Disp: Boolean;
+begin
+  // the two lines the real project produced, verbatim
+  Assert.IsFalse(IsInterfaceDeclLine(
+    '  result := InterfaceArrayFind(aInterfaceArray,aItem);', Name, Disp),
+    'an assignment is no declaration');
+  Assert.IsFalse(IsInterfaceDeclLine(
+    '  TAbortERezeptResult = Interfaces.GTIDLL.TAbortERezeptResult;', Name, Disp),
+    'an alias to another unit''s type is no declaration');
+  // near misses
+  Assert.IsFalse(IsInterfaceDeclLine('  X := Interfaces.Foo;', Name, Disp));
+  Assert.IsFalse(IsInterfaceDeclLine('  if A <= InterfaceCount then', Name, Disp));
+  Assert.IsFalse(IsInterfaceDeclLine('  TFoo = InterfaceHelper;', Name, Disp));
+  // ... and the keyword still wins when it really is one
+  Assert.IsTrue(IsInterfaceDeclLine('  IFoo=interface', Name, Disp), 'no spaces');
+end;
+
+{ TSignatureQualifierTests }
+
+procedure TSignatureQualifierTests.ImplementationAndDeclaration_NormalizeEqual;
+begin
+  // the reported pair, verbatim
+  Assert.AreEqual(
+    TSignatureChecker.Normalize(
+      'function IsConnectorUnreachable(const AResultCode: Integer; ' +
+      'const AErrorMessage: string): Boolean;'),
+    TSignatureChecker.Normalize(
+      'function TGemTiFunctions.IsConnectorUnreachable(const AResultCode: ' +
+      'Integer; const AErrorMessage: string): Boolean;'),
+    'the qualifier must not take the keyword with it');
+  // the keyword SURVIVES - a procedure and a function of the same name and
+  // parameters must still differ
+  Assert.AreNotEqual(
+    TSignatureChecker.Normalize('procedure TFoo.Bar(A: Integer);'),
+    TSignatureChecker.Normalize('function TFoo.Bar(A: Integer): Boolean;'));
+  Assert.IsTrue(TSignatureChecker.Normalize(
+    'function TFoo.Bar(A: Integer): Boolean;').StartsWith('function '),
+    'the keyword is kept');
+  // a constructor, and a generic type qualifier
+  Assert.AreEqual(
+    TSignatureChecker.Normalize('constructor Create(AOwner: TComponent);'),
+    TSignatureChecker.Normalize('constructor TFoo.Create(AOwner: TComponent);'));
+  Assert.AreEqual(
+    TSignatureChecker.Normalize('procedure Add(const AItem: T);'),
+    TSignatureChecker.Normalize('procedure TList<T>.Add(const AItem: T);'));
+  // an UNqualified implementation header (a free routine) is unchanged
+  Assert.AreEqual(
+    TSignatureChecker.Normalize('procedure DoIt(A: Integer);'),
+    TSignatureChecker.Normalize('procedure DoIt(A: Integer);'));
+end;
+
 { TDeclarationAnchorTests }
 
 procedure TDeclarationAnchorTests.NoAnswerOnAUseLine_IsNoAnchor;
@@ -1741,5 +1840,7 @@ initialization
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);
   TDUnitX.RegisterTestFixture(TDfmGluedDeclarationTests);
   TDUnitX.RegisterTestFixture(TDeclarationAnchorTests);
+  TDUnitX.RegisterTestFixture(TSignatureQualifierTests);
+  TDUnitX.RegisterTestFixture(TInterfaceDeclLineTests);
 
 end.

@@ -471,12 +471,28 @@ begin
     SB.Free;
   end;
 
-  // Strip a leading "TClass." prefix so declarations and implementations
-  // compare as equal regardless of qualification.
+  // Strip the "TClass." QUALIFIER so declarations and implementations compare
+  // as equal regardless of qualification - but only the qualifier: copying
+  // from the dot onwards took the KEYWORD with it ("function tfoo.bar(...)"
+  // became "bar(...)" while its declaration stayed "function bar(...)"), so
+  // every implementation looked different from its own declaration. Found on
+  // a real project (2026-09-30): TGemTiFunctions.IsConnectorUnreachable was
+  // reported as diverging from a declaration it matches exactly.
   var Dot := Pos('.', Result);
   var ParenPos := Pos('(', Result);
   if (Dot > 0) and ((ParenPos = 0) or (Dot < ParenPos)) then
-    Result := Copy(Result, Dot + 1, MaxInt);
+  begin
+    // where the qualifier starts: right after the keyword's space, or at the
+    // very beginning when there is no keyword
+    var QualStart := 1;
+    for var K := Dot - 1 downto 1 do
+      if Result[K] = ' ' then
+      begin
+        QualStart := K + 1;
+        Break;
+      end;
+    Delete(Result, QualStart, Dot - QualStart + 1);
+  end;
 end;
 
 class function TSignatureChecker.AllEqual(const AEntries: TSignatureEntries): Boolean;

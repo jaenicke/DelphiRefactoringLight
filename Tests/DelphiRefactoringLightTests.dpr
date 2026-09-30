@@ -45,6 +45,7 @@ uses
   Test.AutoImportGenericResolve in 'Test.AutoImportGenericResolve.pas',
   Test.InheritedDefectFixes in 'Test.InheritedDefectFixes.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
+  Expert.InterfaceGuidCheck in '..\Source\Expert.InterfaceGuidCheck.pas',
   Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',
   Expert.SafeDeletePlan in '..\Source\Expert.SafeDeletePlan.pas',
   Expert.PascalScanner in '..\Source\Expert.PascalScanner.pas',

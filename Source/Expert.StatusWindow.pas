@@ -604,16 +604,16 @@ begin
   else
     Row('  server busy', 'no', 'it answers requests');
   S := '';
-  var VC := TLspManager.Instance.PeekVerifyClient;
-  if VC <> nil then
-    Row('  verification session', 'running (agent)',
-      'answers the candidate checks of find references / rename - about ' +
-      'twice as fast, and never aborted after 10 s')
-  else if TPluginSettings.VerifySession then
-    Row('  verification session', 'off (starts with the next scan)',
-      'a second DelphiLsp process, shut down again after 10 idle minutes')
+  // The STATE of that session is the plain-language row further up - this one
+  // only says how it is CONFIGURED (two rows of the same name looked like a
+  // bug when the window was first seen with a real project, 2026-09-30).
+  if TPluginSettings.VerifySession then
+    Row('  verification setting', 'on',
+      'a second DelphiLsp process answers the candidate checks of find ' +
+      'references / rename - about twice as fast, never aborted after 10 s, ' +
+      'shut down again after 10 idle minutes')
   else
-    Row('  verification session', 'disabled in the options',
+    Row('  verification setting', 'off',
       'the main session verifies - slower, and it can be aborted while a ' +
       'project loads');
   if TPluginSettings.LspLogging then

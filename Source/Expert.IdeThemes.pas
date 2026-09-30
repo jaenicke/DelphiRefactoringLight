@@ -29,6 +29,21 @@ function ColorLuminance(AColor: TColor): Integer;
 ///  anything.</summary>
 procedure ComputeHintColors(ABaseBack, ABaseText: TColor;
   out ABack, ABorder, AText: TColor);
+
+type
+  /// <summary>How a status row reads at a glance: good / waiting / broken /
+  ///  nothing special (user request 2026-09-30 - the status window was a
+  ///  wall of equal-looking text).</summary>
+  TStatusLevel = (slNeutral, slGood, slWait, slBad);
+
+/// <summary>A readable colour for ALEVEL on ABACKGROUND. Derived, not fixed:
+///  the saturated green / amber / red of a light theme is unreadable on a
+///  dark editor background, so there the hue is lightened until it carries -
+///  the same approach ComputeHintColors takes for the hint window.
+///  slNeutral answers ADefaultText unchanged.</summary>
+function StatusLevelColor(ALevel: TStatusLevel; ABackground,
+  ADefaultText: TColor): TColor;
+
 procedure EnableThemes(AForm: TCustomForm);
 
 implementation
@@ -58,6 +73,36 @@ begin
   G := EnsureRange(Integer((RGBVal shr 8) and $FF) + ADelta, 0, 255);
   B := EnsureRange(Integer((RGBVal shr 16) and $FF) + ADelta, 0, 255);
   Result := TColor(R or (G shl 8) or (B shl 16));
+end;
+
+function StatusLevelColor(ALevel: TStatusLevel; ABackground,
+  ADefaultText: TColor): TColor;
+const
+  // TColor is $00BBGGRR. Tones for a LIGHT background: dark enough to read
+  // on white without shouting.
+  GoodLight = TColor($00107010);   // RGB(16, 112, 16)
+  WaitLight = TColor($000070B0);   // RGB(176, 112, 0) - amber
+  BadLight  = TColor($000000C0);   // RGB(192, 0, 0)
+  // ... and for a DARK background: the same hues, lightened until they carry.
+  GoodDark  = TColor($0080D880);   // RGB(128, 216, 128)
+  WaitDark  = TColor($0060C8F0);   // RGB(240, 200, 96)
+  BadDark   = TColor($008080FF);   // RGB(255, 128, 128)
+begin
+  if ALevel = slNeutral then Exit(ADefaultText);
+  if ColorLuminance(ABackground) < 128 then
+    case ALevel of
+      slGood: Result := GoodDark;
+      slWait: Result := WaitDark;
+    else
+      Result := BadDark;
+    end
+  else
+    case ALevel of
+      slGood: Result := GoodLight;
+      slWait: Result := WaitLight;
+    else
+      Result := BadLight;
+    end;
 end;
 
 procedure ComputeHintColors(ABaseBack, ABaseText: TColor;

@@ -79,6 +79,11 @@ type
     FKnownFiles: TDictionary<string, string>;
     FAutoCompleteUnits: Boolean;
     FDiagnosticsCount: Integer;
+    // Requests this session really answered. The status window needs a CHEAP
+    // readiness signal (its tick may not send requests), and for the AGENT
+    // session it is the only one there is - it pushes no diagnostics at all
+    // (user request 2026-09-30: "make the LSP state easier to understand").
+    FAnsweredCount: Integer;
     // $/progress of the server: token -> title. While one is running (the
     // 12-30 s "Loading project" of a big project) every request is aborted
     // after 10 s by the controller, so a scan must WAIT instead of reading
@@ -235,13 +240,17 @@ type
     /// <summary>Requests code completion. Returns a JSON array of items.</summary>
     function GetCompletion(const AFilePath: string; ALine, ACol: Integer): TJSONObject;
 
-    /// <summary>True as soon as the server can answer about AFilePath:
-    ///  documentSymbol returns a non-empty list, which it can only do once
-    ///  the unit is parsed. The ONLY readiness signal available for the
-    ///  agent session - it never pushes diagnostics (forum 2026-09-30: a
-    ///  freshly started verification session answered null for a minute and
-    ///  the scan took that for "no declaration"). AKeepWaiting is polled
-    ///  between attempts (pump the UI / cancel).</summary>
+    /// <summary>True once the server answers documentSymbol for AFilePath
+    ///  with a non-empty list - i.e. it answers AT ALL and has the unit at
+    ///  least lexically. A DIAGNOSTIC, not a gate: MEASURED on a freshly
+    ///  started agent session (scratchpad lspprobe\ProbeReady.dpr), it
+    ///  answered after 91 ms with 2 symbols while textDocument/definition was
+    ///  still unavailable - so it does NOT predict that definitions work. Use
+    ///  it to tell "this session answers nothing at all" from "it answers but
+    ///  knows no declaration"; whoever needs a definition must ask for the
+    ///  definition. AKeepWaiting is polled between attempts (pump the UI /
+    ///  cancel), and while the server reports progress the budget is
+    ///  extended.</summary>
     function WaitUnitParsed(const AFilePath: string; ATimeoutMs: Cardinal;
       const AKeepWaiting: TFunc<Boolean> = nil): Boolean;
 
@@ -273,6 +282,10 @@ type
     ///  the server actually pushes diagnostics. 0 == controller-mode
     ///  may not be active or the server hasn't analysed yet.</summary>
     function GetDiagnosticsCount: Integer;
+    /// <summary>Requests this session answered (without an error). 0 means
+    ///  "has never answered anything" - a session that is still loading the
+    ///  project looks exactly like that.</summary>
+    function GetAnsweredCount: Integer;
     /// <summary>How many FILES we currently hold error diagnostics for -
     ///  the push counter alone cannot tell "123 pushes, but none for the
     ///  file you are looking at" (status window).</summary>
@@ -361,6 +374,16 @@ type
     function Count: Integer;
     function Text: string;
   end;
+
+/// <summary>How long it is reasonable to wait for a session to become able to
+///  answer, for a project of AFILECOUNT units. There is no honest single
+///  number: DelphiLsp loads the whole project first and that scales with it
+///  (measured on the reporter's 566-file project: a freshly started agent
+///  session needed ~56 s). 60 s of floor plus 200 ms per file, capped at 10
+///  minutes. This is only the FALLBACK bound - while the server reports
+///  progress, WaitUnitParsed keeps waiting anyway (user question 2026-09-30:
+///  "reichen denn 120 Sekunden wirklich immer?" - they do not).</summary>
+function LspReadinessBudgetMs(AFileCount: Integer): Cardinal;
 
 implementation
 
@@ -828,6 +851,7 @@ begin
   Result := Pending.Response;
   Pending.Response := nil; // Ownership to caller
   Pending.Free;
+  if Result <> nil then TInterlocked.Increment(FAnsweredCount);
   if Result = nil then   // woken by MarkReaderDead
     raise ELspError.Create(-32099, 'Connection to DelphiLSP lost during ' + AMethod);
 
@@ -1604,6 +1628,17 @@ end;
 // verification - it never pushes a single diagnostic by design (measured,
 // issue #13). documentSymbol does: the server can only answer it once it has
 // parsed the unit, and it is one request.
+function LspReadinessBudgetMs(AFileCount: Integer): Cardinal;
+const
+  FloorMs = 60000;
+  PerFileMs = 200;
+  CapMs = 600000;
+begin
+  if AFileCount < 0 then AFileCount := 0;
+  if AFileCount > (CapMs - FloorMs) div PerFileMs then Exit(CapMs);
+  Result := FloorMs + Cardinal(AFileCount) * PerFileMs;
+end;
+
 function TLspClient.WaitUnitParsed(const AFilePath: string;
   ATimeoutMs: Cardinal; const AKeepWaiting: TFunc<Boolean>): Boolean;
 var
@@ -1614,6 +1649,12 @@ begin
   if AFilePath = '' then Exit;
   Deadline := GetTickCount64 + ATimeoutMs;
   repeat
+    // WHILE THE SERVER REPORTS PROGRESS, KEEP WAITING: $/progress is the
+    // server saying "I am working on X", and giving up on a timeout while it
+    // says that would mean giving up on a session that is about to answer.
+    // The budget therefore only bounds the case where it says NOTHING at all.
+    if BusyWith <> '' then
+      Deadline := GetTickCount64 + ATimeoutMs;
     Sym := nil;
     try
       // a short per-attempt timeout: a server that is busy loading does not
@@ -1866,6 +1907,11 @@ begin
   for var R in Ranges do
     if (ALine >= R.Start.Line) and (ALine <= R.End_.Line) then
       Exit(True);
+end;
+
+function TLspClient.GetAnsweredCount: Integer;
+begin
+  Result := FAnsweredCount;
 end;
 
 function TLspClient.GetDiagnosticsCount: Integer;

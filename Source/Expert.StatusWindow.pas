@@ -25,6 +25,9 @@ unit Expert.StatusWindow;
 
 interface
 
+uses
+  Expert.IdeThemes;   // TStatusLevel: a row's colour is part of its data
+
 /// <summary>Registers the dockable form with the IDE. Call from Register.</summary>
 procedure RegisterStatusWindow;
 /// <summary>Unregisters and closes it. Call before the BPL unloads.</summary>
@@ -38,6 +41,10 @@ procedure ShowMcpToolsWindow;
 type
   TStatusRow = record
     Caption, Value, Detail: string;
+    /// <summary>How the row reads at a glance - the frame paints the status
+    ///  cell in the matching colour (user request 2026-09-30). Rows that are
+    ///  plain information stay slNeutral.</summary>
+    Level: TStatusLevel;
   end;
 
 /// <summary>The rows the status window shows, collected NOW - whether the
@@ -50,11 +57,11 @@ implementation
 uses
   Expert.ResourceMonitor, Expert.CompletionWizard,
   System.SysUtils, System.Classes, System.IniFiles, System.IOUtils,
-  Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls,
+  Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Graphics,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
   ToolsAPI, DesignIntf,   // DesignIntf: TEditState / TEditAction
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager, Expert.PluginSettings,
-  Expert.AutoImport, Expert.ContextMenu, Expert.IdeThemes, Expert.DialogHelper,
+  Expert.AutoImport, Expert.ContextMenu, Expert.DialogHelper,   // IdeThemes: interface uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.VcsBlame,
   Expert.MessagesReader, Expert.StructureErrors, Expert.McpServer, Lsp.Client,
   Expert.Version, Expert.ListViewSort, Mcp.Protocol,
@@ -91,7 +98,8 @@ type
     FResValid: Boolean;
     FMemText, FMemDetail: string;  // refreshed every 10th tick (walks caches)
     FMemValid: Boolean;
-    procedure Row(const ACaption, AValue, ADetail: string);
+    procedure Row(const ACaption, AValue, ADetail: string;
+      ALevel: TStatusLevel = slNeutral);
   public
     /// <summary>One refresh round: the expensive rows re-sample every Nth
     ///  call, so calling it about once a second is what it expects.</summary>
@@ -102,10 +110,16 @@ type
   TStatusFrame = class(TRlDockFrame)
   private
     FList: TListView;
+    // The painter runs from the control's own message loop, not from our
+    // tick, so it must not touch the collector - it reads this copy, which
+    // Apply keeps in step with the visible rows.
+    FLevels: TArray<TStatusLevel>;
     FPopup: TPopupMenu;
     FMniAdjust: TMenuItem;
     FTimer: TTimer;
     FC: TStatusCollector;
+    procedure DoDrawSubItem(Sender: TCustomListView; AItem: TListItem;
+      ASubItem: Integer; AState: TCustomDrawState; var ADefaultDraw: Boolean);
     procedure DoTick(Sender: TObject);
     procedure DoListDblClick(Sender: TObject);
     procedure DoAdjustBlameClick(Sender: TObject);
@@ -194,6 +208,10 @@ begin
   // a double-click (or the context menu) on the "Live blame" row opens the
   // live adjuster.
   FList.OnDblClick := DoListDblClick;
+  // Colour is the whole point of the request ("mit Farben und einer einfach
+  // verstaendlichen Statuszeile"): the STATUS cell is drawn in the level's
+  // colour, the rest stays as the theme wants it.
+  FList.OnCustomDrawSubItem := DoDrawSubItem;
   FPopup := TPopupMenu.Create(Self);
   FPopup.OnPopup := DoPopup;
   FMniAdjust := TMenuItem.Create(FPopup);
@@ -223,13 +241,15 @@ begin
   FreeAndNil(FC);
 end;
 
-procedure TStatusCollector.Row(const ACaption, AValue, ADetail: string);
+procedure TStatusCollector.Row(const ACaption, AValue, ADetail: string;
+  ALevel: TStatusLevel);
 begin
   if FRowCount >= Length(FRows) then
     SetLength(FRows, FRowCount + 8);
   FRows[FRowCount].Caption := ACaption;
   FRows[FRowCount].Value := AValue;
   FRows[FRowCount].Detail := ADetail;
+  FRows[FRowCount].Level := ALevel;
   Inc(FRowCount);
 end;
 
@@ -263,11 +283,45 @@ end;
 // changed. In the normal case (nothing moved since the last tick) not a
 // single assignment happens, so the control never repaints and the
 // selection survives.
+// HARD RULE of this code base: a handler that touches the canvas MUST set
+// Brush.Color from the theme - the native control then takes the row
+// background from it, and the unthemed default is WHITE (that is how the
+// GUID and circular-reference lists ended up white-on-dark).
+procedure TStatusFrame.DoDrawSubItem(Sender: TCustomListView; AItem: TListItem;
+  ASubItem: Integer; AState: TCustomDrawState; var ADefaultDraw: Boolean);
+var
+  Lvl: TStatusLevel;
+begin
+  ADefaultDraw := True;
+  Sender.Canvas.Brush.Color := GetThemedColor(clWindow);
+  if (AItem = nil) or (AItem.Index < 0) or (AItem.Index > High(FLevels)) then Exit;
+  // column 1 is "Status" - the one word the user should be able to read
+  // without reading anything else
+  if ASubItem <> 1 then Exit;
+  Lvl := FLevels[AItem.Index];
+  if Lvl = slNeutral then Exit;
+  if cdsSelected in AState then Exit;   // the selection owns its colours
+  Sender.Canvas.Font.Color := StatusLevelColor(Lvl,
+    GetThemedColor(clWindow), GetThemedColor(clWindowText));
+  Sender.Canvas.Font.Style := Sender.Canvas.Font.Style + [fsBold];
+end;
+
 procedure TStatusFrame.Apply;
 var
   I: Integer;
   It: TListItem;
 begin
+  // the painter's copy of the levels, and a repaint ONLY when one changed
+  // (the tick must not touch windows otherwise - the hint's CPU storm)
+  var LevelsChanged := Length(FLevels) <> FC.FRowCount;
+  if LevelsChanged then SetLength(FLevels, FC.FRowCount);
+  for I := 0 to FC.FRowCount - 1 do
+    if FLevels[I] <> FC.FRows[I].Level then
+    begin
+      FLevels[I] := FC.FRows[I].Level;
+      LevelsChanged := True;
+    end;
+
   if FList.Items.Count <> FC.FRowCount then
   begin
     // Structural change (should not happen - the row set is fixed).
@@ -300,6 +354,7 @@ begin
         It.SubItems[1] := FC.FRows[I].Detail;
     end;
   end;
+  if LevelsChanged then FList.Invalidate;
 end;
 
 // What THIS plugin keeps in memory, per consumer. The plugin shares the
@@ -432,14 +487,15 @@ begin
       'Tools > Options > IDE > Environment Variables');
 
   // ---- LSP session --------------------------------------------------------
+  // ONE LINE IN PLAIN WORDS FIRST (user request 2026-09-30): what the
+  // session means for the features, not what it consists of. The rows below
+  // keep the numbers for a closer look. Cheap getters only - this runs once
+  // a second and must never send a request.
   Client := nil;   // a local object reference is NOT zero-initialised
-  if not TLspManager.Instance.IsAlive then
-    Row('DelphiLSP session', 'not started',
-      'starts on the first request (rename, completion, quick fixes)')
-  else
+  DiagCount := 0;
+  DiagFiles := 0;
+  if TLspManager.Instance.IsAlive then
   begin
-    DiagCount := 0;
-    DiagFiles := 0;
     Client := TLspManager.Instance.PeekClient;
     if Client <> nil then
       try
@@ -447,16 +503,90 @@ begin
         DiagFiles := Client.GetDiagnosticFileCount;
       except
       end;
-    if DiagCount = 0 then
-      Row('DelphiLSP session', 'running, no diagnostics',
-        'our session has never pushed one - hints (H2443, ...) are ' +
-        'unavailable; errors come from the Structure view / the compiler')
-    else
-      Row('DelphiLSP session', 'running',
-        Format('%d push(es) received, diagnostics held for %d file(s) ' +
-          '(ALL files, not just this one)',
-          [DiagCount, DiagFiles]));
   end;
+  var Busy := '';
+  if Client <> nil then
+    try Busy := Client.BusyWith; except end;
+  var Answered := 0;
+  if Client <> nil then
+    try Answered := Client.GetAnsweredCount; except end;
+
+  if Client = nil then
+    Row('DelphiLSP', 'not started yet',
+      'It starts with the first search, rename, completion or quick fix - ' +
+      'nothing is wrong here.', slNeutral)
+  else if not Client.IsConnected then
+    Row('DelphiLSP', 'CONNECTION LOST',
+      'DelphiLsp.exe is gone. The next request starts a new session; if it ' +
+      'keeps happening, switch the LSP log on in the options and send the ' +
+      'log.', slBad)
+  else if Busy <> '' then
+    Row('DelphiLSP', 'BUSY - loading the project',
+      Format('It is working on "%s". A search started now would have to wait ' +
+        'for it: while the project loads, requests are answered with nothing.',
+        [Busy]), slWait)
+  else if Answered = 0 then
+    Row('DelphiLSP', 'starting up - not answering yet',
+      'The session is running but has not answered a single request. That is ' +
+      'the state right after the IDE starts: give it a moment, a search ' +
+      'started now waits for it.', slWait)
+  else if DiagCount = 0 then
+    Row('DelphiLSP', 'ready for searches, no diagnostics',
+      'Searches, rename and navigation work. Only the compiler HINTS ' +
+      '(H2443 "unit needed", unused variables, ...) are missing - our session ' +
+      'has never pushed one; errors still come from the Structure view and ' +
+      'the compiler.', slWait)
+  else
+    Row('DelphiLSP', 'ready',
+      Format('Everything works: %d answer(s) given, %d diagnostic push(es) ' +
+        'received for %d file(s).', [Answered, DiagCount, DiagFiles]), slGood);
+
+  // The VERIFICATION session is the one that answers the scans since 1.10.0,
+  // and it pushes no diagnostics at all - so its own line, or a freshly
+  // started one looks "fine" while it answers nothing (forum 2026-09-30).
+  var VClient := TLspManager.Instance.PeekVerifyClient;
+  if VClient = nil then
+    Row('  verification session', 'not started yet',
+      'A separate, faster session for "find references" and rename; it ' +
+      'starts with the first one of them.', slNeutral)
+  else
+  begin
+    var VAnswered := 0;
+    var VBusy := '';
+    try
+      VAnswered := VClient.GetAnsweredCount;
+      VBusy := VClient.BusyWith;
+    except
+    end;
+    if not VClient.IsConnected then
+      Row('  verification session', 'CONNECTION LOST',
+        'The scans fall back to the session above.', slBad)
+    else if VBusy <> '' then
+      Row('  verification session', 'BUSY - loading the project',
+        Format('Working on "%s". A search waits for it and says so.', [VBusy]), slWait)
+    else if VAnswered = 0 then
+      Row('  verification session', 'starting up - not answering yet',
+        'It has not answered anything yet. A search started now waits for it ' +
+        'first (up to 2 minutes) and then lets the main session verify.', slWait)
+    else
+      Row('  verification session', 'ready',
+        Format('%d answer(s) given. It carries the per-occurrence checks of ' +
+          '"find references" and rename.', [VAnswered]), slGood);
+  end;
+  if Client <> nil then
+  begin
+    if DiagCount = 0 then
+      Row('  diagnostics', 'none received',
+        'our session has never pushed one - hints (H2443, ...) are ' +
+        'unavailable; errors come from the Structure view / the compiler',
+        slWait)
+    else
+      Row('  diagnostics', Format('%d push(es), %d file(s)',
+        [DiagCount, DiagFiles]),
+        'held for ALL files the session has seen, not just this one', slGood);
+  end
+  else
+    Row('  diagnostics', '-', '');
   if TLspManager.Instance.ProjectIndexed then S := 'yes' else S := 'no';
   Row('  project indexed', S, 'the LSP has seen this project once');
   // What the server is doing RIGHT NOW: while it loads a project (12-30 s

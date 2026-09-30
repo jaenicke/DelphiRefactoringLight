@@ -647,17 +647,28 @@ begin
     if VClient <> Ctx.Client then
     begin
       VClient.SyncDocumentWith(F, Ctx.Content);
-      // An agent session pushes no diagnostics, so there is no counter that
-      // could say whether it is READY - and a freshly started one answers
-      // every request with null while it loads the project (forum
-      // 2026-09-30). documentSymbol is the signal that works without
-      // diagnostics; when it stays silent, the main session verifies.
-      if not VClient.WaitUnitParsed(F, 120000,
-           function: Boolean
-           begin
-             Result := WaitForSingleObject(AStop, 0) <> WAIT_OBJECT_0;
-           end) then
-        VClient := Ctx.Client;
+      // An agent session pushes neither diagnostics nor progress (both
+      // measured), so nothing says whether it is ready - and a freshly
+      // started one answers every request with null while it loads the
+      // project (forum 2026-09-30). Ask BOTH sessions the question this tool
+      // depends on - the declaration - and use the one that answers it.
+      var PBudget := LspReadinessBudgetMs(Length(Ctx.ScopeFiles));
+      var PDl := GetTickCount64 + PBudget;
+      repeat
+        var PProbe: TArray<TLspLocation> := nil;
+        try PProbe := VClient.GotoDefinition(F, L1 - 1, Ctx.IdentCol0);
+        except PProbe := nil; end;
+        if Length(PProbe) > 0 then Break;
+        try PProbe := Ctx.Client.GotoDefinition(F, L1 - 1, Ctx.IdentCol0);
+        except PProbe := nil; end;
+        if Length(PProbe) > 0 then
+        begin
+          VClient := Ctx.Client;
+          Break;
+        end;
+        if (WaitForSingleObject(AStop, 500) = WAIT_OBJECT_0)
+          or (GetTickCount64 >= PDl) then Break;
+      until False;
     end;
     if VClient = Ctx.Client then
     begin

@@ -1097,25 +1097,42 @@ begin
       if EditorOrDiskReader()(FContext.FileName, StartContent) then
         VClient.SyncDocumentWith(FContext.FileName, StartContent);
       // A FRESHLY STARTED agent session is still loading the project and
-      // answers every request with null - and it pushes no diagnostics, so
-      // no counter can tell. documentSymbol can (forum 2026-09-30). Without
-      // this, a rename would verify against null answers: the declaration
-      // unresolved, the caret taken as the anchor, and only a fraction of
-      // the occurrences renamed.
-      FHost.SetStatus('Preparing the verification session (DelphiLsp is ' +
-        'loading the project)...');
-      if not VClient.WaitUnitParsed(FContext.FileName, 120000,
-           function: Boolean
-           begin
-             FHost.SetProgress(0, 0);     // pumps the dialog
-             Result := not FHost.ScanCancelled;
-           end) then
-      begin
-        FDiagLog := FDiagLog + 'The verification session could not answer ' +
-          'documentSymbol within 120 s (still loading the project) - the main ' +
-          'session verifies instead.' + sLineBreak;
-        VClient := Client;
-      end;
+      // answers every request with null - and it pushes no diagnostics AND no
+      // progress (both measured), so no counter can tell. The question that
+      // decides this rename is the DECLARATION, so that is what both sessions
+      // are asked; whichever answers it can judge the occurrences. Without
+      // this, a rename verifies against null answers and touches a fraction
+      // of the places (forum 2026-09-30).
+      var RBudget := LspReadinessBudgetMs(Length(ProjFiles));
+      var RDl := GetTickCount64 + RBudget;
+      var RProbe: TArray<TLspLocation> := nil;
+      repeat
+        FHost.SetStatus(Format('Waiting for DelphiLSP to resolve the ' +
+          'declaration (up to %d s)...', [RBudget div 1000]));
+        FHost.SetProgress(0, 0);     // pumps the dialog
+        try RProbe := VClient.GotoDefinition(FContext.FileName,
+          FContext.Line - 1, FContext.Column - 1);
+        except RProbe := nil; end;
+        if Length(RProbe) > 0 then Break;
+        try
+          RProbe := Client.GotoDefinition(FContext.FileName,
+            FContext.Line - 1, FContext.Column - 1);
+        except RProbe := nil; end;
+        if Length(RProbe) > 0 then
+        begin
+          FDiagLog := FDiagLog + 'The agent session did not resolve the ' +
+            'declaration, the main session did - it verifies.' + sLineBreak;
+          VClient := Client;
+          Break;
+        end;
+        if FHost.ScanCancelled or (GetTickCount64 >= RDl) then
+        begin
+          FDiagLog := FDiagLog + Format('Neither session resolved the ' +
+            'declaration within %d s.', [RBudget div 1000]) + sLineBreak;
+          Break;
+        end;
+        Sleep(500);
+      until False;
     end;
     IncCtx := TLspIncludeContext.Create(VClient, EditorOrDiskReader());
     IncCtx.RegisterFiles(ProjFiles);

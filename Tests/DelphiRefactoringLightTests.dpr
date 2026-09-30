@@ -25,6 +25,7 @@ uses
   Lsp.Uri in '..\Source\Lsp.Uri.pas',
   Lsp.Protocol in '..\Source\Lsp.Protocol.pas',
   Lsp.Client in '..\Source\Lsp.Client.pas',
+  Expert.IdeThemes in '..\Source\Expert.IdeThemes.pas',
   Expert.PluginSettings in '..\Source\Expert.PluginSettings.pas',
   Expert.WithScanner in '..\Source\Expert.WithScanner.pas',
   Expert.WithRewriter in '..\Source\Expert.WithRewriter.pas',

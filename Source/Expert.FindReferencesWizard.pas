@@ -303,7 +303,8 @@ begin
   begin
     FDialog.SetStatus('DelphiLSP has not analysed ' +
       ExtractFileName(FContext.FileName) + ' yet - waiting for it...');
-    if Client.WaitUnitParsed(FContext.FileName, 90000,
+    if Client.WaitUnitParsed(FContext.FileName,
+         LspReadinessBudgetMs(Length(ProjFiles)),
          function: Boolean
          begin
            Application.ProcessMessages;
@@ -311,9 +312,10 @@ begin
          end) then
       Trace('main session: ready (documentSymbol answered for the start file)')
     else
-      Trace('main session: NOT READY - documentSymbol for the start file went ' +
-        'unanswered for 90 s, so null answers below mean "not analysed", not ' +
-        '"no declaration"');
+      Trace(Format('main session: NOT READY - documentSymbol for the start ' +
+        'file went unanswered for %d s, so null answers below mean "not ' +
+        'analysed", not "no declaration"',
+        [LspReadinessBudgetMs(Length(ProjFiles)) div 1000]));
   end;
   if Aborted then Exit;
   LspLine := FContext.Line - 1;
@@ -416,28 +418,55 @@ begin
     // ~55 s; the declaration query fell into that window, the caret became
     // the anchor and 298 correctly resolved references were dropped as
     // "another symbol".
-    FDialog.SetStatus('Preparing the verification session (DelphiLsp is ' +
-      'loading the project)...');
-    Trace('verification: separate session (' + VClient.ServerType +
-      ') - probing whether it can answer');
-    if VClient.WaitUnitParsed(FContext.FileName, 120000,
-         function: Boolean
-         begin
-           FDialog.SetStatus('Preparing the verification session (DelphiLsp is ' +
-             'loading the project)...');
-           Application.ProcessMessages;
-           Result := not Aborted;
-         end) then
-      Trace('verification session: ready (documentSymbol answered)')
-    else
+    //
+    // CHOSEN BY EVIDENCE, not by a proxy signal: the question this scan needs
+    // answered is the DECLARATION of the symbol, so that is what both
+    // sessions are asked. MEASURED here, which is why it is not documentSymbol:
+    // on a fresh agent session documentSymbol answered after 84 ms while
+    // definitions were still unavailable - it is a WEAKER signal than the
+    // thing we depend on. The budget scales with the project (DelphiLsp loads
+    // all of it first) and the window's close cancels the wait.
+    var Budget := LspReadinessBudgetMs(Length(ProjFiles));
+    var Dl := GetTickCount64 + Budget;
+    var Probe: TArray<TLspLocation> := nil;
+    var UsedMain := False;
+    repeat
+      FDialog.SetStatus(Format('Waiting for DelphiLSP to resolve the declaration ' +
+        '(up to %d s - close this window to stop)...', [Budget div 1000]));
+      Application.ProcessMessages;
+      try Probe := VClient.GotoDefinition(FContext.FileName, LspLine, LspCol);
+      except Probe := nil; end;
+      if Length(Probe) > 0 then Break;
+      // The MAIN session has been running with the IDE all along - when IT
+      // answers, it is the one that can judge the candidates.
+      if not Aborted then
+        try
+          Probe := Client.GotoDefinition(FContext.FileName, LspLine, LspCol);
+          if Length(Probe) > 0 then
+          begin
+            UsedMain := True;
+            Break;
+          end;
+        except
+        end;
+      if Aborted or (GetTickCount64 >= Dl) then Break;
+      Sleep(500);
+    until False;
+    if UsedMain then
     begin
-      // It cannot answer. The MAIN session has been running with the IDE and
-      // passed its own check, so it verifies instead - the same fallback
-      // VerificationClient already uses when the agent cannot be STARTED.
-      Trace('verification session: NOT READY after 120 s (documentSymbol ' +
-        'unanswered) - the main session verifies instead');
+      Trace('verification: the agent session did not resolve the declaration, ' +
+        'the MAIN session did - the main session verifies');
       VClient := Client;
-    end;
+    end
+    else if Length(Probe) > 0 then
+      Trace('verification: separate session (' + VClient.ServerType +
+        ') - it resolved the declaration')
+    else
+      Trace(Format('verification: separate session (%s) - NEITHER session ' +
+        'resolved the declaration within %d s (documentSymbol answers: %s); ' +
+        'nothing will be filtered out below',
+        [VClient.ServerType, Budget div 1000,
+         BoolToStr(VClient.WaitUnitParsed(FContext.FileName, 1), True)]));
   end;
   if VClient = Client then
     Trace('verification: main session');

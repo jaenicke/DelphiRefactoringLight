@@ -70,6 +70,13 @@ type
     // in the IDE while we work on it) - issue #13 asked for this switch
     FLspLogBox: TCheckBox;
     FVerifyBox: TCheckBox;
+    // issue #20: the keep list for the uses cleanup - same reason, built
+    // in code rather than in the DFM
+    FKeepGroup: TGroupBox;
+    FKeepLabel: TLabel;
+    FKeepEdit: TEdit;
+    FKeepNote: TLabel;
+    procedure EnsureKeepRow;
     procedure EnsureLspLogBox;
     procedure EnsureExtraRows;
     function EditFor(Kind: TShortcutKind): TEdit;
@@ -122,6 +129,39 @@ end;
 // 32 px row pitch at 96 dpi, same key handlers); the hint moves below
 // them. AdjustLayout then treats them exactly like the designed rows.
 // Excluded: skUnitRefs, which never had an edit on this page.
+// Issue #20: the form designer writes units into a form unit's uses by
+// itself (ISelectionEditor.RequiresUnits), and the cleanup asks it now. A
+// unit written by some OTHER IDE expert on save is not in that answer, so
+// this list is the manual way out for the remaining false positives.
+procedure TLspOptionsFrame.EnsureKeepRow;
+begin
+  if FKeepGroup <> nil then Exit;
+  FKeepGroup := TGroupBox.Create(Self);
+  FKeepGroup.Parent := Self;
+  FKeepGroup.Caption := 'Uses cleanup';
+  FKeepGroup.Left := grpBlame.Left;
+  FKeepGroup.Width := grpBlame.Width;
+  FKeepGroup.Anchors := grpBlame.Anchors;
+
+  FKeepLabel := TLabel.Create(Self);
+  FKeepLabel.Parent := FKeepGroup;
+  FKeepLabel.Caption := 'Never remove (masks, ; separated):';
+
+  FKeepEdit := TEdit.Create(Self);
+  FKeepEdit.Parent := FKeepGroup;
+  FKeepEdit.Hint := 'e.g. dxSkin*;MyCompany.Components.* - these units are ' +
+    'never offered for removal. The dialog''s "Always keep" button adds rows here.';
+  FKeepEdit.ShowHint := True;
+
+  FKeepNote := TLabel.Create(Self);
+  FKeepNote.Parent := FKeepGroup;
+  FKeepNote.WordWrap := True;
+  FKeepNote.AutoSize := False;
+  FKeepNote.Caption := '(Units the form designer requires are detected ' +
+    'automatically - this list is only for what it cannot report. Keep the ' +
+    'masks narrow: "cx*" would also protect cx units that really are unused.)';
+end;
+
 procedure TLspOptionsFrame.EnsureLspLogBox;
 begin
   if FLspLogBox <> nil then Exit;
@@ -305,8 +345,27 @@ begin
   lblBlameNote.SetBounds(34, Row, grpBlame.ClientWidth - 34 - Gap, 2 * LineH);
   grpBlame.Height := lblBlameNote.Top + lblBlameNote.Height + Gap;
 
+  // ---- uses cleanup ----------------------------------------------------
+  // A new section means TEACHING THIS ROUTINE about it, not just creating
+  // it: the flow below places the button after the LAST group, and a group
+  // left at its designed Top is exactly how the button once landed inside
+  // one (tester screenshot).
+  EnsureKeepRow;
+  FKeepGroup.Top := grpBlame.Top + grpBlame.Height + Gap;
+  FKeepGroup.Width := grpBlame.Width;
+  Row := 22;
+  FKeepLabel.Left := 16;
+  FKeepLabel.Top := Row + 4;
+  EditLeft := EnsureRange(FKeepLabel.Left + FKeepLabel.Width + Gap, 100,
+    FKeepGroup.ClientWidth div 2);
+  FKeepEdit.SetBounds(EditLeft, Row,
+    Max(120, FKeepGroup.ClientWidth - EditLeft - Gap), FKeepEdit.Height);
+  Row := Row + FKeepEdit.Height + 6;
+  FKeepNote.SetBounds(34, Row, FKeepGroup.ClientWidth - 34 - Gap, 3 * LineH);
+  FKeepGroup.Height := FKeepNote.Top + FKeepNote.Height + Gap;
+
   // ---- and only THEN the button ---------------------------------------
-  btnDefaults.Top := grpBlame.Top + grpBlame.Height + 10;
+  btnDefaults.Top := FKeepGroup.Top + FKeepGroup.Height + 10;
 
   // THE FRAME'S OWN HEIGHT must follow the content. The options host
   // scrolls its page by that height, so a frame that stays at its
@@ -353,6 +412,8 @@ begin
   edtBlameWidth.Text := IntToStr(TPluginSettings.BlameColumnWidth);
   edtBlameOffset.Text := IntToStr(TPluginSettings.BlameColumnOffset);
   cbxTortoise.Checked := TPluginSettings.BlameUseTortoise;
+  EnsureKeepRow;
+  FKeepEdit.Text := TPluginSettings.UsesCleanupKeepUnits;
 end;
 
 procedure TLspOptionsFrame.StoreToSettings;
@@ -385,6 +446,8 @@ begin
   // The switch takes effect immediately - the gutter width is restored
   // when it goes off, so a stale wide gutter can never be left behind.
   TPluginSettings.LiveBlame := cbxLiveBlame.Checked;
+  if FKeepEdit <> nil then
+    TPluginSettings.UsesCleanupKeepUnits := Trim(FKeepEdit.Text);
   ApplyBlameSettings;
 end;
 
@@ -441,6 +504,8 @@ begin
   EnsureLspLogBox;
   FLspLogBox.Checked := False;
   FVerifyBox.Checked := True;
+  // The keep list is the user's own data, gathered one false positive at a
+  // time - "restore defaults" must not silently throw it away.
 end;
 
 end.

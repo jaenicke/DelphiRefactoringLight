@@ -42,6 +42,7 @@ uses
   Expert.WithRewriter, Expert.WithScanner, Expert.FindOriginalSymbolWizard,
   Expert.UnitReferencesWizard, Expert.UnitReferencesDialog,
   Expert.InterfaceGuidCheck, Expert.DfmEventCheck, Expert.DfmEventCheckDialog,
+  Expert.DfmRename,
   Expert.SignatureCheck, Expert.SignatureCheckWizard,
   Expert.ExtractInterface, Expert.ExtractInterfaceWizard, Expert.ExtractMethod,
   Lsp.Client, Lsp.Protocol, Lsp.Uri,
@@ -408,14 +409,85 @@ begin
 end;
 
 const
+  // Appended, never reordered - a consumer keyed on 'unused' stays right.
   VerdictNames: array[TUsesVerdict] of string = ('used', 'unused', 'movable',
-    'unknown', 'init_code', 'ide_managed');
+    'unknown', 'init_code', 'ide_managed', 'kept_by_user', 'unverified');
+
+type
+  // Issue #20: what the IDE's form designer would write into this unit's
+  // uses by itself. Only answerable ON THE MAIN THREAD and only for a form
+  // unit whose form the IDE has loaded, so both tools fill it inside their
+  // McpRunOnMain block and report the state per file.
+  TDesignerState = record
+    Required: TArray<TDesignerRequiredUnit>;
+    Complete: Boolean;    // no selection editor raised while asking
+    Answered: Boolean;    // there WAS a designer to ask
+    IsForm: Boolean;
+    function Verified: Boolean;
+    function StateText: string;
+  end;
+
+function TDesignerState.Verified: Boolean;
+begin
+  Result := Answered and Complete;
+end;
+
+function TDesignerState.StateText: string;
+begin
+  if not IsForm then
+    Result := 'not a form unit - nothing re-adds units here'
+  else if Verified then
+    Result := Format('verified: %d unit(s) required by the form designer',
+      [Length(Required)])
+  else if Answered then
+    Result := 'INCOMPLETE: a selection editor raised, so units may be missing'
+  else
+    Result := 'form not loaded in the designer - the IDE may re-add entries';
+end;
+
+// Must run on the main thread (ToolsAPI + designer).
+procedure QueryDesigner(const AFile: string; var AState: TDesignerState);
+begin
+  AState := Default(TDesignerState);
+  AState.IsForm := FormFileOf(AFile) <> '';
+  if not AState.IsForm or (Editor = nil) then Exit;
+  AState.Answered := Editor.GetDesignerRequiredUnits(AFile, AState.Required,
+    AState.Complete);
+end;
+
+// The three injected lookups are the same for both tools.
+function AnalyzeUsesWithDesigner(const AContent: string;
+  const ASnap: IUnitSnapshot; const AState: TDesignerState;
+  const AKeepList: string): TArray<TUsesEntryInfo>;
+begin
+  Result := AnalyzeUses(AContent,
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      for var H in ASnap.Lookup(AIdent) do Result := Result + [H.UnitName];
+    end,
+    function(const AUnitName: string): Boolean
+    begin
+      Result := ASnap.HasUnit(AUnitName);
+    end,
+    function(const AUnitName: string): Boolean
+    begin
+      Result := ASnap.HasInitCode(AUnitName);
+    end,
+    DesignerRequiredLookup(AState.Required),
+    function(const AUnitName: string): Boolean
+    begin
+      Result := MatchesKeepList(AUnitName, AKeepList);
+    end,
+    AState.IsForm and not AState.Verified);
+end;
 
 function ToolAnalyzeUses(AArgs: TJSONObject; AStop: THandle): string;
 var
   F, Err, C: string;
   Found: Boolean;
   Cycle0: Integer;
+  St: TDesignerState;
 begin
   F := ArgStr(AArgs, 'file');
   if F = '' then Exit(McpErr('argument "file" is required'));
@@ -428,6 +500,8 @@ begin
       Found := McpReadContent(F, C);
       // the index parses from DISK - one fresh cycle, like the dialog does
       TUnitIndex.Instance.RefreshSourcesFromEditor;
+      // the designer answers only here, on the main thread (issue #20)
+      QueryDesigner(F, St);
     end, True, AStop, Err) then Exit(McpErr(Err));
   if not Found then Exit(McpErr('file not found: ' + F));
   var Waited := 0;
@@ -439,20 +513,8 @@ begin
   var Snap := TUnitIndex.Instance.Snapshot;
   if (Snap = nil) or (Snap.IdentCount = 0) then
     Exit(McpErr('the identifier index is not ready yet'));
-  var Entries := AnalyzeUses(C,
-    function(const AIdent: string): TArray<string>
-    begin
-      Result := nil;
-      for var H in Snap.Lookup(AIdent) do Result := Result + [H.UnitName];
-    end,
-    function(const AUnitName: string): Boolean
-    begin
-      Result := Snap.HasUnit(AUnitName);
-    end,
-    function(const AUnitName: string): Boolean
-    begin
-      Result := Snap.HasInitCode(AUnitName);
-    end);
+  var Entries := AnalyzeUsesWithDesigner(C, Snap, St,
+    TPluginSettings.UsesCleanupKeepUnits);
   var Arr := TJSONArray.Create;
   for var E in Entries do
   begin
@@ -463,16 +525,23 @@ begin
     O.AddPair('verdict', VerdictNames[E.Verdict]);
     O.AddPair('usages', TJSONNumber.Create(E.UsageCount));
     if E.FirstUseLine >= 0 then O.AddPair('firstUseLine', TJSONNumber.Create(E.FirstUseLine + 1));
+    if E.Reason <> '' then O.AddPair('reason', E.Reason);
     Arr.Add(O);
   end;
   var Res := TJSONObject.Create;
   Res.AddPair('file', F);
+  Res.AddPair('designerVerified', TJSONBool.Create(St.Verified));
+  Res.AddPair('designerState', St.StateText);
   Res.AddPair('entries', Arr);
   Res.AddPair('note', 'unused = no identifier of the unit is used (remove_unit); ' +
     'movable = only used in the implementation (remove + add_unit with ' +
-    'section implementation); init_code / ide_managed / unknown are KEPT ' +
-    'deliberately. Class helpers, operators and initialization side effects ' +
-    'are invisible to this textual analysis.');
+    'section implementation); init_code / ide_managed / kept_by_user / ' +
+    'unknown are KEPT deliberately - ide_managed means the form designer ' +
+    'writes that entry itself (see "reason"), so removing it is undone on the ' +
+    'next save. unverified = a FORM unit whose form is not loaded in the IDE: ' +
+    'nothing could confirm what the designer would re-add, so treat those as ' +
+    'unknown rather than unused. Class helpers, operators and initialization ' +
+    'side effects are invisible to this textual analysis.');
   Result := McpOk(Res);
 end;
 
@@ -2223,9 +2292,10 @@ end;
 function ToolCleanupUses(AArgs: TJSONObject; AStop: THandle): string;
 var
   F, Err, C: string;
-  Found, DoApply, DoRemove, DoMove: Boolean;
+  Found, DoApply, DoRemove, DoMove, DoUnverified: Boolean;
   Cycle0: Integer;
   Entries: TArray<TUsesEntryInfo>;
+  St: TDesignerState;
 begin
   F := ArgStr(AArgs, 'file');
   if F = '' then Exit(McpErr('argument "file" is required'));
@@ -2233,6 +2303,12 @@ begin
   DoApply := ArgBool(AArgs, 'apply');
   DoRemove := ArgBool(AArgs, 'remove_unused', True);
   DoMove := ArgBool(AArgs, 'move_to_implementation', False);
+  // Issue #20: in a form unit whose form is NOT loaded, nothing can say
+  // which units the designer would write back. Inside the IDE such an entry
+  // simply reappears; on a command-line or CI build nothing re-adds it - at
+  // best that is a compile error, at worst a form that streams a class
+  // nobody registered any more. So it takes an explicit opt-in.
+  DoUnverified := ArgBool(AArgs, 'include_unverified', False);
   Found := False;
   Cycle0 := TUnitIndex.Instance.ScanCycle;
   if not McpRunOnMain(
@@ -2240,6 +2316,7 @@ begin
     begin
       Found := McpReadContent(F, C);
       TUnitIndex.Instance.RefreshSourcesFromEditor;
+      QueryDesigner(F, St);
     end, True, AStop, Err) then Exit(McpErr(Err));
   if not Found then Exit(McpErr('file not found: ' + F));
   // the index parses from DISK - wait for one full cycle like the dialog
@@ -2252,33 +2329,34 @@ begin
   var Snap := TUnitIndex.Instance.Snapshot;
   if (Snap = nil) or (Snap.IdentCount = 0) then
     Exit(McpErr('the identifier index is not ready yet - see get_status'));
-  Entries := AnalyzeUses(C,
-    function(const AIdent: string): TArray<string>
-    begin
-      Result := nil;
-      for var H in Snap.Lookup(AIdent) do Result := Result + [H.UnitName];
-    end,
-    function(const AUnitName: string): Boolean
-    begin
-      Result := Snap.HasUnit(AUnitName);
-    end,
-    function(const AUnitName: string): Boolean
-    begin
-      Result := Snap.HasInitCode(AUnitName);
-    end);
+  Entries := AnalyzeUsesWithDesigner(C, Snap, St,
+    TPluginSettings.UsesCleanupKeepUnits);
 
   var Content := C;
   var Rows := TJSONArray.Create;
   var Removed := 0;
   var Moved := 0;
-  for var E in Entries do
+  var Skipped := 0;
+  for var E0 in Entries do
   begin
+    var E := E0;
     var Row := TJSONObject.Create;
     Row.AddPair('unit', E.UnitName);
     Row.AddPair('verdict', VerdictNames[E.Verdict]);
+    if E.Reason <> '' then Row.AddPair('reason', E.Reason);
+    // An unverified row acts on what the TEXT says, but only when the
+    // caller has taken responsibility for it.
+    if E.Verdict = uvUnverified then
+      if DoUnverified then
+        E.Verdict := ResolveUnverified(E)
+      else
+        Inc(Skipped);
     var Action := 'kept';
     var Next := '';
-    if (E.Verdict = uvUnused) and DoRemove then
+    if E.Verdict = uvUnverified then
+      Action := 'kept: unverified - the form is not loaded, so nothing could ' +
+        'confirm the IDE would not re-add it (pass include_unverified=true)'
+    else if (E.Verdict = uvUnused) and DoRemove then
     begin
       if PlanRemoveUnitFromUsesText(Content, E.UnitName, Next) then
       begin
@@ -2306,7 +2384,11 @@ begin
     else if E.Verdict = uvUnused then
       Action := 'kept: remove_unused is off'
     else if E.Verdict = uvMovable then
-      Action := 'kept: move_to_implementation is off';
+      Action := 'kept: move_to_implementation is off'
+    else if E.Verdict = uvIdeManaged then
+      Action := 'kept: the form designer writes this entry itself'
+    else if E.Verdict = uvKeptByUser then
+      Action := 'kept: on your keep list';
     Row.AddPair('action', Action);
     Rows.Add(Row);
   end;
@@ -2315,15 +2397,19 @@ begin
   Extra.AddPair('entries', Rows);
   Extra.AddPair('removed', TJSONNumber.Create(Removed));
   Extra.AddPair('movedToImplementation', TJSONNumber.Create(Moved));
+  Extra.AddPair('designerVerified', TJSONBool.Create(St.Verified));
+  Extra.AddPair('designerState', St.StateText);
+  if Skipped > 0 then
+    Extra.AddPair('unverifiedKept', TJSONNumber.Create(Skipped));
   if Content = C then
   begin
     Extra.AddPair('file', F);
     Extra.AddPair('applied', TJSONBool.Create(False));
     Extra.AddPair('changes', TJSONArray.Create);
     Extra.AddPair('note', 'Nothing to clean up with these options. init_code, ' +
-      'ide_managed and unknown entries are kept deliberately; class helpers, ' +
-      'operators and initialization side effects are invisible to a textual ' +
-      'analysis.');
+      'ide_managed, kept_by_user, unverified and unknown entries are kept ' +
+      'deliberately; class helpers, operators and initialization side ' +
+      'effects are invisible to a textual analysis.');
     Exit(McpOk(Extra));
   end;
   Result := ContentResult(F, C, Content, 'cleanup_uses', DoApply,

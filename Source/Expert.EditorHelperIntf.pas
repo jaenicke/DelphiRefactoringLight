@@ -42,6 +42,15 @@ type
     IsValid: Boolean;
   end;
 
+  /// <summary>One unit the IDE's form designer writes into a form unit's
+  ///  interface uses BY ITSELF, with the component that asks for it
+  ///  ('cxGrid1: TcxGrid'). Removing such an entry is a tug-of-war: the
+  ///  IDE puts it back on the next save.</summary>
+  TDesignerRequiredUnit = record
+    UnitName: string;
+    Reason: string;
+  end;
+
   IEditorHelper = interface
     ['{1F6F4D86-5C8D-4A6E-9B0E-7BCE2C5F0A12}']
     // ---------- Cursor / project context ----------
@@ -119,6 +128,19 @@ type
     ///  changed on disk would simply be overwritten on the next save.
     ///  Always False in standalone.</summary>
     function IsFormInDesigner(const APasFile: string): Boolean;
+    /// <summary>The units the IDE's form designer inserts by itself for the
+    ///  form of APasFile: the unit of every component class AND of its
+    ///  ancestors, plus whatever the registered selection editors ask for
+    ///  (ISelectionEditor.RequiresUnits - DevExpress uses that heavily).
+    ///  None of these appears as an identifier in the .pas, so a textual
+    ///  analysis cannot see them.
+    ///  False when the form is not loaded in the designer; AComplete is
+    ///  False when a selection editor raised, so the list may MISS units -
+    ///  the caller must then treat the answer as unverified rather than
+    ///  complete. Main thread only. Always False in standalone.</summary>
+    function GetDesignerRequiredUnits(const APasFile: string;
+      out AUnits: TArray<TDesignerRequiredUnit>;
+      out AComplete: Boolean): Boolean;
     /// <summary>Renames a component (AIsMethod = False) or an event
     ///  handler method (True) through the form designer of APasFile - the
     ///  path the Object Inspector takes, so the designer updates its own

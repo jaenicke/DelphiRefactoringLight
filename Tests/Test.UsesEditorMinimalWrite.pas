@@ -92,6 +92,9 @@ type
     // IEditorHelper members this fake does not need
     function GetOpenSourceFiles: TArray<string>;
     function IsFormInDesigner(const APasFile: string): Boolean;
+    function GetDesignerRequiredUnits(const APasFile: string;
+      out AUnits: TArray<TDesignerRequiredUnit>;
+      out AComplete: Boolean): Boolean;
     function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
       AIsMethod: Boolean; out AMessage: string): Boolean;
     constructor Create;
@@ -165,6 +168,16 @@ end;
 
 function TFakeEditor.IsFormInDesigner(const APasFile: string): Boolean;
 begin
+  Result := False;
+end;
+
+function TFakeEditor.GetDesignerRequiredUnits(const APasFile: string;
+  out AUnits: TArray<TDesignerRequiredUnit>; out AComplete: Boolean): Boolean;
+// No designer in the test harness - and NOT "complete and empty", so a
+// caller treats a form unit as unverified (issue #20).
+begin
+  AUnits := nil;
+  AComplete := False;
   Result := False;
 end;
 

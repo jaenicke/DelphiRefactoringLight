@@ -16,7 +16,9 @@ unit Test.RegressionSuite;
 interface
 
 uses
-  DUnitX.TestFramework;
+  // The designer-managed uses fixture names TUsesEntryInfo / TUsesVerdict in
+  // its own helpers, so those two live here rather than only below.
+  DUnitX.TestFramework, Expert.UsesCleanup, Expert.EditorHelperIntf;
 
 type
   [TestFixture]
@@ -299,6 +301,39 @@ type
     [Test] procedure GeneratingKinds_HaveNoTextPreview;
   end;
 
+  /// <summary>Issue #20: the uses cleanup offered units for removal that the
+  ///  IDE's FORM DESIGNER writes back on the next save (cxGraphics,
+  ///  cxControls, ... with DevExpress; Data.DB for a plain TDBGrid, because
+  ///  its selection editor asks for it through
+  ///  ISelectionEditor.RequiresUnits). None of them appears as an identifier
+  ///  in the .pas, so no textual analysis can see them - the designer of the
+  ///  loaded form is the only exact source, and a hand-written list of four
+  ///  VCL units can never cover third-party or in-house packages.
+  ///  AnalyzeUses stays pure: what the designer answered comes in as a
+  ///  lookup, so these tests script it.</summary>
+  [TestFixture]
+  TDesignerManagedUsesTests = class
+  private
+    /// <summary>A form unit that uses a unit it never NAMES - exactly the
+    ///  shape of the report.</summary>
+    function FormUnit: string;
+    function Analyze(const AContent: string;
+      const ADesignerUnits: TArray<string>; const AKeepList: string = '';
+      AFormUnverified: Boolean = False): TArray<TUsesEntryInfo>;
+    function VerdictOf(const AEntries: TArray<TUsesEntryInfo>;
+      const AUnit: string): TUsesVerdict;
+    function ReasonOf(const AEntries: TArray<TUsesEntryInfo>;
+      const AUnit: string): string;
+  public
+    [Test] procedure ADesignerRequiredUnitIsKeptAndNamesTheComponent;
+    [Test] procedure ADesignerRequiredUnitIsNotMovedDownEither;
+    [Test] procedure UnitScopeNamesMatchBothWays;
+    [Test] procedure TheKeepListTakesMasks;
+    [Test] procedure AFormWhoseDesignerCannotBeAskedIsUnverified;
+    [Test] procedure AnIncompleteAnswerStillProtectsWhatItDidReport;
+    [Test] procedure OptingIntoAnUnverifiedRowFollowsTheText;
+  end;
+
 implementation
 
 uses
@@ -309,7 +344,7 @@ uses
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
-  Expert.UsesCleanup, Expert.MoveToUnit, Expert.SafeDeletePlan;
+  Expert.MoveToUnit, Expert.SafeDeletePlan;
 
 const
   NL = sLineBreak;
@@ -1985,6 +2020,234 @@ begin
   end;
 end;
 
+{ TDesignerManagedUsesTests }
+
+function TDesignerManagedUsesTests.FormUnit: string;
+begin
+  // The DevExpress units of the report are not mentioned anywhere in the
+  // source - the DESIGNER puts them there. Vcl.Forms is used (TForm),
+  // Vcl.Dialogs only in the implementation.
+  Result :=
+    'unit Unit1;'#13#10 +
+    'interface'#13#10 +
+    'uses'#13#10 +
+    '  Vcl.Forms, Vcl.Controls, cxGraphics, cxControls, Data.DB;'#13#10 +
+    'type'#13#10 +
+    '  TForm1 = class(TForm)'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'uses'#13#10 +
+    '  Vcl.Dialogs;'#13#10 +
+    'procedure Go;'#13#10 +
+    'begin'#13#10 +
+    '  ShowMessage(''hi'');'#13#10 +
+    'end;'#13#10 +
+    'end.';
+end;
+
+function TDesignerManagedUsesTests.Analyze(const AContent: string;
+  const ADesignerUnits: TArray<string>; const AKeepList: string;
+  AFormUnverified: Boolean): TArray<TUsesEntryInfo>;
+var
+  Required: TArray<TDesignerRequiredUnit>;
+  R: TDesignerRequiredUnit;
+begin
+  Required := nil;
+  for var U in ADesignerUnits do
+  begin
+    R.UnitName := U;
+    R.Reason := 'cxGrid1: TcxGrid';
+    Required := Required + [R];
+  end;
+  Result := AnalyzeUses(AContent,
+    function(const AIdent: string): TArray<string>
+    begin
+      // only what the .pas really names
+      Result := nil;
+      if SameText(AIdent, 'TForm') then Result := ['Vcl.Forms']
+      else if SameText(AIdent, 'TControl') then Result := ['Vcl.Controls']
+      else if SameText(AIdent, 'ShowMessage') then Result := ['Vcl.Dialogs'];
+    end,
+    function(const AUnit: string): Boolean begin Result := True; end,
+    function(const AUnit: string): Boolean begin Result := False; end,
+    DesignerRequiredLookup(Required),
+    function(const AUnit: string): Boolean
+    begin
+      Result := MatchesKeepList(AUnit, AKeepList);
+    end,
+    AFormUnverified);
+end;
+
+function TDesignerManagedUsesTests.VerdictOf(
+  const AEntries: TArray<TUsesEntryInfo>; const AUnit: string): TUsesVerdict;
+begin
+  for var E in AEntries do
+    if SameText(E.UnitName, AUnit) then Exit(E.Verdict);
+  Assert.Fail('no entry for ' + AUnit);
+  Result := uvUnknown;
+end;
+
+function TDesignerManagedUsesTests.ReasonOf(
+  const AEntries: TArray<TUsesEntryInfo>; const AUnit: string): string;
+begin
+  Result := '';
+  for var E in AEntries do
+    if SameText(E.UnitName, AUnit) then Exit(E.Reason);
+end;
+
+procedure TDesignerManagedUsesTests.ADesignerRequiredUnitIsKeptAndNamesTheComponent;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // The reported case: the designer needs cxGraphics, the source never
+  // names it.
+  E := Analyze(FormUnit, ['cxGraphics']);
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, VerdictOf(E, 'cxGraphics'));
+  // and the row has to SAY which component does it, or the user cannot
+  // judge the answer
+  Assert.AreEqual('cxGrid1: TcxGrid', ReasonOf(E, 'cxGraphics'));
+  // cxControls is NOT in the designer answer, so it stays a candidate
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'cxControls'));
+  // REGRESSION: without a designer lookup the old behaviour is unchanged -
+  // that is what every non-form unit keeps doing.
+  E := Analyze(FormUnit, []);
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'cxGraphics'));
+  Assert.AreEqual<TUsesVerdict>(uvUsed, VerdictOf(E, 'Vcl.Forms'));
+end;
+
+procedure TDesignerManagedUsesTests.ADesignerRequiredUnitIsNotMovedDownEither;
+const
+  Src =
+    'unit Unit1;'#13#10 +
+    'interface'#13#10 +
+    'uses'#13#10 +
+    '  Data.DB;'#13#10 +
+    'implementation'#13#10 +
+    'procedure Go(D: TDataSet);'#13#10 +
+    'begin'#13#10 +
+    'end;'#13#10 +
+    'end.';
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // Data.DB is only used in the implementation, so the analysis alone would
+  // offer to move it down - but the designer always writes into the
+  // INTERFACE uses, so moving it starts the same tug-of-war as removing it.
+  E := AnalyzeUses(Src,
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      if SameText(AIdent, 'TDataSet') then Result := ['Data.DB'];
+    end,
+    function(const AUnit: string): Boolean begin Result := True; end,
+    function(const AUnit: string): Boolean begin Result := False; end,
+    DesignerRequiredLookup([]));
+  Assert.AreEqual<TUsesVerdict>(uvMovable, VerdictOf(E, 'Data.DB'),
+    'without the designer it is movable');
+
+  var Req: TDesignerRequiredUnit;
+  Req.UnitName := 'Data.DB';
+  Req.Reason := 'DBGrid1: TDBGrid';
+  E := AnalyzeUses(Src,
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      if SameText(AIdent, 'TDataSet') then Result := ['Data.DB'];
+    end,
+    function(const AUnit: string): Boolean begin Result := True; end,
+    function(const AUnit: string): Boolean begin Result := False; end,
+    DesignerRequiredLookup([Req]));
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, VerdictOf(E, 'Data.DB'),
+    'the designer writes it into the INTERFACE uses - do not move it');
+end;
+
+procedure TDesignerManagedUsesTests.UnitScopeNamesMatchBothWays;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // The designer reports the RTTI name ('Vcl.Forms'), older code writes the
+  // short one ('Forms'). Matched both ways, so it errs towards KEEPING.
+  Assert.IsTrue(SameUnitIgnoringScope('Forms', 'Vcl.Forms'));
+  Assert.IsTrue(SameUnitIgnoringScope('Vcl.Forms', 'Forms'));
+  Assert.IsTrue(SameUnitIgnoringScope('vcl.forms', 'Vcl.Forms'), 'case');
+  Assert.IsFalse(SameUnitIgnoringScope('Vcl.Forms', 'Vcl.FormsX'));
+  Assert.IsFalse(SameUnitIgnoringScope('Forms', 'MyForms'),
+    'a name that merely ENDS with it is another unit');
+  // and through the analysis
+  E := Analyze(StringReplace(FormUnit, 'Vcl.Controls, cxGraphics',
+    'Controls, cxGraphics', []), ['Vcl.Controls']);
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, VerdictOf(E, 'Controls'));
+end;
+
+procedure TDesignerManagedUsesTests.TheKeepListTakesMasks;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // What the designer cannot report (a unit some other IDE expert writes on
+  // save) is what this list is for.
+  Assert.IsTrue(MatchesKeepList('dxSkinsCore', 'dxSkin*;MyCompany.*'));
+  Assert.IsTrue(MatchesKeepList('MyCompany.Utils', 'dxSkin*;MyCompany.*'));
+  Assert.IsFalse(MatchesKeepList('MyCompanyX', 'dxSkin*;MyCompany.*'),
+    'MyCompany.* must not swallow MyCompanyX');
+  Assert.IsFalse(MatchesKeepList('cxGraphics', ''), 'an empty list keeps nothing');
+  Assert.IsTrue(MatchesKeepList('CXGRAPHICS', 'cxgraphics'), 'case-insensitive');
+  Assert.IsTrue(MatchesKeepList('dxSkinsCore', ' dxSkin* ; x '), 'blanks around a mask');
+  E := Analyze(FormUnit, [], 'cx*');
+  Assert.AreEqual<TUsesVerdict>(uvKeptByUser, VerdictOf(E, 'cxControls'));
+  // the designer answer WINS over the keep list: its reason is the useful one
+  E := Analyze(FormUnit, ['cxGraphics'], 'cx*');
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, VerdictOf(E, 'cxGraphics'));
+  Assert.AreEqual<TUsesVerdict>(uvKeptByUser, VerdictOf(E, 'cxControls'));
+end;
+
+procedure TDesignerManagedUsesTests.AFormWhoseDesignerCannotBeAskedIsUnverified;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // Outside the IDE (MCP on a closed form, standalone, or a form that failed
+  // to load) nothing can say what the designer would re-add - and nothing
+  // re-adds it on a CI build either, so a removal there is a compile error
+  // at best and a form that streams an unregistered class at worst.
+  E := Analyze(FormUnit, [], '', True);
+  Assert.AreEqual<TUsesVerdict>(uvUnverified, VerdictOf(E, 'cxGraphics'));
+  Assert.AreEqual<TUsesVerdict>(uvUnverified, VerdictOf(E, 'Data.DB'));
+  Assert.AreEqual<TUsesVerdict>(uvUsed, VerdictOf(E, 'Vcl.Forms'),
+    'a unit that IS used stays used - this is not about usage');
+  // the same content WITHOUT a form file keeps the old verdict
+  E := Analyze(FormUnit, [], '', False);
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'cxGraphics'));
+end;
+
+procedure TDesignerManagedUsesTests.AnIncompleteAnswerStillProtectsWhatItDidReport;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // A selection editor raised while we asked: what it DID report is still
+  // true, the rest is unknown. So the reported unit stays protected and
+  // everything else becomes unverified - never the other way round.
+  E := Analyze(FormUnit, ['cxGraphics'], '', True);
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, VerdictOf(E, 'cxGraphics'));
+  Assert.AreEqual<TUsesVerdict>(uvUnverified, VerdictOf(E, 'cxControls'));
+end;
+
+procedure TDesignerManagedUsesTests.OptingIntoAnUnverifiedRowFollowsTheText;
+var
+  Entry: TUsesEntryInfo;
+begin
+  // ONE rule for the dialog's Apply and the MCP tool's include_unverified.
+  Entry := Default(TUsesEntryInfo);
+  Entry.Verdict := uvUnverified;
+  Entry.UsageCount := 0;
+  Assert.AreEqual<TUsesVerdict>(uvUnused, ResolveUnverified(Entry));
+  Entry.UsageCount := 3;
+  Assert.AreEqual<TUsesVerdict>(uvMovable, ResolveUnverified(Entry));
+  // every other verdict is passed through untouched
+  Entry.Verdict := uvIdeManaged;
+  Assert.AreEqual<TUsesVerdict>(uvIdeManaged, ResolveUnverified(Entry));
+  Entry.Verdict := uvUsed;
+  Assert.AreEqual<TUsesVerdict>(uvUsed, ResolveUnverified(Entry));
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -2008,5 +2271,6 @@ initialization
   TDUnitX.RegisterTestFixture(TDeclarationAnchorTests);
   TDUnitX.RegisterTestFixture(TSignatureQualifierTests);
   TDUnitX.RegisterTestFixture(TInterfaceDeclLineTests);
+  TDUnitX.RegisterTestFixture(TDesignerManagedUsesTests);
 
 end.

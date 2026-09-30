@@ -38,6 +38,7 @@ type
     class var FScopeIncludeUsedUnits: Boolean;
     class var FRenameScope: Integer;
     class var FRenameBackup: Boolean;
+    class var FUsesCleanupKeepUnits: string;
     class var FLoaded: Boolean;
     class function BaseRegistryKey: string; static;
     class function LegacyRegistryKey: string; static;
@@ -120,6 +121,16 @@ type
     class property RenameScope: Integer read FRenameScope write FRenameScope;
     class property RenameBackup: Boolean read FRenameBackup write FRenameBackup;
 
+    /// <summary>Units the uses cleanup must never offer for removal, as
+    /// masks separated by ';' ('dxSkin*;MyCompany.Components.*'). The
+    /// designer query (issue #20) covers what ISelectionEditor.RequiresUnits
+    /// reports; a unit some other IDE expert writes on save is not in that
+    /// answer, and this is where such a false positive is turned off. Empty
+    /// by default - a mask like 'cx*' would also protect cx units that
+    /// really are unused.</summary>
+    class property UsesCleanupKeepUnits: string
+      read FUsesCleanupKeepUnits write FUsesCleanupKeepUnits;
+
     class function DefaultPrewarm: Boolean; static;
   end;
 
@@ -193,6 +204,21 @@ begin
     case AReg.GetDataType(AName) of
       rdInteger: Result := AReg.ReadInteger(AName);
       rdString, rdExpandString: Result := StrToIntDef(Trim(AReg.ReadString(AName)), ADefault);
+    end;
+  except
+    Result := ADefault;
+  end;
+end;
+
+function ReadStrDef(AReg: TRegistry; const AName: string;
+  const ADefault: string): string;
+begin
+  Result := ADefault;
+  try
+    if not AReg.ValueExists(AName) then Exit;
+    case AReg.GetDataType(AName) of
+      rdString, rdExpandString: Result := AReg.ReadString(AName);
+      rdInteger: Result := IntToStr(AReg.ReadInteger(AName));
     end;
   except
     Result := ADefault;
@@ -275,6 +301,7 @@ begin
   FScopeIncludeUsedUnits := False;
   FRenameScope := 0;
   FRenameBackup := True;
+  FUsesCleanupKeepUnits := '';
   FLoaded := True;
 
   try
@@ -302,6 +329,8 @@ begin
       FRenameScope := ReadIntDef(Reg, 'RenameScope', FRenameScope);
       if (FRenameScope < 0) or (FRenameScope > 3) then FRenameScope := 0;
       FRenameBackup := ReadBoolDef(Reg, 'RenameBackup', FRenameBackup);
+      FUsesCleanupKeepUnits := ReadStrDef(Reg, 'UsesCleanupKeepUnits',
+        FUsesCleanupKeepUnits);
     finally
       Reg.CloseKey;
     end;
@@ -335,6 +364,7 @@ begin
       Reg.WriteBool('ScopeIncludeUsedUnits', FScopeIncludeUsedUnits);
       Reg.WriteInteger('RenameScope', FRenameScope);
       Reg.WriteBool('RenameBackup', FRenameBackup);
+      Reg.WriteString('UsesCleanupKeepUnits', FUsesCleanupKeepUnits);
     finally
       Reg.CloseKey;
     end;

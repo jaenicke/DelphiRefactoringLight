@@ -856,11 +856,18 @@ const
     '{"name":"cleanup_uses","description":"Runs what the uses-cleanup dialog runs: ' +
     'removes entries no identifier of which is used and (move_to_implementation) moves ' +
     'interface entries that are only needed in the implementation. Entries with ' +
-    'initialization code, IDE-managed units and anything the analysis is unsure about are ' +
-    'kept, and the answer says so per entry. apply=false (the default) only shows the ' +
-    'change.","inputSchema":{"type":"object","properties":{"file":{"type":"string"},' +
+    'initialization code, entries the FORM DESIGNER writes itself (asked from the loaded ' +
+    'form - it would re-add them on the next save), entries on the user keep list and ' +
+    'anything the analysis is unsure about are kept, and the answer says so per entry. In a ' +
+    'form unit whose form is NOT loaded in the IDE, textually unused entries are reported ' +
+    'as \"unverified\" and kept unless include_unverified is set. apply=false (the ' +
+    'default) only shows the change.","inputSchema":{"type":"object","properties":' +
+    '{"file":{"type":"string"},' +
     '"remove_unused":{"type":"boolean","description":"Default true."},' +
     '"move_to_implementation":{"type":"boolean","description":"Default false."},' +
+    '"include_unverified":{"type":"boolean","description":"Default false. Also act on ' +
+    'entries of a form unit whose designer could not be asked - outside the IDE nothing ' +
+    're-adds them, so a wrong removal can break the build or the form streaming."},' +
     ApplyProp + ',' + TokenProp + ',' + InstanceProp + '},"required":["file"]}}' +
     ',' +
     '{"name":"find_unit_references","description":"Which units use the given unit, and ' +
@@ -962,7 +969,9 @@ const
     ',' +
     '{"name":"analyze_uses","description":"Uses-clause analysis of one unit: every entry with v' +
     'erdict used / unused / movable (only needed in the implementation) / init_code / ide_manag' +
-    'ed / unknown and its usage count.","inputSchema":{"type":"object","properties":{"file":{"t' +
+    'ed (the form designer writes it itself - see reason) / kept_by_user / unverified (form not' +
+    ' loaded, so nothing could confirm it) / unknown, its usage count and designerVerified for ' +
+    'the file.","inputSchema":{"type":"object","properties":{"file":{"t' +
     'ype":"string","description":"Absolute path of the unit."},"instance":{"type":"integer","de' +
     'scription":"Process id of the IDE to use. Normally omitted - the IDE is chosen automatical' +
     'ly (see ide_instances)."}},"required":["file"]}}' +

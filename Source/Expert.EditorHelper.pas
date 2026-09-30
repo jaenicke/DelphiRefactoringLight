@@ -55,6 +55,9 @@ type
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
     function IsFormInDesigner(const APasFile: string): Boolean;
+    function GetDesignerRequiredUnits(const APasFile: string;
+      out AUnits: TArray<TDesignerRequiredUnit>;
+      out AComplete: Boolean): Boolean;
     function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
       AIsMethod: Boolean; out AMessage: string): Boolean;
     function GotoLocation(const AFilePath: string;
@@ -138,7 +141,7 @@ type
 implementation
 
 uses
-  Expert.PascalScanner;
+  DesignEditors, Expert.PascalScanner;
 
 function TIDEEditorHelper.GetActiveFileName: string;
 var
@@ -846,6 +849,174 @@ end;
 function TIDEEditorHelper.IsFormInDesigner(const APasFile: string): Boolean;
 begin
   Result := FindFormEditorOf(APasFile) <> nil;
+end;
+
+type
+  // ISelectionEditor.RequiresUnits hands its units to a TGetStrProc, and
+  // that is a METHOD pointer (System.Classes) - hence a small collector
+  // object instead of an anonymous method.
+  TRequiredUnitCollector = class
+  strict private
+    FSeen: TDictionary<string, Boolean>;      // UPPER(unit)
+    FList: TList<TDesignerRequiredUnit>;      // insertion order kept
+    FReason: string;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure AddUnit(const AUnitName: string);
+    /// <summary>Attached to every unit added from now on.</summary>
+    property Reason: string read FReason write FReason;
+    function ToArray: TArray<TDesignerRequiredUnit>;
+  end;
+
+constructor TRequiredUnitCollector.Create;
+begin
+  inherited Create;
+  FSeen := TDictionary<string, Boolean>.Create;
+  FList := TList<TDesignerRequiredUnit>.Create;
+end;
+
+destructor TRequiredUnitCollector.Destroy;
+begin
+  FList.Free;
+  FSeen.Free;
+  inherited;
+end;
+
+procedure TRequiredUnitCollector.AddUnit(const AUnitName: string);
+var
+  Entry: TDesignerRequiredUnit;
+begin
+  // A third-party editor may pass anything; only the first mention of a
+  // unit keeps its reason (the component that asked for it first).
+  if Trim(AUnitName) = '' then Exit;
+  if FSeen.ContainsKey(UpperCase(Trim(AUnitName))) then Exit;
+  FSeen.Add(UpperCase(Trim(AUnitName)), True);
+  Entry.UnitName := Trim(AUnitName);
+  Entry.Reason := FReason;
+  FList.Add(Entry);
+end;
+
+function TRequiredUnitCollector.ToArray: TArray<TDesignerRequiredUnit>;
+begin
+  Result := FList.ToArray;
+end;
+
+// Issue #20: uses cleanup offered DevExpress units (cxGraphics, cxControls,
+// cxLookAndFeels, ...) for removal although the designer writes them back
+// on the next save, so every cleanup was undone and the next one offered
+// them again. The units never appear as an IDENTIFIER in the .pas, so no
+// textual analysis can see them - and the old answer, a hand-written list
+// of four VCL units, cannot cover third-party or in-house packages.
+//
+// The exact source is the designer of the LOADED form, and it can be asked:
+//   * the unit of every component CLASS and of its ANCESTORS (DesignIntf
+//     documents that the designer ensures exactly those),
+//   * plus ISelectionEditor.RequiresUnits of every selection editor
+//     registered for that class or an ancestor of it.
+//
+// MEASURED in DesignEditors.pas, and it decides the shape of this code:
+// GetSelectionEditors derives ONE common ancestor from the whole selection
+// and returns the editors registered at or above it. So a mixed selection
+// would ask a HIGHER class than the components actually are and miss the
+// per-class editors - the grouping by class is a correctness requirement,
+// not a speed trick. The editor itself only ever receives the DESIGNER
+// (TSelectionEditor holds nothing else, and RequiresUnits takes no
+// selection), which is also why one query per distinct class is exactly
+// equivalent to one per component.
+function TIDEEditorHelper.GetDesignerRequiredUnits(const APasFile: string;
+  out AUnits: TArray<TDesignerRequiredUnit>; out AComplete: Boolean): Boolean;
+var
+  FormEditor: IOTAFormEditor;
+  NtaForm: INTAFormEditor;
+  Designer: IDesigner;
+  Root: TComponent;
+  ByClass: TObjectDictionary<TClass, TList<TComponent>>;
+  Collector: TRequiredUnitCollector;
+
+  procedure AddToGroup(AComp: TComponent);
+  var
+    Group: TList<TComponent>;
+  begin
+    if AComp = nil then Exit;
+    if not ByClass.TryGetValue(AComp.ClassType, Group) then
+    begin
+      Group := TList<TComponent>.Create;
+      ByClass.Add(AComp.ClassType, Group);
+    end;
+    Group.Add(AComp);
+  end;
+
+  function ReasonFor(AGroup: TList<TComponent>): string;
+  begin
+    Result := AGroup[0].ClassName;
+    if AGroup[0].Name <> '' then
+      Result := AGroup[0].Name + ': ' + Result;
+    if AGroup.Count > 1 then
+      Result := Result + Format(' (and %d more)', [AGroup.Count - 1]);
+  end;
+
+begin
+  Result := False;
+  AUnits := nil;
+  AComplete := True;
+  FormEditor := FindFormEditorOf(APasFile);
+  if not Supports(FormEditor, INTAFormEditor, NtaForm) then Exit;
+  Designer := nil;
+  Root := nil;
+  try
+    // A module can be mid-construction, and a form that failed to load
+    // raises here instead of answering nil - either way there is nothing
+    // to ask, and the caller must treat that as UNVERIFIED.
+    Designer := NtaForm.FormDesigner;
+    if Designer <> nil then
+      Root := Designer.Root;
+  except
+    Root := nil;
+  end;
+  if (Designer = nil) or (Root = nil) then Exit;
+
+  ByClass := TObjectDictionary<TClass, TList<TComponent>>.Create([doOwnsValues]);
+  Collector := TRequiredUnitCollector.Create;
+  try
+    AddToGroup(Root);
+    for var I := 0 to Root.ComponentCount - 1 do
+      AddToGroup(Root.Components[I]);
+
+    for var Pair in ByClass do
+    begin
+      Collector.Reason := ReasonFor(Pair.Value);
+      // A third-party selection editor runs INSIDE the IDE here. It must
+      // never break a uses cleanup - but once one raised we can no longer
+      // claim to know everything the designer would write.
+      try
+        // The class's own unit AND its ancestors': a component from an own
+        // package pulls its base class's unit in too, while the .pas names
+        // only the descendant.
+        var K: TClass := Pair.Key;
+        while (K <> nil) and (K <> TObject) do
+        begin
+          Collector.AddUnit(K.UnitName);
+          K := K.ClassParent;
+        end;
+        var Sel := CreateSelectionList;
+        for var Comp in Pair.Value do
+          Sel.Add(Comp);
+        var Editors := GetSelectionEditors(Designer, Sel);
+        if Editors <> nil then
+          for var I := 0 to Editors.Count - 1 do
+            if Editors[I] <> nil then
+              Editors[I].RequiresUnits(Collector.AddUnit);
+      except
+        AComplete := False;
+      end;
+    end;
+    AUnits := Collector.ToArray;
+    Result := True;
+  finally
+    Collector.Free;
+    ByClass.Free;
+  end;
 end;
 
 function TIDEEditorHelper.RenameInFormDesigner(const APasFile, AOldName,

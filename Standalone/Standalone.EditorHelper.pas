@@ -141,6 +141,9 @@ type
     procedure ReloadModifiedFiles(const FilePaths: TArray<string>);
     procedure NotifyClassStructureChanged(const AFilePath: string);
     function IsFormInDesigner(const APasFile: string): Boolean;
+    function GetDesignerRequiredUnits(const APasFile: string;
+      out AUnits: TArray<TDesignerRequiredUnit>;
+      out AComplete: Boolean): Boolean;
     function RenameInFormDesigner(const APasFile, AOldName, ANewName: string;
       AIsMethod: Boolean; out AMessage: string): Boolean;
     function GotoLocation(const AFilePath: string;
@@ -617,6 +620,17 @@ begin end;
 function TStandaloneEditorHelper.IsFormInDesigner(const APasFile: string): Boolean;
 // No form designer here - form files are always edited as text.
 begin
+  Result := False;
+end;
+
+function TStandaloneEditorHelper.GetDesignerRequiredUnits(const APasFile: string;
+  out AUnits: TArray<TDesignerRequiredUnit>; out AComplete: Boolean): Boolean;
+// There is no form designer here, so nothing can say which units it would
+// re-add. NOT "complete and empty": the caller must treat a form unit as
+// unverified instead of removing entries the IDE would put back (issue #20).
+begin
+  AUnits := nil;
+  AComplete := False;
   Result := False;
 end;
 

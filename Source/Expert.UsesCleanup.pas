@@ -27,14 +27,21 @@ unit Expert.UsesCleanup;
 interface
 
 uses
-  System.SysUtils, Expert.UsesEditor;
+  System.SysUtils, Expert.UsesEditor, Expert.EditorHelperIntf;
 
 type
   TUsesVerdict = (uvUsed, uvUnused, uvMovable, uvUnknown,
     uvInitCode,     // textually unused, but the unit runs initialization/
                     // finalization code - removing it would change behavior
-    uvIdeManaged);  // the IDE auto-manages this uses entry for form units
-                    // (it would silently re-add it - don't fight it)
+    uvIdeManaged,   // the IDE writes this uses entry itself (the form
+                    // designer, or the built-in list) - it would silently
+                    // re-add it, so it is neither removed nor moved
+    uvKeptByUser,   // matches the user's keep list (options page)
+    uvUnverified);  // a FORM unit whose designer could not be asked: the
+                    // IDE may re-add the entry, and outside the IDE nobody
+                    // would - opt-in only, never pre-ticked
+  // New values are APPENDED on purpose: VerdictNames and every stored or
+  // reported string stays what it was.
 
   TUsesEntryInfo = record
     UnitName: string;
@@ -42,19 +49,53 @@ type
     Verdict: TUsesVerdict;
     UsageCount: Integer;
     FirstUseLine: Integer;   // 0-based, -1 when unused
+    Reason: string;          // why it is kept ('cxGrid1: TcxGrid'), else ''
   end;
 
   /// <summary>Identifier -> declaring unit names (the index Lookup).</summary>
   TIdentLookup = reference to function(const AIdent: string): TArray<string>;
   /// <summary>Is the unit's source indexed (analysable at all)?</summary>
   TUnitKnown = reference to function(const AUnitName: string): Boolean;
+  /// <summary>'' = the form designer does not need this unit; otherwise the
+  ///  component that asks for it ('cxGrid1: TcxGrid').</summary>
+  TUnitReason = reference to function(const AUnitName: string): string;
 
 /// <summary>Analyses AContent's uses entries. Pure function of the content
-///  plus the injected lookups - unit-testable without an index.
-///  AHasInitCode: does the unit run initialization/finalization code?</summary>
+///  plus the injected lookups - unit-testable without an index or an IDE.
+///  AHasInitCode: does the unit run initialization/finalization code?
+///  ADesignerRequired: what the form designer writes by itself (nil = do
+///  not consider it, which is the behaviour before issue #20).
+///  AUserKept: the user's keep list. AFormUnverified: this is a form unit
+///  whose designer could NOT be asked, so a textually unused entry cannot
+///  be verified - it becomes uvUnverified instead of uvUnused.</summary>
 function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
   const AUnitKnown: TUnitKnown;
-  const AHasInitCode: TUnitKnown): TArray<TUsesEntryInfo>;
+  const AHasInitCode: TUnitKnown;
+  const ADesignerRequired: TUnitReason = nil;
+  const AUserKept: TUnitKnown = nil;
+  AFormUnverified: Boolean = False): TArray<TUsesEntryInfo>;
+
+/// <summary>'Forms' and 'Vcl.Forms' name the same unit when the project
+///  works with unit scope names - and the designer reports the RTTI name
+///  while older code writes the short one. Compared BOTH ways, so it errs
+///  towards a match, which means keeping the unit.</summary>
+function SameUnitIgnoringScope(const A, B: string): Boolean;
+
+/// <summary>AList: masks separated by ';' (MatchesMask syntax,
+///  case-insensitive), e.g. 'dxSkin*;MyCompany.Components.*'.</summary>
+function MatchesKeepList(const AUnitName, AList: string): Boolean;
+
+/// <summary>The ADesignerRequired callback for AnalyzeUses over what
+///  IEditorHelper.GetDesignerRequiredUnits answered - one place, so the
+///  dialog and both MCP tools match units the same way.</summary>
+function DesignerRequiredLookup(
+  const ARequired: TArray<TDesignerRequiredUnit>): TUnitReason;
+
+/// <summary>What an UNVERIFIED entry does once the user opts in: the text
+///  decides - no usage at all means remove, usage only in the
+///  implementation means move. ONE place, so the dialog's Apply and the MCP
+///  tool's include_unverified can never disagree about it.</summary>
+function ResolveUnverified(const AEntry: TUsesEntryInfo): TUsesVerdict;
 
 /// <summary>Opens the cleanup dialog for the active editor file.</summary>
 procedure CleanupUsesCurrentUnit;
@@ -63,11 +104,12 @@ implementation
 
 uses
   System.Classes, System.Generics.Collections, System.Math, System.StrUtils,
-  System.UITypes,
+  System.UITypes, System.Masks,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Dialogs,
-  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.DialogHelper,
-  Expert.IdeThemes, Expert.ListViewSort, Expert.PascalScanner;
+  Expert.UnitIndex, Expert.DialogHelper, Expert.DfmRename,
+  Expert.IdeThemes, Expert.ListViewSort, Expert.PascalScanner,
+  Expert.PluginSettings;
 
 // ---------------------------------------------------------------------------
 //  Analysis
@@ -98,6 +140,50 @@ begin
   for I := Low(IdeManagedUnits) to High(IdeManagedUnits) do
     if SameText(IdeManagedUnits[I], AName) then
       Exit(True);
+end;
+
+function SameUnitIgnoringScope(const A, B: string): Boolean;
+begin
+  Result := SameText(A, B) or EndsText('.' + A, B) or EndsText('.' + B, A);
+end;
+
+function MatchesKeepList(const AUnitName, AList: string): Boolean;
+begin
+  Result := False;
+  if (AUnitName = '') or (Trim(AList) = '') then Exit;
+  for var Mask in AList.Split([';']) do
+    if Trim(Mask) <> '' then
+      // MatchesMask is case-sensitive on the literal characters, so both
+      // sides go through UpperCase - a keep list is typed by hand.
+      if MatchesMask(UpperCase(AUnitName), UpperCase(Trim(Mask))) then
+        Exit(True);
+end;
+
+function ResolveUnverified(const AEntry: TUsesEntryInfo): TUsesVerdict;
+begin
+  if AEntry.Verdict <> uvUnverified then
+    Result := AEntry.Verdict
+  else if AEntry.UsageCount = 0 then
+    Result := uvUnused
+  else
+    Result := uvMovable;
+end;
+
+function DesignerRequiredLookup(
+  const ARequired: TArray<TDesignerRequiredUnit>): TUnitReason;
+begin
+  Result :=
+    function(const AUnitName: string): string
+    begin
+      Result := '';
+      for var R in ARequired do
+        if SameUnitIgnoringScope(R.UnitName, AUnitName) then
+        begin
+          Result := R.Reason;
+          if Result = '' then Result := 'the form designer';
+          Exit;
+        end;
+    end;
 end;
 
 function SplitLines(const AContent: string): TArray<string>;
@@ -163,7 +249,10 @@ end;
 
 function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
   const AUnitKnown: TUnitKnown;
-  const AHasInitCode: TUnitKnown): TArray<TUsesEntryInfo>;
+  const AHasInitCode: TUnitKnown;
+  const ADesignerRequired: TUnitReason;
+  const AUserKept: TUnitKnown;
+  AFormUnverified: Boolean): TArray<TUsesEntryInfo>;
 var
   Lines: TArray<string>;
   ImplLine, I, CI: Integer;
@@ -368,24 +457,54 @@ begin
     ScanIdentifiers;
     ScanQualifiedNames;
 
+    // ONE decision per entry, first match wins. The order matters: a unit
+    // the IDE writes itself must be neither removed NOR moved (the designer
+    // always writes into the INTERFACE uses, so moving it down starts the
+    // same tug-of-war), which is why that test comes before everything
+    // except "it is really used".
     for I := 0 to Entries.Count - 1 do
     begin
       E := Entries[I];
       if E.Verdict = uvUnknown then Continue;
+      // what the textual analysis ALONE would say
+      var Candidate := uvUsed;
       if E.UsageCount = 0 then
+        Candidate := uvUnused
+      else if (E.Section = usInterface) and not IntfUse.ContainsKey(I) then
+        Candidate := uvMovable;
+
+      var DesignerReason := '';
+      if Assigned(ADesignerRequired) then
+        DesignerReason := ADesignerRequired(E.UnitName);
+
+      if Candidate = uvUsed then
+        E.Verdict := uvUsed
+      else if IsIdeManagedUnit(E.UnitName) then
       begin
-        if IsIdeManagedUnit(E.UnitName) then
-          E.Verdict := uvIdeManaged
-        else if Assigned(AHasInitCode) and AHasInitCode(E.UnitName) then
-          E.Verdict := uvInitCode
-        else
-          E.Verdict := uvUnused;
+        E.Verdict := uvIdeManaged;
+        E.Reason := 'built-in list';
       end
-      else if (E.Section = usInterface) and not IntfUse.ContainsKey(I)
-        and not IsIdeManagedUnit(E.UnitName) then
-        E.Verdict := uvMovable
+      else if DesignerReason <> '' then
+      begin
+        E.Verdict := uvIdeManaged;
+        E.Reason := DesignerReason;
+      end
+      else if Assigned(AUserKept) and AUserKept(E.UnitName) then
+      begin
+        E.Verdict := uvKeptByUser;
+        E.Reason := 'your keep list';
+      end
+      else if (Candidate = uvUnused) and Assigned(AHasInitCode)
+        and AHasInitCode(E.UnitName) then
+        E.Verdict := uvInitCode
+      else if AFormUnverified then
+      begin
+        // UsageCount still decides remove vs. move when the user opts in
+        E.Verdict := uvUnverified;
+        E.Reason := 'form not loaded in the designer';
+      end
       else
-        E.Verdict := uvUsed;
+        E.Verdict := Candidate;
       Entries[I] := E;
     end;
     Result := Entries.ToArray;
@@ -413,21 +532,24 @@ type
     FBtnClose: TButton;
     FBtnAll: TButton;
     FBtnNone: TButton;
+    FBtnKeep: TButton;
     FFilling: Boolean;
     procedure Fill;
     procedure DoApply(Sender: TObject);
     procedure DoCloseClick(Sender: TObject);
     procedure DoSelectAll(Sender: TObject);
     procedure DoSelectNone(Sender: TObject);
+    procedure DoAlwaysKeep(Sender: TObject);
     procedure DoItemChecked(Sender: TObject; Item: TListItem);
     function IsActionable(AIndex: Integer): Boolean;
   public
     constructor CreateDialog(AOwner: TComponent; const AFile: string;
-      const AEntries: TArray<TUsesEntryInfo>);
+      const AEntries: TArray<TUsesEntryInfo>; const ADesignerNote: string);
   end;
 
 constructor TUsesCleanupDialog.CreateDialog(AOwner: TComponent;
-  const AFile: string; const AEntries: TArray<TUsesEntryInfo>);
+  const AFile: string; const AEntries: TArray<TUsesEntryInfo>;
+  const ADesignerNote: string);
 var
   Col: TListColumn;
   Panel: TPanel;
@@ -449,6 +571,8 @@ begin
   FLbl.AlignWithMargins := True;
   FLbl.Caption := 'Tick the entries to clean up: "unused" entries are ' +
     'removed, "movable" entries are moved to the implementation uses.';
+  if ADesignerNote <> '' then
+    FLbl.Caption := FLbl.Caption + '  |  ' + ADesignerNote;
 
   FLblWarn := TLabel.Create(Self);
   FLblWarn.Parent := Self;
@@ -478,7 +602,7 @@ begin
   FList.Checkboxes := True;
   Col := FList.Columns.Add; Col.Caption := 'Unit';       Col.Width := 220;
   Col := FList.Columns.Add; Col.Caption := 'Section';    Col.Width := 110;
-  Col := FList.Columns.Add; Col.Caption := 'Status';     Col.Width := 200;
+  Col := FList.Columns.Add; Col.Caption := 'Status';     Col.Width := 280;
   Col := FList.Columns.Add; Col.Caption := 'Usages';     Col.Width := 60;
   Col := FList.Columns.Add; Col.Caption := 'First use';  Col.Width := 70;
   FList.OnItemChecked := DoItemChecked;
@@ -515,6 +639,19 @@ begin
   FBtnNone.Left := 366; FBtnNone.Top := 8; FBtnNone.Width := 90;
   FBtnNone.OnClick := DoSelectNone;
 
+  // The designer query covers ISelectionUnits.RequiresUnits. A unit some
+  // other IDE expert writes on save (skin units, depending on the project's
+  // options) is not in that answer - so the false positives the user still
+  // sees can be turned into a rule right here.
+  FBtnKeep := TButton.Create(Self);
+  FBtnKeep.Parent := Panel;
+  FBtnKeep.Caption := 'Always &keep';
+  FBtnKeep.Left := 470; FBtnKeep.Top := 8; FBtnKeep.Width := 100;
+  FBtnKeep.Hint := 'Adds the SELECTED rows to the keep list in the options, ' +
+    'so they are never offered for removal again.';
+  FBtnKeep.ShowHint := True;
+  FBtnKeep.OnClick := DoAlwaysKeep;
+
   Fill;
   EnableListViewSorting(FList);
   EnableThemes(Self);
@@ -523,8 +660,40 @@ end;
 
 function TUsesCleanupDialog.IsActionable(AIndex: Integer): Boolean;
 begin
+  // uvUnverified IS actionable - the user may know the form is fine - but
+  // Fill never pre-ticks it.
   Result := (AIndex >= 0) and (AIndex <= High(FEntries))
-    and (FEntries[AIndex].Verdict in [uvUnused, uvMovable]);
+    and (FEntries[AIndex].Verdict in [uvUnused, uvMovable, uvUnverified]);
+end;
+
+procedure TUsesCleanupDialog.DoAlwaysKeep(Sender: TObject);
+var
+  Added: string;
+begin
+  Added := '';
+  for var I := 0 to FList.Items.Count - 1 do
+  begin
+    if not FList.Items[I].Selected then Continue;
+    var Idx := NativeInt(FList.Items[I].Data);
+    if (Idx < 0) or (Idx > High(FEntries)) then Continue;
+    var U := FEntries[Idx].UnitName;
+    if MatchesKeepList(U, TPluginSettings.UsesCleanupKeepUnits) then Continue;
+    if Added <> '' then Added := Added + '; ';
+    Added := Added + U;
+  end;
+  if Added = '' then
+  begin
+    ShowThemedMessage('Select the rows you want to keep first (they are ' +
+      'either already on the keep list or nothing is selected).');
+    Exit;
+  end;
+  var L := Trim(TPluginSettings.UsesCleanupKeepUnits);
+  if L <> '' then L := L + '; ';
+  TPluginSettings.UsesCleanupKeepUnits := L + Added;
+  TPluginSettings.Save;
+  ShowThemedMessage('Added to the keep list: ' + Added + #13#10 +
+    'They will show as "kept (your list)" from the next run on. The list ' +
+    'is on the options page (masks allowed, e.g. dxSkin*).');
 end;
 
 procedure TUsesCleanupDialog.DoItemChecked(Sender: TObject; Item: TListItem);
@@ -590,7 +759,17 @@ begin
         uvInitCode:
           Item.SubItems.Add('no direct usage, but has initialization code - kept');
         uvIdeManaged:
-          Item.SubItems.Add('managed by the IDE (auto re-added) - kept');
+          // The REASON is the point of this row: "cxGrid1: TcxGrid" tells
+          // the user which component makes the IDE write the unit back.
+          Item.SubItems.Add('required by the form designer (' + E.Reason +
+            ') - kept');
+        uvKeptByUser:
+          Item.SubItems.Add('kept (your list)');
+        uvUnverified:
+          if E.UsageCount = 0 then
+            Item.SubItems.Add('unused in code - form not loaded, the IDE may re-add it')
+          else
+            Item.SubItems.Add('only used in implementation - form not loaded, move?');
       end;
       Item.SubItems.Add(IntToStr(E.UsageCount));
       if E.FirstUseLine >= 0 then
@@ -620,6 +799,9 @@ begin
     var Idx := NativeInt(FList.Items[I].Data);
     if (Idx < 0) or (Idx > High(FEntries)) then Continue;
     E := FEntries[Idx];
+    // An unverified row the user ticked deliberately is treated by what the
+    // text says - the same rule the MCP tool applies for include_unverified.
+    E.Verdict := ResolveUnverified(E);
     case E.Verdict of
       uvUnused:
         if RemoveUnitFromUses(FFile, E.UnitName) then Inc(Done)
@@ -667,6 +849,9 @@ var
   Snap: IUnitSnapshot;
   Entries: TArray<TUsesEntryInfo>;
   Cycle0, Waited: Integer;
+  Required: TArray<TDesignerRequiredUnit>;
+  Complete, Verified, IsForm: Boolean;
+  KeepList, DesignerNote: string;
 begin
   if (Editor = nil) or GCleanupBusy then Exit;
   Ctx := Editor.GetCurrentContext;
@@ -706,6 +891,18 @@ begin
       Exit;
     end;
 
+    // ISSUE #20: ask the LOADED form designer which units it writes by
+    // itself. Opening a form unit in the editor loads its form, so this
+    // normally costs nothing beyond one pass over the components; when the
+    // form did NOT load, the answer is "not verified" and the textually
+    // unused entries of a FORM unit are marked instead of pre-ticked.
+    Required := nil;
+    Complete := False;
+    Verified := Editor.GetDesignerRequiredUnits(Ctx.FileName, Required, Complete)
+      and Complete;
+    IsForm := FormFileOf(Ctx.FileName) <> '';
+    KeepList := TPluginSettings.UsesCleanupKeepUnits;
+
     Entries := AnalyzeUses(Content,
       function(const AIdent: string): TArray<string>
       var
@@ -723,7 +920,25 @@ begin
       function(const AUnitName: string): Boolean
       begin
         Result := Snap.HasInitCode(AUnitName);
-      end);
+      end,
+      DesignerRequiredLookup(Required),
+      function(const AUnitName: string): Boolean
+      begin
+        Result := MatchesKeepList(AUnitName, KeepList);
+      end,
+      IsForm and not Verified);
+
+    if not IsForm then
+      DesignerNote := ''
+    else if Verified then
+      DesignerNote := Format('Form designer: verified (%d unit(s) required ' +
+        'by components)', [Length(Required)])
+    else if Length(Required) > 0 then
+      DesignerNote := 'Form designer: INCOMPLETE (a selection editor failed) ' +
+        '- entries marked unverified'
+    else
+      DesignerNote := 'Form not loaded in the designer - entries marked ' +
+        'unverified, the IDE may re-add them';
   finally
     Screen.Cursor := crDefault;
     GCleanupBusy := False;
@@ -735,7 +950,7 @@ begin
     Exit;
   end;
   var Dlg := TUsesCleanupDialog.CreateDialog(Application.MainForm,
-    Ctx.FileName, Entries);
+    Ctx.FileName, Entries, DesignerNote);
   try
     Dlg.ShowModal;
   finally

@@ -90,6 +90,34 @@ function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,
 function DeclarationAnchorUnknown(AHasDefinition: Boolean;
   const ACaretLine, AName: string): Boolean;
 
+/// <summary>The line range of the routine HEADER that ALINE0 belongs to, when
+///  that header declares ANAME. AFirst is the line the header starts on - the
+///  one that carries the name - and ALast the line its parameter list closes
+///  on. False when no such header stands within a few lines above ALINE0.
+///  WHY (forum 2026-09-30, second log): DelphiLSP answered the declaration of
+///  "BTB" with ROM_Utils.pas:15589:1 while the routine starts at 15584 - a
+///  CONTINUATION line of a wrapped parameter list, where the name does not
+///  occur at all. The partner query is asked at the name's column on that
+///  line, finds nothing, so the symbol's position set keeps that single line -
+///  and every candidate the server resolves to the header's FIRST line then
+///  counts as "another symbol". In that run it silently dropped the
+///  declaration, the implementation and 7 calls, out of the WARM run: the one
+///  that looked right.</summary>
+function DeclarationHeaderSpan(const ALines: TArray<string>; ALine0: Integer;
+  const AName: string; out AFirst, ALast: Integer): Boolean;
+
+/// <summary>The position the candidates' own answers agree on, and how many
+///  of them do; '' / -1 when they do not agree clearly enough (fewer than two
+///  answers, or no position reaching AMinShare of them).
+///  WHY: while the declaration query stays unanswered the scan has no anchor
+///  and marks EVERY hit unverified - although its own answers already name the
+///  declaration. In the reported cold run 326 of 341 candidates resolved to
+///  ROM_Utils.pas:15589, the very position the warm run took two minutes later
+///  as the declaration. That is evidence, not a guess - the same "the most
+///  frequent target IS the symbol" rule semantic replace already uses.</summary>
+function DominantAnswer(const AFiles: TArray<string>; const ALines: TArray<Integer>;
+  out AFile: string; out ALine: Integer; AMinShare: Double = 0.6): Integer;
+
 /// <summary>ALines after AEdits (applied bottom-up; overlapping edits are
 ///  not expected - the planner never produces them).</summary>
 function ApplySafeDeleteEdits(const ALines: TArray<string>;
@@ -111,8 +139,8 @@ function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 implementation
 
 uses
-  System.Classes, System.StrUtils, System.Math, Expert.AutoImport,
-  Expert.UnitIndex, Expert.PascalScanner;
+  System.Classes, System.StrUtils, System.Math, System.Generics.Collections,
+  Expert.AutoImport, Expert.UnitIndex, Expert.PascalScanner;
 
 function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 begin
@@ -386,6 +414,98 @@ function DeclarationAnchorUnknown(AHasDefinition: Boolean;
   const ACaretLine, AName: string): Boolean;
 begin
   Result := (not AHasDefinition) and not LineDeclaresName(ACaretLine, AName);
+end;
+
+function DeclarationHeaderSpan(const ALines: TArray<string>; ALine0: Integer;
+  const AName: string; out AFirst, ALast: Integer): Boolean;
+const
+  MaxUp = 40;      // a parameter list longer than this is not a wrapped header
+  MaxDown = 40;
+var
+  I, Depth: Integer;
+  Masked: TArray<string>;
+begin
+  Result := False;
+  AFirst := ALine0;
+  ALast := ALine0;
+  if (ALine0 < 0) or (ALine0 > High(ALines)) or (AName = '') then Exit;
+  // comments and strings masked: a name inside one is no declaration
+  Masked := MaskCommentsAndStrings(ALines);
+  // UP to the line that carries the name and declares it
+  I := ALine0;
+  while (I >= 0) and (ALine0 - I <= MaxUp) do
+  begin
+    if HasWholeWordCI(Masked[I], AName) and LineDeclaresName(Masked[I], AName) then
+    begin
+      AFirst := I;
+      Result := True;
+      Break;
+    end;
+    Dec(I);
+  end;
+  if not Result then Exit;
+  // DOWN while the parameter list is still open - that is the header's extent
+  Depth := 0;
+  ALast := AFirst;
+  for I := AFirst to Min(High(Masked), AFirst + MaxDown) do
+  begin
+    for var C in Masked[I] do
+      if C = '(' then Inc(Depth)
+      else if C = ')' then Dec(Depth);
+    ALast := I;
+    if (Depth <= 0) and (I > AFirst) then Break;
+    if (Depth <= 0) and (Pos(';', Masked[I]) > 0) then Break;
+  end;
+  if ALast < ALine0 then ALast := ALine0;   // the answer itself always belongs
+end;
+
+function DominantAnswer(const AFiles: TArray<string>; const ALines: TArray<Integer>;
+  out AFile: string; out ALine: Integer; AMinShare: Double): Integer;
+var
+  Counts: TDictionary<string, Integer>;
+  Total, Best: Integer;
+  BestKey: string;
+begin
+  Result := 0;
+  AFile := '';
+  ALine := -1;
+  Total := Min(Length(AFiles), Length(ALines));
+  if Total < 2 then Exit;
+  Counts := TDictionary<string, Integer>.Create;
+  try
+    Best := 0;
+    BestKey := '';
+    for var I := 0 to Total - 1 do
+    begin
+      if AFiles[I] = '' then Continue;
+      var K := UpperCase(AFiles[I]) + '|' + IntToStr(ALines[I]);
+      var N := 0;
+      Counts.TryGetValue(K, N);
+      Inc(N);
+      Counts.AddOrSetValue(K, N);
+      if N > Best then
+      begin
+        Best := N;
+        BestKey := K;
+        AFile := AFiles[I];
+        ALine := ALines[I];
+      end;
+    end;
+    // a clear majority of the ANSWERED ones - a handful of scattered answers
+    // must not be promoted to "the declaration"
+    var Answered := 0;
+    for var I := 0 to Total - 1 do
+      if AFiles[I] <> '' then Inc(Answered);
+    if (Best >= 2) and (Answered > 0) and (Best / Answered >= AMinShare) then
+      Result := Best
+    else
+    begin
+      AFile := '';
+      ALine := -1;
+    end;
+  finally
+    Counts.Free;
+  end;
 end;
 
 function DeclarationAnswerIsForeign(const ACaretLine, AName, ACaretFile,

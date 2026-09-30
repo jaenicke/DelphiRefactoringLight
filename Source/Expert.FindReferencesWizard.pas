@@ -79,7 +79,16 @@ implementation
 
 
 uses
-  Winapi.Windows, Expert.PascalScanner, Expert.SafeDeletePlan;
+  Winapi.Windows, Expert.PascalScanner, Expert.SafeDeletePlan, Expert.AutoImport;
+
+const
+  /// <summary>How long the scan waits UP FRONT for DelphiLSP to name the
+  ///  declaration. An anchor found here only saves requests later; when it
+  ///  does not arrive, the scan derives one from its candidates' own answers
+  ///  (DominantAnswer), so waiting out the whole project budget - 173 s in the
+  ///  reported run, for nothing - buys the user nothing but a progress
+  ///  bar.</summary>
+  AnchorProbeMaxMs = 30000;
 
 // Content for the kind classification: the editor buffer (main thread),
 // else the disk
@@ -426,7 +435,14 @@ begin
     // definitions were still unavailable - it is a WEAKER signal than the
     // thing we depend on. The budget scales with the project (DelphiLsp loads
     // all of it first) and the window's close cancels the wait.
-    var Budget := LspReadinessBudgetMs(Length(ProjFiles));
+    // MEASURED, and it is why this is no longer the project-scaled budget
+    // (forum 2026-09-30, first log): waiting 173 s for the declaration
+    // produced NOTHING, and twenty seconds later the scan's own queries were
+    // answered fine. An anchor found up front only saves requests (the source
+    // pre-check can skip candidates); when it does not come quickly the scan
+    // derives it afterwards from the answers it collects anyway. So the user
+    // does not sit in front of a progress bar for minutes for a "maybe".
+    var Budget := Min(LspReadinessBudgetMs(Length(ProjFiles)), AnchorProbeMaxMs);
     var Dl := GetTickCount64 + Budget;
     var Probe: TArray<TLspLocation> := nil;
     var UsedMain := False;
@@ -798,6 +814,14 @@ var
   // index in Verified <-> index in ACandidates of every row that ended
   // UNVERIFIED, for the second attempt after the pass
   Retry: TList<TPair<Integer, Integer>>;
+  // What DelphiLSP answered for every LISTED row, aligned with Verified.
+  // A run without an anchor derives one from exactly this (see below).
+  AnsFile: TList<string>;
+  AnsLine: TList<Integer>;
+  // the positions the post-pass judges against: ATargets, plus the anchor
+  // a run without one derives from its own answers (it cannot be added to
+  // ATargets itself - a var parameter cannot be captured by the closures)
+  Anchors: TLspSymbolTargets;
   Synced: TDictionary<string, Boolean>;
   Contents: TDictionary<string, string>;
   Reader: TIncludeReader;
@@ -812,9 +836,20 @@ var
     Contents.Add(UpperCase(AFile), Result);
   end;
 
+  // the ONE place a row is listed, so its answer cannot get out of step
+  procedure AddRow(const ARow: TFindReferenceItem; const AAnsFile: string;
+    AAnsLine: Integer);
+  begin
+    Verified.Add(ARow);
+    AnsFile.Add(AAnsFile);
+    AnsLine.Add(AAnsLine);
+  end;
+
 begin
   Verified := TList<TFindReferenceItem>.Create;
   Retry := TList<TPair<Integer, Integer>>.Create;
+  AnsFile := TList<string>.Create;
+  AnsLine := TList<Integer>.Create;
   Synced := TDictionary<string, Boolean>.Create;
   Contents := TDictionary<string, string>.Create;
   Reader := EditorOrDiskReader();
@@ -993,6 +1028,14 @@ begin
         end;
       end;
       var NoAnswer := System.Length(Defs) = 0;
+      // kept for the anchor derivation after the pass
+      var AnsF := '';
+      var AnsL := -1;
+      if not NoAnswer then
+      begin
+        AnsF := TLspUri.FileUriToPath(Defs[0].Uri);
+        AnsL := Defs[0].Range.Start.Line;
+      end;
       var Answer: string;
       if not NoAnswer then
         Answer := Format('DelphiLSP -> %s:%d', [ExtractFileName(TLspUri.FileUriToPath(Defs[0].Uri)),
@@ -1048,12 +1091,12 @@ begin
       if Matches then
       begin
         Trace(Where + '  ' + Answer + ' -> LISTED (' + How + ')');
-        Verified.Add(C);
+        AddRow(C, AnsF, AnsL);
       end
       else if NoAnswer and (C.Note <> '') then
       begin
         Trace(Where + '  ' + Answer + ' -> LISTED, ' + C.Note);
-        Verified.Add(C);            // classified above (overload of our type)
+        AddRow(C, AnsF, AnsL);            // classified above (overload of our type)
       end
       else if NoAnswer and IsIncludeFile(C.FilePath) then
       begin
@@ -1061,7 +1104,7 @@ begin
         // tell (the including unit may not compile on its own)
         C.Note := 'UNVERIFIED - no answer inside this include file';
         Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (include file)');
-        Verified.Add(C);
+        AddRow(C, AnsF, AnsL);
       end
       else if NoAnswer and not LineDeclaresName(C.Preview, AOldName) then
       begin
@@ -1075,7 +1118,7 @@ begin
           C.Note := 'UNVERIFIED - no answer from DelphiLSP';
         Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED');
         Retry.Add(TPair<Integer, Integer>.Create(Verified.Count, I));
-        Verified.Add(C);
+        AddRow(C, AnsF, AnsL);
       end
       else if NoAnswer then
         Trace(Where + '  ' + Answer + ' -> dropped (declares another symbol)')
@@ -1087,7 +1130,7 @@ begin
         C.Note := 'UNVERIFIED - ' + Answer + ', and the declaration of the ' +
           'searched symbol is unknown';
         Trace(Where + '  ' + Answer + ' -> LISTED UNVERIFIED (no anchor)');
-        Verified.Add(C);
+        AddRow(C, AnsF, AnsL);
       end
       else
         Trace(Where + '  ' + Answer + ' -> dropped (leads to another symbol)');
@@ -1100,6 +1143,76 @@ begin
     // Ergebnis richtig". By now those files have been sent and analysed,
     // so one more query each usually answers. Cheap: only the unanswered
     // ones, and only while the window is open.
+    // everything the post-pass judges against; the derivation below may add to
+    // it, the normal path uses it unchanged
+    Anchors := ATargets;
+
+    // NO ANCHOR, BUT THE ANSWERS AGREE (forum 2026-09-30, first log): the
+    // declaration query stayed unanswered for the whole budget, so every one
+    // of the 341 hits was listed UNVERIFIED - while 326 of them had been
+    // resolved by the very same session to ROM_Utils.pas:15589, exactly the
+    // position the warm run took as the declaration two minutes later. The
+    // scan's own answers ARE the evidence; throwing them away leaves the user
+    // to run the search a second time.
+    if FNoAnchor and (Verified.Count > 0) and not Aborted then
+    begin
+      var DerFile: string;
+      var DerLine: Integer;
+      var Agree := DominantAnswer(AnsFile.ToArray, AnsLine.ToArray, DerFile, DerLine);
+      if Agree > 0 then
+      begin
+        // the same treatment an answered declaration gets: the whole header is
+        // one position and the partner joins the set
+        var DerContent: string;
+        var DF1, DL1: Integer;
+        if Reader(DerFile, DerContent) and
+           DeclarationHeaderSpan(SplitContentLines(DerContent), DerLine, AOldName,
+             DF1, DL1) then
+        begin
+          for var HL := DF1 to DL1 do Anchors.Add(DerFile, HL);
+          AIncludes.AddTargetWithPartner(Anchors, DerFile, DF1,
+            NameColumnOnLine(SplitContentLines(DerContent)[DF1], AOldName, 0),
+            AOldName);
+        end
+        else
+          Anchors.Add(DerFile, DerLine);
+        Trace(Format('no anchor, but %d of %d listed rows answered %s:%d - taken ' +
+          'as the declaration, the rows are judged against it',
+          [Agree, Verified.Count, ExtractFileName(DerFile), DerLine + 1]));
+        FNoAnchor := False;     // there IS an anchor now
+        var Cleared := 0;
+        var Elsewhere2 := 0;
+        for var R := 0 to Verified.Count - 1 do
+        begin
+          if AnsFile[R] = '' then Continue;     // never answered: stays marked
+          var Row := Verified[R];
+          if Anchors.Contains(AnsFile[R], AnsLine[R]) or
+             ALinked.Contains(AnsFile[R], AnsLine[R]) then
+          begin
+            Row.Note := '';
+            Inc(Cleared);
+          end
+          else
+          begin
+            // KEPT, not dropped: this anchor is DERIVED, so a row that answers
+            // elsewhere is reported rather than removed - losing a real
+            // reference is the worse error of the two.
+            Row.Note := Format('UNVERIFIED - DelphiLSP resolved it to %s:%d, ' +
+              'which is not the declaration the other answers agree on',
+              [ExtractFileName(AnsFile[R]), AnsLine[R] + 1]);
+            Inc(Elsewhere2);
+          end;
+          Verified[R] := Row;
+        end;
+        Trace(Format('derived anchor: %d row(s) verified against it, %d answer(s) ' +
+          'lead elsewhere (kept, marked)', [Cleared, Elsewhere2]));
+        FDialog.SetStatus(Format('DelphiLSP did not answer the declaration query - ' +
+          'it was derived from %d agreeing answers (%s:%d): %d verified, %d lead ' +
+          'elsewhere.', [Agree, ExtractFileName(DerFile), DerLine + 1, Cleared,
+          Elsewhere2]));
+      end;
+    end;
+
     if (Retry.Count > 0) and not Aborted then
     begin
       var Fixed := 0;
@@ -1125,10 +1238,10 @@ begin
           var DF2 := TLspUri.FileUriToPath(Defs2[0].Uri);
           var DL2 := Defs2[0].Range.Start.Line;
           Trace(Format('%s  second attempt: DelphiLSP -> %s:%d -> %s', [Where2,
-            ExtractFileName(DF2), DL2 + 1, IfThen(ATargets.Contains(DF2, DL2) or
+            ExtractFileName(DF2), DL2 + 1, IfThen(Anchors.Contains(DF2, DL2) or
             ALinked.Contains(DF2, DL2), 'resolved', 'elsewhere (kept, marked)')]));
           var Row := Verified[VIdx];
-          if ATargets.Contains(DF2, DL2) then
+          if Anchors.Contains(DF2, DL2) then
           begin
             Row.Note := '';
             Verified[VIdx] := Row;
@@ -1185,6 +1298,8 @@ begin
     Contents.Free;
     Synced.Free;
     Retry.Free;
+    AnsFile.Free;
+    AnsLine.Free;
     Verified.Free;
   end;
 end;

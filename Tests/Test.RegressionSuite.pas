@@ -260,6 +260,14 @@ type
   public
     [Test] procedure NoAnswerOnAUseLine_IsNoAnchor;
     [Test] procedure NoAnswerOnADeclaration_IsTheAnchor;
+    /// <summary>Second round of the same report: the answer pointed at a
+    ///  CONTINUATION line of a wrapped header, where the name does not occur -
+    ///  so the partner query found nothing and the warm run silently dropped
+    ///  the declaration, the implementation and 7 calls.</summary>
+    [Test] procedure AWrappedHeaderIsOnePosition;
+    /// <summary>...and the cold run marked all 341 hits unverified although
+    ///  326 of its own answers named the declaration.</summary>
+    [Test] procedure TheAnswersThemselvesNameTheDeclaration;
   end;
 
   /// <summary>A forum report (2026-09-30): two event handlers sat on the
@@ -1416,6 +1424,83 @@ begin
 end;
 
 { TDeclarationAnchorTests }
+
+procedure TDeclarationAnchorTests.AWrappedHeaderIsOnePosition;
+var
+  First, Last: Integer;
+begin
+  // the reported shape: the routine starts on the first line, DelphiLSP
+  // answered with the LAST one (column 1), where "BTB" does not occur
+  var Lines: TArray<string> := [
+    'implementation',                                     // 0
+    '',                                                   // 1
+    'procedure BTB( const xEintrag: String;',             // 2
+    '               const xTyp: TBtbTyp;',                // 3
+    '               const xRezeptur: String;',            // 4
+    '               const xKunde: Integer;',              // 5
+    '               const xBemerkung: String );',         // 6
+    'begin',                                              // 7
+    '  DoSomething;',                                     // 8
+    'end;'];                                              // 9
+  Assert.IsTrue(DeclarationHeaderSpan(Lines, 6, 'BTB', First, Last),
+    'the continuation line belongs to the header above it');
+  Assert.AreEqual(2, First, 'the header starts where the NAME stands');
+  Assert.AreEqual(6, Last, 'and ends where its parameter list closes');
+  // asked at the header line itself the answer must not move
+  Assert.IsTrue(DeclarationHeaderSpan(Lines, 2, 'BTB', First, Last));
+  Assert.AreEqual(2, First);
+  Assert.AreEqual(6, Last);
+  // a line inside the BODY is no header of BTB - the walk up must not run
+  // into the header and turn a call into the declaration
+  Assert.IsFalse(DeclarationHeaderSpan(Lines, 8, 'DoSomething', First, Last),
+    'a call is not a header');
+  // and a one-line header stays one line
+  var One: TArray<string> := ['procedure BTB(const x: String);'];
+  Assert.IsTrue(DeclarationHeaderSpan(One, 0, 'BTB', First, Last));
+  Assert.AreEqual(0, First);
+  Assert.AreEqual(0, Last);
+end;
+
+procedure TDeclarationAnchorTests.TheAnswersThemselvesNameTheDeclaration;
+var
+  F: string;
+  L: Integer;
+begin
+  // the reported run: 326 of 341 candidates answered ROM_Utils.pas:15589,
+  // 9 answered 15584 (the same routine) and 5 another symbol
+  var Files: TArray<string> := nil;
+  var Lines: TArray<Integer> := nil;
+  for var I := 1 to 326 do
+  begin
+    Files := Files + ['D:\Sources\ROM_Utils.pas'];
+    Lines := Lines + [15588];
+  end;
+  for var I := 1 to 9 do
+  begin
+    Files := Files + ['D:\Sources\ROM_Utils.pas'];
+    Lines := Lines + [15583];
+  end;
+  for var I := 1 to 5 do
+  begin
+    Files := Files + ['D:\Sources\UGlobalRomConfig.pas'];
+    Lines := Lines + [1585];
+  end;
+  Assert.AreEqual(326, DominantAnswer(Files, Lines, F, L), 'the agreed position');
+  Assert.AreEqual('D:\Sources\ROM_Utils.pas', F);
+  Assert.AreEqual(15588, L);
+
+  // scattered answers are NOT a declaration - three files, no majority
+  var S: TArray<string> := ['a.pas', 'b.pas', 'c.pas', 'd.pas'];
+  var SL: TArray<Integer> := [1, 2, 3, 4];
+  Assert.AreEqual(0, DominantAnswer(S, SL, F, L), 'no agreement, no anchor');
+  Assert.AreEqual('', F);
+  // a single answer is not evidence either
+  Assert.AreEqual(0, DominantAnswer(['a.pas'], [1], F, L));
+  // unanswered candidates ('' file) do not count against the majority
+  Assert.AreEqual(3, DominantAnswer(['x.pas', '', 'x.pas', '', 'x.pas'],
+    [7, 0, 7, 0, 7], F, L), 'three agreeing answers among five candidates');
+  Assert.AreEqual(7, L);
+end;
 
 procedure TDeclarationAnchorTests.NoAnswerOnAUseLine_IsNoAnchor;
 begin

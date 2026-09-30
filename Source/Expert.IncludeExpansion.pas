@@ -187,7 +187,7 @@ implementation
 
 uses
   System.IOUtils, System.StrUtils, System.Math, Winapi.Windows, Lsp.Uri,
-  Delphi.FileEncoding, Expert.PascalScanner;
+  Delphi.FileEncoding, Expert.PascalScanner, Expert.SafeDeletePlan;
 
 const
   MaxIncludeDepth = 8;
@@ -789,19 +789,35 @@ end;
 procedure TLspIncludeContext.AddTargetWithPartner(var ATargets: TLspSymbolTargets;
   const AFile: string; ALine, ACol: Integer; const AName: string);
 var
-  Col: Integer;
+  Col, Line: Integer;
   Content: string;
 begin
   ATargets.Add(AFile, ALine);
   Col := ACol;
+  Line := ALine;
   if AName <> '' then
     try
       if FReader(AFile, Content) then
       begin
         var Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
-        if (ALine >= 0) and (ALine <= High(Lines)) then
+        // A WRAPPED HEADER IS ONE POSITION (forum 2026-09-30, second log):
+        // DelphiLSP answered ROM_Utils.pas:15589:1 for a routine that starts at
+        // 15584 - a CONTINUATION line of its parameter list, where the name does
+        // not occur at all. Asking the partner THERE finds nothing, so the set
+        // keeps that single line and every candidate the server resolves to the
+        // header's FIRST line counts as another symbol. In the reported run the
+        // WARM pass - the one that looked right - silently dropped the
+        // declaration, the implementation and 7 calls that way.
+        var HFirst, HLast: Integer;
+        if DeclarationHeaderSpan(Lines, ALine, AName, HFirst, HLast) then
         begin
-          var C := NameColumnOnLine(Lines[ALine], AName, ACol);
+          for var HL := HFirst to HLast do ATargets.Add(AFile, HL);
+          Line := HFirst;
+        end;
+        if (Line >= 0) and (Line <= High(Lines)) then
+        begin
+          var C := NameColumnOnLine(Lines[Line], AName,
+            IfThen(Line = ALine, ACol, 0));
           if C >= 0 then Col := C;
         end;
       end;
@@ -809,7 +825,7 @@ begin
       // keep the given column
     end;
   try
-    var D := Definition(AFile, ALine, Col);
+    var D := Definition(AFile, Line, Col);
     if Length(D) > 0 then
       ATargets.Add(TLspUri.FileUriToPath(D[0].Uri), D[0].Range.Start.Line);
   except

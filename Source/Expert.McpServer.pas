@@ -60,6 +60,11 @@ function McpServerPipe: string;
 ///  running bridge asks for this IDE's context every 5 s, so a request
 ///  within the last 15 s means "connected". ADetail lists them.</summary>
 function McpConnectionStatus(out ADetail: string): string;
+/// <summary>'' while every connected bridge reports this plugin's version;
+///  otherwise the one line saying what is wrong. Separate from
+///  McpConnectionStatus so a caller can colour its row without parsing
+///  text.</summary>
+function McpBridgeProblem: string;
 
 type
   /// <summary>What happened to one tool in this IDE session.</summary>
@@ -1682,11 +1687,34 @@ begin
     Result := 'connected (1 Claude Code session)'
   else
     Result := Format('connected (%d Claude Code sessions)', [Length(Clients)]);
+  var Problem := '';
   for var C in Clients do
   begin
     if ADetail <> '' then ADetail := ADetail + ', ';
-    ADetail := ADetail + Format('bridge pid %d: %d request(s), last %d s ago',
-      [C.Pid, C.Requests, (GetTickCount64 - C.LastTick) div 1000]);
+    var Ver := C.Version;
+    if Ver = '' then Ver := 'version unknown';
+    ADetail := ADetail + Format('bridge pid %d (%s): %d request(s), last %d s ago',
+      [C.Pid, Ver, C.Requests, (GetTickCount64 - C.LastTick) div 1000]);
+    if Problem = '' then
+      Problem := BridgeVersionProblem(C.Version, PluginVersion);
+  end;
+  if Problem <> '' then
+  begin
+    // Say it in the STATUS, not only in the details: this is the one thing
+    // that makes a bridge which install.cmd failed to replace visible at all.
+    Result := Result + ' - BRIDGE VERSION MISMATCH';
+    ADetail := Problem + '. ' + ADetail;
+  end;
+end;
+
+function McpBridgeProblem: string;
+begin
+  Result := '';
+  if GServer = nil then Exit;
+  for var C in GServer.RecentClients(15000) do
+  begin
+    Result := BridgeVersionProblem(C.Version, PluginVersion);
+    if Result <> '' then Exit;
   end;
 end;
 

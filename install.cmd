@@ -40,7 +40,7 @@ echo See DelphiRefactoringLight.log for details.
 :: package installation)
 set MCPEXE=%LOCALAPPDATA%\DelphiRefactoringLight\mcp\RefactoringLightMcp.exe
 call "%~dp0Mcp\buildmcp.cmd" %BDSVER%
-if %ERRORLEVEL% NEQ 0 goto :restart_hint
+if %ERRORLEVEL% NEQ 0 goto :mcp_failed
 
 echo.
 echo ============================================
@@ -86,6 +86,27 @@ echo  reconnect it with /mcp or start a new session.
 echo  Check which IDEs the bridge sees:
 echo.
 echo       "%MCPEXE%" --list
+
+:mcp_failed
+:: The package IS installed, so this must not read like a plain success - a
+:: stale bridge exe is invisible from inside Claude Code (it only reports its
+:: version to the MCP client, never to the IDE), and that cost two sessions of
+:: chasing wrong timeouts on 2026-09-30.
+echo.
+echo ################################################################
+echo  WARNING: the package is installed, the MCP BRIDGE IS NOT.
+echo ################################################################
+echo.
+echo  Claude Code will keep talking to the OLD bridge exe, so its tools
+echo  behave like the build that exe came from - wrong timeouts, missing
+echo  tools - and nothing inside the IDE can tell you. The reason is in
+echo  the lines above.
+echo.
+echo  Close EVERY Claude Code session, then run install.cmd again.
+echo  To see what is installed at any time:
+echo.
+echo       "%MCPEXE%" --version
+goto :restart_hint
 
 :restart_hint
 echo.

@@ -53,9 +53,33 @@ if exist "%TARGET%" (
     move /y "%TARGET%" "%TARGET%.old" >nul 2>&1
 )
 copy /y "%BUILT%" "%TARGET%" >nul
-if %ERRORLEVEL% NEQ 0 (
-    echo MCP bridge: could not copy to %TARGET%
-    exit /b 1
-)
-echo MCP bridge installed: %TARGET%
+if %ERRORLEVEL% NEQ 0 goto :notinstalled
+
+:: VERIFY - a copy that reports success is NOT proof (2026-09-30): the exe
+:: installed here had been nine days old while every build succeeded, because
+:: the rename-aside failed and the copy could not overwrite the live exe. So
+:: ASK THE INSTALLED EXE what it is and compare it with the built one; only
+:: that distinguishes "installed" from "still the old file".
+set "BUILTVER="
+set "TARGETVER="
+for /f "tokens=2" %%v in ('"%BUILT%" --version 2^>nul') do set "BUILTVER=%%v"
+for /f "tokens=2" %%v in ('"%TARGET%" --version 2^>nul') do set "TARGETVER=%%v"
+if not "%BUILTVER%"=="%TARGETVER%" goto :notinstalled
+
+echo MCP bridge installed: %TARGET% (%TARGETVER%)
 exit /b 0
+
+:notinstalled
+echo.
+echo ****************************************************************
+echo  MCP bridge NOT updated - the old exe is still installed.
+echo ****************************************************************
+echo.
+echo  built    : %BUILTVER%  %BUILT%
+if defined TARGETVER echo  installed: %TARGETVER%  %TARGET%
+if not defined TARGETVER echo  installed: the exe there did not answer --version
+echo.
+echo  The file could not be replaced. Almost always a RUNNING Claude Code
+echo  session (or a "claude" in a terminal) still holds it.
+echo  Close every one of them, then run install.cmd again.
+exit /b 1

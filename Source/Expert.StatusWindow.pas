@@ -467,7 +467,10 @@ begin
   Row('MCP bridge endpoint', McpServerStatus,
     McpServerPipe + ' - used by RefactoringLightMcp.exe (Claude Code)');
   S := McpConnectionStatus(Detail);
-  Row('  Claude Code', S, Detail);
+  if McpBridgeProblem <> '' then
+    Row('  Claude Code', S, Detail, slBad)
+  else
+    Row('  Claude Code', S, Detail);
 
   // ---- identifier index ---------------------------------------------------
   if TUnitIndex.Instance.Ready then S := 'ready' else S := 'building...';

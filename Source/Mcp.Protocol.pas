@@ -24,9 +24,16 @@ unit Mcp.Protocol;
 // Between bridge and IDE: one connection per request, one line of UTF-8
 // JSON each way (JSON escapes line breaks inside strings, so a raw #10
 // always ends a message).
-//   request : {"method":"context"}
-//             {"method":"call","tool":"get_quick_fixes","arguments":{...}}
+//   request : {"bridge":"1.15.2","method":"context"}
+//             {"bridge":"...","method":"call","tool":"get_quick_fixes",...}
 //   response: {"ok":true,"result":{...}}  /  {"ok":false,"error":"..."}
+//
+// "bridge" is the version of the bridge EXE that sent the request. Before
+// 1.15.2 the bridge reported its version only to its MCP client, never here -
+// so an install that silently left an OLD exe behind (install.cmd could not
+// replace it) was undetectable from inside the IDE, and its tools behaved like
+// the build they came from: nine days of wrong timeouts, diagnosed twice from
+// the wrong end. A request without the field means "a bridge older than that".
 
 interface
 
@@ -61,6 +68,27 @@ function PipeWriteLine(AHandle: THandle; AStop: THandle; ATimeoutMs: Cardinal;
 ///  line. AError says why it failed (not running / busy / timeout).</summary>
 function McpPipeRequest(APid: Cardinal; const ARequest: string;
   ATimeoutMs: Cardinal; out AResponse, AError: string): Boolean;
+
+// ---- which bridge exe is talking to us (see the note at the top) ----
+
+/// <summary>Writes AVersion into the request line as "bridge". Inserted as
+///  TEXT right behind the '{' on purpose: a request can carry a whole unit
+///  (buffer_edit), and parsing megabytes just to add one field would cost more
+///  than the call itself. An empty AVersion or a non-object line is returned
+///  unchanged.</summary>
+function StampBridgeVersion(const ARequest, AVersion: string): string;
+
+/// <summary>The version the sender stamped in, '' when the line carries none
+///  (a bridge from before 1.15.2). Reads only the HEAD of the line, for the
+///  same reason - the server must not parse a huge request twice.</summary>
+function BridgeVersionOfRequest(const ARequest: string): string;
+
+/// <summary>'' when the two versions agree (nothing to report); otherwise one
+///  line naming BOTH numbers and the two things that cause a skew. Pure, so
+///  the status row, get_status and the tests share one wording. Deliberately
+///  does not compare which is newer: the answer is the same either way - the
+///  install did not finish.</summary>
+function BridgeVersionProblem(const ABridge, APlugin: string): string;
 
 // ---- what an IDE instance tells the bridge about itself ----
 
@@ -392,6 +420,71 @@ begin
     Result := Result + ', group ' + ExtractFileName(ProjectGroup)
   else
     Result := Result + ', no project open';
+end;
+
+function StampBridgeVersion(const ARequest, AVersion: string): string;
+var
+  Field, Rest: string;
+begin
+  Result := ARequest;
+  if (AVersion = '') or not ARequest.StartsWith('{') then Exit;
+  // let the JSON writer quote it - the value is our own version constant, but
+  // a field built by hand is exactly how invalid JSON gets on the wire
+  var S := TJSONString.Create(AVersion);
+  try
+    Field := '"bridge":' + S.ToJSON;
+  finally
+    S.Free;
+  end;
+  Rest := ARequest.Substring(1);
+  if Trim(Rest).StartsWith('}') then
+    Result := '{' + Field + Rest          // '{}' has no member to separate from
+  else
+    Result := '{' + Field + ',' + Rest;
+end;
+
+function BridgeVersionOfRequest(const ARequest: string): string;
+const
+  Key = '"bridge"';
+  HeadChars = 160;   // StampBridgeVersion puts it directly behind the '{'
+var
+  Head: string;
+  P: Integer;
+begin
+  Result := '';
+  Head := Copy(ARequest, 1, HeadChars);
+  P := Pos(Key, Head);
+  if P = 0 then Exit;
+  P := P + Length(Key);
+  while (P <= Length(Head)) and CharInSet(Head[P], [' ', #9]) do Inc(P);
+  if (P > Length(Head)) or (Head[P] <> ':') then Exit;
+  Inc(P);
+  while (P <= Length(Head)) and CharInSet(Head[P], [' ', #9]) do Inc(P);
+  if (P > Length(Head)) or (Head[P] <> '"') then Exit;
+  Inc(P);
+  while (P <= Length(Head)) and (Head[P] <> '"') do
+  begin
+    // a version needs no escapes; stop rather than misread something odd
+    if Head[P] = '\' then Exit('');
+    Result := Result + Head[P];
+    Inc(P);
+  end;
+  if (P > Length(Head)) or (Head[P] <> '"') then Result := '';   // truncated
+end;
+
+function BridgeVersionProblem(const ABridge, APlugin: string): string;
+begin
+  Result := '';
+  if (APlugin = '') or (ABridge = APlugin) then Exit;
+  if ABridge = '' then
+    Result := Format('the bridge exe does not report its version, so it is ' +
+      'older than %s - if its tools behave oddly (timeouts, missing tools), ' +
+      'run install.cmd and start a new Claude Code session', [APlugin])
+  else
+    Result := Format('bridge exe %s, plugin %s - these must match. Either ' +
+      'install.cmd could not replace RefactoringLightMcp.exe (a running ' +
+      'Claude Code session holds it: close them all and install again) or ' +
+      'RAD Studio was not restarted after the install', [ABridge, APlugin]);
 end;
 
 function NormDir(const S: string): string;

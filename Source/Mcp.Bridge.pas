@@ -111,7 +111,11 @@ end;
 function TPipeTransport.Request(APid: Cardinal; const ARequest: string;
   ATimeoutMs: Cardinal; out AResponse, AError: string): Boolean;
 begin
-  Result := McpPipeRequest(APid, ARequest, ATimeoutMs, AResponse, AError);
+  // THE one funnel for every request this exe sends (context, tools, calls),
+  // so the version stamp cannot be forgotten at a new call site - which is
+  // what makes the IDE able to name a stale bridge at all.
+  Result := McpPipeRequest(APid,
+    StampBridgeVersion(ARequest, BridgeVersion), ATimeoutMs, AResponse, AError);
 end;
 
 // Rename, reference scans and the project-wide analyses can take minutes

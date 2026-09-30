@@ -96,6 +96,13 @@ type
   public
     [Test] procedure SecurityDescriptor_IsBuiltOnThisPlatform;
     [Test] procedure Start_ReportsThePipeItReallyCreated;
+    /// <summary>An install that could not replace RefactoringLightMcp.exe left
+    ///  a bridge nine days old talking to a current plugin, and NOTHING could
+    ///  see it: the exe reported its version to its MCP client only. Now every
+    ///  request carries it.</summary>
+    [Test] procedure BridgeVersion_IsStampedAndReadBack;
+    [Test] procedure BridgeVersion_MismatchIsNamedNotGuessed;
+    [Test] procedure BridgeVersion_ReachesTheServerOverARealPipe;
   end;
 
   /// <summary>Issue #13: while DelphiLSP loads a big project (12-30 s) its
@@ -292,7 +299,7 @@ uses
   Expert.DfmEventCheck, Expert.SignatureCheck, Expert.InterfaceGuidCheck,
   Expert.WithScanner, Lsp.Uri, Rename.WorkspaceEdit, Expert.VcsBlame,
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
-  Winapi.Windows, Mcp.PipeServer, System.JSON, Lsp.Protocol,
+  Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.UsesCleanup, Expert.MoveToUnit, Expert.SafeDeletePlan;
 
@@ -686,6 +693,80 @@ begin
     Assert.IsTrue(WaitNamedPipe(PChar(Name), 1000), 'the pipe is reachable');
     Srv.Stop;
     Assert.IsFalse(Srv.Listening, 'after Stop nothing listens');
+  finally
+    Srv.Free;
+  end;
+end;
+
+procedure TMcpPipeRegressionTests.BridgeVersion_IsStampedAndReadBack;
+begin
+  var R := StampBridgeVersion('{"method":"call","tool":"x"}', '1.15.2');
+  Assert.AreEqual('{"bridge":"1.15.2","method":"call","tool":"x"}', R,
+    'the stamp goes behind the brace, the rest is untouched');
+  Assert.AreEqual('1.15.2', BridgeVersionOfRequest(R));
+  // it must stay valid JSON for the parser the server really uses
+  var O := TJSONObject.ParseJSONValue(R) as TJSONObject;
+  Assert.IsNotNull(O, 'a stamped request still parses');
+  try
+    Assert.AreEqual('1.15.2', O.GetValue<string>('bridge'));
+    Assert.AreEqual('call', O.GetValue<string>('method'));
+  finally
+    O.Free;
+  end;
+  // an object without members must not end up as '{"bridge":"x",}'
+  Assert.AreEqual('{"bridge":"1.15.2"}', StampBridgeVersion('{}', '1.15.2'));
+  // a bridge from before this change sends nothing - not an error, just unknown
+  Assert.AreEqual('', BridgeVersionOfRequest('{"method":"context"}'));
+  Assert.AreEqual('{"method":"context"}',
+    StampBridgeVersion('{"method":"context"}', ''), 'no version, no stamp');
+end;
+
+procedure TMcpPipeRegressionTests.BridgeVersion_MismatchIsNamedNotGuessed;
+begin
+  Assert.AreEqual('', BridgeVersionProblem('1.15.2', '1.15.2'),
+    'equal versions have nothing to report');
+  Assert.AreEqual('', BridgeVersionProblem('1.15.2', ''),
+    'without a plugin version there is no verdict to give');
+  var S := BridgeVersionProblem('1.2.0', '1.15.2');
+  Assert.IsTrue(S.Contains('1.2.0') and S.Contains('1.15.2'),
+    'BOTH numbers must be in the message, that is the whole point: ' + S);
+  Assert.IsTrue(S.Contains('install.cmd'), 'and what to do about it: ' + S);
+  Assert.IsTrue(BridgeVersionProblem('', '1.15.2').Contains('1.15.2'),
+    'a bridge too old to report its version is still reported');
+end;
+
+procedure TMcpPipeRegressionTests.BridgeVersion_ReachesTheServerOverARealPipe;
+var
+  Srv: TMcpPipeServer;
+  Seen, Probe, Resp, Err, Mine: string;
+begin
+  // Serve THIS process's own pipe and send through the PRODUCTION transport,
+  // because the point is not that a stamped request can be read - it is that
+  // the one funnel every request goes through really stamps. A future request
+  // site that bypasses it fails here.
+  // A real Claude Code bridge polls every Refactoring Light pipe it finds, so
+  // this must not assume it is the only client: our own request is recognised
+  // by a probe value, and only our own PID is looked up.
+  Probe := 'p' + FormatDateTime('hhnnsszzz', Now);
+  Srv := TMcpPipeServer.Create(McpPipeName(GetCurrentProcessId),
+    function(const ARequest: string; AStop: THandle): string
+    begin
+      if ARequest.Contains(Probe) then Seen := ARequest;
+      Result := '{"ok":true}';
+    end);
+  try
+    Assert.IsTrue(Srv.Start, 'the test pipe is there: ' + Srv.LastError);
+    var T: IMcpTransport := TPipeTransport.Create;
+    Assert.IsTrue(T.Request(GetCurrentProcessId,
+      '{"method":"context","probe":"' + Probe + '"}', 5000, Resp, Err),
+      'the request went through: ' + Err);
+    Assert.AreEqual(BridgeVersion, BridgeVersionOfRequest(Seen),
+      'the production transport stamps its version into every request');
+    for var C in Srv.RecentClients(60000) do
+      if C.Pid = GetCurrentProcessId then Mine := C.Version;
+    Assert.AreEqual(BridgeVersion, Mine,
+      'and the IDE side keeps it per client, which is what the status row reads');
+    Srv.Stop;
   finally
     Srv.Free;
   end;

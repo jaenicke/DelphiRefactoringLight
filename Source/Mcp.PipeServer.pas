@@ -38,6 +38,10 @@ type
     Pid: Cardinal;
     LastTick: UInt64;   // GetTickCount64 of its last request
     Requests: Integer;
+    /// <summary>Version of the bridge exe, from the request's "bridge" field.
+    ///  '' = a bridge from before 1.15.2, which sent none - that is the state
+    ///  in which a stale exe used to be invisible.</summary>
+    Version: string;
   end;
 
   TMcpPipeServer = class
@@ -54,7 +58,7 @@ type
     FLock: TObject;
     FClients: TArray<TMcpClientInfo>;
     procedure ListenLoop;
-    procedure NoteClient(APipe: THandle);
+    procedure NoteClient(APipe: THandle; const AVersion: string);
     procedure Serve(APipe: THandle);
     procedure SetLastError(const S: string);
   public
@@ -215,7 +219,7 @@ begin
   end;
 end;
 
-procedure TMcpPipeServer.NoteClient(APipe: THandle);
+procedure TMcpPipeServer.NoteClient(APipe: THandle; const AVersion: string);
 var
   Pid: ULONG;
   I: Integer;
@@ -228,12 +232,16 @@ begin
       begin
         FClients[I].LastTick := GetTickCount64;
         Inc(FClients[I].Requests);
+        // one exe per process, so this never changes - but a request that
+        // carries nothing must not erase what an earlier one told us
+        if AVersion <> '' then FClients[I].Version := AVersion;
         Exit;
       end;
     var C: TMcpClientInfo;
     C.Pid := Pid;
     C.LastTick := GetTickCount64;
     C.Requests := 1;
+    C.Version := AVersion;
     // bounded: forget entries silent for more than an hour
     var Kept: TArray<TMcpClientInfo> := nil;
     for var X in FClients do
@@ -430,7 +438,7 @@ begin
   try
     if not PipeReadLine(APipe, FStopEvent, 10000, Req) then Exit;
     TInterlocked.Increment(FRequests);
-    NoteClient(APipe);
+    NoteClient(APipe, BridgeVersionOfRequest(Req));
     try
       Resp := FHandler(Req, FStopEvent);
     except

@@ -104,6 +104,12 @@ type
     FReaderDead: Boolean;
 
     procedure MarkReaderDead;
+    /// <summary>Removes the pending request AId without freeing it (a send
+    ///  that failed - the caller still owns the object).</summary>
+    procedure UnregisterPending(AId: Integer);
+    /// <summary>Ends the reader thread for Destroy, even while it is blocked
+    ///  in a synchronous ReadFile on the pipe.</summary>
+    procedure StopReader;
     procedure CheckConnected;
     function ResolveBareUris(const ALocs: TArray<TLspLocation>;
       const ARequestFile: string): TArray<TLspLocation>;
@@ -490,6 +496,47 @@ begin
   end;
 end;
 
+procedure TLspClient.UnregisterPending(AId: Integer);
+begin
+  FPendingLock.Enter;
+  try
+    FPending.ExtractPair(AId);
+  finally
+    FPendingLock.Leave;
+  end;
+end;
+
+procedure TLspClient.StopReader;
+begin
+  FReaderThread.Terminate;
+  // The server process goes FIRST, then we wait - not the other way round.
+  // After a Shutdown a well-behaved server is gone already and this does
+  // nothing; a hung one would otherwise keep the reader blocked.
+  if FProcessHandle <> INVALID_HANDLE_VALUE then
+    TerminateProcess(FProcessHandle, 1);
+  // Then abort the read itself. Closing FStdoutRead (as Destroy used to) does
+  // NOT wake a thread blocked in a synchronous ReadFile on a pipe: that read
+  // only ends at EOF, and EOF never comes while ANY process still holds the
+  // write end - DelphiLSP's controller hands its stdout on to the agent
+  // processes it spawns, and they can outlive it. Destroy then hung in
+  // WaitFor (and closing a handle another thread is reading from is a race
+  // of its own). CancelSynchronousIo makes the blocked ReadFile fail, the
+  // transport raises EStreamError and the reader ends. Repeated, because a
+  // reader that was BETWEEN two reads has nothing to cancel yet and may still
+  // enter the next one.
+  while not FReaderThread.Finished do
+  begin
+    CancelSynchronousIo(FReaderThread.Handle);
+    if WaitForSingleObject(FReaderThread.Handle, 50) <> WAIT_TIMEOUT then
+      Break;
+    // A reader inside TThread.Synchronize (a log handler) needs the main
+    // thread to pump, as TThread.WaitFor would.
+    if GetCurrentThreadId = MainThreadID then
+      CheckSynchronize(0);
+  end;
+  FReaderThread.WaitFor;
+end;
+
 function TLspClient.IsConnected: Boolean;
 begin
   Result := (FReaderThread <> nil) and not FReaderDead and
@@ -532,15 +579,8 @@ end;
 
 destructor TLspClient.Destroy;
 begin
-  if (FReaderThread <> nil) and not FReaderThread.Finished then
-  begin
-    FReaderThread.Terminate;
-    // Closing the pipe unblocks the pending Read
-    if FStdoutRead <> INVALID_HANDLE_VALUE then
-      CloseHandle(FStdoutRead);
-    FStdoutRead := INVALID_HANDLE_VALUE;
-    FReaderThread.WaitFor;
-  end;
+  if FReaderThread <> nil then
+    StopReader;
   FreeAndNil(FReaderThread);
   FreeAndNil(FTransport);
   FreeAndNil(FStdinStream);
@@ -678,47 +718,77 @@ var
   SA: TSecurityAttributes;
   SI: TStartupInfo;
   PI: TProcessInformation;
-  hStdinRead, hStdoutWrite: THandle;
+  hStdinRead, hStdoutWrite, hStdErr: THandle;
   CmdLine: string;
 begin
   if not FileExists(FLspExePath) then
     raise EFileNotFoundException.Create('DelphiLsp.exe nicht gefunden: ' + FLspExePath);
 
-  // Create anonymous pipes
-  SA.nLength := SizeOf(SA);
-  SA.bInheritHandle := True;
-  SA.lpSecurityDescriptor := nil;
+  hStdinRead := 0;
+  hStdoutWrite := 0;
+  hStdErr := INVALID_HANDLE_VALUE;
+  try
+    // Create anonymous pipes. NOT inheritable at creation: our own ends must
+    // never be inheritable, not even between CreatePipe and a later
+    // SetHandleInformation - a process started from another thread in that
+    // window would inherit them and keep the pipe open behind our back. Only
+    // the two CHILD ends are made inheritable, just below.
+    SA.nLength := SizeOf(SA);
+    SA.bInheritHandle := False;
+    SA.lpSecurityDescriptor := nil;
 
-  if not CreatePipe(hStdinRead, FStdinWrite, @SA, 0) then
-    RaiseLastOSError;
-  if not CreatePipe(FStdoutRead, hStdoutWrite, @SA, 0) then
-    RaiseLastOSError;
+    if not CreatePipe(hStdinRead, FStdinWrite, @SA, 0) then
+      RaiseLastOSError;
+    if not CreatePipe(FStdoutRead, hStdoutWrite, @SA, 0) then
+      RaiseLastOSError;
+    if not SetHandleInformation(hStdinRead, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) or
+      not SetHandleInformation(hStdoutWrite, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) then
+      RaiseLastOSError;
 
-  // Make our ends non-inheritable
-  SetHandleInformation(FStdinWrite, HANDLE_FLAG_INHERIT, 0);
-  SetHandleInformation(FStdoutRead, HANDLE_FLAG_INHERIT, 0);
+    // stderr goes to NUL. It used to share the stdout pipe, so anything the
+    // server printed there landed in the middle of the JSON-RPC stream and
+    // broke the framing. Nothing reads it: -LogModes writes the server's own
+    // log file instead.
+    SA.bInheritHandle := True;
+    hStdErr := CreateFile('NUL', GENERIC_WRITE, FILE_SHARE_READ or FILE_SHARE_WRITE,
+      @SA, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if hStdErr = INVALID_HANDLE_VALUE then
+      RaiseLastOSError;
 
-  // Start the process
-  FillChar(SI, SizeOf(SI), 0);
-  SI.cb := SizeOf(SI);
-  SI.dwFlags := STARTF_USESTDHANDLES;
-  SI.hStdInput := hStdinRead;
-  SI.hStdOutput := hStdoutWrite;
-  SI.hStdError := hStdoutWrite; // redirect stderr too
+    // Start the process
+    FillChar(SI, SizeOf(SI), 0);
+    SI.cb := SizeOf(SI);
+    SI.dwFlags := STARTF_USESTDHANDLES;
+    SI.hStdInput := hStdinRead;
+    SI.hStdOutput := hStdoutWrite;
+    SI.hStdError := hStdErr;
 
-  CmdLine := '"' + FLspExePath + '"';
-  if FExtraArgs <> '' then
-    CmdLine := CmdLine + ' ' + FExtraArgs;
+    CmdLine := '"' + FLspExePath + '"';
+    if FExtraArgs <> '' then
+      CmdLine := CmdLine + ' ' + FExtraArgs;
 
-  if not CreateProcess(nil, PChar(CmdLine), nil, nil, True,
-    CREATE_NO_WINDOW, nil, nil, SI, PI) then
-    RaiseLastOSError;
+    if not CreateProcess(nil, PChar(CmdLine), nil, nil, True,
+      CREATE_NO_WINDOW, nil, nil, SI, PI) then
+      RaiseLastOSError;
+  except
+    // A failed start used to leak every handle created so far - and left our
+    // ends in the fields, where Destroy closed them once more.
+    if FStdinWrite <> INVALID_HANDLE_VALUE then CloseHandle(FStdinWrite);
+    if FStdoutRead <> INVALID_HANDLE_VALUE then CloseHandle(FStdoutRead);
+    FStdinWrite := INVALID_HANDLE_VALUE;
+    FStdoutRead := INVALID_HANDLE_VALUE;
+    if hStdinRead <> 0 then CloseHandle(hStdinRead);
+    if hStdoutWrite <> 0 then CloseHandle(hStdoutWrite);
+    if hStdErr <> INVALID_HANDLE_VALUE then CloseHandle(hStdErr);
+    raise;
+  end;
 
   FProcessHandle := PI.hProcess;
   CloseHandle(PI.hThread);
   // Close child ends
   CloseHandle(hStdinRead);
   CloseHandle(hStdoutWrite);
+  CloseHandle(hStdErr);
 
   // Create streams and transport
   FStdinStream := THandleStream.Create(FStdinWrite);
@@ -828,9 +898,21 @@ begin
     FPendingLock.Leave;
   end;
 
-  Log('-->', AMethod, Msg.ToJSON);
-  FTransport.SendMessage(Msg);
-  Msg.Free;
+  // Msg (and with it AParams - often the text of a whole unit) is freed on
+  // every path: a broken pipe makes SendMessage raise, and that used to leak
+  // the message AND leave the pending request registered until Destroy.
+  try
+    try
+      Log('-->', AMethod, Msg.ToJSON);
+      FTransport.SendMessage(Msg);
+    except
+      UnregisterPending(Id);
+      Pending.Free;
+      raise;
+    end;
+  finally
+    Msg.Free;
+  end;
 
   // Wait for response
   WaitResult := Pending.Event.WaitFor(ATimeoutMs);
@@ -899,9 +981,19 @@ begin
     FPendingLock.Leave;
   end;
 
-  Log('-->', AMethod + ' (async#' + IntToStr(Result) + ')', Msg.ToJSON);
-  FTransport.SendMessage(Msg);
-  Msg.Free;
+  // As in SendRequest: Msg is freed and the pending entry dropped on failure.
+  try
+    try
+      Log('-->', AMethod + ' (async#' + IntToStr(Result) + ')', Msg.ToJSON);
+      FTransport.SendMessage(Msg);
+    except
+      UnregisterPending(Result);
+      Pending.Free;
+      raise;
+    end;
+  finally
+    Msg.Free;
+  end;
 end;
 
 function TLspClient.WaitForResponse(ARequestId: Integer; ATimeoutMs: Cardinal): TJSONObject;
@@ -962,9 +1054,12 @@ begin
   else
     Msg.AddPair('params', TJSONObject.Create);
 
-  Log('-->', AMethod, Msg.ToJSON);
-  FTransport.SendMessage(Msg);
-  Msg.Free;
+  try
+    Log('-->', AMethod, Msg.ToJSON);
+    FTransport.SendMessage(Msg);
+  finally
+    Msg.Free;   // a broken pipe raises here - the message must not leak
+  end;
 end;
 
 procedure TLspClient.Initialize(const ARootPath, ADprojPath: string; const ASearchPath: string);
@@ -1719,6 +1814,8 @@ procedure TLspClient.Shutdown;
 var
   Response: TJSONObject;
 begin
+  // Never started (Start failed): there is no transport to talk through.
+  if FTransport = nil then Exit;
   try
     Response := SendRequest('shutdown', nil, 15000);
     Response.Free;

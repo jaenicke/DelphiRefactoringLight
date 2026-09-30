@@ -11,7 +11,8 @@
 ///  Regression tests for the defects this fork inherited from upstream and
 ///  fixed on 2026-09-03 after the audit of `jaenicke/DelphiRefactoringLight`
 ///  at `a03d564`. Each fixture pins ONE fixed behaviour, and each was
-///  confirmed to fail against the pre-fix code.
+///  confirmed to fail against the pre-fix code. TLspUriNonAsciiTests came
+///  later, with the second audit (at 3a8d623), and failed the same way.
 ///
 ///  Only the pure, IDE-free surface is covered here - which is exactly the
 ///  surface the audit identified as the highest-leverage test target:
@@ -61,6 +62,15 @@ type
     [Test] procedure UncUri_KeepsItsLeadingBackslashes;
     [Test] procedure UncPath_IsEmittedAsTheTwoSlashForm;
     [Test] procedure UncPath_RoundTrips;
+  end;
+
+  [TestFixture]
+  TLspUriNonAsciiTests = class
+  public
+    [Test] procedure RawNonAsciiInUri_IsKept;
+    [Test] procedure SurrogatePair_IsEncodedAsOneFourByteSequence;
+    [Test] procedure NonAsciiPath_RoundTrips;
+    [Test] procedure MalformedPercentEscape_IsKeptLiteral;
   end;
 
   [TestFixture]
@@ -212,6 +222,53 @@ begin
     'path -> uri -> path must be identity for UNC, spaces included');
 end;
 
+{ TLspUriNonAsciiTests }
+
+procedure TLspUriNonAsciiTests.RawNonAsciiInUri_IsKept;
+begin
+  // A server may send non-ASCII characters unescaped. PercentDecode kept
+  // only the LOW byte of each one, which is not valid UTF-8 - the path came
+  // back with replacement characters and named no existing file.
+  // U+00DC 'U umlaut', U+00DF 'sharp s', U+00E9 'e acute'
+  Assert.AreEqual('C:\' + #$00DC + 'bung\Stra' + #$00DF + 'e' + #$00E9 + '.pas',
+    TLspUri.FileUriToPath('file:///C:/' + #$00DC + 'bung/Stra' + #$00DF + 'e' + #$00E9 + '.pas'),
+    'raw non-ASCII characters in a uri must survive decoding');
+end;
+
+procedure TLspUriNonAsciiTests.SurrogatePair_IsEncodedAsOneFourByteSequence;
+var
+  Uri: string;
+begin
+  // A character outside the BMP is a surrogate PAIR in UTF-16. Encoding each
+  // half on its own made two U+FFFD (EF BF BD) of it - a uri the server
+  // cannot map back to the file.
+  // U+1F600 = D83D DE00 in UTF-16 = F0 9F 98 80 in UTF-8
+  Uri := TLspUri.PathToFileUri('C:\a' + #$D83D#$DE00 + '.pas');
+  Assert.IsTrue(Uri.Contains('%F0%9F%98%80'),
+    'a supplementary-plane character must be one 4-byte UTF-8 sequence; got ' + Uri);
+  Assert.IsFalse(Uri.Contains('%EF%BF%BD'),
+    'no half of the pair may become a replacement character; got ' + Uri);
+end;
+
+procedure TLspUriNonAsciiTests.NonAsciiPath_RoundTrips;
+var
+  Path: string;
+begin
+  // Otherwise the diagnostics cache keys and the didOpen uris stop matching
+  // for such a project.
+  Path := 'C:\Proj ' + #$00E4 + #$00F6 + #$00FC + '\' + #$D83D#$DE00 + ' x\Unit1.pas';
+  Assert.AreEqual(Path, TLspUri.FileUriToPath(TLspUri.PathToFileUri(Path)),
+    'path -> uri -> path must be identity');
+end;
+
+procedure TLspUriNonAsciiTests.MalformedPercentEscape_IsKeptLiteral;
+begin
+  // HexDigitValue answered 0 for a non-hex digit, so "%zz" became byte 0
+  // and put a #0 into the path.
+  Assert.AreEqual('C:\100%zz.pas', TLspUri.FileUriToPath('file:///C:/100%zz.pas'),
+    'a percent sign without two hex digits is literal text');
+end;
+
 { TFileEncodingTests }
 
 procedure TFileEncodingTests.Setup;
@@ -338,6 +395,7 @@ end;
 initialization
   TDUnitX.RegisterTestFixture(TCanTakeSemicolonTests);
   TDUnitX.RegisterTestFixture(TLspUriUncTests);
+  TDUnitX.RegisterTestFixture(TLspUriNonAsciiTests);
   TDUnitX.RegisterTestFixture(TFileEncodingTests);
 
 end.

@@ -39,23 +39,28 @@ type
 
 class function TLspUriHelper.PercentEncodePath(const APath: string): string;
 var
-  I: Integer;
-  Ch: Char;
+  Bytes: TBytes;
+  SB: TStringBuilder;
 begin
-  Result := '';
-  for I := 1 to Length(APath) do
-  begin
-    Ch := APath[I];
-    case Ch of
-      'A'..'Z', 'a'..'z', '0'..'9',
-      '-', '_', '.', '~', '/', ':':
-        Result := Result + Ch;
-    else
-      // Percent-encode any other character as its UTF-8 bytes.
-      var Bytes := TEncoding.UTF8.GetBytes(Ch);
-      for var B in Bytes do
-        Result := Result + '%' + IntToHex(B, 2);
-    end;
+  // Encode the UTF-8 bytes of the WHOLE string, not each UTF-16 unit on its
+  // own: a character outside the BMP is a surrogate PAIR, and converting each
+  // half separately made two U+FFFD of it (EF BF BD twice) - a uri that names
+  // a different file.
+  Bytes := TEncoding.UTF8.GetBytes(APath);
+  SB := TStringBuilder.Create(Length(Bytes) * 3);
+  try
+    for var B in Bytes do
+      case B of
+        Ord('A')..Ord('Z'), Ord('a')..Ord('z'), Ord('0')..Ord('9'),
+        Ord('-'), Ord('_'), Ord('.'), Ord('~'), Ord('/'), Ord(':'):
+          SB.Append(Char(B));
+      else
+        // Percent-encode any other byte.
+        SB.Append('%').Append(IntToHex(B, 2));
+      end;
+    Result := SB.ToString;
+  finally
+    SB.Free;
   end;
 end;
 
@@ -66,22 +71,26 @@ begin
     'A'..'F': Result := Ord(Ch) - Ord('A') + 10;
     'a'..'f': Result := Ord(Ch) - Ord('a') + 10;
   else
-    Result := 0;
+    Result := -1;   // not a hex digit
   end;
 end;
 
 class function TLspUriHelper.PercentDecode(const S: string): string;
 var
-  I: Integer;
-  Bytes: TBytes;
+  I, Start: Integer;
+  Bytes, Chunk: TBytes;
   ByteCount: Integer;
 begin
-  SetLength(Bytes, Length(S));
+  // A UTF-16 unit is at most 3 UTF-8 bytes (a surrogate pair: 2 units, 4 bytes).
+  SetLength(Bytes, Length(S) * 3);
   ByteCount := 0;
   I := 1;
   while I <= Length(S) do
   begin
-    if (S[I] = '%') and (I + 2 <= Length(S)) then
+    // A '%' without two hex digits after it is literal text - decoding it
+    // anyway put a #0 into the path.
+    if (S[I] = '%') and (I + 2 <= Length(S)) and (HexDigitValue(S[I+1]) >= 0) and
+      (HexDigitValue(S[I+2]) >= 0) then
     begin
       Bytes[ByteCount] := Byte(HexDigitValue(S[I+1]) * 16 + HexDigitValue(S[I+2]));
       Inc(ByteCount);
@@ -89,10 +98,17 @@ begin
     end
     else
     begin
-      // Take ASCII characters as-is.
-      Bytes[ByteCount] := Byte(Ord(S[I]));
-      Inc(ByteCount);
+      // A run of unescaped text (a stray '%' included) is taken as its UTF-8
+      // bytes. Byte(Ord(Ch)) kept only the LOW byte of a raw non-ASCII
+      // character, which is not valid UTF-8.
+      Start := I;
       Inc(I);
+      while (I <= Length(S)) and (S[I] <> '%') do
+        Inc(I);
+      Chunk := TEncoding.UTF8.GetBytes(Copy(S, Start, I - Start));
+      if Length(Chunk) > 0 then
+        Move(Chunk[0], Bytes[ByteCount], Length(Chunk));
+      Inc(ByteCount, Length(Chunk));
     end;
   end;
   Result := TEncoding.UTF8.GetString(Bytes, 0, ByteCount);

@@ -44,6 +44,7 @@ uses
   Test.UsesEditorMinimalWrite in 'Test.UsesEditorMinimalWrite.pas',
   Test.AutoImportGenericResolve in 'Test.AutoImportGenericResolve.pas',
   Test.InheritedDefectFixes in 'Test.InheritedDefectFixes.pas',
+  Test.MoveToUnitBody in 'Test.MoveToUnitBody.pas',
   Expert.SignatureCheck in '..\Source\Expert.SignatureCheck.pas',
   Expert.InterfaceGuidCheck in '..\Source\Expert.InterfaceGuidCheck.pas',
   Expert.StatementRefactor in '..\Source\Expert.StatementRefactor.pas',

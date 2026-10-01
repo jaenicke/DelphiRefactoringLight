@@ -105,6 +105,11 @@ type
     [Test] procedure BridgeVersion_IsStampedAndReadBack;
     [Test] procedure BridgeVersion_MismatchIsNamedNotGuessed;
     [Test] procedure BridgeVersion_ReachesTheServerOverARealPipe;
+    /// <summary>Audit #22, H5: handler threads were bare anonymous threads,
+    ///  invisible to ShutdownWorkersAndWait - the unload never waited for a
+    ///  handler that outlived Stop. They are started through the latch now.
+    ///  </summary>
+    [Test] procedure PipeHandler_IsCountedAsAWorker;
   end;
 
   /// <summary>Issue #13: while DelphiLSP loads a big project (12-30 s) its
@@ -863,6 +868,70 @@ begin
   finally
     Srv.Free;
   end;
+end;
+
+// Sends one request carrying AProbe to this process's pipe on a thread of
+// its own (the handler under test blocks, so the caller must not).
+function StartProbeClient(const AProbe: string): TThread;
+begin
+  Result := TThread.CreateAnonymousThread(
+    procedure
+    var
+      Resp, Err: string;
+    begin
+      McpPipeRequest(GetCurrentProcessId,
+        '{"method":"context","probe":"' + AProbe + '"}', 10000, Resp, Err);
+    end);
+  Result.FreeOnTerminate := False;
+  Result.Start;
+end;
+
+procedure TMcpPipeRegressionTests.PipeHandler_IsCountedAsAWorker;
+var
+  Srv: TMcpPipeServer;
+  Entered, Release: TEvent;
+  Client: TThread;
+  Probe: string;
+  Before, During: Integer;
+begin
+  Probe := 'h5-' + FormatDateTime('hhnnsszzz', Now);
+  ResetWorkerLatch;
+  Before := ActiveWorkerCount;
+  Entered := TEvent.Create(nil, True, False, '');
+  Release := TEvent.Create(nil, True, False, '');
+  try
+    Srv := TMcpPipeServer.Create(McpPipeName(GetCurrentProcessId),
+      function(const ARequest: string; AStop: THandle): string
+      begin
+        if ARequest.Contains(Probe) then
+        begin
+          Entered.SetEvent;
+          Release.WaitFor(10000);
+        end;
+        Result := '{"ok":true}';
+      end);
+    try
+      Assert.IsTrue(Srv.Start, 'the test pipe is there: ' + Srv.LastError);
+      Client := StartProbeClient(Probe);
+      try
+        Assert.IsTrue(Entered.WaitFor(5000) = wrSignaled, 'the handler runs');
+        During := ActiveWorkerCount;
+      finally
+        Release.SetEvent;
+        Client.WaitFor;
+        Client.Free;
+      end;
+      Srv.Stop;
+    finally
+      Srv.Free;
+    end;
+  finally
+    Release.Free;
+    Entered.Free;
+  end;
+  Assert.IsTrue(During > Before, Format('a running pipe handler must be ' +
+    'counted by the worker latch (workers before: %d, while it ran: %d)',
+    [Before, During]));
 end;
 
 { TLspProgressTests }

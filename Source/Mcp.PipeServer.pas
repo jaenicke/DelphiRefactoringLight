@@ -16,7 +16,8 @@ unit Mcp.PipeServer;
 //   request never sees "no such pipe" while the first is being served
 //   (which would make discovery miss the IDE);
 // * every accepted connection runs on its own short-lived handler thread,
-//   counted in FActive;
+//   counted in FActive and started through Expert.WorkerLatch.StartWorker,
+//   so ShutdownWorkersAndWait sees it like every other worker;
 // * Stop signals FStopEvent - every wait in here and in the handler (see
 //   StopEvent) watches it - and waits for the listener and all handlers
 //   before returning. No code of this unit runs after Stop.
@@ -89,7 +90,8 @@ function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
 implementation
 
 uses
-  System.SyncObjs, System.JSON, Mcp.Protocol;
+  System.SyncObjs, System.JSON, Mcp.Protocol,
+  Expert.WorkerLatch;   // RTL only as well: handler threads are joined at unload
 
 const
   PIPE_REJECT_REMOTE_CLIENTS = $00000008;
@@ -406,11 +408,14 @@ begin
       end;
 
       // Hand the connection to its own thread and immediately offer the
-      // next instance.
+      // next instance. Through the worker latch: a bare anonymous thread is
+      // invisible to ShutdownWorkersAndWait, so a handler that outlived Stop
+      // could still be running when the BPL is unmapped.
       TInterlocked.Increment(FActive);
+      var Started := False;
       try
         var P := Pipe;
-        TThread.CreateAnonymousThread(
+        Started := StartWorker(
           procedure
           begin
             try
@@ -418,9 +423,15 @@ begin
             finally
               TInterlocked.Decrement(FActive);
             end;
-          end).Start;
+          end);
       except
+        // thread creation failed - drop this connection, keep listening
+      end;
+      if not Started then
+      begin
+        // shutting down, or no thread: the client sees a closed pipe
         TInterlocked.Decrement(FActive);
+        DisconnectNamedPipe(Pipe);
         CloseHandle(Pipe);
       end;
     end;

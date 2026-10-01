@@ -412,6 +412,15 @@ begin
     AWhy := 'the selection does not end with a complete statement';
     Exit;
   end;
+  // "if X then" / "  A;" / "B;": wrapping A and B would take B into the
+  // branch as well
+  if IsSoleBranchStatement(ALines, StatementStartLine(M, AFirst0)) then
+  begin
+    AWhy := 'the statement is the only one of a then/else/do branch - put it ' +
+      'into begin..end first (the try would take the following statements ' +
+      'into the branch)';
+    Exit;
+  end;
   Indent := LeadingBlanks(ALines[AFirst0]);
   Cleanup := ACleanup;
   if Cleanup = '' then Cleanup := '// TODO: release what the block acquired'

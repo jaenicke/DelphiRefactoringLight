@@ -299,9 +299,16 @@ begin
         if FirstToken = '' then FirstToken := Token;
         LastToken := Token;
 
-        if Token = 'BEGIN' then Inc(BeginEndDepth)
+        // Every block that "end" closes counts in BeginEndDepth: begin,
+        // try, case and asm - counting only begin refused every complete
+        // try..end and case..end
+        if (Token = 'BEGIN') or (Token = 'ASM') then Inc(BeginEndDepth)
         else if Token = 'END' then Dec(BeginEndDepth)
-        else if Token = 'TRY' then Inc(TryDepth)
+        else if Token = 'TRY' then
+        begin
+          Inc(TryDepth);
+          Inc(BeginEndDepth);
+        end
         else if (Token = 'EXCEPT') or (Token = 'FINALLY') then
         begin
           if TryDepth > 0 then
@@ -309,7 +316,11 @@ begin
           else
             ForeignFinallyExceptFound := True;
         end
-        else if Token = 'CASE' then Inc(CaseDepth)
+        else if Token = 'CASE' then
+        begin
+          Inc(CaseDepth);
+          Inc(BeginEndDepth);
+        end
         else if Token = 'IF' then
           Inc(PendingThen)
         else if Token = 'THEN' then
@@ -368,6 +379,7 @@ begin
             LoopHeaderPending := False;
           end;
         end
+        else if Token = 'ASM' then BlockStack.Add(bkBegin)
         else if Token = 'BEGIN' then
         begin
           if ExpectLoopBody then
@@ -394,7 +406,12 @@ begin
         else if Token = 'END' then
         begin
           if BlockStack.Count > 0 then
+          begin
+            // the case is closed: an "else" after it is an orphan again
+            if (BlockStack.Last = bkCase) and (CaseDepth > 0) then
+              Dec(CaseDepth);
             BlockStack.Delete(BlockStack.Count - 1);
+          end;
         end
         else if Token = 'UNTIL' then
         begin

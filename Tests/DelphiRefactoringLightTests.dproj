@@ -105,6 +105,9 @@
         <DCCReference Include="Test.ChangeSignature.pas"/>
         <DCCReference Include="..\Standalone\Standalone.EditorHelper.pas"/>
         <DCCReference Include="Test.StandaloneState.pas"/>
+        <DCCReference Include="..\Source\Expert.SelectionValidator.pas"/>
+        <DCCReference Include="..\Source\Expert.ExtractMethod.pas"/>
+        <DCCReference Include="Test.ExtractMethod.pas"/>
         <BuildConfiguration Include="Release">
             <Key>Cfg_1</Key>
             <CfgParent>Base</CfgParent>

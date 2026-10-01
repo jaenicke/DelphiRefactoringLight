@@ -65,7 +65,10 @@ uses
   Test.Issue11 in 'Test.Issue11.pas',
   Test.ChangeSignature in 'Test.ChangeSignature.pas',
   Standalone.EditorHelper in '..\Standalone\Standalone.EditorHelper.pas',
-  Test.StandaloneState in 'Test.StandaloneState.pas';
+  Test.StandaloneState in 'Test.StandaloneState.pas',
+  Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
+  Expert.ExtractMethod in '..\Source\Expert.ExtractMethod.pas',
+  Test.ExtractMethod in 'Test.ExtractMethod.pas';
 
 var
   Runner: ITestRunner;

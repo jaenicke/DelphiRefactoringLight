@@ -32,6 +32,7 @@ type
     [Test] procedure ExtractVariable_RefusesUnsafeSpots;
     [Test] procedure WrapTryFinally_InfersCleanup;
     [Test] procedure WrapTryFinally_WrapsAndRefusesPartialBlocks;
+    [Test] procedure WrapTryFinally_RefusesASoleBranchBody;
     [Test] procedure SafeDelete_MethodDeclarationAndBody;
     [Test] procedure SafeDelete_VetoesDispatchAndPublished;
     [Test] procedure SafeDelete_DataDeclarations;
@@ -243,6 +244,25 @@ begin
   Assert.AreEqual('  L := TStringList.Create;|  try|    L.Add(''a'');|    if X then|' +
     '    begin|      Y;|    end;|  finally|    L.Free;|  end;|  Z;', string.Join('|', R));
   Assert.IsFalse(PlanWrapTryFinally(Src, 1, 4, '', R, Why), 'begin without its end');
+end;
+
+procedure TIssue11Tests.WrapTryFinally_RefusesASoleBranchBody;
+var
+  R: TArray<string>;
+  Why: string;
+begin
+  // A is the whole then-branch: wrapping A and B would make B conditional
+  Assert.IsFalse(PlanWrapTryFinally(TArray<string>.Create('begin', '  if X then',
+    '    A;', '  B;', 'end;'), 2, 3, '', R, Why), 'then-branch body plus B');
+  Assert.IsTrue(Why.Contains('only one of a then/else/do branch'), Why);
+  Assert.IsFalse(PlanWrapTryFinally(TArray<string>.Create('begin',
+    '  for I := 0 to 9 do  // loop', '    A;', '  B;', 'end;'), 2, 3, '', R, Why),
+    'a do-body, with a comment after the do');
+  Assert.IsFalse(PlanWrapTryFinally(TArray<string>.Create('begin', '  if X then',
+    '    A', '  else', '    C;', '  B;', 'end;'), 4, 5, '', R, Why), 'an else-branch body');
+  // inside a begin..end branch it stays possible
+  Assert.IsTrue(PlanWrapTryFinally(TArray<string>.Create('begin', '  if X then',
+    '  begin', '    A;', '    B;', '  end;', 'end;'), 3, 4, '', R, Why), Why);
 end;
 
 procedure TIssue11Tests.SafeDelete_MethodDeclarationAndBody;

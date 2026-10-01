@@ -455,6 +455,14 @@ begin
     AState.Complete);
 end;
 
+// Every entry name the answer is about to carry - the tool checks its own
+// result with it (Expert.McpTools.UnitNameSelfCheck).
+function EntryNames(const AEntries: TArray<TUsesEntryInfo>): TArray<string>;
+begin
+  SetLength(Result, Length(AEntries));
+  for var I := 0 to High(AEntries) do Result[I] := AEntries[I].UnitName;
+end;
+
 // The three injected lookups are the same for both tools.
 function AnalyzeUsesWithDesigner(const AContent, AFile: string;
   const ASnap: IUnitSnapshot; const AState: TDesignerState;
@@ -533,6 +541,8 @@ begin
   end;
   var Res := TJSONObject.Create;
   Res.AddPair('file', F);
+  var SelfCheck := UnitNameSelfCheck(EntryNames(Entries));
+  if SelfCheck <> '' then Res.AddPair('selfCheck', SelfCheck);
   Res.AddPair('designerVerified', TJSONBool.Create(St.Verified));
   Res.AddPair('designerState', St.StateText);
   Res.AddPair('entries', Arr);
@@ -2402,6 +2412,18 @@ begin
   Extra.AddPair('movedToImplementation', TJSONNumber.Create(Moved));
   Extra.AddPair('designerVerified', TJSONBool.Create(St.Verified));
   Extra.AddPair('designerState', St.StateText);
+  var SelfCheck := UnitNameSelfCheck(EntryNames(Entries));
+  // A name that cannot be a unit name means the clause was misparsed - then
+  // nothing here may be applied, whatever "apply" says.
+  if SelfCheck <> '' then
+  begin
+    Extra.AddPair('selfCheck', SelfCheck);
+    Extra.AddPair('file', F);
+    Extra.AddPair('applied', TJSONBool.Create(False));
+    Extra.AddPair('changes', TJSONArray.Create);
+    Extra.AddPair('note', 'Nothing was changed: see selfCheck.');
+    Exit(McpOk(Extra));
+  end;
   if Skipped > 0 then
     Extra.AddPair('unverifiedKept', TJSONNumber.Create(Skipped));
   if Content = C then

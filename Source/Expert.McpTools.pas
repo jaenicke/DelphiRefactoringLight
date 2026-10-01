@@ -59,6 +59,23 @@ function ChangesToJson(const AChanges: TArray<TPreviewChange>): TJSONArray;
 ///  for (the same shape the fix ids use).</summary>
 function PreviewContentHash(const AContent: string): Cardinal;
 
+/// <summary>Is AName something that CANNOT be a Delphi unit name - empty, or
+///  anything but a dotted identifier?
+///  WHY A TOOL CHECKS ITS OWN ANSWER: analyze_uses reported
+///  'Expert.PluginSettings {$IFNDEF STANDALONE_BUILD}' as a unit name for
+///  two days (1.16.2 fixed the parser). The answer was wrong in a way that
+///  is structurally impossible, I had read that very clause in the same
+///  session without noticing, and it took an outside audit to find it. A
+///  result like that is not data, it is a defect in whoever produced it - so
+///  the tools say so instead of passing it on. The model on the other end
+///  takes a tool answer for truth; this is the one place that can doubt
+///  it.</summary>
+function ImplausibleUnitName(const AName: string): Boolean;
+
+/// <summary>'' when every name is plausible, otherwise the sentence a tool
+///  puts into its answer as "selfCheck".</summary>
+function UnitNameSelfCheck(const ANames: TArray<string>): string;
+
 /// <summary>Remembers which files a preview describes and how they looked.
 ///  "apply" with that token refuses when a buffer changed meanwhile - the
 ///  caller then sees a stale preview instead of an edit it never saw.
@@ -87,7 +104,55 @@ function QuickFixesToJson(const AFile: string; AHash: Cardinal;
 implementation
 
 uses
-  System.TypInfo, System.StrUtils, Expert.UsesEditor;
+  System.TypInfo, System.StrUtils, Expert.UsesEditor, Expert.PascalScanner;
+
+function ImplausibleUnitName(const AName: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  if AName = '' then Exit;
+  if not IsIdentStart(AName[1]) then Exit;
+  I := 2;
+  while I <= Length(AName) do
+  begin
+    // a dotted name: every segment starts like an identifier
+    if AName[I] = '.' then
+    begin
+      if (I = Length(AName)) or not IsIdentStart(AName[I + 1]) then Exit;
+      Inc(I, 2);
+      Continue;
+    end;
+    if not IsIdentChar(AName[I]) then Exit;
+    Inc(I);
+  end;
+  Result := False;
+end;
+
+function UnitNameSelfCheck(const ANames: TArray<string>): string;
+var
+  Bad: string;
+  N: Integer;
+begin
+  Result := '';
+  Bad := '';
+  N := 0;
+  for var Name in ANames do
+    if ImplausibleUnitName(Name) then
+    begin
+      Inc(N);
+      if N <= 5 then
+      begin
+        if Bad <> '' then Bad := Bad + ' | ';
+        Bad := Bad + '"' + Name + '"';
+      end;
+    end;
+  if N = 0 then Exit;
+  Result := Format('DEFECT IN THIS PLUGIN, please report: %d of the %d entries ' +
+    'is not a valid unit name - %s. The uses clause was not parsed correctly, ' +
+    'so every verdict and every lookup keyed on these names is unreliable.',
+    [N, Length(ANames), Bad]);
+end;
 
 function PreviewContentHash(const AContent: string): Cardinal;
 begin

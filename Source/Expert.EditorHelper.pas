@@ -338,6 +338,7 @@ var
   Module: IOTAModule;
   FilePath: string;
 begin
+  RequireMainThread('ReloadModifiedFiles');
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     Exit;
 
@@ -468,6 +469,7 @@ procedure TIDEEditorHelper.SaveAllFiles;
 var
   ModuleServices: IOTAModuleServices;
 begin
+  RequireMainThread('SaveAllFiles');
   if Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     ModuleServices.SaveAll;
 end;
@@ -477,6 +479,7 @@ var
   ModuleServices: IOTAModuleServices;
   Module: IOTAModule;
 begin
+  RequireMainThread('SaveFile');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -500,6 +503,7 @@ var
   CharPos: TOTACharPos;
   I: Integer;
 begin
+  RequireMainThread('GotoLocation');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     Exit;
@@ -571,6 +575,7 @@ var
   BytesRead: Integer;
   OldTextLen: Integer;
 begin
+  RequireMainThread('ApplyEditViaEditor');
   Result := False;
 
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
@@ -654,6 +659,7 @@ var
   Buf: TBytes;
   LinearPos: Integer;
 begin
+  RequireMainThread('InsertTextAtLineStart');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -703,6 +709,7 @@ var
   BytesRead: Integer;
   Buf: TBytes;
 begin
+  RequireMainThread('ReplaceFileContent');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -789,6 +796,7 @@ var
   Buf: TBytes;
   StartPos, EndPos: Integer;
 begin
+  RequireMainThread('ReplaceSelection');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -1028,6 +1036,7 @@ var
   Comp: IOTAComponent;
   NtaComp: INTAComponent;
 begin
+  RequireMainThread('RenameInFormDesigner');
   Result := False;
   AMessage := '';
   FormEditor := FindFormEditorOf(APasFile);
@@ -1095,6 +1104,7 @@ var
   I: Integer;
   FormEditor: IOTAFormEditor;
 begin
+  RequireMainThread('NotifyClassStructureChanged');
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
   if Module = nil then Exit;
@@ -1129,6 +1139,7 @@ var
   Writer: IOTAEditWriter;
   I: Integer;
 begin
+  RequireMainThread('ReplaceLineAt');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -1167,6 +1178,7 @@ var
   Writer: IOTAEditWriter;
   I: Integer;
 begin
+  RequireMainThread('DeleteLineAt');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then Exit;
   Module := ModuleServices.FindModule(AFilePath);
@@ -1530,6 +1542,7 @@ var
   Project: IOTAProject;
   I: Integer;
 begin
+  RequireMainThread('AddFileToActiveProject');
   Result := False;
   if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
   // Prefer the active project from the project group.
@@ -1563,6 +1576,7 @@ var
   Cur, Dir: string;
   I: Integer;
 begin
+  RequireMainThread('AddProjectSearchPath');
   Result := False;
   if ADir = '' then Exit;
   if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;

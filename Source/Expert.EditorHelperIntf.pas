@@ -28,6 +28,11 @@ unit Expert.EditorHelperIntf;
 
 interface
 
+uses
+  // RTL only - the unit's point is to carry NO ToolsAPI / VCL dependency,
+  // and System.SysUtils is what EOffMainThread needs.
+  System.SysUtils;
+
 type
   /// <summary>Cursor + project state at the moment a wizard is invoked.
   ///  Line and Column are 1-based (matching what the user sees in
@@ -196,10 +201,57 @@ function Editor: IEditorHelper;
 ///  by tests).</summary>
 procedure SetEditorImpl(const AImpl: IEditorHelper);
 
+// ---------------------------------------------------------------------------
+//  The main-thread rule, made visible
+// ---------------------------------------------------------------------------
+//
+// ToolsAPI - editor buffers included - is MAIN THREAD ONLY. That rule has
+// been broken silently more than once: the completion wizards broke it
+// through a "read the live buffer" helper hidden inside the LSP client, and
+// three MCP tools apply their edit AFTER their McpRunOnMain block has closed,
+// i.e. from the pipe handler thread (fork audit, 2026-10). Such a race does
+// not fail - it corrupts a buffer now and then, which is the worst way for a
+// defect to behave.
+// So every write path names itself, and a violation becomes VISIBLE (status
+// window, get_status) instead of being a coin toss.
+
+type
+  EOffMainThread = class(Exception);
+
+var
+  /// <summary>Turn a violation into an exception instead of a counter.
+  ///  OFF by default ON PURPOSE: three MCP tools are known to violate the
+  ///  rule today (reported, fix pending), and a guard that turns a
+  ///  working-by-luck tool into a hard error before the tool is fixed would
+  ///  be a regression of its own. Switch it on once MainThreadViolations
+  ///  stays 0 through a full round of the tools.</summary>
+  StrictMainThread: Boolean = False;
+
+/// <summary>True iff the caller runs on the main thread.</summary>
+function OnMainThread: Boolean;
+
+/// <summary>Records that AWhat ran off the main thread (counter + name).</summary>
+procedure NoteOffMainThread(const AWhat: string);
+
+/// <summary>What every write path calls first: records the violation and,
+///  with StrictMainThread on, raises EOffMainThread instead of racing.</summary>
+procedure RequireMainThread(const AWhat: string);
+
+/// <summary>How many violations were recorded, and the name of the last one
+///  ('ReplaceFileContent' ...) - for the status window and get_status.</summary>
+function MainThreadViolations: Integer;
+function LastOffMainThreadCall: string;
+
 implementation
+
+uses
+  System.Classes, System.SyncObjs;
 
 var
   GEditor: IEditorHelper;
+  GViolations: Integer;
+  GLastOffMain: string;
+  GLastLock: TCriticalSection;
 
 function Editor: IEditorHelper;
 begin
@@ -210,5 +262,58 @@ procedure SetEditorImpl(const AImpl: IEditorHelper);
 begin
   GEditor := AImpl;
 end;
+
+function OnMainThread: Boolean;
+begin
+  Result := TThread.CurrentThread.ThreadID = MainThreadID;
+end;
+
+procedure NoteOffMainThread(const AWhat: string);
+begin
+  TInterlocked.Increment(GViolations);
+  // A worker that is still running while the BPL unloads would otherwise
+  // AV on a freed lock - the counter is what matters, the name is a bonus.
+  if GLastLock = nil then Exit;
+  GLastLock.Enter;
+  try
+    GLastOffMain := AWhat;
+  finally
+    GLastLock.Leave;
+  end;
+end;
+
+procedure RequireMainThread(const AWhat: string);
+begin
+  if OnMainThread then Exit;
+  NoteOffMainThread(AWhat);
+  if StrictMainThread then
+    raise EOffMainThread.CreateFmt('%s was called from a worker thread. ' +
+      'ToolsAPI and the editor buffers are main thread only - run it through ' +
+      'RunOnMain / McpRunOnMain.', [AWhat]);
+end;
+
+function MainThreadViolations: Integer;
+begin
+  Result := TInterlocked.CompareExchange(GViolations, 0, 0);
+end;
+
+function LastOffMainThreadCall: string;
+begin
+  if GLastLock = nil then Exit('');
+  GLastLock.Enter;
+  try
+    Result := GLastOffMain;
+  finally
+    GLastLock.Leave;
+  end;
+end;
+
+initialization
+  GLastLock := TCriticalSection.Create;
+
+finalization
+  var L := GLastLock;
+  GLastLock := nil;   // readers bail out instead of touching a freed lock
+  L.Free;
 
 end.

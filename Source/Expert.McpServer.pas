@@ -1268,11 +1268,18 @@ function ToolBufferSave(AArgs: TJSONObject; AStop: THandle): string;
 var
   F, Err, Msg: string;
   WasModified, Saved: Boolean;
+  // A MODULE owns every file of the pair, and Save writes all of them: the
+  // .pas of a form takes its .dfm along, re-streamed as the current IDE
+  // writes it, and the IDE may extend the unit's own uses clause while it is
+  // at it. That cost a revert round once (2026-09-30), because the answer
+  // only ever named the file that was asked for. It names them all now.
+  Others: TArray<string>;
 begin
   if not RequireFile(AArgs, F, Err) then Exit(ErrResult(Err));
   Msg := '';
   WasModified := False;
   Saved := False;
+  Others := nil;
   if not RunOnMain(
     procedure
     begin
@@ -1283,6 +1290,17 @@ begin
         Exit;
       end;
       WasModified := ModuleIsModified(M);
+      // collected BEFORE the save - afterwards nothing is modified any more
+      for var I := 0 to M.GetModuleFileCount - 1 do
+      begin
+        var FE := M.GetModuleFileEditor(I);
+        if (FE = nil) or (FE.FileName = '') then Continue;
+        if SameText(ExpandFileName(FE.FileName), F) then Continue;
+        if FE.Modified then
+          Others := Others + [FE.FileName + ' (modified)']
+        else
+          Others := Others + [FE.FileName];
+      end;
       if not WasModified then Exit;
       Saved := M.Save(False, True);
       if not Saved then
@@ -1294,6 +1312,18 @@ begin
   Res.AddPair('saved', TJSONBool.Create(Saved));
   if not WasModified then
     Res.AddPair('note', 'The buffer had no unsaved changes - nothing written.');
+  if Length(Others) > 0 then
+  begin
+    var Arr := TJSONArray.Create;
+    for var O in Others do Arr.Add(O);
+    Res.AddPair('alsoWritten', Arr);
+    if Saved then
+      Res.AddPair('note2', 'The IDE saves the whole MODULE, so these files of ' +
+        'the same module were written too. A form''s .dfm is re-streamed as ' +
+        'this IDE version writes it, and the designer may add the units of ' +
+        'its components to the unit''s uses clause - check them before you ' +
+        'commit.');
+  end;
   Result := OkResult(Res);
 end;
 

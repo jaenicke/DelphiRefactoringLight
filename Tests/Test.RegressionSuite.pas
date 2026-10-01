@@ -368,6 +368,22 @@ type
     [Test] procedure AnInactiveBranchIsNeverJudgedButItsNeighbourIs;
   end;
 
+  /// <summary>Two guards the plugin keeps on ITSELF, both earned.
+  ///  (1) ToolsAPI is main thread only, and breaking that rule does not
+  ///  fail - it corrupts a buffer now and then. A fork audit found three MCP
+  ///  tools applying their edit from the pipe handler thread, which no test
+  ///  could have caught, so every write path reports itself now.
+  ///  (2) analyze_uses answered 'Expert.PluginSettings {$IFNDEF
+  ///  STANDALONE_BUILD}' as a unit NAME for two days. That is structurally
+  ///  impossible, and a tool that notices it says so instead of passing it
+  ///  to a caller who has no way to doubt it.</summary>
+  [TestFixture]
+  TSelfProtectionTests = class
+  public
+    [Test] procedure AWriteFromAWorkerThreadIsRecordedAndCanBeRefused;
+    [Test] procedure AnImpossibleUnitNameIsReportedAsADefect;
+  end;
+
 implementation
 
 uses
@@ -378,7 +394,7 @@ uses
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
-  Expert.MoveToUnit, Expert.SafeDeletePlan;
+  Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools;
 
 const
   NL = sLineBreak;
@@ -2478,6 +2494,97 @@ begin
   Assert.Contains(ReasonOf(E, 'A'), 'directives');
 end;
 
+{ TSelfProtectionTests }
+
+procedure TSelfProtectionTests.AWriteFromAWorkerThreadIsRecordedAndCanBeRefused;
+var
+  Before: Integer;
+  Raised, RanOffMain: Boolean;
+  T: TThread;
+begin
+  // the test itself runs on the main thread, so nothing is recorded there
+  Before := MainThreadViolations;
+  Assert.IsTrue(OnMainThread, 'the suite runs on the main thread');
+  RequireMainThread('probe_from_main');
+  Assert.AreEqual(Before, MainThreadViolations,
+    'a main-thread call is not a violation');
+
+  // ... and a worker thread is one, by name
+  T := TThread.CreateAnonymousThread(
+    procedure
+    begin
+      RequireMainThread('probe_from_worker');
+    end);
+  T.FreeOnTerminate := False;
+  try
+    T.Start;
+    T.WaitFor;
+  finally
+    T.Free;
+  end;
+  Assert.AreEqual(Before + 1, MainThreadViolations, 'the violation is counted');
+  Assert.AreEqual('probe_from_worker', LastOffMainThreadCall,
+    'and the call that did it is named');
+
+  // With the strict switch it is fatal instead of merely counted. It is OFF
+  // by default on purpose: the three known offenders would turn into hard
+  // errors before they are fixed.
+  Raised := False;
+  RanOffMain := False;
+  StrictMainThread := True;
+  try
+    T := TThread.CreateAnonymousThread(
+      procedure
+      begin
+        try
+          RequireMainThread('probe_strict');
+          RanOffMain := True;      // must NOT be reached
+        except
+          on E: EOffMainThread do Raised := True;
+        end;
+      end);
+    T.FreeOnTerminate := False;
+    try
+      T.Start;
+      T.WaitFor;
+    finally
+      T.Free;
+    end;
+  finally
+    StrictMainThread := False;
+  end;
+  Assert.IsTrue(Raised, 'strict mode raises EOffMainThread');
+  Assert.IsFalse(RanOffMain, 'and the write never happens');
+end;
+
+procedure TSelfProtectionTests.AnImpossibleUnitNameIsReportedAsADefect;
+begin
+  // the two names analyze_uses really answered, verbatim
+  Assert.IsTrue(ImplausibleUnitName('Expert.PluginSettings {$IFNDEF STANDALONE_BUILD}'));
+  Assert.IsTrue(ImplausibleUnitName('Expert.BlameGutter{$ENDIF}'));
+  Assert.IsTrue(ImplausibleUnitName('System.SysUtils { was: System.Math'));
+  Assert.IsTrue(ImplausibleUnitName('A in ''..\src\A.pas'''));
+  Assert.IsTrue(ImplausibleUnitName(''), 'an empty name is not a unit either');
+  Assert.IsTrue(ImplausibleUnitName('Vcl.'), 'a trailing dot has no segment');
+  Assert.IsTrue(ImplausibleUnitName('.Vcl.Forms'));
+  Assert.IsTrue(ImplausibleUnitName('2Fast'), 'a name cannot start with a digit');
+  // ... and everything a real unit name looks like
+  Assert.IsFalse(ImplausibleUnitName('Vcl.Forms'));
+  Assert.IsFalse(ImplausibleUnitName('Winapi.Windows'));
+  Assert.IsFalse(ImplausibleUnitName('cxGraphics'));
+  Assert.IsFalse(ImplausibleUnitName('U2'));
+  Assert.IsFalse(ImplausibleUnitName('_Private.Unit_2'));
+  Assert.IsFalse(ImplausibleUnitName('mormot.core.interfaces'));
+
+  // the sentence a tool puts into its answer
+  Assert.AreEqual('', UnitNameSelfCheck(['Vcl.Forms', 'System.Classes']),
+    'a clean answer carries no selfCheck at all');
+  var S := UnitNameSelfCheck(['Vcl.Forms', 'Expert.BlameGutter{$ENDIF}']);
+  Assert.IsTrue(S <> '', 'one bad name is enough');
+  Assert.Contains(S, 'Expert.BlameGutter{$ENDIF}', 'it quotes the name');
+  Assert.Contains(S, 'report', 'and says it is a defect in the plugin');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -2503,5 +2610,6 @@ initialization
   TDUnitX.RegisterTestFixture(TInterfaceDeclLineTests);
   TDUnitX.RegisterTestFixture(TDesignerManagedUsesTests);
   TDUnitX.RegisterTestFixture(TUsesClauseParsingTests);
+  TDUnitX.RegisterTestFixture(TSelfProtectionTests);
 
 end.

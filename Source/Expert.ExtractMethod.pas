@@ -73,6 +73,13 @@ type
     ReturnVarType: string;
   end;
 
+  /// <summary>An identifier of the selected block and the place DelphiLSP
+  ///  is asked about it (0-based file line and column).</summary>
+  TExtractToken = record
+    Ident: string;
+    Line0, Col0: Integer;
+  end;
+
   TLspExtractMethodWizard = class
   private
     FDialog: TExtractMethodDialog;      // nil = headless (MCP)
@@ -99,7 +106,9 @@ type
     function GenerateCall(const AInfo: TExtractMethodInfo): string;
     function GenerateClassDeclaration(const AInfo: TExtractMethodInfo): string;
     /// <summary>Removes the moved variables from the var declaration
-    ///  of the original method (between InsertLine and StartLine).</summary>
+    ///  of the original method (between InsertLine and StartLine) - and
+    ///  only from there (PlanLocalVarRemoval). Before the new method is
+    ///  inserted above it.</summary>
     procedure RemoveLocalVarsFromDeclaration(const AInfo: TExtractMethodInfo);
     procedure DoAnalyzeAndPreview(var AInfo: TExtractMethodInfo);
     /// <summary>The four editor writes of one extraction - shared by the
@@ -122,10 +131,36 @@ function ExtractMethodHeadless(const AFile: string; AFromLine1, AToLine1: Intege
   const AMethodName: string; AApply: Boolean; out APreview: TExtractMethodPreview;
   out AError: string): Boolean;
 
+/// <summary>The first occurrence of every identifier of ASelectedText
+///  (lines separated by LF) with its position in the FILE. The first line
+///  of the selection starts at the 1-based column AStartCol, so its columns
+///  are offset by AStartCol-1 - for a selection that starts mid-line the
+///  LSP was asked about the wrong token. Keywords and identifiers inside
+///  strings or comments are skipped.</summary>
+function ExtractBlockTokens(const ASelectedText: string;
+  AStartLine, AStartCol: Integer): TArray<TExtractToken>;
+
+/// <summary>True when AIdent can become the Result of the extracted
+///  function: the block's FIRST mention of it is an unconditional top-level
+///  assignment whose right side does not read it. Otherwise the block reads
+///  the value the variable had before, and Result would start undefined -
+///  "Total := Total + Extra" became "Result := Result + AExtra". Such a
+///  variable stays a var parameter.</summary>
+function CanReturnViaResult(const ABlockText, AIdent: string): Boolean;
+
+/// <summary>The line edits that take ANames out of the var section(s) of
+///  the routine whose header is on the 1-based line AHeaderLine - only that
+///  routine's, from the header to its begin (or a nested routine). A var
+///  section that loses every declaration loses its keyword line too.
+///  Result: (1-based line, new text) in ascending order; #0 deletes the
+///  line.</summary>
+function PlanLocalVarRemoval(const AFileLines: TArray<string>; AHeaderLine: Integer;
+  const ANames: TArray<string>): TArray<TPair<Integer, string>>;
+
 implementation
 
 uses
-  System.UITypes;
+  System.UITypes, Expert.PascalScanner;
 
 type
   TSymbolKind = (skUnknown, skVariable, skConst, skField, skProperty, skParameter, skProcedure, skFunction, skType, skUnit,
@@ -876,7 +911,6 @@ end;
 function TLspExtractMethodWizard.AnalyzeVariables(var AInfo: TExtractMethodInfo; AClient: TLspClient): Boolean;
 var
   Lines: TArray<string>;
-  Seen: TDictionary<string, Boolean>;
   Assigned_: TDictionary<string, Boolean>;
   Tokens: TList<TTokenInfo>;
   NeedDef: TList<Integer>;
@@ -887,7 +921,6 @@ var
 begin
   Result := True;
   Lines := AInfo.SelectedText.Split([#10]);
-  Seen := TDictionary<string, Boolean>.Create;
   Assigned_ := TDictionary<string, Boolean>.Create;
   Tokens := TList<TTokenInfo>.Create;
   NeedDef := TList<Integer>.Create;
@@ -900,23 +933,15 @@ begin
     for I := 0 to High(Lines) do
     begin
       Line := Lines[I].TrimRight([#13,#10]);
-      var LL := AInfo.StartLine-1+I;
       var AM := TRegEx.Match(Line, '^\s*(\w+)\s*:=');
       if AM.Success then Assigned_.AddOrSetValue(UpperCase(AM.Groups[1].Value), True);
-      for var M in TRegEx.Matches(Line, '\b([A-Za-z_]\w*)\b') do
-      begin
-        var UI := UpperCase(M.Value);
-        if Seen.ContainsKey(UI) then Continue;
-        // Skip Pascal keywords (cost LSP time, yield nothing)
-        if TExtractMethodHelper.IsPascalKeyword(UI) then Continue;
-        // Skip tokens inside string/comment
-        if TExtractMethodHelper.IsInsideStringOrComment(Line, M.Index) then Continue;
-        Seen.Add(UI, True);
-        var TI: TTokenInfo;
-        TI.Ident:=M.Value; TI.LspLine:=LL; TI.LspCol:=M.Index-1;
-        TI.HoverId:=-1; TI.DefId:=-1; TI.HoverText:=''; TI.DefFile:=''; TI.DefLine:=-1;
-        Tokens.Add(TI);
-      end;
+    end;
+    for var ET in ExtractBlockTokens(AInfo.SelectedText, AInfo.StartLine, AInfo.StartCol) do
+    begin
+      var TI: TTokenInfo;
+      TI.Ident:=ET.Ident; TI.LspLine:=ET.Line0; TI.LspCol:=ET.Col0;
+      TI.HoverId:=-1; TI.DefId:=-1; TI.HoverText:=''; TI.DefFile:=''; TI.DefLine:=-1;
+      Tokens.Add(TI);
     end;
     AInfo.DiagLog := AInfo.DiagLog + IntToStr(Tokens.Count)+' relevant identifiers (keywords/strings filtered)'+sLineBreak;
     // DelphiLSP does NOT support parallel requests -> batch size 1
@@ -1114,13 +1139,20 @@ begin
           UsedOutside := TExtractMethodHelper.IdentUsedOutsideBlock(FileLines, TI.Ident,
             AInfo.InsertLine, MethodEnd, AInfo.StartLine, AInfo.EndLine,
             TI.DefLine);
-        if UsedOutside then
+        // An inline var is declared - and usually initialised - above the
+        // block, so its value flows in: it is a parameter even when nothing
+        // after the block uses it. Moving it declared a second, uninitialised
+        // variable in the new routine and left "var X := 5;" behind.
+        if UsedOutside or Inline_ then
         begin
           // Variable is also used outside -> parameter
           var P: TExtractedParam; P.Name:=TI.Ident; P.TypeName:=TN;
           if Assigned_.ContainsKey(UpperCase(TI.Ident)) then P.Mode:=pmVar
           else P.Mode:=pmConst;
-          AInfo.DiagLog:=AInfo.DiagLog+'    -> parameter (also used outside)'+sLineBreak;
+          if UsedOutside then
+            AInfo.DiagLog:=AInfo.DiagLog+'    -> parameter (also used outside)'+sLineBreak
+          else
+            AInfo.DiagLog:=AInfo.DiagLog+'    -> parameter (inline var declared before the block)'+sLineBreak;
           PL.Add(P);
         end
         else
@@ -1149,12 +1181,14 @@ begin
     // Promote the first var-parameter (pmVar) to the function's Result:
     // when a value is assigned inside the block and read afterwards, it is
     // more idiomatic Delphi to return it as a function result than to pass
-    // it back through a var parameter.
+    // it back through a var parameter. Only when the block does not need
+    // the value the variable had before it (CanReturnViaResult).
     AInfo.ReturnVarName := '';
     AInfo.ReturnVarType := '';
     for var RI := 0 to High(AInfo.Params) do
       if (AInfo.Params[RI].Mode = pmVar)
-        and not AInfo.Params[RI].IsForwardedEnclosingParam then
+        and not AInfo.Params[RI].IsForwardedEnclosingParam
+        and CanReturnViaResult(AInfo.SelectedText, AInfo.Params[RI].Name) then
       begin
         AInfo.ReturnVarName := AInfo.Params[RI].Name;
         AInfo.ReturnVarType := AInfo.Params[RI].TypeName;
@@ -1176,7 +1210,7 @@ begin
 
     if FDialog<>nil then FDialog.SetProgress(Tokens.Count*2, Tokens.Count*2);
   finally
-    NeedDef.Free; Tokens.Free; LVL.Free; PL.Free; Assigned_.Free; Seen.Free;
+    NeedDef.Free; Tokens.Free; LVL.Free; PL.Free; Assigned_.Free;
   end;
 end;
 
@@ -1357,12 +1391,14 @@ var
   Content: string;
   FL: TArray<string>;
   SL: TStringList;
-  ToRemove: TDictionary<string, Boolean>;
+  Names: TArray<string>;
+  Plan: TArray<TPair<Integer, string>>;
   I: Integer;
-  InVar: Boolean;
 begin
-  // IMPORTANT: read the editor buffer (not the file on disk) so that the
-  // newly inserted method and call are not lost.
+  // IMPORTANT: read the editor buffer (not the file on disk). Called after
+  // the block was replaced (below the var section) and BEFORE the new
+  // method is inserted (above it), so the line numbers of the enclosing
+  // routine are still those of the analysis.
   if not Editor.ReadEditorContent(AInfo.FileName, Content) then Exit;
 
   SL := TStringList.Create;
@@ -1375,93 +1411,239 @@ begin
     SL.Free;
   end;
 
-  ToRemove := TDictionary<string, Boolean>.Create;
-  // Collect line changes: 1-based line -> NewText (#0 = delete)
-  var LineChanges := TList<TPair<Integer, string>>.Create;
+  for var LV in AInfo.LocalVars do
+    Names := Names + [LV.Name];
+  Plan := PlanLocalVarRemoval(FL, AInfo.InsertLine, Names);
+
+  // Apply changes in reverse so that line numbers stay stable - and never
+  // outside the declaration part of the enclosing routine
+  for var J := High(Plan) downto 0 do
+  begin
+    var LineNum := Plan[J].Key;
+    if (LineNum <= AInfo.InsertLine) or (LineNum >= AInfo.StartLine) then Continue;
+    if Plan[J].Value = #0 then
+      Editor.DeleteLineAt(AInfo.FileName, LineNum)
+    else
+      Editor.ReplaceLineAt(AInfo.FileName, LineNum, Plan[J].Value);
+  end;
+end;
+
+function ExtractBlockTokens(const ASelectedText: string;
+  AStartLine, AStartCol: Integer): TArray<TExtractToken>;
+var
+  Lines: TArray<string>;
+  Seen: TDictionary<string, Boolean>;
+  Toks: TList<TExtractToken>;
+begin
+  Lines := ASelectedText.Split([#10]);
+  Seen := TDictionary<string, Boolean>.Create;
+  Toks := TList<TExtractToken>.Create;
   try
-    for var LV in AInfo.LocalVars do
-      ToRemove.AddOrSetValue(UpperCase(LV.Name), True);
-
-    // Walk all var sections in the file and remove affected names,
-    // BUT: skip the var section of the NEWLY INSERTED method!
-    var UpperMethodName := UpperCase(AInfo.MethodName);
-    InVar := False;
-    var IsInExtractedMethod := False;
-    I := 0;
-    while I < Length(FL) do
+    for var I := 0 to High(Lines) do
     begin
-      var Line := FL[I];
-      var U := UpperCase(Trim(Line));
-
-      if U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ') or
-         U.StartsWith('CONSTRUCTOR ') or U.StartsWith('DESTRUCTOR ') then
+      var Line := Lines[I].TrimRight([#13, #10]);
+      // the first line of the selection starts at AStartCol, not at column 1
+      var ColOffset := 0;
+      if I = 0 then ColOffset := AStartCol - 1;
+      for var M in TRegEx.Matches(Line, '\b([A-Za-z_]\w*)\b') do
       begin
-        InVar := False;
-        // Check whether this is the header of the new method
-        // e.g. "procedure TForm4.ExtractedMethod(...)" or "procedure ExtractedMethod(..)"
-        IsInExtractedMethod := (Pos('.' + UpperMethodName, U) > 0) or
-          (Pos('PROCEDURE ' + UpperMethodName, U) > 0) or
-          (Pos('FUNCTION ' + UpperMethodName, U) > 0);
-      end
-      else if (U = 'VAR') or U.StartsWith('VAR ') then
-        InVar := True
-      else if (U = 'BEGIN') or U.StartsWith('BEGIN ') or
-              (U = 'CONST') or U.StartsWith('CONST ') then
-        InVar := False;
-
-      // New method: skip
-      if InVar and not IsInExtractedMethod then
-      begin
-        var ColPos := Pos(':', Line);
-        if ColPos > 0 then
-        begin
-          var Before := Copy(Line, 1, ColPos - 1);
-          var After := Copy(Line, ColPos);
-          var Names := Before.Split([',']);
-          var NewNames := TStringList.Create;
-          try
-            for var N in Names do
-            begin
-              var TrimN := Trim(N);
-              if TrimN = '' then Continue;
-              if not ToRemove.ContainsKey(UpperCase(TrimN)) then
-                NewNames.Add(TrimN);
-            end;
-            if NewNames.Count = 0 then
-              // All names removed -> delete the line
-              LineChanges.Add(TPair<Integer, string>.Create(I + 1, #0))
-            else if NewNames.Count < Length(Names) then
-            begin
-              var Indent := '';
-              for var CI := 1 to Length(Line) do
-                if CharInSet(Line[CI], [' ', #9]) then
-                  Indent := Indent + Line[CI]
-                else
-                  Break;
-              LineChanges.Add(TPair<Integer, string>.Create(I + 1,
-                Indent + string.Join(', ', NewNames.ToStringArray) + After));
-            end;
-          finally
-            NewNames.Free;
-          end;
-        end;
+        var UI := UpperCase(M.Value);
+        if Seen.ContainsKey(UI) then Continue;
+        // Skip Pascal keywords (cost LSP time, yield nothing)
+        if TExtractMethodHelper.IsPascalKeyword(UI) then Continue;
+        // Skip tokens inside string/comment
+        if TExtractMethodHelper.IsInsideStringOrComment(Line, M.Index) then Continue;
+        Seen.Add(UI, True);
+        var T: TExtractToken;
+        T.Ident := M.Value;
+        T.Line0 := AStartLine - 1 + I;
+        T.Col0 := M.Index - 1 + ColOffset;
+        Toks.Add(T);
       end;
-
-      Inc(I);
     end;
-
-    // Apply changes in reverse so that line numbers stay stable
-    for var J := LineChanges.Count - 1 downto 0 do
-    begin
-      var LineNum := LineChanges[J].Key;
-      var NewText := LineChanges[J].Value;
-      if NewText = #0 then
-        Editor.DeleteLineAt(AInfo.FileName, LineNum)
-      else
-        Editor.ReplaceLineAt(AInfo.FileName, LineNum, NewText);
-    end;
+    Result := Toks.ToArray;
   finally
-    LineChanges.Free;
+    Toks.Free;
+    Seen.Free;
+  end;
+end;
+
+function CanReturnViaResult(const ABlockText, AIdent: string): Boolean;
+var
+  Lines: TArray<string>;
+  Id, PrevCode: string;
+  BaseIndent: Integer;
+
+  function IndentOf(const S: string): Integer;
+  begin
+    Result := 0;
+    while (Result < Length(S)) and CharInSet(S[Result + 1], [' ', #9]) do Inc(Result);
+  end;
+
+begin
+  Result := False;
+  if AIdent = '' then Exit;
+  Id := TRegEx.Escape(AIdent);
+  Lines := MaskCommentsAndStrings(ABlockText.Replace(#13, '').Split([#10]));
+  BaseIndent := MaxInt;
+  for var L in Lines do
+    if (Trim(L) <> '') and (IndentOf(L) < BaseIndent) then BaseIndent := IndentOf(L);
+  PrevCode := '';
+  for var L in Lines do
+  begin
+    if Trim(L) = '' then Continue;
+    if not TRegEx.IsMatch(L, '(?<![\w.&])' + Id + '\b', [roIgnoreCase]) then
+    begin
+      PrevCode := L;
+      Continue;
+    end;
+    // The FIRST mention decides: it must write the variable, at the top
+    // level of the block, without reading it.
+    var M := TRegEx.Match(L, '^\s*' + Id + '\s*:=(.*)$', [roIgnoreCase]);
+    if not M.Success then Exit;
+    if IndentOf(L) <> BaseIndent then Exit;                 // nested: conditional
+    if TRegEx.IsMatch(M.Groups[1].Value, '(?<![\w.&])' + Id + '\b', [roIgnoreCase]) then
+      Exit;                                                 // reads itself
+    // the single statement of an if / loop / case label on the line above
+    var P := UpperCase(Trim(PrevCode));
+    if P.EndsWith('THEN') or P.EndsWith('DO') or P.EndsWith('ELSE')
+      or P.EndsWith(':') then
+      Exit;
+    Exit(True);
+  end;
+end;
+
+function PlanLocalVarRemoval(const AFileLines: TArray<string>; AHeaderLine: Integer;
+  const ANames: TArray<string>): TArray<TPair<Integer, string>>;
+var
+  ToRemove: TDictionary<string, Boolean>;
+  Changes: TDictionary<Integer, string>;
+  I, HeaderEnd, Depth, SectionKw, Survivors: Integer;
+  InVar: Boolean;
+
+  // A var section that lost every declaration loses its keyword line too:
+  // a bare "var" before "begin" does not compile.
+  procedure CloseSection;
+  begin
+    if InVar and (SectionKw >= 0) and (Survivors = 0) then
+      Changes.AddOrSetValue(SectionKw + 1, #0);
+    InVar := False;
+    SectionKw := -1;
+    Survivors := 0;
+  end;
+
+  function StartsWithWord(const AUpper, AWord: string): Boolean;
+  begin
+    Result := (AUpper = AWord) or AUpper.StartsWith(AWord + ' ');
+  end;
+
+begin
+  Result := nil;
+  if (AHeaderLine < 1) or (AHeaderLine > Length(AFileLines)) or (Length(ANames) = 0) then
+    Exit;
+  ToRemove := TDictionary<string, Boolean>.Create;
+  Changes := TDictionary<Integer, string>.Create;
+  try
+    for var N in ANames do
+      ToRemove.AddOrSetValue(UpperCase(N), True);
+
+    // The header can wrap; its parameter list is no var section.
+    HeaderEnd := AHeaderLine - 1;
+    Depth := 0;
+    for I := AHeaderLine - 1 to High(AFileLines) do
+    begin
+      HeaderEnd := I;
+      var Done := False;
+      for var C in StripLineComment(AFileLines[I]) do
+        case C of
+          '(': Inc(Depth);
+          ')': if Depth > 0 then Dec(Depth);
+          ';': if Depth = 0 then Done := True;
+        end;
+      if Done then Break;
+    end;
+
+    InVar := False;
+    SectionKw := -1;
+    Survivors := 0;
+    for I := HeaderEnd + 1 to High(AFileLines) do
+    begin
+      var Line := AFileLines[I];
+      var Code := StripLineComment(Line);
+      var U := UpperCase(Trim(Code));
+      // the body or a nested routine ends the routine's declaration part
+      if StartsWithWord(U, 'BEGIN') or StartsWithWord(U, 'ASM')
+        or U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ')
+        or U.StartsWith('CONSTRUCTOR ') or U.StartsWith('DESTRUCTOR ')
+        or U.StartsWith('CLASS ') then
+        Break;
+      var DeclStart := 1;      // where the declaration text starts on the line
+      if StartsWithWord(U, 'VAR') then
+      begin
+        CloseSection;
+        InVar := True;
+        SectionKw := I;
+        if U = 'VAR' then Continue;
+        DeclStart := Pos('VAR', UpperCase(Line)) + 3;
+      end
+      else if StartsWithWord(U, 'CONST') or StartsWithWord(U, 'TYPE')
+        or StartsWithWord(U, 'LABEL') or StartsWithWord(U, 'RESOURCESTRING')
+        or StartsWithWord(U, 'THREADVAR') then
+      begin
+        CloseSection;
+        Continue;
+      end;
+      if not InVar or (U = '') then Continue;
+
+      // Only a plain one-line "A, B: TType;" is edited. Anything else - a
+      // multi-line record type, two declarations on one line - stays, which
+      // at worst leaves an unused variable behind (a hint, not a broken unit).
+      var Decl := Copy(Code, DeclStart, MaxInt);
+      var ColPos := Pos(':', Decl);
+      if (ColPos = 0) or (Pos(';', Decl) <> Length(TrimRight(Decl)))
+        or (Pos('(', Copy(Decl, 1, ColPos)) > 0) then
+      begin
+        Inc(Survivors);
+        Continue;
+      end;
+      var Names := Copy(Decl, 1, ColPos - 1).Split([',']);
+      var Kept: TArray<string> := nil;
+      for var N in Names do
+        if (Trim(N) <> '') and not ToRemove.ContainsKey(UpperCase(Trim(N))) then
+          Kept := Kept + [Trim(N)];
+      if Length(Kept) = Length(Names) then
+      begin
+        Inc(Survivors);
+        Continue;
+      end;
+      var Prefix := '';
+      if DeclStart = 1 then
+      begin
+        for var CI := 1 to Length(Line) do
+          if CharInSet(Line[CI], [' ', #9]) then Prefix := Prefix + Line[CI] else Break;
+      end
+      else
+        Prefix := TrimRight(Copy(Line, 1, DeclStart - 1)) + ' ';
+      if Length(Kept) > 0 then
+      begin
+        Changes.AddOrSetValue(I + 1, Prefix + string.Join(', ', Kept)
+          + Copy(Line, DeclStart + ColPos - 1, MaxInt));
+        Inc(Survivors);
+      end
+      else if I = SectionKw then
+        Changes.AddOrSetValue(I + 1, TrimRight(Prefix))   // "var X: Integer;" -> "var"
+      else
+        Changes.AddOrSetValue(I + 1, #0);
+    end;
+    CloseSection;
+
+    var Keys := Changes.Keys.ToArray;
+    TArray.Sort<Integer>(Keys);
+    SetLength(Result, Length(Keys));
+    for I := 0 to High(Keys) do
+      Result[I] := TPair<Integer, string>.Create(Keys[I], Changes[Keys[I]]);
+  finally
+    Changes.Free;
     ToRemove.Free;
   end;
 end;
@@ -1705,13 +1887,15 @@ begin
 
   // Insert the new method and class declaration via a direct Writer
   // (avoids the IDE's auto-indent)
+  // Remove the moved variables from the var declaration of the old method -
+  // between the block and the insert point, so before the insertions move
+  // its lines
+  if Length(AInfo.LocalVars)>0 then
+    RemoveLocalVarsFromDeclaration(AInfo);
+
   Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.InsertLine, AMethodText);
   if (AInfo.ClassDeclLine>0) and (ADeclText<>'') then
     Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.ClassDeclLine, ADeclText);
-
-  // Remove the moved variables from the var declaration of the old method
-  if Length(AInfo.LocalVars)>0 then
-    RemoveLocalVarsFromDeclaration(AInfo);
 
   // Notify the form designer about class changes
   Editor.NotifyClassStructureChanged(AInfo.FileName);

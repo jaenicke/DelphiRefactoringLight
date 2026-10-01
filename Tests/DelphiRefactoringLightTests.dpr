@@ -61,7 +61,10 @@ uses
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas',
-  Test.ChangeSignature in 'Test.ChangeSignature.pas';
+  Test.ChangeSignature in 'Test.ChangeSignature.pas',
+  Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
+  Expert.ExtractMethod in '..\Source\Expert.ExtractMethod.pas',
+  Test.ExtractMethod in 'Test.ExtractMethod.pas';
 
 var
   Runner: ITestRunner;

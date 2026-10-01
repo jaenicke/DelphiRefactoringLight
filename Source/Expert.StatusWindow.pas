@@ -634,17 +634,6 @@ begin
     Row('  inactive regions', '-', '');
   if TLspManager.Instance.ProjectIndexed then S := 'yes' else S := 'no';
   Row('  project indexed', S, 'the LSP has seen this project once');
-  // ToolsAPI is MAIN THREAD ONLY, and breaking that rule does not fail -
-  // it corrupts a buffer now and then. Every write path reports itself, so
-  // a violation is a NUMBER here instead of a rare mystery (fork audit,
-  // 2026-10: three MCP tools apply their edit from the pipe thread).
-  if MainThreadViolations = 0 then
-    Row('main-thread rule', 'kept', 'no editor write came from a worker thread')
-  else
-    Row('main-thread rule', Format('%d violation(s)', [MainThreadViolations]),
-      Format('last: %s - ToolsAPI and the editor buffers are main thread ' +
-      'only; this is a DEFECT in the plugin, please report it',
-      [LastOffMainThreadCall]), slBad);
   // What the server is doing RIGHT NOW: while it loads a project (12-30 s
   // for a big one) the controller aborts every request after 10 s, so this
   // row explains a search that seems to find nothing (issue #13).
@@ -678,6 +667,18 @@ begin
         'RefactoringLight*.log') + ' - every request with its duration')
   else
     Row('  session log', 'off', 'switch it on in the options to diagnose a slow session');
+
+  // ToolsAPI is MAIN THREAD ONLY, and breaking that rule does not fail -
+  // it corrupts a buffer now and then. Every write path reports itself, so
+  // a violation is a NUMBER here instead of a rare mystery (fork audit,
+  // 2026-10: three MCP tools apply their edit from the pipe thread).
+  if MainThreadViolations = 0 then
+    Row('main-thread rule', 'kept', 'no editor write came from a worker thread')
+  else
+    Row('main-thread rule', Format('%d violation(s)', [MainThreadViolations]),
+      Format('last: %s - ToolsAPI and the editor buffers are main thread ' +
+      'only; this is a DEFECT in the plugin, please report it',
+      [LastOffMainThreadCall]), slBad);
 
   // ---- live quick-fix checker --------------------------------------------
   LiveStatusInfo(LiveFile, Analysing, Resolving, FromLsp, Fresh, FixCount);

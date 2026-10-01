@@ -1316,13 +1316,24 @@ begin
   begin
     var Arr := TJSONArray.Create;
     for var O in Others do Arr.Add(O);
-    Res.AddPair('alsoWritten', Arr);
+    // The NAME says what happened: nothing was saved, so nothing was
+    // written either - a field called "alsoWritten" would be a small lie in
+    // exactly the answer that exists to be trusted.
     if Saved then
+    begin
+      Res.AddPair('alsoWritten', Arr);
       Res.AddPair('note2', 'The IDE saves the whole MODULE, so these files of ' +
         'the same module were written too. A form''s .dfm is re-streamed as ' +
         'this IDE version writes it, and the designer may add the units of ' +
         'its components to the unit''s uses clause - check them before you ' +
         'commit.');
+    end
+    else
+    begin
+      Res.AddPair('wouldAlsoWrite', Arr);
+      Res.AddPair('note2', 'Nothing was written. These files belong to the ' +
+        'same MODULE, so a save of this buffer would write them too.');
+    end;
   end;
   Result := OkResult(Res);
 end;

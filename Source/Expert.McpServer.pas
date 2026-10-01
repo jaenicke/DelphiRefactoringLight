@@ -104,11 +104,18 @@ const
 //  Main-thread dispatch
 // ---------------------------------------------------------------------------
 
+const
+  // TMainCall.State: whoever gets there first decides whether Proc runs.
+  McsPending = 0;     // posted, not yet picked up by the main thread
+  McsRunning = 1;     // claimed by the main thread - it runs (or ran)
+  McsAbandoned = 2;   // the caller gave up first - Proc must never run
+
 type
   TMainCall = class(TInterfacedObject)
   public
     Proc: TProc;
     AllowModal: Boolean;
+    State: Integer;   // McsPending / McsRunning / McsAbandoned, by CAS only
     Done: THandle;
     Error: string;
     constructor Create(const AProc: TProc; AAllowModal: Boolean);
@@ -180,7 +187,12 @@ begin
   end;
   Call := TMainCall(Msg.LParam);
   try
-    if not Call.AllowModal and (Application.ModalLevel > 0) then
+    // Claim the call. If its caller gave up (timeout, stop event), it must
+    // not run: the caller has already answered "failed" and freed what the
+    // proc captured.
+    if TInterlocked.CompareExchange(Call.State, McsRunning, McsPending) <> McsPending then
+      Call.Error := 'abandoned by its caller before it could run'
+    else if not Call.AllowModal and (Application.ModalLevel > 0) then
       Call.Error := 'the IDE is busy: a modal dialog is open - close it and retry'
     else if not Call.AllowModal and (GMainDepth > 0) then
       Call.Error := 'the IDE is busy with another MCP request (e.g. a rename) - retry'
@@ -241,7 +253,17 @@ begin
   end;
   Handles[0] := Call.Done;
   Handles[1] := AStop;
-  case WaitForMultipleObjects(2, @Handles[0], False, ATimeoutMs) of
+  var Wait := WaitForMultipleObjects(2, @Handles[0], False, ATimeoutMs);
+  // ATimeoutMs bounds the wait for the main thread to START the call. If it
+  // has started, it is waited for to the end: answering "failed" while it
+  // goes on would report a write that still lands, and let the caller free
+  // what the proc writes to (get_quick_fixes frees its dictionary in a
+  // finally). Done alone here - the proc runs on the main thread, and the
+  // stop event is set from there, so waiting for it cannot help.
+  if (Wait <> WAIT_OBJECT_0) and
+     (TInterlocked.CompareExchange(Call.State, McsAbandoned, McsPending) <> McsPending) then
+    Wait := WaitForSingleObject(Call.Done, INFINITE);
+  case Wait of
     WAIT_OBJECT_0:
       begin
         AError := Call.Error;
@@ -253,7 +275,8 @@ begin
         Result := False;
       end;
   else
-    AError := Format('the IDE main thread did not respond within %d s',
+    AError := Format('the IDE main thread did not pick the request up ' +
+      'within %d s - it was cancelled, nothing was changed',
       [ATimeoutMs div 1000]);
     Result := False;
   end;
@@ -1686,6 +1709,22 @@ begin
   GServer.Start;
 end;
 
+// Not in Winapi.Windows.
+function GetModuleHandleExW(dwFlags: DWORD; lpModuleName: PWideChar;
+  var phModule: HMODULE): BOOL; stdcall; external kernel32 name 'GetModuleHandleExW';
+
+// Keeps this BPL mapped until the process ends.
+procedure PinThisModule;
+const
+  GET_MODULE_HANDLE_EX_FLAG_PIN = $00000001;
+  GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = $00000004;
+var
+  H: HMODULE;
+begin
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN or
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, PWideChar(@PinThisModule), H);
+end;
+
 procedure StopMcpServer;
 begin
   // Server first: it signals the stop event and waits for every handler,
@@ -1693,7 +1732,20 @@ begin
   // may the dispatch window go.
   if GServer <> nil then
   begin
-    GServer.Stop;
+    if not GServer.Stop then
+    begin
+      // A handler ignored the stop event (an LSP wait, a long lsp_request).
+      // Freeing the server, the fix cache or the scratch store now would pull
+      // them from under it, and the unload would unmap the code it runs. So
+      // nothing it can reach is freed and the module stays mapped - a
+      // deliberate leak on an exceptional path instead of an access
+      // violation in a closing IDE. The dispatch window does go: a late
+      // RunOnMain then answers "shutting down" instead of running.
+      PinThisModule;
+      GServer := nil;
+      FreeAndNil(GDispatcher);
+      Exit;
+    end;
     FreeAndNil(GServer);
   end;
   FreeAndNil(GDispatcher);

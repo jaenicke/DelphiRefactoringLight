@@ -16,10 +16,13 @@ unit Mcp.PipeServer;
 //   request never sees "no such pipe" while the first is being served
 //   (which would make discovery miss the IDE);
 // * every accepted connection runs on its own short-lived handler thread,
-//   counted in FActive;
+//   counted in FActive and started through Expert.WorkerLatch.StartWorker,
+//   so ShutdownWorkersAndWait sees it like every other worker;
 // * Stop signals FStopEvent - every wait in here and in the handler (see
-//   StopEvent) watches it - and waits for the listener and all handlers
-//   before returning. No code of this unit runs after Stop.
+//   StopEvent) watches it - and waits for the listener and all handlers.
+//   A handler that ignores the event can outlive the deadline; Stop then
+//   returns False, and the owner must not free anything that handler can
+//   reach. Destroy waits for the last handler.
 
 interface
 
@@ -70,7 +73,13 @@ type
     function Start: Boolean;
     /// <summary>True while a pipe instance is waiting for clients.</summary>
     function Listening: Boolean;
-    procedure Stop(ATimeoutMs: Cardinal = 5000);
+    /// <summary>Stops listening and waits up to ATimeoutMs for the running
+    ///  handlers. False = a handler is still running (it ignores the stop
+    ///  event): the server and everything the handler reaches must then stay
+    ///  alive, and so must the code it runs.</summary>
+    function Stop(ATimeoutMs: Cardinal = 5000): Boolean;
+    /// <summary>Handlers running right now.</summary>
+    function ActiveHandlers: Integer;
     function LastError: string;
     /// <summary>The processes (MCP bridges) that sent a request within the
     ///  last AMaxAgeMs, most recent first.</summary>
@@ -89,7 +98,8 @@ function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
 implementation
 
 uses
-  System.SyncObjs, System.JSON, Mcp.Protocol;
+  System.SyncObjs, System.JSON, Mcp.Protocol,
+  Expert.WorkerLatch;   // RTL only as well: handler threads are joined at unload
 
 const
   PIPE_REJECT_REMOTE_CLIENTS = $00000008;
@@ -192,7 +202,10 @@ end;
 
 destructor TMcpPipeServer.Destroy;
 begin
-  Stop;
+  // Never free what a running handler still uses (the stop event, FLock):
+  // wait for the last one. An owner that cannot afford the wait asks Stop
+  // first and, when it returns False, does not free the server at all.
+  while not Stop(1000) do ;
   CloseHandle(FReadyEvent);
   CloseHandle(FStopEvent);
   FLock.Free;
@@ -305,21 +318,31 @@ begin
   Result := TInterlocked.CompareExchange(FListening, 0, 0) <> 0;
 end;
 
-procedure TMcpPipeServer.Stop(ATimeoutMs: Cardinal);
+function TMcpPipeServer.Stop(ATimeoutMs: Cardinal): Boolean;
 var
   Deadline: UInt64;
 begin
-  if FListener = nil then Exit;
+  // No early exit when the listener is already gone: a second Stop after
+  // one that returned False must still wait for, and report, the handlers.
   SetEvent(FStopEvent);
-  FListener.WaitFor;
-  FreeAndNil(FListener);
+  if FListener <> nil then
+  begin
+    FListener.WaitFor;
+    FreeAndNil(FListener);
+  end;
   // Handlers watch the stop event in every wait; give them the time to
-  // leave. A handler still running after the deadline would execute code
-  // of an unloaded BPL, so the deadline is generous.
+  // leave. One still running after the deadline would use this object and
+  // execute code of an unloaded BPL - so instead of returning as if the stop
+  // was clean, SAY so and let the owner keep everything alive.
   Deadline := GetTickCount64 + ATimeoutMs;
-  while (TInterlocked.CompareExchange(FActive, 0, 0) > 0) and
-        (GetTickCount64 < Deadline) do
+  while (ActiveHandlers > 0) and (GetTickCount64 < Deadline) do
     Sleep(10);
+  Result := ActiveHandlers = 0;
+end;
+
+function TMcpPipeServer.ActiveHandlers: Integer;
+begin
+  Result := TInterlocked.CompareExchange(FActive, 0, 0);
 end;
 
 procedure TMcpPipeServer.ListenLoop;
@@ -406,11 +429,14 @@ begin
       end;
 
       // Hand the connection to its own thread and immediately offer the
-      // next instance.
+      // next instance. Through the worker latch: a bare anonymous thread is
+      // invisible to ShutdownWorkersAndWait, so a handler that outlived Stop
+      // could still be running when the BPL is unmapped.
       TInterlocked.Increment(FActive);
+      var Started := False;
       try
         var P := Pipe;
-        TThread.CreateAnonymousThread(
+        Started := StartWorker(
           procedure
           begin
             try
@@ -418,9 +444,15 @@ begin
             finally
               TInterlocked.Decrement(FActive);
             end;
-          end).Start;
+          end);
       except
+        // thread creation failed - drop this connection, keep listening
+      end;
+      if not Started then
+      begin
+        // shutting down, or no thread: the client sees a closed pipe
         TInterlocked.Decrement(FActive);
+        DisconnectNamedPipe(Pipe);
         CloseHandle(Pipe);
       end;
     end;

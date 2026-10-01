@@ -295,7 +295,16 @@ function LineInfo(ALogical1Based: Integer; out AInfo: TBlameLine): Boolean;
 var
   Src: TBlameLines;
 begin
-  if GDirty then Src := GMapped else Src := GLines;
+  // The remap belongs to ONE buffer. After a switch to another modified
+  // buffer it was read as that buffer's blame - B's gutter showed A's
+  // authors - so it is used only while it is the current file's.
+  if GDirty then
+  begin
+    if not SameText(GMapFile, GFile) then Exit(False);
+    Src := GMapped;
+  end
+  else
+    Src := GLines;
   Result := GEnabled and (ALogical1Based >= 1)
     and (ALogical1Based <= Length(Src));
   if Result then
@@ -764,6 +773,10 @@ begin
     begin
       GFile := F;
       GLines := nil;
+      // The remap belongs to the PREVIOUS buffer - it goes with its lines.
+      GMapped := nil;
+      GMapHash := 0;
+      GMapFile := '';
       Changed := True;
     end;
 
@@ -771,6 +784,29 @@ begin
     if Dirty <> GDirty then
     begin
       GDirty := Dirty;
+      Changed := True;
+    end;
+
+    // The blame belongs to the file ON DISK, which a modified buffer does
+    // not change - so it is fetched either way. Fetched only while clean, a
+    // buffer that was already modified when it became active had no blame
+    // to remap until it was saved.
+    RequestBlame(F);                       // no-op when current or running
+    if BlameForFile(F, NewLines) then
+    begin
+      if Pointer(NewLines) <> Pointer(GLines) then
+      begin
+        if Length(NewLines) <> Length(GLines) then Changed := True;
+        GLines := NewLines;
+        GMapHash := 0;                     // remap against the new data
+      end;
+    end
+    else if Length(GLines) > 0 then
+    begin
+      GLines := nil;
+      GMapped := nil;
+      GMapHash := 0;
+      GMapFile := '';
       Changed := True;
     end;
 
@@ -791,21 +827,6 @@ begin
 
     if GRestorePending then RestorePendingForActive(F);
     EnsureGutterWidth(F);
-
-    if not GDirty then
-    begin
-      RequestBlame(F);                     // no-op when current or running
-      if BlameForFile(F, NewLines) then
-      begin
-        if Length(NewLines) <> Length(GLines) then Changed := True;
-        GLines := NewLines;
-      end
-      else if Length(GLines) > 0 then
-      begin
-        GLines := nil;
-        Changed := True;
-      end;
-    end;
 
     if Editor.GetCaretLineCol(Line, Col) and (Line <> GCaretLine) then
     begin
@@ -832,6 +853,13 @@ procedure SetBlameEnabled(AValue: Boolean);
 begin
   if AValue = GEnabled then Exit;
   GEnabled := AValue;
+  // Whatever was remapped belongs to the state before the switch. After
+  // off/on it was read as current (a stale GMapped with a stale GDirty)
+  // until the next change of file.
+  GMapped := nil;
+  GMapHash := 0;
+  GMapFile := '';
+  GDirty := False;
   if GEnabled then
   begin
     GFile := '';

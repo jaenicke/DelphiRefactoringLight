@@ -370,7 +370,11 @@ begin
               var F: string := ARules[R].Find;
               var L: Integer := Length(F);
               if (L = 0) or (I + L - 1 > N) then Continue;
-              if CompareStr(Copy(AText, I, L), F) <> 0 then Continue;
+              // Case-INSENSITIVE, like Pascal itself (audit #40, M18b): a
+              // rule "Foo -> Bar" used to miss "foo := 1" and "FOO(x)", so
+              // part of the code moved to the new API and the rest stayed
+              // on the old one - without a word about what was skipped.
+              if not SameText(Copy(AText, I, L), F) then Continue;
               if (I + L <= N) and IsIdentChar(AText[I + L]) then Continue;
               AOnMatch(R, I);
               Inc(I, L);

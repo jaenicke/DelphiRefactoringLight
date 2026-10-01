@@ -63,6 +63,7 @@ uses
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.AuditReproRemoveWith in 'Test.AuditReproRemoveWith.pas',
+  Test.AuditReproSearch in 'Test.AuditReproSearch.pas',
   Test.Issue11 in 'Test.Issue11.pas',
   Test.ChangeSignature in 'Test.ChangeSignature.pas',
   Standalone.EditorHelper in '..\Standalone\Standalone.EditorHelper.pas',

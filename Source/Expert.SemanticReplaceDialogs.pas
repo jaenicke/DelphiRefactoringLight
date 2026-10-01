@@ -58,6 +58,14 @@ type
   TSemanticReplaceUnitsDialog = class(TForm)
   private
     FAllFiles: TArray<string>;
+    /// <summary>Tick state PER FAllFiles ENTRY (audit #40, L5b). The list
+    ///  box only holds what the filter lets through, and RefreshList clears
+    ///  it - so typing in the filter dropped every tick, including the ones
+    ///  on units the filter hid, and they silently left the run.</summary>
+    FTicked: TArray<Boolean>;
+    /// <summary>True while RefreshList fills the box, so the OnClickCheck
+    ///  handler does not write the state it is restoring.</summary>
+    FFilling: Boolean;
     FCheckList: TCheckListBox;
     FEdtFilter: TEdit;
     FBtnAll, FBtnNone, FBtnOk, FBtnCancel: TButton;
@@ -66,6 +74,8 @@ type
     procedure DoFilterChange(Sender: TObject);
     procedure DoAll(Sender: TObject);
     procedure DoNone(Sender: TObject);
+    procedure RememberTicks;
+    procedure DoItemCheck(Sender: TObject);
   public
     constructor CreateDialog(AOwner: TComponent;
       const AAllFiles: TArray<string>);
@@ -379,6 +389,7 @@ begin
   Constraints.MinWidth := 520;
   Constraints.MinHeight := 360;
   FAllFiles := AAllFiles;
+  SetLength(FTicked, Length(FAllFiles));
   BuildLayout;
   RefreshList;
   EnableThemes(Self);
@@ -421,22 +432,51 @@ begin
 
   FCheckList := TCheckListBox.Create(Self); FCheckList.Parent := Self;
   FCheckList.Align := alClient;
+  FCheckList.OnClickCheck := DoItemCheck;
+end;
+
+procedure TSemanticReplaceUnitsDialog.RememberTicks;
+begin
+  if FFilling then Exit;
+  for var I := 0 to FCheckList.Items.Count - 1 do
+  begin
+    var Idx := NativeInt(FCheckList.Items.Objects[I]) - 1;   // 1-based
+    if (Idx >= 0) and (Idx <= High(FTicked)) then
+      FTicked[Idx] := FCheckList.Checked[I];
+  end;
+end;
+
+procedure TSemanticReplaceUnitsDialog.DoItemCheck(Sender: TObject);
+begin
+  RememberTicks;
 end;
 
 procedure TSemanticReplaceUnitsDialog.RefreshList;
 var
   Filter: string;
-  F: string;
 begin
+  // What is ticked now belongs to FAllFiles, not to the visible rows -
+  // save it before the box is cleared and restore it after (audit #40,
+  // L5b). The row carries its FAllFiles index (1-based, so 0 = none).
+  RememberTicks;
   Filter := UpperCase(Trim(FEdtFilter.Text));
+  FFilling := True;
   FCheckList.Items.BeginUpdate;
   try
     FCheckList.Items.Clear;
-    for F in FAllFiles do
-      if (Filter = '') or (Pos(Filter, UpperCase(ExtractFileName(F))) > 0) then
-        FCheckList.Items.AddObject(ExtractFileName(F) + '  -  ' + F, TObject(0));
+    for var I := 0 to High(FAllFiles) do
+      if (Filter = '')
+        or (Pos(Filter, UpperCase(ExtractFileName(FAllFiles[I]))) > 0) then
+      begin
+        var Row := FCheckList.Items.AddObject(
+          ExtractFileName(FAllFiles[I]) + '  -  ' + FAllFiles[I],
+          TObject(NativeInt(I + 1)));
+        if (I <= High(FTicked)) and FTicked[I] then
+          FCheckList.Checked[Row] := True;
+      end;
   finally
     FCheckList.Items.EndUpdate;
+    FFilling := False;
   end;
 end;
 
@@ -449,27 +489,26 @@ procedure TSemanticReplaceUnitsDialog.DoAll(Sender: TObject);
 var I: Integer;
 begin
   for I := 0 to FCheckList.Items.Count - 1 do FCheckList.Checked[I] := True;
+  RememberTicks;
 end;
 
 procedure TSemanticReplaceUnitsDialog.DoNone(Sender: TObject);
 var I: Integer;
 begin
   for I := 0 to FCheckList.Items.Count - 1 do FCheckList.Checked[I] := False;
+  RememberTicks;
 end;
 
 function TSemanticReplaceUnitsDialog.SelectedFiles: TArray<string>;
 var
-  I, P: Integer;
-  S: string;
   Res: TArray<string>;
 begin
-  for I := 0 to FCheckList.Items.Count - 1 do
-    if FCheckList.Checked[I] then
-    begin
-      S := FCheckList.Items[I];
-      P := Pos('-  ', S);
-      if P > 0 then Res := Res + [Trim(Copy(S, P + 3, MaxInt))];
-    end;
+  // From the per-file state, so a unit that is ticked but currently
+  // FILTERED OUT still takes part (audit #40, L5b).
+  RememberTicks;
+  for var I := 0 to High(FAllFiles) do
+    if (I <= High(FTicked)) and FTicked[I] then
+      Res := Res + [FAllFiles[I]];
   Result := Res;
 end;
 

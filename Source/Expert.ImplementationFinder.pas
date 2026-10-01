@@ -126,7 +126,7 @@ implementation
 
 uses
   System.Classes, System.Generics.Collections, System.StrUtils, Winapi.Windows, Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding,
-  Expert.UnitIndex;
+  Expert.UnitIndex, Expert.PascalScanner;
 
 { File-private helpers for parsing Pascal class/interface headers
   and class-method implementation lines. Grouped into a class to keep
@@ -683,8 +683,8 @@ class function TImplementationFinder.FindByProjectScan(const AProjectFiles: TArr
 var
   ResultList: TList<TFindReferenceItem>;
   Item: TFindReferenceItem;
-  RawContent, LineStr: string;
-  Lines: TArray<string>;
+  RawContent, LineStr, ScanStr: string;
+  Lines, Masked: TArray<string>;
   UpperId: string;
   LineIdx, SearchPos, FoundPos, AfterPos: Integer;
   BeforeOk, AfterOk, Keep: Boolean;
@@ -714,6 +714,12 @@ begin
         RawContent := ReadDelphiFile(F);
         if Pos(UpperId, UpperCase(RawContent)) = 0 then Continue;
         Lines := ReadDelphiFileLines(F);
+        // The SCAN works on the masked text (audit #40, M21a): a '//' line
+        // was rejected, but a header inside { } or (* *) was found and
+        // listed as an implementation - and rename took it as a target.
+        // Masking keeps every position, so the hit coordinates still refer
+        // to the real line, which is what Preview below shows.
+        Masked := MaskCommentsAndStrings(Lines);
       except
         Continue;
       end;
@@ -721,19 +727,23 @@ begin
       for LineIdx := 0 to High(Lines) do
       begin
         LineStr := Lines[LineIdx];
+        if LineIdx <= High(Masked) then
+          ScanStr := Masked[LineIdx]
+        else
+          ScanStr := LineStr;
         SearchPos := 1;
         while SearchPos <= System.Length(LineStr) do
         begin
-          FoundPos := Pos(UpperId, UpperCase(Copy(LineStr, SearchPos)));
+          FoundPos := Pos(UpperId, UpperCase(Copy(ScanStr, SearchPos)));
           if FoundPos = 0 then Break;
           FoundPos := SearchPos + FoundPos - 1;
 
           // Wort-Grenzen pruefen
-          BeforeOk := (FoundPos = 1) or not CharInSet(LineStr[FoundPos - 1], ['A'..'Z','a'..'z','0'..'9','_']);
+          BeforeOk := (FoundPos = 1) or not CharInSet(ScanStr[FoundPos - 1], ['A'..'Z','a'..'z','0'..'9','_']);
           AfterPos := FoundPos + System.Length(AIdentifier);
-          AfterOk := (AfterPos > System.Length(LineStr)) or not CharInSet(LineStr[AfterPos], ['A'..'Z','a'..'z','0'..'9','_']);
+          AfterOk := (AfterPos > System.Length(ScanStr)) or not CharInSet(ScanStr[AfterPos], ['A'..'Z','a'..'z','0'..'9','_']);
 
-          if BeforeOk and AfterOk and TImplFinderHelper.IsClassMethodImplLine(LineStr, FoundPos) then
+          if BeforeOk and AfterOk and TImplFinderHelper.IsClassMethodImplLine(ScanStr, FoundPos) then
           begin
             Keep := True;
 
@@ -741,7 +751,7 @@ begin
             begin
               // Klassenname vor dem Punkt extrahieren und pruefen ob
               // diese Klasse den erwarteten Owner-Typ implementiert.
-              ClassName := TImplFinderHelper.ExtractClassNameBeforeIdentifier(LineStr, FoundPos);
+              ClassName := TImplFinderHelper.ExtractClassNameBeforeIdentifier(ScanStr, FoundPos);
               if ClassName = '' then
                 Keep := False
               else if not ClassCache.TryGetValue(UpperCase(ClassName), Keep) then

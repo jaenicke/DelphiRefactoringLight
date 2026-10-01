@@ -468,7 +468,7 @@ begin
       AddError(Format('Selection contains %d "Continue" without an enclosing loop inside the selection - ' +
         'would not compile after extraction.', [ContinueOutsideLoop]));
     if BareRaiseOutsideExcept > 0 then
-      AddError(Format('Selection contains bare "raise;" outside of an except-block inside the selection - ' +
+      AddError(Format('Selection contains %d bare "raise;" outside of an except-block inside the selection - ' +
         'would not compile after extraction.', [BareRaiseOutsideExcept]));
     if GotoCount > 0 then
       AddWarning(Format('Selection contains %d "goto" - label targets are not verified; ' +

@@ -749,6 +749,26 @@ begin
   FEdtNewName.Enabled := not ABusy;
   FCmbScope.Enabled := not ABusy;
   FBtnPickUnits.Enabled := not ABusy;
+  // The "plus units" boxes too (audit #40, M17): ticking one during a scan
+  // runs DoScopeChange, which CLEARS the preview - and the running scan
+  // then fills it again and re-enables Rename with results for the scope
+  // that is no longer selected. Idle state comes from UpdateScopeControls,
+  // which knows they only apply to the whole-project scope.
+  if FChkOpenUnits <> nil then
+  begin
+    if ABusy then
+    begin
+      FChkOpenUnits.Enabled := False;
+      FChkUsedUnits.Enabled := False;
+    end
+    else
+      UpdateScopeControls;
+  end;
+  // Cancel is a button again after a scan, so it must be CLICKABLE again
+  // (audit #40, M16): DoBtnStopClick disables it ("one stop is enough")
+  // and nothing ever re-enabled it, so after one Stop the dialog could
+  // only be closed with Alt+F4 for the rest of its life.
+  FBtnCancel.Enabled := True;
   // During the scan Cancel must NOT close the dialog: the scan runs
   // inside the Preview click handler, so closing here would free the
   // form under running code. It stops the scan instead.

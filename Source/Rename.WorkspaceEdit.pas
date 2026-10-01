@@ -134,12 +134,28 @@ var
   Prefix, Suffix: string;
   NewLines: TArray<string>;
   I: Integer;
+  Breaks: string;
+  HadFinalBreak: Boolean;
 begin
   Lines := TStringList.Create;
   try
+    // The FILE's own line break, not sLineBreak (audit #40, L5n): joining
+    // with CRLF rewrote every line of an LF-only file for a one-token
+    // rename, and a file without a final break gained one - either way a
+    // whole-file diff where one line changed.
+    if AContent.Contains(#13#10) then
+      Breaks := #13#10
+    else if AContent.Contains(#10) then
+      Breaks := #10
+    else if AContent.Contains(#13) then
+      Breaks := #13
+    else
+      Breaks := sLineBreak;      // single line: nothing to preserve
+    HadFinalBreak := AContent.EndsWith(Breaks);
+    Lines.LineBreak := Breaks;
     Lines.Text := AContent;
     // Make sure an empty trailing line is preserved
-    if AContent.EndsWith(sLineBreak) then
+    if HadFinalBreak then
       Lines.Add('');
 
     SortedEdits := Copy(AEdits);
@@ -196,10 +212,14 @@ begin
     end;
 
     // Back to string - remove the last artificial empty string
-    if (Lines.Count > 0) and (Lines[Lines.Count - 1] = '') and AContent.EndsWith(sLineBreak) then
+    if (Lines.Count > 0) and (Lines[Lines.Count - 1] = '') and HadFinalBreak then
       Lines.Delete(Lines.Count - 1);
 
     Result := Lines.Text;
+    // TStringList.Text ALWAYS ends with a break; the file need not.
+    if not HadFinalBreak then
+      while Result.EndsWith(Breaks) do
+        SetLength(Result, Length(Result) - Length(Breaks));
   finally
     Lines.Free;
   end;

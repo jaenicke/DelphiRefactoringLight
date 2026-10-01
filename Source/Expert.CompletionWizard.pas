@@ -297,8 +297,7 @@ begin
   if (Pt.X <> FLastPos.X) or (Pt.Y <> FLastPos.Y) then
   begin
     FLastPos := Pt;
-    if Pt.X + FPopup.Width > Screen.Width then Pt.X := Screen.Width - FPopup.Width;
-    if Pt.Y + FPopup.Height > Screen.Height then Pt.Y := Pt.Y - FPopup.Height - 40;
+    Pt := FitPopup(WorkAreaAt(Pt), Pt, FPopup.Width, FPopup.Height, Pt.Y - FPopup.Height - 40);
     SetWindowPos(FPopup.Handle, 0, Pt.X, Pt.Y, 0, 0,
       SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE);
   end;

@@ -4160,20 +4160,6 @@ begin
   Action := caFree;
 end;
 
-// Work area of the monitor showing APt. Screen.WorkAreaRect is the PRIMARY
-// monitor's - with the IDE on a monitor above or beside it, every
-// placement was clamped onto the wrong screen (or rejected altogether).
-function WorkAreaAt(const APt: TPoint): TRect;
-var
-  M: TMonitor;
-begin
-  M := Screen.MonitorFromPoint(APt, mdNearest);
-  if M <> nil then
-    Result := M.WorkareaRect
-  else
-    Result := Screen.WorkAreaRect;
-end;
-
 procedure TQuickFixPopup.ShowAt(const APt: TPoint);
 begin
   // Keep the popup on the visible work area.

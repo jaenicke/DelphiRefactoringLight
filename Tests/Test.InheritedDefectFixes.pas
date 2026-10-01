@@ -90,11 +90,18 @@ type
     [Test] procedure WriteAll_LeavesNoTempFileBehind;
   end;
 
+  [TestFixture]
+  TPopupPlacementTests = class
+  public
+    [Test] procedure FitPopup_StaysOnTheAnchorsMonitor;
+    [Test] procedure FitPopup_MonitorLeftOfThePrimary;
+  end;
+
 implementation
 
 uses
-  System.SysUtils, System.IOUtils, System.Classes,
-  Expert.AutoImport, Lsp.Uri, Delphi.FileEncoding;
+  System.SysUtils, System.IOUtils, System.Classes, System.Types,
+  Expert.AutoImport, Expert.DialogHelper, Lsp.Uri, Delphi.FileEncoding;
 
 { TCanTakeSemicolonTests }
 
@@ -392,10 +399,43 @@ begin
     'and the new content must be in place');
 end;
 
+{ TPopupPlacementTests }
+
+procedure TPopupPlacementTests.FitPopup_StaysOnTheAnchorsMonitor;
+var
+  WorkArea: TRect;
+  Placed: TPoint;
+begin
+  // A 2560 px monitor to the RIGHT of a 2560 px primary. The popups used to
+  // clamp to Screen.Width/Height - the primary's size - and so pulled a
+  // popup at X = 5000 back to 2560 - 450, onto the other monitor.
+  WorkArea := Rect(2560, 0, 5120, 1400);
+  Placed := FitPopup(WorkArea, Point(3000, 500), 450, 320, 100);
+  Assert.AreEqual(3000, Placed.X, 'it fits: stays at the caret');
+  Assert.AreEqual(500, Placed.Y, 'it fits: stays below the caret');
+  Placed := FitPopup(WorkArea, Point(5000, 500), 450, 320, 100);
+  Assert.AreEqual(5120 - 450, Placed.X, 'pulled left to the right edge of THIS monitor');
+  Placed := FitPopup(WorkArea, Point(3000, 1300), 450, 320, 960);
+  Assert.AreEqual(960, Placed.Y, 'no room below: flipped above');
+end;
+
+procedure TPopupPlacementTests.FitPopup_MonitorLeftOfThePrimary;
+var
+  Placed: TPoint;
+begin
+  // A monitor left of the primary has negative coordinates; nothing kept a
+  // popup from crossing its left edge.
+  Placed := FitPopup(Rect(-1920, 0, 0, 1040), Point(-100, 20), 450, 320, 0);
+  Assert.AreEqual(-450, Placed.X, 'pulled left to the right edge of the left-hand monitor');
+  Placed := FitPopup(Rect(-1920, 0, 0, 1040), Point(-2000, 20), 450, 320, 0);
+  Assert.AreEqual(-1920, Placed.X, 'never left of the monitor');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TCanTakeSemicolonTests);
   TDUnitX.RegisterTestFixture(TLspUriUncTests);
   TDUnitX.RegisterTestFixture(TLspUriNonAsciiTests);
   TDUnitX.RegisterTestFixture(TFileEncodingTests);
+  TDUnitX.RegisterTestFixture(TPopupPlacementTests);
 
 end.

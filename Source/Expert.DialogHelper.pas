@@ -32,7 +32,7 @@ unit Expert.DialogHelper;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
+  System.SysUtils, System.Classes, System.Types, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
 
 type
   /// <summary>Class for the ad-hoc progress/tool windows built with
@@ -124,6 +124,19 @@ function AskThemedConfirm(const AMsg, AConfirmCaption: string): Boolean;
 ///  fix asks before it deletes a NON-EMPTY body. Call once at startup -
 ///  without it that fix refuses to delete anything.</summary>
 procedure InstallRemovePrivateConfirm;
+
+/// <summary>Work area of the monitor showing APt. Screen.WorkAreaRect and
+///  Screen.Width/Height are the PRIMARY monitor's - with the editor on a
+///  monitor beside or above it, a popup clamped to them lands on the wrong
+///  screen.</summary>
+function WorkAreaAt(const APt: TPoint): TRect;
+
+/// <summary>Top-left corner for a popup of AWidth x AHeight anchored at APt,
+///  kept inside AWorkArea: pulled left when it would cross the right edge,
+///  moved to AFlipTop when it would cross the bottom, and never left of or
+///  above the work area. Pure, so the placement is testable.</summary>
+function FitPopup(const AWorkArea: TRect; const APt: TPoint;
+  AWidth, AHeight, AFlipTop: Integer): TPoint;
 
 implementation
 
@@ -631,6 +644,29 @@ begin
   finally
     Dlg.Free;
   end;
+end;
+
+function WorkAreaAt(const APt: TPoint): TRect;
+begin
+  var M := Screen.MonitorFromPoint(APt, mdNearest);
+  if M <> nil then
+    Result := M.WorkareaRect
+  else
+    Result := Screen.WorkAreaRect;
+end;
+
+function FitPopup(const AWorkArea: TRect; const APt: TPoint;
+  AWidth, AHeight, AFlipTop: Integer): TPoint;
+begin
+  Result := APt;
+  if Result.X + AWidth > AWorkArea.Right then
+    Result.X := AWorkArea.Right - AWidth;
+  if Result.X < AWorkArea.Left then
+    Result.X := AWorkArea.Left;
+  if Result.Y + AHeight > AWorkArea.Bottom then
+    Result.Y := AFlipTop;
+  if Result.Y < AWorkArea.Top then
+    Result.Y := AWorkArea.Top;
 end;
 
 end.

@@ -131,7 +131,7 @@ type
 implementation
 
 uses
-  Expert.IdeThemes;
+  System.Types, Expert.IdeThemes, Expert.DialogHelper;
 
 {$IFNDEF STANDALONE_BUILD}
 // ---------------------------------------------------------------------------
@@ -360,12 +360,11 @@ begin
   FListBox.Items.Add('Loading suggestions...');
   FDetailLabel.Caption := '';
 
-  Left := X;
-  Top := Y;
-  if Left + Width > Screen.Width then
-    Left := Screen.Width - Width;
-  if Top + Height > Screen.Height then
-    Top := Y - Height - 20;
+  // Kept on the monitor the caret is on - Screen.Width/Height are the
+  // primary monitor's only.
+  var Origin := FitPopup(WorkAreaAt(Point(X, Y)), Point(X, Y), Width, Height, Y - Height - 20);
+  Left := Origin.X;
+  Top := Origin.Y;
 
   // SW_SHOWNOACTIVATE preserves the editor's focus.
   ShowWindow(Handle, SW_SHOWNOACTIVATE);

@@ -225,12 +225,12 @@ end;
 procedure TLspFindUnitReferencesWizard.Status(const AText: string);
 begin
   FHeadlessStatus := AText;
-  if FDialog <> nil then Status(AText);
+  if FDialog <> nil then FDialog.SetStatus(AText);
 end;
 
 procedure TLspFindUnitReferencesWizard.Progress(ACurrent, ATotal: Integer);
 begin
-  if FDialog <> nil then Progress(ACurrent, ATotal);
+  if FDialog <> nil then FDialog.SetProgress(ACurrent, ATotal);
 end;
 
 function TLspFindUnitReferencesWizard.Cancelled: Boolean;

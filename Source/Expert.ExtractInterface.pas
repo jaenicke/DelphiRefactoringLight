@@ -240,6 +240,31 @@ type
     ///  the methods covers the whole interface contract.</summary>
     class function ParseInterfaceMethodSignatures(const AFile: string;
       ADeclLine, AEndLine: Integer): TArray<TInterfaceMethodInfo>;
+
+    /// <summary>1-based position of the type keyword in ALine when it is
+    ///  the first word after the '=' ("TFoo = class", "TFoo = packed
+    ///  class", "IFoo = interface"), else 0. A plain Pos() over the line
+    ///  also finds the word inside a name such as "TMyClass".</summary>
+    class function TypeKeywordPos(const ALine: string;
+      const AKeywords: array of string): Integer;
+
+    /// <summary>The member lines to splice into an existing interface:
+    ///  BuildInterfaceText without its "IFoo = interface" header, GUID
+    ///  line and "end;". Empty when no member is selected.</summary>
+    class function InterfaceSpliceLines(const AInfo: TExtractInterfaceInfo): TArray<string>;
+
+    /// <summary>Finds the class AClassName again after an edit moved it:
+    ///  the declaration nearest to ANearLine (1-based). Returns its new
+    ///  1-based declaration and end lines.</summary>
+    class function RelocateClass(const AFileLines: TArray<string>;
+      const AClassName: string; ANearLine: Integer;
+      out ADeclLine, AEndLine: Integer): Boolean;
+
+    /// <summary>The directive for one IInterface method added to a class
+    ///  with base ABaseClass: 'override; ' where the base declares it
+    ///  virtual, else ''. Only QueryInterface is virtual in TComponent;
+    ///  its _AddRef and _Release are static (E2170 on override).</summary>
+    class function IInterfaceDirective(const ABaseClass, AMethodName: string): string;
   end;
 
   /// <summary>Tiny utility: scans an entire Pascal source file and yields
@@ -256,6 +281,14 @@ type
   TProjectInterfaceScanner = class
   public
     class function ScanFile(const AFileName: string): TArray<TInterfaceDeclLocation>;
+    /// <summary>ScanFile on lines already in memory.</summary>
+    class function ScanLines(const AFileName: string;
+      const ALines: TArray<string>): TArray<TInterfaceDeclLocation>;
+    /// <summary>Finds the interface AInterfaceName in ALines again after an
+    ///  edit moved it: the declaration nearest to ANearLine (1-based).</summary>
+    class function FindDecl(const ALines: TArray<string>;
+      const AInterfaceName: string; ANearLine: Integer;
+      out ALoc: TInterfaceDeclLocation): Boolean;
     class function ScanProject(const AFiles: TArray<string>): TArray<TInterfaceDeclLocation>;
   end;
 
@@ -350,15 +383,16 @@ var
     out AClassName, AAncestors: string): Boolean;
   var
     EqPos, ClassPos, ParenPos: Integer;
-    L, U, Name, AfterClass: string;
+    L, Name, AfterClass: string;
   begin
     Result := False;
     L := StripLineComment(ALine);
-    U := UpperCase(L);
     EqPos := Pos('=', L);
     if EqPos = 0 then Exit;
-    ClassPos := Pos('CLASS', U);
-    if (ClassPos = 0) or (ClassPos < EqPos) then Exit;
+    // "class" must be the first word after '=': found anywhere, it was
+    // found in a name like TMyClass, and the line was skipped.
+    ClassPos := TExtractInterfaceEngine.TypeKeywordPos(L, ['class']);
+    if ClassPos = 0 then Exit;
     // exclude 'class procedure', 'class function', 'class var', etc.
     AfterClass := Trim(Copy(L, ClassPos + 5, MaxInt));
     if (AfterClass <> '') then
@@ -1129,16 +1163,99 @@ begin
   end;
 end;
 
+class function TExtractInterfaceEngine.TypeKeywordPos(const ALine: string;
+  const AKeywords: array of string): Integer;
+var
+  P, Q: Integer;
+  W: string;
+begin
+  Result := 0;
+  P := Pos('=', ALine);
+  if P = 0 then Exit;
+  Inc(P);
+  repeat
+    while (P <= Length(ALine)) and ALine[P].IsWhiteSpace do Inc(P);
+    Q := P;
+    while (Q <= Length(ALine)) and IsIdentChar(ALine[Q]) do Inc(Q);
+    W := Copy(ALine, P, Q - P);
+    if not SameText(W, 'packed') then Break;
+    P := Q;
+  until False;
+  if W = '' then Exit;
+  for var K in AKeywords do
+    if SameText(W, K) then Exit(P);
+end;
+
+class function TExtractInterfaceEngine.InterfaceSpliceLines(
+  const AInfo: TExtractInterfaceInfo): TArray<string>;
+var
+  Body: TStringList;
+  I: Integer;
+begin
+  Result := nil;
+  Body := TStringList.Create;
+  try
+    Body.Text := BuildInterfaceText(AInfo);
+    // header, GUID ... "end;" - the frame always goes, also when nothing
+    // is left between it
+    for I := 2 to Body.Count - 2 do
+      if Trim(Body[I]) <> '' then
+        Result := Result + [Body[I]];
+  finally
+    Body.Free;
+  end;
+end;
+
+class function TExtractInterfaceEngine.RelocateClass(
+  const AFileLines: TArray<string>; const AClassName: string; ANearLine: Integer;
+  out ADeclLine, AEndLine: Integer): Boolean;
+var
+  I, Best, EqPos: Integer;
+  L, Name: string;
+  Info: TExtractInterfaceInfo;
+begin
+  Result := False;
+  ADeclLine := 0;
+  AEndLine := 0;
+  Best := -1;
+  for I := 0 to High(AFileLines) do
+  begin
+    L := StripLineComment(AFileLines[I]);
+    if TypeKeywordPos(L, ['class']) = 0 then Continue;
+    EqPos := Pos('=', L);
+    Name := Trim(Copy(L, 1, EqPos - 1));
+    if Pos('<', Name) > 0 then Name := Trim(Copy(Name, 1, Pos('<', Name) - 1));
+    if not SameText(Name, AClassName) then Continue;
+    if (Best < 0) or (Abs(I + 1 - ANearLine) < Abs(Best + 1 - ANearLine)) then
+      Best := I;
+  end;
+  if Best < 0 then Exit;
+  // the parse walks up from the given line, so it starts on the header
+  if not ParseClassAtLine(AFileLines, '', Best + 1, Info) then Exit;
+  if not SameText(Info.ClassName, AClassName) then Exit;
+  ADeclLine := Info.ClassDeclLine;
+  AEndLine := Info.ClassEndLine;
+  Result := True;
+end;
+
+class function TExtractInterfaceEngine.IInterfaceDirective(
+  const ABaseClass, AMethodName: string): string;
+begin
+  Result := '';
+  if (ABaseClass = '') or SameText(ABaseClass, 'TObject') or
+     SameText(ABaseClass, 'TPersistent') then Exit;
+  // TComponent-style base: QueryInterface is virtual, _AddRef/_Release
+  // are not
+  if SameText(AMethodName, 'QueryInterface') then
+    Result := 'override; ';
+end;
+
 { ---------- TProjectInterfaceScanner ---------- }
 
 class function TProjectInterfaceScanner.ScanFile(
   const AFileName: string): TArray<TInterfaceDeclLocation>;
 var
   Lines: TArray<string>;
-  I, J: Integer;
-  L, Trimmed, Upper: string;
-  EqPos, IfacePos, Depth: Integer;
-  List: TList<TInterfaceDeclLocation>;
 begin
   Result := nil;
   if not TFile.Exists(AFileName) then Exit;
@@ -1147,19 +1264,59 @@ begin
   except
     Exit;
   end;
+  Result := ScanLines(AFileName, Lines);
+end;
+
+class function TProjectInterfaceScanner.FindDecl(const ALines: TArray<string>;
+  const AInterfaceName: string; ANearLine: Integer;
+  out ALoc: TInterfaceDeclLocation): Boolean;
+var
+  Loc: TInterfaceDeclLocation;
+begin
+  Result := False;
+  ALoc := Default(TInterfaceDeclLocation);
+  for Loc in ScanLines('', ALines) do
+    if SameText(Loc.InterfaceName, AInterfaceName) and
+       (not Result or (Abs(Loc.DeclLine - ANearLine) < Abs(ALoc.DeclLine - ANearLine))) then
+    begin
+      ALoc := Loc;
+      Result := True;
+    end;
+end;
+
+class function TProjectInterfaceScanner.ScanLines(const AFileName: string;
+  const ALines: TArray<string>): TArray<TInterfaceDeclLocation>;
+var
+  I, J: Integer;
+  L, Trimmed: string;
+  EqPos, IfacePos, Depth: Integer;
+  List: TList<TInterfaceDeclLocation>;
+begin
   List := TList<TInterfaceDeclLocation>.Create;
   try
     I := 0;
-    while I < Length(Lines) do
+    while I < Length(ALines) do
     begin
-      L := StripLineComment(Lines[I]);
+      L := StripLineComment(ALines[I]);
       Trimmed := Trim(L);
-      Upper := UpperCase(Trimmed);
       EqPos := Pos('=', Trimmed);
       if EqPos > 0 then
       begin
-        IfacePos := Pos('INTERFACE', Upper);
-        if (IfacePos > EqPos) then
+        // "interface" / "dispinterface" as the first word after '=' - a
+        // Pos() over the line also took "class(TInterfacedObject, IFoo)".
+        // A forward "IFoo = interface;" has no body: its end would be the
+        // next type's.
+        IfacePos := TExtractInterfaceEngine.TypeKeywordPos(Trimmed,
+          ['interface', 'dispinterface']);
+        if IfacePos > 0 then
+        begin
+          var KwLen := Length('interface');
+          if StartsText('dispinterface', Copy(Trimmed, IfacePos, MaxInt)) then
+            KwLen := Length('dispinterface');
+          if StartsText(';', TrimLeft(Copy(Trimmed, IfacePos + KwLen, MaxInt))) then
+            IfacePos := 0;
+        end;
+        if IfacePos > 0 then
         begin
           // exclude the unit's "interface" section keyword
           var Name_ := Trim(Copy(Trimmed, 1, EqPos - 1));
@@ -1172,9 +1329,9 @@ begin
             Depth := 1;
             var EndLineFound := -1;
             J := I;
-            while J < Length(Lines) do
+            while J < Length(ALines) do
             begin
-              var LineU := UpperCase(StripLineComment(Lines[J]));
+              var LineU := UpperCase(StripLineComment(ALines[J]));
               var Pos_ := 1;
               while Pos_ <= Length(LineU) do
               begin

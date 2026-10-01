@@ -61,7 +61,11 @@ uses
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas',
-  Test.ChangeSignature in 'Test.ChangeSignature.pas';
+  Test.ChangeSignature in 'Test.ChangeSignature.pas',
+  Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',
+  Expert.EventGen in '..\Source\Expert.EventGen.pas',
+  Test.ExtractInterface in 'Test.ExtractInterface.pas',
+  Test.EventGenPlan in 'Test.EventGenPlan.pas';
 
 var
   Runner: ITestRunner;

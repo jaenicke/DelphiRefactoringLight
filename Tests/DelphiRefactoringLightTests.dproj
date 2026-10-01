@@ -101,6 +101,10 @@
         <DCCReference Include="Test.RegressionSuite.pas"/>
         <DCCReference Include="Test.Issue11.pas"/>
         <DCCReference Include="Test.ChangeSignature.pas"/>
+        <DCCReference Include="..\Source\Expert.ExtractInterface.pas"/>
+        <DCCReference Include="..\Source\Expert.EventGen.pas"/>
+        <DCCReference Include="Test.ExtractInterface.pas"/>
+        <DCCReference Include="Test.EventGenPlan.pas"/>
         <BuildConfiguration Include="Release">
             <Key>Cfg_1</Key>
             <CfgParent>Base</CfgParent>

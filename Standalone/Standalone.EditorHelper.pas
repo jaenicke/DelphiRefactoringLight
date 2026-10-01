@@ -46,6 +46,13 @@ type
   ///  can read SelStart / SelLength.</summary>
   TGetSelectionFunc = reference to function: TStandaloneSelection;
 
+  /// <summary>Callback the standalone main form installs so a wizard's
+  ///  Editor.GotoLocation actually shows its target: the form loads
+  ///  AFile into the Memo and places the caret. ALine / ACol are
+  ///  1-based.</summary>
+  TStandaloneNavigateProc = reference to procedure(const AFile: string;
+    ALine, ACol, AHighlightLen: Integer);
+
   /// <summary>Minimal "open project" model used by the standalone
   ///  executable. The main form owns one of these and feeds it to
   ///  TStandaloneEditorHelper. Wizards call methods on Editor; Editor
@@ -64,6 +71,7 @@ type
     FOpenBuffers: TDictionary<string, string>;
     FGetSelection: TGetSelectionFunc;
     FOnExternalChange: TProc<string>;
+    FOnNavigate: TStandaloneNavigateProc;
     function NormKey(const AFile: string): string;
   public
     constructor Create;
@@ -99,6 +107,7 @@ type
     property ActiveCol: Integer read FActiveCol;
     property GetSelectionFunc: TGetSelectionFunc read FGetSelection write FGetSelection;
     property OnExternalChange: TProc<string> read FOnExternalChange write FOnExternalChange;
+    property OnNavigate: TStandaloneNavigateProc read FOnNavigate write FOnNavigate;
     function TryGetBuffer(const AFile: string; out AContent: string): Boolean;
     /// <summary>Paths of the currently open (possibly unsaved) buffers.</summary>
     function OpenBufferFiles: TArray<string>;
@@ -644,11 +653,13 @@ end;
 function TStandaloneEditorHelper.GotoLocation(const AFilePath: string;
   ALine, ACol: Integer; AHighlightLen: Integer): Boolean;
 begin
-  // Update the active-file pointer so the main form (which observes
-  // the state) can switch tabs and position the caret in its editor
-  // on the next event-pump cycle.
-  // Convert from LSP 0-based to our 1-based.
+  // Convert from LSP 0-based to our 1-based. Moving the active file
+  // alone is not enough: nothing observes it, so the Memo kept showing
+  // the previous file while the state (and Ctrl+S) meant the new one.
+  // OnNavigate lets the main form load the target and place the caret.
   FState.SetActiveFile(AFilePath, ALine + 1, ACol + 1);
+  if Assigned(FState.OnNavigate) then
+    FState.OnNavigate(AFilePath, ALine + 1, ACol + 1, AHighlightLen);
   Result := True;
 end;
 

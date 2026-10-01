@@ -61,7 +61,9 @@ uses
   Test.RepoHygiene in 'Test.RepoHygiene.pas',
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.Issue11 in 'Test.Issue11.pas',
-  Test.ChangeSignature in 'Test.ChangeSignature.pas';
+  Test.ChangeSignature in 'Test.ChangeSignature.pas',
+  Standalone.EditorHelper in '..\Standalone\Standalone.EditorHelper.pas',
+  Test.StandaloneState in 'Test.StandaloneState.pas';
 
 var
   Runner: ITestRunner;

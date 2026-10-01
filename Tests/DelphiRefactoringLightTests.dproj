@@ -101,6 +101,8 @@
         <DCCReference Include="Test.RegressionSuite.pas"/>
         <DCCReference Include="Test.Issue11.pas"/>
         <DCCReference Include="Test.ChangeSignature.pas"/>
+        <DCCReference Include="..\Standalone\Standalone.EditorHelper.pas"/>
+        <DCCReference Include="Test.StandaloneState.pas"/>
         <BuildConfiguration Include="Release">
             <Key>Cfg_1</Key>
             <CfgParent>Base</CfgParent>

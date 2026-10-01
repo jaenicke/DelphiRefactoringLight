@@ -50,6 +50,11 @@ type
     FLV: TListView;
     FSortColumn: Integer;    // -1 = unsorted
     FAscending: Boolean;
+    /// <summary>The handler that was there before (audit #37, L4f): the
+    ///  assignment used to overwrite it. No caller has one today, so this
+    ///  is a latent defect - and exactly the kind that is cheap to close
+    ///  now and expensive to find later.</summary>
+    FPrevColumnClick: TLVColumnClickEvent;
     procedure DoColumnClick(Sender: TObject; Column: TListColumn);
     function CellText(AItem: TListItem): string;
   end;
@@ -101,9 +106,21 @@ begin
   Sorter := TListViewSorter(AParam);
   S1 := Sorter.CellText(TListItem(L1));
   S2 := Sorter.CellText(TListItem(L2));
-  // Numeric-aware: line numbers / counts sort as numbers, not text.
-  if TryStrToFloat(S1, N1) and TryStrToFloat(S2, N2) then
+  // Numeric-aware: line numbers / counts sort as numbers, not text. But
+  // NUMBERS AND TEXT ARE SEPARATE GROUPS (audit #37, L4f): comparing a
+  // pair numerically when both parse and textually otherwise is not a
+  // total order - '9' < '10' as numbers, '10' < '1a' and '1a' < '9' as
+  // text, i.e. a cycle, and the result then depended on the INPUT ORDER
+  // (the same three cells came out in three different orders). Numbers
+  // first, then text, each group ordered within itself.
+  var Num1 := TryStrToFloat(S1, N1);
+  var Num2 := TryStrToFloat(S2, N2);
+  if Num1 and Num2 then
     Result := CompareValue(N1, N2)
+  else if Num1 then
+    Result := -1
+  else if Num2 then
+    Result := 1
   else
     Result := CompareText(S1, S2);
   if Result = 0 then
@@ -123,6 +140,7 @@ begin
   end;
   FLV.CustomSort(@LVCompare, LPARAM(Self));
   SetListViewSortArrow(FLV, FSortColumn, FAscending);
+  if Assigned(FPrevColumnClick) then FPrevColumnClick(Sender, Column);
 end;
 
 procedure EnableListViewSorting(ALV: TListView);
@@ -134,6 +152,7 @@ begin
   Sorter.FLV := ALV;
   Sorter.FSortColumn := -1;
   Sorter.FAscending := True;
+  Sorter.FPrevColumnClick := ALV.OnColumnClick;   // chained, not replaced
   ALV.OnColumnClick := Sorter.DoColumnClick;
 end;
 

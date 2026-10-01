@@ -164,7 +164,21 @@ begin
     end;
     if Trim(Copy(U, KwEnd, MaxInt)).StartsWith(';') then Exit;   // forward decl
     AName := Trim(Copy(ALine, 1, P - 1));
+    // "type IFoo = interface" names the INTERFACE, not "type IFoo"
+    // (audit #37, L3d): a one-line declaration kept the keyword in the
+    // name, so every report and every duplicate comparison used a name
+    // that does not exist.
+    if AName.ToUpper.StartsWith('TYPE ') then
+      AName := Trim(Copy(AName, 6, MaxInt));
     if (AName = '') or not CharInSet(AName[1], ['A'..'Z', 'a'..'z', '_']) then Exit;
+    // The name is ONE identifier, optionally with a generic parameter list
+    // ("IList<T: IObject>" is a real shape in this project, so the check
+    // stops at the '<' rather than rejecting it).
+    for var CI := 2 to Length(AName) do
+    begin
+      if AName[CI] = '<' then Break;
+      if not CharInSet(AName[CI], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then Exit;
+    end;
     Exit(True);
   end;
 end;
@@ -183,9 +197,14 @@ begin
   Entries := TList<TInterfaceGuidEntry>.Create;
   try
     Lines := ReadFileLines(AFile);
+    // MASKED, not just '//'-stripped (audit #37, L3d): an interface inside
+    // { } or (* *) was reported, which also made the REAL one a duplicate
+    // of itself. Masking keeps the line length, so every position below
+    // still refers to the real line.
+    var Masked := MaskCommentsAndStrings(Lines);
     for I := 0 to High(Lines) do
     begin
-      L := StripLineComment(Lines[I]);
+      if I <= High(Masked) then L := Masked[I] else L := Lines[I];
       var IsDisp := False;
       if not IsInterfaceDeclLine(L, Name, IsDisp) then Continue;
 
@@ -195,11 +214,17 @@ begin
       while (Guid = '') and (J < High(Lines)) and (J < I + 3) do
       begin
         Inc(J);
-        Guid := ExtractGuid(StripLineComment(Lines[J]));
-        // Stop early if the next declaration starts.
+        var NextLine: string;
+        if J <= High(Masked) then NextLine := Masked[J] else NextLine := Lines[J];
+        // THE NEXT DECLARATION ENDS THE SEARCH, and that test comes FIRST
+        // (audit #37, M24): extracting before it meant
+        // "IMarker = interface / end; / IOther = interface ['{...}']"
+        // reported IMarker with IOTHER's GUID - a false duplicate that
+        // also hid the missing one.
         var NextName: string;
         var NextDisp: Boolean;
-        if IsInterfaceDeclLine(StripLineComment(Lines[J]), NextName, NextDisp) then Break;
+        if IsInterfaceDeclLine(NextLine, NextName, NextDisp) then Break;
+        Guid := ExtractGuid(NextLine);
       end;
 
       E := Default(TInterfaceGuidEntry);

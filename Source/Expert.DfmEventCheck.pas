@@ -1385,7 +1385,12 @@ begin
   DfmLines := GetLines(ADfmFile);
   if Length(DfmLines) = 0 then Exit;
   // Binary DFM guard: text DFMs start with object/inherited/inline.
-  var FirstWord := UpperCase(Trim(DfmLines[0]).Split([' '])[0]);
+  // Split returns an EMPTY array for a blank line, so [0] raised and the
+  // exception escaped CheckProject and aborted the whole project check
+  // (audit #37, M23). A blank first line is simply not a text DFM.
+  var FirstParts := UpperCase(Trim(DfmLines[0])).Split([' ']);
+  var FirstWord := '';
+  if Length(FirstParts) > 0 then FirstWord := FirstParts[0];
   if (FirstWord <> 'OBJECT') and (FirstWord <> 'INHERITED') and (FirstWord <> 'INLINE') then
     Exit;
 
@@ -2283,20 +2288,76 @@ var
     Result := Fallback;
   end;
 
+  /// <summary>The line range of the ISSUE'S form class body, or (-1, -1)
+  ///  when it cannot be located. A unit may declare several classes with a
+  ///  same-named handler - a frame or a helper before the form - and the
+  ///  first unqualified match used to win (audit #37, L3b): that class's
+  ///  declaration was rewritten while the form's own stayed, so
+  ///  declaration and implementation disagreed.</summary>
+  procedure FormClassRange(out AFrom, ATo: Integer);
+  var
+    I: Integer;
+    U: string;
+  begin
+    AFrom := -1;
+    ATo := -1;
+    if AIssue.FormClass = '' then Exit;
+    for I := 0 to Lines.Count - 1 do
+    begin
+      U := UpperCase(Trim(Lines[I]));
+      if AFrom < 0 then
+      begin
+        // "TForm1 = class(TForm)" / "TForm1 = class" - the declaration of
+        // THIS form class, not a mention of it
+        if U.StartsWith(UpperCase(AIssue.FormClass) + ' ')
+          or U.StartsWith(UpperCase(AIssue.FormClass) + '=') then
+        begin
+          var Eq := Pos('=', U);
+          if (Eq > 0) and Trim(Copy(U, Eq + 1, MaxInt)).StartsWith('CLASS') then
+            AFrom := I;
+        end;
+      end
+      else if (U = 'END;') or U.StartsWith('IMPLEMENTATION') then
+      begin
+        ATo := I;
+        Exit;
+      end;
+    end;
+    if AFrom >= 0 then ATo := Lines.Count - 1;
+  end;
+
   function FindDeclIndex: Integer;
   // Locate the in-class DECLARATION header "procedure <Handler>(" - the one
   // that is NOT class-qualified (no '.'). Anchored by name, not by line
   // number: correcting an earlier handler in the same file collapses its
   // multi-line header and shifts every later line, so a stored line index
   // would be stale by the time this issue is fixed.
+  // THE FORM'S OWN CLASS FIRST (audit #37, L3b), then the whole file: the
+  // form class from the DFM can be empty or differ from the implementing
+  // class (inherited forms, frames), which is why the fallback stays.
   var
     I, CutPos, K: Integer;
     U, HN, Rest, NamePart: string;
+    ClassFrom, ClassTo, Pass, LoI, HiI: Integer;
   begin
     Result := -1;
     HN := AIssue.HandlerName;
     if HN = '' then Exit;
-    for I := 0 to Lines.Count - 1 do
+    FormClassRange(ClassFrom, ClassTo);
+    for Pass := 0 to 1 do
+    begin
+      if Pass = 0 then
+      begin
+        if ClassFrom < 0 then Continue;    // no class body: only the file pass
+        LoI := ClassFrom;
+        HiI := ClassTo;
+      end
+      else
+      begin
+        LoI := 0;
+        HiI := Lines.Count - 1;
+      end;
+    for I := LoI to HiI do
       // EVERY declaration of the line: "b_Cancel: TButton;procedure Foo;"
       // is legal Delphi, and missing it here would generate a SECOND
       // declaration of a handler that already exists (forum 2026-09-30).
@@ -2318,6 +2379,7 @@ var
         // implementation and are handled by FindImplIndex.
         if (Pos('.', NamePart) = 0) and SameText(NamePart, HN) then Exit(I);
       end;
+    end;
   end;
 
   // True if AUnit already appears in any uses clause of Lines.

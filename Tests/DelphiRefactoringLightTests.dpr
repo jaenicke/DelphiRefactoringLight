@@ -64,6 +64,7 @@ uses
   Test.RegressionSuite in 'Test.RegressionSuite.pas',
   Test.AuditReproRemoveWith in 'Test.AuditReproRemoveWith.pas',
   Test.AuditReproSearch in 'Test.AuditReproSearch.pas',
+  Test.AuditReproChecks in 'Test.AuditReproChecks.pas',
   Test.Issue11 in 'Test.Issue11.pas',
   Test.ChangeSignature in 'Test.ChangeSignature.pas',
   Standalone.EditorHelper in '..\Standalone\Standalone.EditorHelper.pas',

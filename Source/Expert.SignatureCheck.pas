@@ -560,13 +560,39 @@ begin
   if AEntries[AIdx].Normalized = AReference then Exit('this row already matches');
   if not ReferenceEntry(AEntries, AReference, Ref) then Exit('no reference signature');
   if AEntries[AIdx].Role = srImplementation then
-    // the implementation is aligned with the class declaration of ITS unit
-    // - which must be the right one first
+  begin
+    // The implementation is aligned with the class declaration of ITS unit
+    // - which must be the right one first. The type comes from the HEADER's
+    // qualifier ("procedure TFoo.Bar(...)" -> TFoo): an implementation row
+    // carries no Container (WalkSymbols only sets one for a declaration),
+    // so comparing the two Containers was never true and this guard could
+    // not fire at all (audit #37, M25) - the tool aligned a body while its
+    // declaration still had the old signature.
+    var ImplType := '';
+    begin
+      var Hdr := AEntries[AIdx].RawSignature;
+      var DotP := 0;
+      // the first dot that follows the keyword, before the parameter list
+      var Limit := Pos('(', Hdr);
+      if Limit = 0 then Limit := Length(Hdr) + 1;
+      for var CI := 1 to Limit - 1 do
+        if Hdr[CI] = '.' then begin DotP := CI; Break; end;
+      if DotP > 0 then
+      begin
+        var Start := DotP;
+        while (Start > 1)
+          and CharInSet(Hdr[Start - 1], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+          Dec(Start);
+        ImplType := Copy(Hdr, Start, DotP - Start);
+      end;
+    end;
+    if ImplType = '' then ImplType := AEntries[AIdx].Container;
     for var E in AEntries do
       if (E.Role = srClassDecl) and SameText(E.FilePath, AEntries[AIdx].FilePath)
-        and SameText(E.Container, AEntries[AIdx].Container)
+        and SameText(E.Container, ImplType)
         and (E.Normalized <> AReference) then
         Exit('align the class declaration first');
+  end;
   Result := '';
 end;
 

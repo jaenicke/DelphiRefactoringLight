@@ -384,8 +384,13 @@ begin
        ((not FVerify.IsConnected) or
         ((ADelphiLspJson <> '') and not SameText(FVerifyProject, ADelphiLspJson))) then
     begin
+      // parked, not freed: a scan on another thread may still hold it
+      // (VerificationClient hands out the plain pointer) - same rule as
+      // RetireClient for the main session
       try FVerify.Shutdown; except end;
-      FreeAndNil(FVerify);
+      FRetired.Add(TPair<TLspClient, UInt64>.Create(FVerify, GetTickCount64));
+      FVerify := nil;
+      SweepRetired(False);
     end;
     if FVerify = nil then
     begin
@@ -457,16 +462,20 @@ begin
       Doomed := FVerify;
       FVerify := nil;
       FVerifyProject := '';
+      // Parked, not freed: FVerifyLastUse is stamped only when a scan FETCHES
+      // the client, so a scan can still be using it when the idle window
+      // runs out. Like the main session it goes after RetiredGraceMs, or in
+      // the destructor once the worker latch has drained.
+      FRetired.Add(TPair<TLspClient, UInt64>.Create(Doomed, GetTickCount64));
+      SweepRetired(False);
     end;
   finally
     FLock.Leave;
   end;
-  // outside the lock: shutting a session down takes a moment
+  // outside the lock: shutting a session down takes a moment (the object
+  // itself stays alive in FRetired, so a holder's requests just fail)
   if Doomed <> nil then
-  begin
     try Doomed.Shutdown; except end;
-    Doomed.Free;
-  end;
 end;
 
 function TLspManager.PeekClient: TLspClient;

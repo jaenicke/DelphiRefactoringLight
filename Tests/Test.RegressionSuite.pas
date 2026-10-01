@@ -86,6 +86,13 @@ type
     [Test] procedure BackupPath_MirrorsTheFullPath;
     [Test] procedure VcsOutput_MixedUtf8AndAnsiLines;
     [Test] procedure WorkerLatch_WaitsAndRefusesAfterShutdown;
+    /// <summary>Audit #38, L1g: the worker COUNT drops in the closure's
+    ///  finally - before the closure epilogue releases what it captured and
+    ///  before the thread itself has ended. A shutdown that watches only
+    ///  the count therefore lets the BPL unload while plugin code is still
+    ///  running on that thread; the Sleep(50) it used instead of a join was
+    ///  a timing allowance, not a guarantee.</summary>
+    [Test] procedure WorkerLatch_WaitsForTheThreadNotJustTheCount;
   end;
 
   /// <summary>The MCP pipe is how Claude Code reaches this IDE. On a 64-bit
@@ -790,6 +797,75 @@ begin
     Assert.IsFalse(StartWorker(procedure begin end), 'no new worker after the shutdown began');
     Assert.IsTrue(WorkersShuttingDown);
   finally
+    ResetWorkerLatch;
+  end;
+end;
+
+type
+  // Its destructor is the "plugin code still running after the counter
+  // dropped": the worker's closure captures it, so it is released by the
+  // closure EPILOGUE - after the latch has already been left. Shape taken
+  // from Ian Branch's own repro for this item (audit #38, L1g).
+  TClosureTail = class(TInterfacedObject)
+  public
+    destructor Destroy; override;
+  end;
+
+var
+  GTailRan: Integer = 0;
+
+destructor TClosureTail.Destroy;
+begin
+  Sleep(300);
+  AtomicExchange(GTailRan, 1);
+  inherited;
+end;
+
+// THE POINT OF THESE TWO HELPERS, and my own first version got it wrong:
+// a variable captured by a closure lives in a frame object that the
+// ENCLOSING METHOD holds as well. Written inside the test method, clearing
+// the local would destroy the tail on the MAIN thread and the test would
+// pass whatever the shutdown does. Built here, only the returned TProc
+// holds the frame - and StartTailWorker keeps the test method from holding
+// the TProc itself.
+function MakeTailProc(AStarted: TEvent): TProc;
+var
+  Tail: IInterface;
+begin
+  Tail := TClosureTail.Create;
+  Result :=
+    procedure
+    begin
+      if Tail <> nil then
+        AStarted.SetEvent;
+    end;
+end;
+
+function StartTailWorker(AStarted: TEvent): Boolean;
+begin
+  Result := StartWorker(MakeTailProc(AStarted));
+end;
+
+procedure TMiscRegressionTests.WorkerLatch_WaitsForTheThreadNotJustTheCount;
+var
+  Started: TEvent;
+begin
+  ResetWorkerLatch;
+  AtomicExchange(GTailRan, 0);
+  Started := TEvent.Create(nil, True, False, '');
+  try
+    Assert.IsTrue(StartTailWorker(Started), 'the worker starts');
+    Assert.IsTrue(Started.WaitFor(5000) = wrSignaled, 'the worker runs');
+    Assert.IsTrue(ShutdownWorkersAndWait(10000),
+      'the shutdown reports that every worker is gone');
+    Assert.AreEqual<Integer>(1, AtomicCmpExchange(GTailRan, 0, 0),
+      'and it may only report that once the thread really ended - the ' +
+      'captured object''s destructor is plugin code on that thread');
+  finally
+    // let the tail finish before the next test, whatever the verdict
+    for var I := 1 to 100 do
+      if AtomicCmpExchange(GTailRan, 0, 0) = 1 then Break else Sleep(50);
+    Started.Free;
     ResetWorkerLatch;
   end;
 end;
@@ -2159,6 +2235,16 @@ function RingResult(AUnits: Integer): TUsesCycleResult;
 var
   Files: TArray<string>;
 begin
+  // The big rings take minutes and the runner prints nothing while a test
+  // runs, which looks like a hang (reported with measurements in audit #38:
+  // 118 s in one test, 132 s of a 150 s run). Say what is happening - the
+  // depth itself must NOT be lowered, see the comment in the deep test.
+  if AUnits >= 5000 then
+  begin
+    Writeln(Format('    [building a %d-unit ring - this takes a while]',
+      [AUnits]));
+    Flush(Output);
+  end;
   SetLength(Files, AUnits);
   for var I := 0 to AUnits - 1 do
     Files[I] := 'C:\ring\U' + IntToStr(I) + '.pas';

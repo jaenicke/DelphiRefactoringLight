@@ -57,6 +57,13 @@ type
     FIdeNotifier: IOTAIDENotifier;
     FIdeNotifierIndex: Integer;
     FInFlight: Boolean;          // simple debounce flag
+    // Audit #38, M4: FInFlight debounced, but it also DISCARDED a project
+    // switch that arrived during the 10-30 s cold start - the prewarm
+    // finished for the old project and nothing re-ran for the new one, so
+    // the session stayed bound to the old one until some wizard happened
+    // to call GetClient. The latest request is parked here instead and the
+    // worker picks it up when it is done.
+    FPending: string;
     FLastProject: string;
     procedure StartPrewarmFor(const AProjectFile: string);
   public
@@ -281,7 +288,13 @@ var
   RootPath, DelphiLspJson: string;
   ScanFiles: TArray<string>;
 begin
-  if FInFlight then Exit;
+  if FInFlight then
+  begin
+    // not dropped: remembered, and run when the current one finishes
+    FPending := AProjectFile;
+    Exit;
+  end;
+  FPending := '';
 
   // Resolve config bits on the main thread (ToolsAPI is single-threaded).
   RootPath := Editor.GetProjectRoot;
@@ -312,9 +325,28 @@ begin
         end;
       finally
         FInFlight := False;
+        // A switch that arrived while this ran is served now. On the MAIN
+        // thread: StartPrewarmFor reads ToolsAPI (project root, the
+        // .delphilsp.json, the source list), which is main-thread only.
+        TThread.Queue(nil,
+          procedure
+          begin
+            var Next := FPending;
+            FPending := '';
+            // Only when it really differs from what we just warmed - and
+            // only while a session is wanted at all, the same condition
+            // the notifier uses.
+            if (Next <> '') and not SameText(Next, AProjectFile)
+              and (TPluginSettings.PrewarmLspOnProjectOpen
+                   or (TLspManager.Instance.PeekClient <> nil)) then
+              StartPrewarmFor(Next);
+          end);
       end;
     end) then
+  begin
     FInFlight := False;   // shutdown began - nothing was started
+    FPending := '';
+  end;
 end;
 
 end.

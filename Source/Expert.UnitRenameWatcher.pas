@@ -45,6 +45,9 @@ type
     FCurrentFileName: string;
   public
     constructor Create(AOwner: TUnitRenameWatcher; const ACurrentFileName: string);
+    // IOTANotifier - TNotifierObject's no-op is not enough here, see
+    // TUnitRenameWatcher.ForgetNotifier (audit #38, M7)
+    procedure Destroyed;
     // IOTAModuleNotifier
     function CheckOverwrite: Boolean;
     procedure ModuleRenamed(const NewName: string);
@@ -69,6 +72,7 @@ type
       TAttachedEntry = record
         Module: IOTAModule;
         NotifierIndex: Integer;
+        Notifier: IOTAModuleNotifier;   // to find the entry again on Destroyed
       end;
     var
       FIdeNotifier: IOTAIDENotifier;
@@ -81,6 +85,13 @@ type
     procedure DoDeferTick(Sender: TObject);
     procedure AttachToAllOpenModules;
     function IsAttachedTo(const AFileName: string): Boolean;
+    /// <summary>A module that closes destroys its notifiers. Nothing used
+    ///  to remove the entry, so FAttached kept the entry AND its IOTAModule
+    ///  reference for the whole IDE session - and when the unit was opened
+    ///  again, IsAttachedTo found the stale entry by file name and no
+    ///  notifier was attached to the NEW module, so its renames were never
+    ///  reported (audit #38, M7).</summary>
+    procedure ForgetNotifier(const ANotifier: IOTAModuleNotifier);
   public
     constructor Create;
     destructor Destroy; override;
@@ -122,6 +133,16 @@ end;
 function TModuleRenameNotifier.CheckOverwrite: Boolean;
 begin
   Result := True;
+end;
+
+procedure TModuleRenameNotifier.Destroyed;
+begin
+  if FOwner <> nil then
+    try
+      FOwner.ForgetNotifier(Self);
+    except
+      // the owner may be going away itself
+    end;
 end;
 
 procedure TModuleRenameNotifier.ModuleRenamed(const NewName: string);
@@ -248,6 +269,20 @@ begin
     AttachToModule(ModuleServices.Modules[I]);
 end;
 
+procedure TUnitRenameWatcher.ForgetNotifier(const ANotifier: IOTAModuleNotifier);
+begin
+  if ANotifier = nil then Exit;
+  for var I := FAttached.Count - 1 downto 0 do
+    if FAttached[I].Notifier = ANotifier then
+    begin
+      // NO RemoveNotifier here: the module is destroying its notifiers, so
+      // the index is already void. Dropping the entry releases our
+      // IOTAModule reference and lets a reopened file attach again.
+      FAttached.Delete(I);
+      Break;
+    end;
+end;
+
 function TUnitRenameWatcher.IsAttachedTo(const AFileName: string): Boolean;
 var
   Entry: TAttachedEntry;
@@ -301,6 +336,7 @@ begin
 
   Notifier := TModuleRenameNotifier.Create(Self, ModuleFileName);
   Entry.Module := AModule;
+  Entry.Notifier := Notifier;
   try
     Entry.NotifierIndex := AModule.AddNotifier(Notifier);
     FAttached.Add(Entry);

@@ -2828,7 +2828,11 @@ end;
 procedure TUnitIndex.EnsureWorker;
 begin
   if FWorker = nil then
+  begin
+    // created suspended, so the field is set before the loop can read it
     FWorker := TIndexWorker.Create(Self);
+    FWorker.Start;
+  end;
 end;
 
 function TUnitIndex.GetSnapshot: IUnitSnapshot;
@@ -3427,14 +3431,36 @@ var
   GCache, PCache: string;
   Cycle: Integer;
 begin
-  // Initial load from both caches - serve them immediately.
-  CurrentSources(GDirs, PDirs, PFiles, GCache, PCache);
-  LoadCache(GCache, FGlobalByPath);  FGlobalKey := GCache;
-  LoadCache(PCache, FProjectByPath); FProjectKey := PCache;
-  if (FGlobalByPath.Count > 0) or (FProjectByPath.Count > 0) then
-    PublishSnapshot(True, True);
+  // Initial load from both caches - serve them immediately. INSIDE a
+  // try..except (audit #38, L1e): the per-cycle guard below starts only
+  // after this, so an exception here (PublishSnapshot on a 32-bit IDE that
+  // is out of memory is the realistic one) ended the thread silently and
+  // the index never built again for the whole session. Dropping what was
+  // loaded lets the first cycle rebuild it.
+  try
+    CurrentSources(GDirs, PDirs, PFiles, GCache, PCache);
+    LoadCache(GCache, FGlobalByPath);  FGlobalKey := GCache;
+    LoadCache(PCache, FProjectByPath); FProjectKey := PCache;
+    if (FGlobalByPath.Count > 0) or (FProjectByPath.Count > 0) then
+      PublishSnapshot(True, True);
+  except
+    on E: Exception do
+    begin
+      try
+        FGlobalByPath.Clear;
+        FProjectByPath.Clear;
+        FGlobalKey := '';
+        FProjectKey := '';
+      except
+        // nothing left to save here
+      end;
+      SetStatus('cache load failed (' + E.ClassName + ') - rebuilding');
+    end;
+  end;
 
   Cycle := 0;
+  // FWorker is assigned before the thread is started (see TIndexWorker
+  // .Create - audit #38, M5), so it is non-nil by the time this runs.
   while (FWorker <> nil) and not FWorker.Terminated do
   begin
     try
@@ -3491,7 +3517,13 @@ constructor TUnitIndex.TIndexWorker.Create(AOwner: TUnitIndex);
 begin
   FOwner := AOwner;
   FreeOnTerminate := False;
-  inherited Create(False);
+  // SUSPENDED (audit #38, M5): Create(False) resumes the thread in
+  // AfterConstruction, so WorkerLoop - which lives on the OWNER and tests
+  // FWorker - could run before EnsureWorker has stored it. It then read nil,
+  // returned at once, and because FWorker is non-nil from then on nothing
+  // recreated it: the index silently stopped refreshing for the session.
+  // EnsureWorker calls Start after the assignment.
+  inherited Create(True);
   Priority := tpLower;
 end;
 

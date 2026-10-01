@@ -61,6 +61,75 @@ uses
 var
   GCount: Integer = 0;
   GShutdown: Integer = 0;
+  // Audit #38, L1g: the COUNTER drops in the closure's finally, i.e. before
+  // the closure epilogue (which releases everything AProc captured) and the
+  // thread's own exit path have run. A shutdown that only watches the count
+  // therefore lets the BPL unload while plugin code is still executing on
+  // that thread; the old Sleep(50) was a timing allowance, not a join. So
+  // the thread HANDLES are kept (duplicated - TThread closes its own) and
+  // waited for as well.
+  GHandleLock: TObject = nil;
+  GHandles: TArray<THandle>;
+
+procedure NoteWorkerThread(AThread: TThread);
+var
+  Dup: THandle;
+begin
+  if (GHandleLock = nil) or (AThread = nil) then Exit;
+  // OUR OWN handle: TThread closes its one in its destructor, and an
+  // anonymous thread frees itself the moment it ends - so waiting on
+  // TThread.Handle would be a race against that free.
+  Dup := 0;
+  if not DuplicateHandle(GetCurrentProcess, AThread.Handle,
+       GetCurrentProcess, @Dup, SYNCHRONIZE, False, 0) or (Dup = 0) then
+    Exit;
+  TMonitor.Enter(GHandleLock);
+  try
+    // prune the ones that have exited, so a long IDE session does not
+    // collect a handle per worker
+    var Keep: TArray<THandle> := nil;
+    for var Old in GHandles do
+      if WaitForSingleObject(Old, 0) = WAIT_TIMEOUT then
+        Keep := Keep + [Old]
+      else
+        CloseHandle(Old);
+    GHandles := Keep + [Dup];
+  finally
+    TMonitor.Exit(GHandleLock);
+  end;
+end;
+
+/// <summary>Waits for the threads still running, up to the deadline.
+///  Handles that are signalled (or that we stop waiting for) are closed.
+///  </summary>
+function JoinWorkerThreads(ADeadline: UInt64; AOnMain: Boolean): Boolean;
+var
+  Pending: TArray<THandle>;
+begin
+  Result := True;
+  if GHandleLock = nil then Exit;
+  TMonitor.Enter(GHandleLock);
+  try
+    Pending := GHandles;
+    GHandles := nil;
+  finally
+    TMonitor.Exit(GHandleLock);
+  end;
+  for var H in Pending do
+  begin
+    while WaitForSingleObject(H, 10) = WAIT_TIMEOUT do
+    begin
+      if GetTickCount64 >= ADeadline then
+      begin
+        Result := False;
+        Break;
+      end;
+      // a worker may be waiting on a queued closure - keep the queue moving
+      if AOnMain then CheckSynchronize(0);
+    end;
+    CloseHandle(H);
+  end;
+end;
 
 function WorkerEnter: Boolean;
 begin
@@ -106,6 +175,9 @@ begin
           WorkerLeave;
         end;
       end);
+    // BEFORE Start, so a shutdown that sees the count already raised can
+    // never miss this thread's handle.
+    NoteWorkerThread(T);
     T.Start;
   except
     WorkerLeave;
@@ -128,10 +200,12 @@ begin
     else
       Sleep(10);
   Result := ActiveWorkerCount = 0;
-  if Result then
-    // The last worker has decremented the counter but may still be on its
-    // way out of the closure - a moment for the epilogue.
-    Sleep(50);
+  // Every worker that was counted has registered its thread handle before
+  // it ran AProc, so once the count is zero the handle list is complete -
+  // and waiting on it is what makes "no plugin code is running any more"
+  // true, instead of hoping 50 ms was enough (audit #38, L1g).
+  if not JoinWorkerThreads(Start + ATimeoutMs, OnMain) then
+    Result := False;
   if OnMain then
     for var I := 1 to 100 do
       if not CheckSynchronize(0) then Break;   // drain queued closures
@@ -141,5 +215,15 @@ procedure ResetWorkerLatch;
 begin
   AtomicExchange(GShutdown, 0);
 end;
+
+initialization
+  GHandleLock := TObject.Create;
+
+finalization
+  // Nothing may wait on the lock any more at this point: the shutdown has
+  // run (it is the first thing in the package's finalization).
+  for var H in GHandles do CloseHandle(H);
+  GHandles := nil;
+  FreeAndNil(GHandleLock);
 
 end.

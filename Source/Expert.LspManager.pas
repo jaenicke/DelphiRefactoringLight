@@ -60,7 +60,7 @@ type
       FVerifyLastUse: UInt64;
       FVerifyFailed: Boolean;      // it could not be started - do not retry in this session
     constructor CreatePrivate;
-    procedure RetireClient;
+    function RetireClient: TLspClient;
     procedure SweepRetired(AAll: Boolean);
   public
     destructor Destroy; override;
@@ -154,7 +154,8 @@ implementation
 
 uses
   Winapi.Windows, System.IOUtils, System.DateUtils, System.JSON,
-  System.Win.Registry, System.TypInfo, Expert.PluginSettings
+  System.Win.Registry, System.TypInfo, Expert.PluginSettings,
+  Expert.WorkerLatch
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI, Expert.EditorHelper {$ENDIF};
 
 const
@@ -306,22 +307,38 @@ begin
   Result := FInstance;
 end;
 
-// Caller holds FLock.
-procedure TLspManager.RetireClient;
+// Caller holds FLock. DETACHES only - the shutdown of the retired client
+// is the caller's job, AFTER FLock.Leave (audit #38, M9): TLspClient
+// .Shutdown sends a request with a 15 s timeout and then waits 5 s for the
+// process, so a server that is alive but not answering used to freeze the
+// IDE for 20 s with FLock held - and every other FLock.Enter behind it.
+// Returns what to shut down, nil when there was nothing. The same
+// detach-then-shutdown shape MaintainVerifySession already uses.
+function TLspManager.RetireClient: TLspClient;
 begin
+  Result := FClient;
   if FClient <> nil then
   begin
-    try
-      FClient.Shutdown;   // ends the process: pending waits wake up and fail
-    except
-      // Shutdown-Fehler ignorieren
-    end;
     FRetired.Add(TPair<TLspClient, UInt64>.Create(FClient, GetTickCount64));
     FClient := nil;
   end;
   FIsReady := False;
   FProjectIndexed := False;
   SweepRetired(False);
+end;
+
+/// <summary>Shuts a detached client down outside the lock. The object stays
+///  alive in FRetired for the grace period - a worker may still hold it.
+///  </summary>
+procedure ShutdownRetired(AClient: TLspClient);
+begin
+  if AClient = nil then Exit;
+  try
+    AClient.Shutdown;   // ends the process: pending waits wake up and fail
+  except
+    // a shutdown that fails changes nothing - the grace period and the
+    // reader's own death handling take it from here
+  end;
 end;
 
 // Caller holds FLock (or is the destructor).
@@ -528,8 +545,19 @@ begin
 
   if NeedRestart then
   begin
-    // Alten Client beenden (nicht freigeben - ein Worker koennte ihn halten)
-    RetireClient;
+    // Alten Client beenden (nicht freigeben - ein Worker koennte ihn halten).
+    // The SHUTDOWN goes to a worker (audit #38, M9): it can take 20 s on a
+    // server that is alive but not answering, and this runs under FLock on
+    // the UI thread after a project switch. Leaving the lock here instead
+    // would open a window in which a second caller sees FClient = nil and
+    // starts a second process, so the retired client - already parked in
+    // FRetired for its grace period, which is far longer than any shutdown
+    // - is ended in the background. If no worker can be started (the BPL is
+    // unloading), it is done here: correctness before responsiveness.
+    var Retired := RetireClient;
+    if Retired <> nil then
+      if not StartWorker(procedure begin ShutdownRetired(Retired) end) then
+        ShutdownRetired(Retired);
 
     // Neuen Client starten
     FClient := TLspClient.Create(FLspExePath);
@@ -716,26 +744,30 @@ begin
   // takes it): it must be gone before the BPL can unload, like every other
   // process we started.
   MaintainVerifySession(0);
+  var Retired: TLspClient;
   FLock.Enter;
   try
-    RetireClient;
+    Retired := RetireClient;
     FCurrentProject := '';
     FCurrentRootPath := '';
   finally
     FLock.Leave;
   end;
+  ShutdownRetired(Retired);   // outside the lock (M9)
 end;
 
 procedure TLspManager.Reset;
 begin
   MaintainVerifySession(0);   // a new project needs a new verification session
+  var Retired: TLspClient;
   FLock.Enter;
   try
-    RetireClient;
+    Retired := RetireClient;
     FCurrentProject := '';
   finally
     FLock.Leave;
   end;
+  ShutdownRetired(Retired);   // outside the lock (M9)
 end;
 
 procedure TLspManager.ApplyStatusToCaption(ADialog: TObject);

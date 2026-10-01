@@ -140,6 +140,15 @@ begin
   // tabs on batch fixes; change bars don't matter for closed files anyway.
   if not Editor.ReadEditorContent(AFilePath, Live) then
     Exit(Editor.ReplaceFileContent(AFilePath, ASL.Text));
+  // The LINE OPS are planned against AOriginal but run on the LIVE buffer,
+  // so the two must still agree (audit #36, L7). They do not when the user
+  // typed between the caller's read and this write: the planned window then
+  // names other lines, ReplaceLineAt overwrites e.g. the 'uses' keyword and
+  // the line it was meant to replace survives below it - reported as
+  // success. A changed buffer is REFUSED here; every caller already has a
+  // stale guard (a content hash) that turns False into a message.
+  if Live <> AOriginal then Exit(False);
+
   Orig := TStringList.Create;
   try
     Orig.Text := AOriginal;

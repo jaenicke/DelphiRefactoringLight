@@ -91,6 +91,27 @@ const
   ///  place).</summary>
   BridgeVersion = PluginVersion;
 
+type
+  /// <summary>How long the bridge waits for a tool's answer. The two
+  ///  mistakes are NOT symmetric: waiting too SHORT tells the model "no
+  ///  answer from the IDE" while the IDE is still writing - a write
+  ///  reported as failed that actually lands - whereas waiting too long is
+  ///  merely slow and the user can interrupt. So an unclassified tool gets
+  ///  the long bound at runtime, and the SUITE is what refuses it.</summary>
+  TToolWait = (twQuick, twLong, twUnclassified);
+
+/// <summary>The bound for one tool. twUnclassified never reaches a user:
+///  ToolTimeout treats it as long.</summary>
+function ToolWaitClass(const AName: string): TToolWait;
+/// <summary>How many ms the bridge really waits for that tool's answer.
+///  </summary>
+function ToolTimeout(const AName: string): Cardinal;
+/// <summary>Every tool of McpToolDefinitions the two lists do not mention -
+///  empty is the contract. A new tool therefore fails a test instead of
+///  inheriting a bound nobody chose (that is how add_iinterface ended up
+///  with 45 s while its own handler allows 120 s).</summary>
+function UnclassifiedWaitTools: TArray<string>;
+
 implementation
 
 uses
@@ -99,6 +120,10 @@ uses
 const
   ContextTimeoutMs = 5000;
   ToolTimeoutMs = 45000;
+  /// <summary>The IDE's own longest budget (300 s on the main thread) plus
+  ///  room for the handler-thread waits that can precede it, so the bridge
+  ///  can never be the one that gives up first.</summary>
+  LongToolWaitMs = 330000;
   SupportedProtocols: array[0..2] of string = ('2025-06-18', '2025-03-26', '2024-11-05');
 
 { TPipeTransport }
@@ -119,9 +144,22 @@ begin
 end;
 
 // Rename, reference scans and the project-wide analyses can take minutes
-// on a big project; everything else answers in seconds.
-function ToolTimeout(const AName: string): Cardinal;
+// on a big project; the quick ones answer in seconds.
+//
+// THE BOUND IS THE IDE'S, NOT A GUESS: the handler side gives its own
+// longest main-thread calls 300 s (MainCallTimeoutMs = 15 s for the rest),
+// and the waits that precede them (LspWaitMs twice in the quick-fix path)
+// sit on the handler thread on top of that. A bridge bound below the IDE's
+// own is therefore a false "no answer" by construction - which is what
+// add_iinterface showed (its handler allows 120 s, the bridge gave up at
+// 45 s), so LongToolWaitMs is the IDE's 300 s plus room for those waits.
+function ToolWaitClass(const AName: string): TToolWait;
 begin
+  // Minutes on a big project: scans, project-wide analyses, VCS calls, and
+  // every tool whose handler asks for more than the default main-thread
+  // trip. get_quick_fixes belongs here too - two 8 s LSP waits, a 15 s
+  // main-thread trip and the O(IdentCount) resolve came close enough to
+  // 45 s to be luck rather than design.
   if AName.StartsWith('rename_') or (AName = 'find_references') or
      (AName = 'find_implementations') or AName.StartsWith('uses_') or
      (AName = 'analyze_uses') or (AName = 'debug_consistency') or
@@ -132,10 +170,52 @@ begin
      (AName = 'find_unit_references') or (AName = 'cleanup_uses') or
      (AName = 'find_original_symbol') or (AName = 'dfm_events') or
      (AName = 'interface_guids') or (AName = 'signature_check') or
-     (AName = 'extract_interface') or (AName = 'extract_method') then
-    Result := 300000
+     (AName = 'extract_interface') or (AName = 'extract_method') or
+     (AName = 'add_iinterface') or (AName = 'get_quick_fixes') or
+     (AName = 'convert_properties') or (AName = 'expand_includes') then
+    Exit(twLong);
+
+  // Reads, single-buffer edits and single LSP requests - the IDE answers
+  // them within its default main-thread trip.
+  if (AName = 'get_diagnostics') or (AName = 'apply_quick_fix') or
+     (AName = 'get_status') or (AName = 'find_unit') or
+     (AName = 'add_unit') or (AName = 'remove_unit') or
+     (AName = 'extract_variable') or (AName = 'wrap_try_finally') or
+     AName.StartsWith('buffer_') or AName.StartsWith('scratch_') or
+     AName.StartsWith('lsp_') or
+     // the bridge's own two: they never leave this process
+     (AName = 'ide_instances') or (AName = 'select_ide') then
+    Exit(twQuick);
+
+  Result := twUnclassified;
+end;
+
+function ToolTimeout(const AName: string): Cardinal;
+begin
+  if ToolWaitClass(AName) = twQuick then
+    Result := ToolTimeoutMs
   else
-    Result := ToolTimeoutMs;
+    Result := LongToolWaitMs;   // unclassified included, deliberately
+end;
+
+function UnclassifiedWaitTools: TArray<string>;
+var
+  Arr: TJSONArray;
+begin
+  Result := nil;
+  Arr := McpToolDefinitions;
+  if Arr = nil then Exit;
+  try
+    for var V in Arr do
+      if V is TJSONObject then
+      begin
+        var N := TJSONObject(V).GetValue<string>('name', '');
+        if (N <> '') and (ToolWaitClass(N) = twUnclassified) then
+          Result := Result + [N];
+      end;
+  finally
+    Arr.Free;
+  end;
 end;
 
 function IsLocalTool(const AName: string): Boolean;

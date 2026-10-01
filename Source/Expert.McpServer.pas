@@ -137,6 +137,11 @@ var
   GWnd: HWND = 0;
   GFixLock: TCriticalSection = nil;
   GFixCache: TDictionary<string, TPair<Cardinal, TArray<TQuickFix>>> = nil;
+  // Written by every pipe HANDLER thread, read by the status tick on the
+  // MAIN thread: a managed string assigned while another thread reads it can
+  // be read mid-replacement, and two handlers assigning at once can free the
+  // old value twice (audit #36, L1). Both sides go through SetLastTool /
+  // LastTool under GStatLock.
   GLastTool: string;
   GToolRegistry: TDictionary<string, TMcpToolHandler> = nil;
   GStatLock: TCriticalSection = nil;
@@ -1647,6 +1652,29 @@ begin
   end;
 end;
 
+procedure SetLastTool(const ATool: string);
+begin
+  if GStatLock = nil then Exit;
+  GStatLock.Enter;
+  try
+    GLastTool := ATool;
+  finally
+    GStatLock.Leave;
+  end;
+end;
+
+function LastTool: string;
+begin
+  Result := '';
+  if GStatLock = nil then Exit;
+  GStatLock.Enter;
+  try
+    Result := GLastTool;      // a COPY leaves the caller independent of the
+  finally                     // next handler's assignment
+    GStatLock.Leave;
+  end;
+end;
+
 function McpToolStats: TArray<TMcpToolStat>;
 begin
   Result := nil;
@@ -1694,7 +1722,7 @@ begin
     Args := nil;
     if Req.GetValue('arguments') is TJSONObject then
       Args := TJSONObject(Req.GetValue('arguments'));
-    GLastTool := Tool;
+    SetLastTool(Tool);
     // An argument name the schema does not list is never read, so the call
     // silently runs with a default. Collect the names BEFORE the dispatch -
     // a handler may consume its arguments object.
@@ -1885,7 +1913,8 @@ begin
     Result := Result + ', last error: ' + GServer.LastError;
   if (GHeadless <> nil) and (GHeadless.Count > 0) then
     Result := Result + Format(', %d headless buffer(s)', [GHeadless.Count]);
-  if GLastTool <> '' then Result := Result + ', last tool: ' + GLastTool;
+  var LT := LastTool;
+  if LT <> '' then Result := Result + ', last tool: ' + LT;
 end;
 
 initialization

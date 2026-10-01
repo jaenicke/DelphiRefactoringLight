@@ -1257,9 +1257,17 @@ begin
   for var V in An.Vetoes do VA.Add(V);
   J.AddPair('vetoes', VA);
 
-  // the new parameter list, if given
-  var NewArr := AArgs.GetValue('params') as TJSONArray;
-  if NewArr = nil then Exit(McpOk(J));
+  // the new parameter list, if given. NOT an `as` cast: "params": {} or
+  // "params": "x" raised EInvalidCast and leaked J with it (audit #36,
+  // L2c) - the error belongs in the answer, like every other bad argument.
+  var NewVal := AArgs.GetValue('params');
+  if (NewVal = nil) or (NewVal is TJSONNull) then Exit(McpOk(J));
+  if not (NewVal is TJSONArray) then
+  begin
+    J.Free;
+    Exit(McpErr('"params" must be an ARRAY of objects (one per parameter)'));
+  end;
+  var NewArr := TJSONArray(NewVal);
   var Rows: TArray<TNewParam> := nil;
   for var V in NewArr do
   begin

@@ -468,7 +468,17 @@ var
   Req, Resp: string;
 begin
   try
-    if not PipeReadLine(APipe, FStopEvent, 10000, Req) then Exit;
+    if not PipeReadLine(APipe, FStopEvent, 10000, Req) then
+    begin
+      // A request that does not complete within 10 s, or one above the
+      // 32 MB cap, used to get the pipe closed in its face: the client
+      // could not tell that from a crashed IDE (audit #36, L2a). Say what
+      // happened - a best effort, the connection may already be gone.
+      PipeWriteLine(APipe, FStopEvent, 2000,
+        '{"ok":false,"error":"the request did not arrive completely ' +
+        '(incomplete line within 10 s, or larger than the 32 MB limit)"}');
+      Exit;
+    end;
     TInterlocked.Increment(FRequests);
     NoteClient(APipe, BridgeVersionOfRequest(Req));
     try

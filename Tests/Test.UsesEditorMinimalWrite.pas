@@ -63,6 +63,12 @@ type
     [Test] procedure InsertionAtEndOfFile_FallsBackToWholeFileWrite;
     [Test] procedure AboveTheOperationCap_FallsBackToWholeFileWrite;
     [Test] procedure FileNotOpenInEditor_FallsBackToWholeFileWrite;
+    /// <summary>Audit #36, L7: the line operations are PLANNED against the
+    ///  content the caller read and then RUN on the live buffer, which the
+    ///  routine only used to ask "is the file open?". When the user types
+    ///  between the two, the planned window names other lines - the edit
+    ///  lands on the wrong one and the call reports success.</summary>
+    [Test] procedure BufferChangedSinceTheCallerReadIt_IsRefused;
   end;
 
 implementation
@@ -593,6 +599,29 @@ begin
   Assert.AreEqual<Integer>(0, GFake.LineOps, 'no line operations');
   Assert.AreEqual(Src(['uses', '  A, B;', '', 'implementation']),
     GFake.Content('Closed.pas'), 'and the closed file received the new content');
+end;
+
+procedure TUsesEditorMinimalWriteTests.BufferChangedSinceTheCallerReadIt_IsRefused;
+var
+  Orig, Typed: string;
+begin
+  // what the caller read and planned against
+  Orig := Src(['unit Foo;', '', 'uses', '  A;', '', 'implementation']);
+  // what the buffer looks like NOW: the user added a line at the top, so
+  // every line below moved down by one
+  Typed := Src(['unit Foo;', '{ a note }', '', 'uses', '  A;', '',
+    'implementation']);
+  NewEditor('Foo.pas', Typed);
+
+  Assert.IsFalse(Apply('Foo.pas', Orig,
+    ['unit Foo;', '', 'uses', '  A, B;', '', 'implementation']),
+    'a buffer that no longer matches what was planned must be refused');
+  Assert.AreEqual<Integer>(0, GFake.LineOps,
+    'and nothing may be written - the old code replaced the wrong line here');
+  Assert.AreEqual<Integer>(0, GFake.WholeWrites,
+    'not even as a whole-file write: that would discard what the user typed');
+  Assert.AreEqual(Typed, GFake.Content('Foo.pas'),
+    'the buffer is exactly as the user left it');
 end;
 
 initialization

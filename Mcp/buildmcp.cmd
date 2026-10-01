@@ -64,6 +64,10 @@ set "BUILTVER="
 set "TARGETVER="
 for /f "tokens=2" %%v in ('"%BUILT%" --version 2^>nul') do set "BUILTVER=%%v"
 for /f "tokens=2" %%v in ('"%TARGET%" --version 2^>nul') do set "TARGETVER=%%v"
+:: Both empty compares EQUAL, so an exe that cannot start at all (a missing
+:: dependency, a truncated copy) used to report "installed" (audit #36, L2f).
+:: An answer from the BUILT exe is the precondition for comparing anything.
+if not defined BUILTVER goto :notinstalled
 if not "%BUILTVER%"=="%TARGETVER%" goto :notinstalled
 
 echo MCP bridge installed: %TARGET% (%TARGETVER%)

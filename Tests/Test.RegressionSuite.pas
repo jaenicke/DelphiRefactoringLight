@@ -115,6 +115,13 @@ type
     ///  handler that outlived Stop. They are started through the latch now.
     ///  </summary>
     [Test] procedure PipeHandler_IsCountedAsAWorker;
+    /// <summary>Audit #36, M43: the bridge gave add_iinterface 45 s while
+    ///  its own handler allows 120 s - so it reported "no answer from the
+    ///  IDE" while the IDE was still writing. The list it was missing from
+    ///  is hand-maintained, which is how it got there (stage 2 added six
+    ///  tools and five got an entry), so the classification is TOTAL now
+    ///  and this test is what refuses an unclassified one.</summary>
+    [Test] procedure EveryToolGetsADeliberateWait;
   end;
 
   /// <summary>Issue #13: while DelphiLSP loads a big project (12-30 s) its
@@ -1010,6 +1017,51 @@ begin
   Assert.IsTrue(During > Before, Format('a running pipe handler must be ' +
     'counted by the worker latch (workers before: %d, while it ran: %d)',
     [Before, During]));
+end;
+
+procedure TMcpPipeRegressionTests.EveryToolGetsADeliberateWait;
+var
+  Missing: TArray<string>;
+begin
+  // THE point of the test: no tool of the shipped list may fall through.
+  // A new tool fails here with its own name until someone decides whether
+  // it answers in seconds or can run for minutes.
+  // ... and it must not pass because the list came back empty: count the
+  // tools first, or a broken McpToolDefinitions would make this vacuous.
+  var Arr := McpToolDefinitions;
+  try
+    Assert.IsTrue((Arr <> nil) and (Arr.Count > 40),
+      'the shipped tool list is what this test walks');
+  finally
+    Arr.Free;
+  end;
+  Missing := UnclassifiedWaitTools;
+  Assert.AreEqual(0, Integer(Length(Missing)),
+    'every tool needs a deliberate wait; unclassified: ' +
+    string.Join(', ', Missing));
+
+  // the reported one, and the neighbour that was close enough to 45 s to
+  // be luck rather than design
+  Assert.AreEqual(Ord(twLong), Ord(ToolWaitClass('add_iinterface')),
+    'its handler allows 120 s');
+  Assert.AreEqual(Ord(twLong), Ord(ToolWaitClass('get_quick_fixes')));
+  // and the bound really is above what the IDE allows itself
+  Assert.IsTrue(ToolTimeout('add_iinterface') > 120000,
+    'the bridge must not be the one that gives up first');
+  Assert.IsTrue(ToolTimeout('rename_apply') >= 300000);
+
+  // a read stays short - a wedged IDE must not block a buffer_read for
+  // minutes
+  Assert.AreEqual(Ord(twQuick), Ord(ToolWaitClass('buffer_read')));
+  Assert.AreEqual(Ord(twQuick), Ord(ToolWaitClass('lsp_hover')));
+  Assert.AreEqual(Ord(twQuick), Ord(ToolWaitClass('ide_instances')));
+  Assert.IsTrue(ToolTimeout('buffer_read') < 60000);
+
+  // an unknown name is unclassified (that is what the first assertion can
+  // fail on) but at RUNTIME it still gets the safe bound
+  Assert.AreEqual(Ord(twUnclassified), Ord(ToolWaitClass('no_such_tool')));
+  Assert.IsTrue(ToolTimeout('no_such_tool') >= 300000,
+    'too short is the dangerous direction, so unclassified waits long');
 end;
 
 { TLspProgressTests }

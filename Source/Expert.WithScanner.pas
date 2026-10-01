@@ -94,6 +94,13 @@ type
     /// <summary>Inner body range — for begin..end, between begin and end
     ///  (exclusive); for single statement, identical to BodyRange.</summary>
     BodyInnerRange: TWithSourceRange;
+    /// <summary>True when the 'with' sits where a statement LIST may stand
+    ///  (after ';', begin, try, finally, except or repeat), so the rewriter
+    ///  may emit more than one statement in its place. False after then /
+    ///  else / do / of / a case label: only ONE statement fits there, and a
+    ///  rewrite that puts a temp assignment in front of the body must wrap
+    ///  both in begin..end, or the body escapes the if / loop.</summary>
+    InStatementList: Boolean;
   end;
 
   TWithScanner = class
@@ -513,9 +520,10 @@ function ReadBody(var Cur: TCursor; var AOcc: TWithOccurrence;
 // Reads the body of a `with` statement. AResults receives every nested
 // `with` discovered inside this body (recursively, at every depth).
 // Nested withs are detected at statement boundaries inside begin..end
-// / try..end / case..end / asm..end bodies; inside a single-statement
-// body the detection is limited to the case where the entire body IS a
-// `with` statement (e.g. `with c do with d do ...`).
+// / try..end / case..end / asm..end bodies, and at statement boundaries
+// inside a single-statement body (after then / else / do / a case label,
+// or between the statements of a begin..end or repeat..until that the
+// single statement contains).
 var
   Ident: string;
   IdentStart: TWithSourcePos;
@@ -529,8 +537,10 @@ var
   // Tries to consume a `with` statement starting at the current cursor
   // (the `with` keyword has just been read into Ident / IdentStart by
   // the outer scanner; we get only the position back). Returns True if
-  // a complete with was parsed and appended to AResults.
-  function TryParseNestedWith(const AKeywordPos: TWithSourcePos): Boolean;
+  // a complete with was parsed and appended to AResults. AInStmtList
+  // says whether the with stands where a statement list may stand.
+  function TryParseNestedWith(const AKeywordPos: TWithSourcePos;
+    AInStmtList: Boolean): Boolean;
   var
     NestedOcc: TWithOccurrence;
     NestedTargets: TList<TWithTarget>;
@@ -540,6 +550,7 @@ var
     Result := False;
     NestedOcc := Default(TWithOccurrence);
     NestedOcc.KeywordPos := AKeywordPos;
+    NestedOcc.InStatementList := AInStmtList;
     NestedTargets := TList<TWithTarget>.Create;
     try
       while True do
@@ -602,6 +613,9 @@ begin
       // next statement starts at a statement boundary, so detect any
       // nested `with` immediately.
       var BoundaryNext: Boolean := True;
+      // Whether the next statement may be a statement LIST (see
+      // TWithOccurrence.InStatementList).
+      var StmtListNext: Boolean := IsBeginEnd or SameKeyword(Ident, 'try');
       while (not Cur.Eof) and (BlockDepth > 0) do
       begin
         SkipTrivia(Cur);
@@ -609,7 +623,15 @@ begin
         case Cur.Peek of
           '''': begin SkipString(Cur); BoundaryNext := False; end;
           '#':  begin SkipCharConst(Cur); BoundaryNext := False; end;
-          ';':  begin Cur.Advance; BoundaryNext := True; end;
+          ';':  begin Cur.Advance; BoundaryNext := True; StmtListNext := True; end;
+          ':':
+            begin
+              // A case label (or a statement label) is followed by a
+              // statement; ':=' is an assignment and is not.
+              BoundaryNext := Cur.PeekAt(1) <> '=';
+              StmtListNext := False;
+              Cur.Advance;
+            end;
         else
           if IsIdentStart(Cur.Peek) then
           begin
@@ -620,6 +642,7 @@ begin
             begin
               Inc(BlockDepth);
               BoundaryNext := True;
+              StmtListNext := SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'try');
             end
             else if SameKeyword(Ident, 'end') then
             begin
@@ -660,13 +683,21 @@ begin
               // statement body already consumed the ';', so the next
               // token starts a statement (a sibling with right after it
               // was missed before).
-              BoundaryNext := TryParseNestedWith(IdentStart);
+              BoundaryNext := TryParseNestedWith(IdentStart, StmtListNext);
+              StmtListNext := BoundaryNext;
             end
             else if SameKeyword(Ident, 'then') or SameKeyword(Ident, 'else')
-              or SameKeyword(Ident, 'do') or SameKeyword(Ident, 'of')
-              or SameKeyword(Ident, 'repeat') or SameKeyword(Ident, 'finally')
+              or SameKeyword(Ident, 'do') or SameKeyword(Ident, 'of') then
+            begin
+              BoundaryNext := True;
+              StmtListNext := False;
+            end
+            else if SameKeyword(Ident, 'repeat') or SameKeyword(Ident, 'finally')
               or SameKeyword(Ident, 'except') then
-              BoundaryNext := True
+            begin
+              BoundaryNext := True;
+              StmtListNext := True;
+            end
             else
               BoundaryNext := False;
             if WordStart < 0 then ;
@@ -695,7 +726,7 @@ begin
       var SaveInnerIdx: Integer := Cur.Idx;
       var SaveInnerLine: Integer := Cur.Line;
       var SaveInnerCol: Integer := Cur.Col;
-      if TryParseNestedWith(IdentStart) then
+      if TryParseNestedWith(IdentStart, False) then
       begin
         // The nested with's end position is the outer body's end.
         var NestedTail := AResults[AResults.Count - 1].BodyRange.EndPos;
@@ -727,39 +758,67 @@ begin
   end;
 
   // Single-statement form. Read until ';' at outer depth, or until 'end'
-  // / 'else' / EOF (a single-statement with at the tail of a block has
+  // / 'else' / 'until' / 'finally' / 'except' / EOF that belongs to the
+  // ENCLOSING structure (a single-statement with at the tail of a block has
   // no ';' before the enclosing 'end').
+  //
+  // "Outer depth" counts the blocks the single statement itself contains:
+  // begin/try/case/asm..end and repeat..until. Without that the body of
+  // 'with B do if F then begin X := 1; Y := 2; end;' ended at the first ';'
+  // and Y went out unqualified - it compiled and bound to something else.
+  // For the same reason an 'else' only ends the body when no 'if' of the
+  // body is still waiting for it.
   AOcc.BodyKind := wbkSingle;
   BodyStartIdx := Cur.Idx;
   if BodyStartIdx < 0 then ; // suppress unused-warning in some configs
   EndPos := StartPos;
   var ParenDepth := 0;
   var BrackDepth := 0;
+  var InnerBlockDepth := 0;          // begin/try/case/asm opened in the body
+  var RepeatDepth := 0;              // repeat opened in the body
+  // Per repeat level: 'if's at inner block depth 0 whose 'else' may follow.
+  var OpenIfs: TArray<Integer>;
+  SetLength(OpenIfs, 1);
+  var Boundary := False;             // a statement may start at the next token
+  var StmtList := False;             // ... and a statement LIST may stand there
   var LastNonWsPos := StartPos;
   while not Cur.Eof do
   begin
     case Cur.Peek of
-      '(': begin Inc(ParenDepth); LastNonWsPos := Cur.Pos; Cur.Advance; end;
-      ')': begin if ParenDepth > 0 then Dec(ParenDepth); LastNonWsPos := Cur.Pos; Cur.Advance; end;
-      '[': begin Inc(BrackDepth); LastNonWsPos := Cur.Pos; Cur.Advance; end;
-      ']': begin if BrackDepth > 0 then Dec(BrackDepth); LastNonWsPos := Cur.Pos; Cur.Advance; end;
-      '''': begin LastNonWsPos := Cur.Pos; SkipString(Cur); end;
-      '#':  begin LastNonWsPos := Cur.Pos; SkipCharConst(Cur); end;
+      '(':
+        if Cur.PeekAt(1) = '*' then SkipTrivia(Cur)
+        else begin Inc(ParenDepth); LastNonWsPos := Cur.Pos; Cur.Advance; Boundary := False; end;
+      ')': begin if ParenDepth > 0 then Dec(ParenDepth); LastNonWsPos := Cur.Pos; Cur.Advance; Boundary := False; end;
+      '[': begin Inc(BrackDepth); LastNonWsPos := Cur.Pos; Cur.Advance; Boundary := False; end;
+      ']': begin if BrackDepth > 0 then Dec(BrackDepth); LastNonWsPos := Cur.Pos; Cur.Advance; Boundary := False; end;
+      '''': begin LastNonWsPos := Cur.Pos; SkipString(Cur); Boundary := False; end;
+      '#':  begin LastNonWsPos := Cur.Pos; SkipCharConst(Cur); Boundary := False; end;
       ';':
-        if (ParenDepth = 0) and (BrackDepth = 0) then
         begin
           LastNonWsPos := Cur.Pos;
           Cur.Advance;
-          Break;
-        end
-        else
+          if (ParenDepth = 0) and (BrackDepth = 0) then
+          begin
+            if (InnerBlockDepth = 0) and (RepeatDepth = 0) then
+              Break;
+            // a separator between statements INSIDE the body
+            if InnerBlockDepth = 0 then
+              OpenIfs[RepeatDepth] := 0;
+            Boundary := True;
+            StmtList := True;
+          end;
+        end;
+      ':':
         begin
           LastNonWsPos := Cur.Pos;
+          // a case label is followed by a statement; ':=' is an assignment
+          Boundary := (ParenDepth = 0) and (BrackDepth = 0) and (Cur.PeekAt(1) <> '=');
+          StmtList := False;
           Cur.Advance;
         end;
       '/':
         if Cur.PeekAt(1) = '/' then SkipTrivia(Cur)
-        else begin LastNonWsPos := Cur.Pos; Cur.Advance; end;
+        else begin LastNonWsPos := Cur.Pos; Cur.Advance; Boundary := False; end;
       '{': SkipTrivia(Cur);
       ' ', #9, #10, #11, #12, #13: Cur.Advance;
     else
@@ -767,9 +826,98 @@ begin
       begin
         SaveIdx := Cur.Idx; SaveLine := Cur.Line; SaveCol := Cur.Col;
         Ident := ReadIdent(Cur, IdentStart);
-        if SameKeyword(Ident, 'end') or SameKeyword(Ident, 'else')
-          or SameKeyword(Ident, 'until') or SameKeyword(Ident, 'finally')
-          or SameKeyword(Ident, 'except') then
+        var EndsBody := False;
+        var WasBoundary := Boundary;
+        Boundary := False;
+        if SameKeyword(Ident, 'end') then
+        begin
+          if InnerBlockDepth > 0 then Dec(InnerBlockDepth) else EndsBody := True;
+        end
+        else if SameKeyword(Ident, 'until') then
+        begin
+          if (RepeatDepth > 0) and (InnerBlockDepth = 0) then
+          begin
+            Dec(RepeatDepth);
+            SetLength(OpenIfs, RepeatDepth + 1);
+          end
+          else if InnerBlockDepth = 0 then
+            EndsBody := True;
+        end
+        else if SameKeyword(Ident, 'else') then
+        begin
+          if InnerBlockDepth > 0 then
+            Boundary := True
+          else if OpenIfs[RepeatDepth] > 0 then
+          begin
+            Dec(OpenIfs[RepeatDepth]);
+            Boundary := True;
+          end
+          else
+            EndsBody := True;
+          StmtList := False;
+        end
+        else if SameKeyword(Ident, 'finally') or SameKeyword(Ident, 'except') then
+        begin
+          if InnerBlockDepth > 0 then
+          begin
+            Boundary := True;
+            StmtList := True;
+          end
+          else
+            EndsBody := True;
+        end
+        else if SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'try')
+          or SameKeyword(Ident, 'case') or SameKeyword(Ident, 'asm') then
+        begin
+          Inc(InnerBlockDepth);
+          Boundary := True;
+          StmtList := SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'try');
+        end
+        else if SameKeyword(Ident, 'repeat') then
+        begin
+          if InnerBlockDepth = 0 then
+          begin
+            Inc(RepeatDepth);
+            SetLength(OpenIfs, RepeatDepth + 1);
+            OpenIfs[RepeatDepth] := 0;
+          end;
+          Boundary := True;
+          StmtList := True;
+        end
+        else if SameKeyword(Ident, 'if') then
+        begin
+          if InnerBlockDepth = 0 then
+            Inc(OpenIfs[RepeatDepth]);
+        end
+        else if SameKeyword(Ident, 'then') or SameKeyword(Ident, 'do')
+          or SameKeyword(Ident, 'of') then
+        begin
+          Boundary := True;
+          StmtList := False;
+        end
+        else if WasBoundary and SameKeyword(Ident, 'with') then
+        begin
+          // A with nested in this body: record it, so that the nested-with
+          // guard can see it. It consumes its own body.
+          if TryParseNestedWith(IdentStart, StmtList) then
+          begin
+            LastNonWsPos := AResults[AResults.Count - 1].BodyRange.EndPos;
+            if (Cur.Idx > 1) and (Cur.Src[Cur.Idx - 1] = ';') then
+            begin
+              // It consumed a ';' - at outer depth that ';' ends THIS body too.
+              LastNonWsPos.Line := Cur.Line;
+              LastNonWsPos.Col := Cur.Col - 1;
+              if (InnerBlockDepth = 0) and (RepeatDepth = 0) then
+                Break;
+              if InnerBlockDepth = 0 then
+                OpenIfs[RepeatDepth] := 0;
+              Boundary := True;
+              StmtList := True;
+            end;
+          end;
+          Continue;
+        end;
+        if EndsBody then
         begin
           // body terminated by enclosing structure — roll back, do not
           // consume the keyword
@@ -783,6 +931,7 @@ begin
       begin
         LastNonWsPos := Cur.Pos;
         Cur.Advance;
+        Boundary := False;
       end;
     end;
   end;
@@ -803,6 +952,7 @@ var
   Ident: string;
   IdentStart: TWithSourcePos;
   AtStmtBoundary: Boolean;
+  InStmtList: Boolean;   // see TWithOccurrence.InStatementList
   PrevSig: Char;     // last significant non-trivia char
   Targets: TList<TWithTarget>;
   Target: TWithTarget;
@@ -817,6 +967,7 @@ begin
     Cur.Col := 1;
     PrevSig := #0;
     AtStmtBoundary := True;
+    InStmtList := True;
 
     while not Cur.Eof do
     begin
@@ -842,6 +993,18 @@ begin
             Cur.Advance;
             PrevSig := ';';
             AtStmtBoundary := True;
+            InStmtList := True;
+          end;
+        ':':
+          begin
+            // A case label (or a statement label) is followed by a
+            // statement, so a 'with' right after it is at a statement
+            // boundary. Without this such a with was never found; ':=' is
+            // an assignment.
+            AtStmtBoundary := Cur.PeekAt(1) <> '=';
+            InStmtList := False;
+            PrevSig := ':';
+            Cur.Advance;
           end;
       else
         if IsIdentStart(Cur.Peek) then
@@ -855,6 +1018,7 @@ begin
           begin
             Occ := Default(TWithOccurrence);
             Occ.KeywordPos := IdentStart;
+            Occ.InStatementList := InStmtList;
 
             // Parse one or more comma-separated targets
             Targets := TList<TWithTarget>.Create;
@@ -908,6 +1072,7 @@ begin
             // the first before). After a malformed one we are not at a
             // boundary unless the next token says so.
             AtStmtBoundary := Parsed;
+            InStmtList := Parsed;
             PrevSig := 'a';
             Continue;
           end;
@@ -916,12 +1081,19 @@ begin
           // permissive here — false positives only mean we'll consider
           // a 'with' that wasn't actually at a boundary; the parser
           // rejects such cases when target parsing fails.
-          if SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'do')
-            or SameKeyword(Ident, 'then') or SameKeyword(Ident, 'else')
-            or SameKeyword(Ident, 'of') or SameKeyword(Ident, 'try')
+          if SameKeyword(Ident, 'begin') or SameKeyword(Ident, 'try')
             or SameKeyword(Ident, 'finally') or SameKeyword(Ident, 'except')
             or SameKeyword(Ident, 'repeat') then
-            AtStmtBoundary := True
+          begin
+            AtStmtBoundary := True;
+            InStmtList := True;
+          end
+          else if SameKeyword(Ident, 'do') or SameKeyword(Ident, 'then')
+            or SameKeyword(Ident, 'else') or SameKeyword(Ident, 'of') then
+          begin
+            AtStmtBoundary := True;
+            InStmtList := False;
+          end
           else
             AtStmtBoundary := False;
 

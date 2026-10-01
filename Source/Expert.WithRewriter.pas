@@ -487,7 +487,9 @@ end;
 ///  the tail by (AOriginalCol - ANewCol) leading spaces. Empty lines
 ///  are kept empty. Lines with less leading whitespace than the shift
 ///  amount are kept (we only strip what's actually there - never
-///  consume non-whitespace).</summary>
+///  consume non-whitespace). When the opener moves RIGHT instead (the
+///  body is wrapped in a new begin..end), lines 2..N that are not empty
+///  get the difference added in front.</summary>
 function ShiftCompoundBody(const ABody: string;
   AOriginalCol, ANewCol: Integer): string;
 var
@@ -496,7 +498,28 @@ var
   LineStart, I, N, Stripped: Integer;
 begin
   Shift := AOriginalCol - ANewCol;
-  if Shift <= 0 then Exit(ABody);
+  if Shift = 0 then Exit(ABody);
+  if Shift < 0 then
+  begin
+    Builder := TStringBuilder.Create;
+    try
+      I := 1;
+      N := Length(ABody);
+      while I <= N do
+      begin
+        Builder.Append(ABody[I]);
+        // After a line break, indent the next line unless it is empty.
+        if ((ABody[I] = #10) or ((ABody[I] = #13) and ((I = N) or (ABody[I + 1] <> #10))))
+          and (I < N) and not CharInSet(ABody[I + 1], [#10, #13]) then
+          Builder.Append(StringOfChar(' ', -Shift));
+        Inc(I);
+      end;
+      Result := Builder.ToString;
+    finally
+      Builder.Free;
+    end;
+    Exit;
+  end;
   N := Length(ABody);
   Builder := TStringBuilder.Create;
   try
@@ -3648,18 +3671,42 @@ begin
           // typically less than the original opener column. We shift the
           // tail of the body left by that difference so the block stays
           // self-consistent.
-          if HasInlineVar then
+          //
+          // Where the with stood in a single-statement slot ('if C then
+          // with X do try ... end') the declarations and the block are TWO
+          // statements, so they are wrapped in begin..end - without it only
+          // the declaration stays under the 'then' and the try runs
+          // unconditionally.
+          if HasInlineVar and not AOccurrence.InStatementList then
           begin
+            var BodyIndent := IndentStr + '  ';
+            Builder.Append('begin');
             for I := 0 to High(Targets) do
               if Targets[I].InlineVarName <> '' then
-                Builder.Append('var ').Append(Targets[I].InlineVarName)
-                       .Append(' := ').Append(Targets[I].Expression).Append(';')
-                       .AppendLine.Append(IndentStr);
+                Builder.AppendLine.Append(BodyIndent)
+                       .Append('var ').Append(Targets[I].InlineVarName)
+                       .Append(' := ').Append(Targets[I].Expression).Append(';');
+            Builder.AppendLine.Append(BodyIndent).Append(ShiftCompoundBody(
+              BodyOnly.TrimLeft,
+              AOccurrence.BodyInnerRange.StartPos.Col - 1,
+              Length(BodyIndent)));
+            Builder.AppendLine.Append(IndentStr).Append('end');
+          end
+          else
+          begin
+            if HasInlineVar then
+            begin
+              for I := 0 to High(Targets) do
+                if Targets[I].InlineVarName <> '' then
+                  Builder.Append('var ').Append(Targets[I].InlineVarName)
+                         .Append(' := ').Append(Targets[I].Expression).Append(';')
+                         .AppendLine.Append(IndentStr);
+            end;
+            Builder.Append(ShiftCompoundBody(
+              BodyOnly.TrimLeft,
+              AOccurrence.BodyInnerRange.StartPos.Col - 1,
+              Length(IndentStr)));
           end;
-          Builder.Append(ShiftCompoundBody(
-            BodyOnly.TrimLeft,
-            AOccurrence.BodyInnerRange.StartPos.Col - 1,
-            Length(IndentStr)));
         end;
     end;
 
@@ -3671,7 +3718,8 @@ begin
   // === Classic-mode (non-inline-var) artifacts =============================
   //
   // Compute these whenever the inline form uses any inline-var, so the
-  // dialog can switch modes without re-running the rewriter. Failure
+  // dialog can switch modes without re-running the rewriter (a rewrite
+  // without any temp gets the inline text unchanged - see the else). Failure
   // here leaves Result.Classic.Supported = False; the dialog will then
   // add wriRequiresInlineVar when the user opts out of inline vars.
   Result.Classic.Supported := False;
@@ -3710,16 +3758,36 @@ begin
           begin
             // Classic mode for try/case/asm: prepend assignments at the
             // same indent level, then emit the block (left-shifted by
-            // the original-vs-new opener-indent difference).
-            for I := 0 to High(Targets) do
-              if Targets[I].InlineVarName <> '' then
-                Builder.Append(Targets[I].InlineVarName)
-                       .Append(' := ').Append(Targets[I].Expression).Append(';')
-                       .AppendLine.Append(IndentStr);
-            Builder.Append(ShiftCompoundBody(
-              BodyOnly.TrimLeft,
-              AOccurrence.BodyInnerRange.StartPos.Col - 1,
-              Length(IndentStr)));
+            // the original-vs-new opener-indent difference). In a
+            // single-statement slot both go into begin..end, exactly as in
+            // the inline form above.
+            if not AOccurrence.InStatementList then
+            begin
+              var BodyIndent := IndentStr + '  ';
+              Builder.Append('begin');
+              for I := 0 to High(Targets) do
+                if Targets[I].InlineVarName <> '' then
+                  Builder.AppendLine.Append(BodyIndent)
+                         .Append(Targets[I].InlineVarName)
+                         .Append(' := ').Append(Targets[I].Expression).Append(';');
+              Builder.AppendLine.Append(BodyIndent).Append(ShiftCompoundBody(
+                BodyOnly.TrimLeft,
+                AOccurrence.BodyInnerRange.StartPos.Col - 1,
+                Length(BodyIndent)));
+              Builder.AppendLine.Append(IndentStr).Append('end');
+            end
+            else
+            begin
+              for I := 0 to High(Targets) do
+                if Targets[I].InlineVarName <> '' then
+                  Builder.Append(Targets[I].InlineVarName)
+                         .Append(' := ').Append(Targets[I].Expression).Append(';')
+                         .AppendLine.Append(IndentStr);
+              Builder.Append(ShiftCompoundBody(
+                BodyOnly.TrimLeft,
+                AOccurrence.BodyInnerRange.StartPos.Col - 1,
+                Length(IndentStr)));
+            end;
           end;
       end;
       Result.Classic.BodyText := Builder.ToString;
@@ -3814,6 +3882,15 @@ begin
         AddUnits.Free;
       end;
     end;
+  end
+  else
+  begin
+    // No temp at all: the inline text IS already the classic text (no
+    // declaration, no unit). Before this the classic form stayed
+    // unsupported, BuildClassicEdits skipped the item, and the dialog still
+    // reported it applied - nothing was written.
+    Result.Classic.Supported := True;
+    Result.Classic.BodyText := Result.NewText;
   end;
 
   // Wenn das Rewrite eine 10.3+ Inline-Variable bräuchte, der Aufrufer

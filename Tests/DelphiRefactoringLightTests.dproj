@@ -82,6 +82,7 @@
         <DCCReference Include="..\Source\Rename.WorkspaceEdit.pas"/>
         <DCCReference Include="Test.WithScanner.pas"/>
         <DCCReference Include="Test.WithRewriter.pas"/>
+        <DCCReference Include="Test.WithRewriteText.pas"/>
         <DCCReference Include="Test.UnitIndexGenerics.pas"/>
         <DCCReference Include="Test.UsesEditorMinimalWrite.pas"/>
         <DCCReference Include="Test.AutoImportGenericResolve.pas"/>

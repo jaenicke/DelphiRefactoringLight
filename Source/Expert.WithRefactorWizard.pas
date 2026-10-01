@@ -200,9 +200,10 @@ end;
 /// <summary>Aggregates per-item Classic data into one flat edit list.
 ///  Per-method var declarations and per-file uses additions are
 ///  combined so each method gets exactly one var-section edit and
-///  each file gets at most one uses-clause edit.</summary>
+///  each file gets at most one uses-clause edit. An item without a
+///  classic form is left out and counted in ASkipped.</summary>
 procedure BuildClassicEdits(const AItems: TArray<TWithRewriteResult>;
-  out AEdits: TArray<TPlainEdit>);
+  out AEdits: TArray<TPlainEdit>; out ASkipped: Integer);
 type
   TMethodAgg = record
     AnyItem: TWithRewriteResult;
@@ -252,13 +253,20 @@ var
   J: Integer;
   KeyF: string;
 begin
+  ASkipped := 0;
   ByMethod := TDictionary<string, TMethodAgg>.Create;
   ByFile := TDictionary<string, TFileAgg>.Create;
   Edits := TList<TPlainEdit>.Create;
   try
     for Item in AItems do
     begin
-      if not Item.Classic.Supported then Continue;
+      // Not derivable in classic form: count it, never drop it silently
+      // (the caller reported such an item as applied).
+      if not Item.Classic.Supported then
+      begin
+        Inc(ASkipped);
+        Continue;
+      end;
 
       // 1) Body-replacement edit.
       Edit.FileName := Item.FileName;
@@ -526,13 +534,16 @@ procedure ApplyEdits(const AItems: TArray<TWithRewriteResult>;
   out AOk, AFailed: Integer);
 var
   Edits: TArray<TPlainEdit>;
+  Skipped: Integer;
 begin
   if AUseInlineVars then
     ApplyEditsInline(AItems, AOk, AFailed)
   else
   begin
-    BuildClassicEdits(AItems, Edits);
+    BuildClassicEdits(AItems, Edits, Skipped);
     ApplyPlainEdits(Edits, AOk, AFailed);
+    // an item that could not be built did not get applied either
+    Inc(AFailed, Skipped);
   end;
 end;
 

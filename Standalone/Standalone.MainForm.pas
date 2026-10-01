@@ -151,6 +151,14 @@ type
     procedure DoRefactorSemanticSelected(Sender: TObject);
   private
     FState: TStandaloneProjectState;
+    /// <summary>The file whose text the Memo shows. Typing and Save go
+    ///  to this file, not to FState.ActiveFile: the two used to drift
+    ///  apart (a file switch, a GotoLocation) and the Memo's text then
+    ///  landed in the other file's buffer or on its disk.</summary>
+    FMemoFile: string;
+    /// <summary>True while LoadFileIntoEditor puts a file into the Memo.
+    ///  The load fires OnChange, which must not treat it as typing.</summary>
+    FLoadingMemo: Boolean;
     /// <summary>Last printable character the user typed. Captured in
     ///  OnKeyPress, consumed (and cleared) in OnKeyUp; lets us
     ///  distinguish a real `.` keystroke from caret movement that
@@ -235,6 +243,12 @@ type
     procedure RefreshTree;
     procedure LoadFileIntoEditor(const AFile: string);
     procedure ReloadActiveFile;
+    /// <summary>Selects ALine / ACol (1-based) in the Memo, plus
+    ///  AHighlightLen characters, and scrolls it into view.</summary>
+    procedure PlaceMemoCaret(ALine, ACol, AHighlightLen: Integer);
+    /// <summary>FState.OnNavigate, i.e. a wizard's Editor.GotoLocation:
+    ///  shows AFile in the Memo and places the caret there.</summary>
+    procedure HandleNavigate(const AFile: string; ALine, ACol, AHighlightLen: Integer);
     procedure UpdateStatusBar;
     /// <summary>Returns the identifier word the caret sits inside / at
     ///  the end of - same logic as the completion wizard's
@@ -327,6 +341,14 @@ begin
         ReloadActiveFile;
     end;
 
+  // A wizard's Editor.GotoLocation (Circular References, Blame, Auto
+  // Import, ...) moves the active file; show that file in the Memo too.
+  FState.OnNavigate :=
+    procedure(const AFile: string; ALine, ACol, AHighlightLen: Integer)
+    begin
+      HandleNavigate(AFile, ALine, ACol, AHighlightLen);
+    end;
+
   // Install the selection callback the standalone IEditorHelper uses
   // to answer Editor.GetSelection. Extract Method calls into this.
   FState.GetSelectionFunc :=
@@ -397,9 +419,51 @@ end;
 procedure TMainForm.LoadFileIntoEditor(const AFile: string);
 begin
   if not TFile.Exists(AFile) then Exit;
-  Memo.Lines.LoadFromFile(AFile);
+  // LoadFromFile fires OnChange while the state still names the previous
+  // file, and DoMemoChange stored the NEW file's text as the PREVIOUS
+  // file's buffer - the next wizard on that file wrote it to disk.
+  FLoadingMemo := True;
+  try
+    Memo.Lines.LoadFromFile(AFile);
+  finally
+    FLoadingMemo := False;
+  end;
+  FMemoFile := AFile;
   FState.SetActiveFile(AFile, 1, 1);
   FState.UpdateBuffer(AFile, Memo.Lines.Text);
+  UpdateStatusBar;
+end;
+
+procedure TMainForm.PlaceMemoCaret(ALine, ACol, AHighlightLen: Integer);
+begin
+  if (ALine < 1) or (ALine > Memo.Lines.Count) then Exit;
+  Memo.SelStart := Memo.Perform(EM_LINEINDEX, ALine - 1, 0) + (ACol - 1);
+  if AHighlightLen > 0 then
+    Memo.SelLength := AHighlightLen
+  else
+    Memo.SelLength := 0;
+  Memo.Perform(EM_SCROLLCARET, 0, 0);
+end;
+
+procedure TMainForm.HandleNavigate(const AFile: string; ALine, ACol, AHighlightLen: Integer);
+var
+  Line, Col: Integer;
+begin
+  if not SameText(AFile, FMemoFile) then
+    LoadFileIntoEditor(AFile);
+  if SameText(AFile, FMemoFile) then
+  begin
+    FState.SetActiveFile(FMemoFile, ALine, ACol);
+    PlaceMemoCaret(ALine, ACol, AHighlightLen);
+  end
+  else
+  begin
+    // The target could not be loaded: point the state back at the file
+    // the Memo shows, so the wizards and Save mean the same file.
+    Line := Memo.Perform(EM_LINEFROMCHAR, Memo.SelStart, 0) + 1;
+    Col := Memo.SelStart - Memo.Perform(EM_LINEINDEX, Line - 1, 0) + 1;
+    FState.SetActiveFile(FMemoFile, Line, Col);
+  end;
   UpdateStatusBar;
 end;
 
@@ -775,8 +839,8 @@ end;
 
 procedure TMainForm.DoFileSave(Sender: TObject);
 begin
-  if FState.ActiveFile = '' then Exit;
-  Editor.ReplaceFileContent(FState.ActiveFile, Memo.Lines.Text);
+  if FMemoFile = '' then Exit;
+  Editor.ReplaceFileContent(FMemoFile, Memo.Lines.Text);
 end;
 
 procedure TMainForm.DoFileExit(Sender: TObject);
@@ -798,8 +862,8 @@ end;
 
 procedure TMainForm.DoMemoChange(Sender: TObject);
 begin
-  if FState.ActiveFile = '' then Exit;
-  FState.UpdateBuffer(FState.ActiveFile, Memo.Lines.Text);
+  if FLoadingMemo or (FMemoFile = '') then Exit;
+  FState.UpdateBuffer(FMemoFile, Memo.Lines.Text);
   // While the completion popup is visible, keep its filter in sync
   // with what the user is typing in the editor. The popup never has
   // focus, so we drive it from here.

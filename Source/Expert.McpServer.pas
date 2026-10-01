@@ -1698,6 +1698,22 @@ begin
   GServer.Start;
 end;
 
+// Not in Winapi.Windows.
+function GetModuleHandleExW(dwFlags: DWORD; lpModuleName: PWideChar;
+  var phModule: HMODULE): BOOL; stdcall; external kernel32 name 'GetModuleHandleExW';
+
+// Keeps this BPL mapped until the process ends.
+procedure PinThisModule;
+const
+  GET_MODULE_HANDLE_EX_FLAG_PIN = $00000001;
+  GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = $00000004;
+var
+  H: HMODULE;
+begin
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN or
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, PWideChar(@PinThisModule), H);
+end;
+
 procedure StopMcpServer;
 begin
   // Server first: it signals the stop event and waits for every handler,
@@ -1705,7 +1721,20 @@ begin
   // may the dispatch window go.
   if GServer <> nil then
   begin
-    GServer.Stop;
+    if not GServer.Stop then
+    begin
+      // A handler ignored the stop event (an LSP wait, a long lsp_request).
+      // Freeing the server, the fix cache or the scratch store now would pull
+      // them from under it, and the unload would unmap the code it runs. So
+      // nothing it can reach is freed and the module stays mapped - a
+      // deliberate leak on an exceptional path instead of an access
+      // violation in a closing IDE. The dispatch window does go: a late
+      // RunOnMain then answers "shutting down" instead of running.
+      PinThisModule;
+      GServer := nil;
+      FreeAndNil(GDispatcher);
+      Exit;
+    end;
     FreeAndNil(GServer);
   end;
   FreeAndNil(GDispatcher);

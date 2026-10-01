@@ -105,6 +105,11 @@ type
     [Test] procedure BridgeVersion_IsStampedAndReadBack;
     [Test] procedure BridgeVersion_MismatchIsNamedNotGuessed;
     [Test] procedure BridgeVersion_ReachesTheServerOverARealPipe;
+    /// <summary>Audit #22, H4: Stop waited 5 s for the handlers and then
+    ///  returned as if all was well, so the owner freed the server (and the
+    ///  package unloaded) under a handler that ignores the stop event. Stop
+    ///  now says so, and Destroy waits for the last handler.</summary>
+    [Test] procedure Stop_ReportsAHandlerThatOutlivesTheDeadline;
     /// <summary>Audit #22, H5: handler threads were bare anonymous threads,
     ///  invisible to ShutdownWorkersAndWait - the unload never waited for a
     ///  handler that outlived Stop. They are started through the latch now.
@@ -884,6 +889,55 @@ begin
     end);
   Result.FreeOnTerminate := False;
   Result.Start;
+end;
+
+procedure TMcpPipeRegressionTests.Stop_ReportsAHandlerThatOutlivesTheDeadline;
+var
+  Srv: TMcpPipeServer;
+  Entered, Release: TEvent;
+  Client: TThread;
+  Probe: string;
+begin
+  // A real Claude Code bridge may poll this pipe too - only OUR request
+  // (recognised by the probe) blocks, every other one is answered at once.
+  Probe := 'h4-' + FormatDateTime('hhnnsszzz', Now);
+  Entered := TEvent.Create(nil, True, False, '');
+  Release := TEvent.Create(nil, True, False, '');
+  try
+    Srv := TMcpPipeServer.Create(McpPipeName(GetCurrentProcessId),
+      function(const ARequest: string; AStop: THandle): string
+      begin
+        if ARequest.Contains(Probe) then
+        begin
+          Entered.SetEvent;
+          // ignores AStop - like an LSP wait or a long lsp_request
+          Release.WaitFor(10000);
+        end;
+        Result := '{"ok":true}';
+      end);
+    try
+      Assert.IsTrue(Srv.Start, 'the test pipe is there: ' + Srv.LastError);
+      Client := StartProbeClient(Probe);
+      try
+        Assert.IsTrue(Entered.WaitFor(5000) = wrSignaled, 'the handler runs');
+        Assert.IsFalse(Srv.Stop(100),
+          'a handler still runs after the deadline - Stop must say so');
+        Assert.IsTrue(Srv.ActiveHandlers >= 1, 'and it is still counted');
+        Release.SetEvent;
+        Assert.IsTrue(Srv.Stop(5000), 'once it has left, the stop is clean');
+        Assert.AreEqual(0, Srv.ActiveHandlers);
+      finally
+        Release.SetEvent;
+        Client.WaitFor;
+        Client.Free;
+      end;
+    finally
+      Srv.Free;
+    end;
+  finally
+    Release.Free;
+    Entered.Free;
+  end;
 end;
 
 procedure TMcpPipeRegressionTests.PipeHandler_IsCountedAsAWorker;

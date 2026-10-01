@@ -62,7 +62,7 @@ implementation
 
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.JSON,
-  System.Generics.Collections, System.SyncObjs,
+  System.Generics.Collections, System.SyncObjs, System.Math,
   Expert.McpServer, Expert.EditorHelperIntf, Expert.LspManager,
   Lsp.Protocol, Lsp.Uri, Delphi.FileEncoding;
 
@@ -464,7 +464,11 @@ begin
     P := AArgs.GetValue('params').Clone as TJSONValue
   else
     P := TJSONObject.Create;
-  Result := RawRequest(Client, Method, P, Cardinal(ArgInt(AArgs, 'timeout_ms', 20000)));
+  // Clamped: this wait does not watch the stop event, so an unbounded
+  // timeout_ms kept a handler alive past the package unload (and a negative
+  // one became ~49 days). 40 s stays inside the bridge's 45 s for the tool.
+  Result := RawRequest(Client, Method, P,
+    Cardinal(EnsureRange(ArgInt(AArgs, 'timeout_ms', 20000), 1000, 40000)));
 end;
 
 initialization

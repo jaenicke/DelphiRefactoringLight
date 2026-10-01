@@ -712,6 +712,7 @@ var
   Item: TUnitRefItem;
   WasRunning: Boolean;
   RawHitTotal, DroppedTarget, DroppedNonProject, DroppedDup: Integer;
+  UnverifiedCount: Integer;
   FinalItems: TList<TUnitRefItem>;
   FileList: TList<TUnitRefItem>;
 begin
@@ -849,12 +850,58 @@ begin
     Status('Querying unit symbols...');
     Application.ProcessMessages;
 
+    // The symbol names are the whole basis of the verdict - without them
+    // every using unit looks unused. A session that is still loading aborts
+    // the request (-32800) or answers empty, so wait while it reports work
+    // and ask again.
     SymbolsJson := nil;
-    try
-      SymbolsJson := Client.GetDocumentSymbols(FContext.FileName);
-    except
-      on E: Exception do
-        Status('LSP error on documentSymbol: ' + E.Message);
+    var SymbolsError := '';
+    var SymbolsCanRetry := True;
+    for var Attempt := 1 to 3 do
+    begin
+      if Cancelled then Exit;
+      Client.WaitServerIdle(60000,
+        function: Boolean
+        begin
+          Application.ProcessMessages;
+          Result := not Cancelled;
+        end);
+      if Cancelled then Exit;
+      try
+        SymbolsJson := Client.GetDocumentSymbols(FContext.FileName);
+        SymbolsError := '';
+      except
+        on E: Exception do
+        begin
+          SymbolsError := E.Message;
+          // a timeout or a lost connection is not cured by asking again
+          SymbolsCanRetry := (E is ELspError) and Client.IsConnected;
+        end;
+      end;
+      if (SymbolsJson <> nil) and (SymbolsJson.Count > 0) then Break;
+      FreeAndNil(SymbolsJson);
+      if not SymbolsCanRetry then Break;
+      if Attempt < 3 then
+      begin
+        Status(Format('No symbols for %s yet - asking DelphiLSP again (%d/3)...',
+          [TargetUnitName, Attempt + 1]));
+        Application.ProcessMessages;
+        Sleep(1000);
+      end;
+    end;
+
+    // No names, no verdict: every using unit would be reported as "listed
+    // but unused", which invites deleting uses entries that are needed.
+    if SymbolsJson = nil then
+    begin
+      FHeadlessItems := nil;
+      if FDialog <> nil then FDialog.SetItems(nil);
+      Status(Format('DelphiLSP returned no symbols for %s%s - the uses entries '
+        + 'cannot be judged, so none is reported as unused. Try again once the '
+        + 'project has finished loading.',
+        [TargetUnitName, IfThen(SymbolsError <> '', ' (' + SymbolsError + ')', '')]));
+      Progress(0, 1);
+      Exit;
     end;
 
     try
@@ -941,6 +988,7 @@ begin
       DroppedTarget := 0;
       DroppedNonProject := 0;
       DroppedDup := 0;
+      UnverifiedCount := 0;
 
       // ============================================================
       // Pass 3: per using-file, scan the source for identifiers
@@ -1043,20 +1091,40 @@ begin
           var DefCount := 0;
           var DefPathLog := '';
           var ErrLog := '';
-          try
-            var Defs := IncCtx.Definition(Item.FilePath, Item.Line, Item.Col);
-            DefCount := System.Length(Defs);
-            if DefCount > 0 then
-            begin
-              var DefPath := TLspUri.FileUriToPath(Defs[0].Uri);
-              DefPathLog := DefPath;
-              if (DefPath <> '') and
-                 (TargetFiles.IndexOf(ExpandFileName(DefPath)) >= 0) then
-                Resolves := True;
+          // A FAILED request is not "does not resolve": a session that is
+          // still loading aborts it (-32800). Wait and ask again; what still
+          // fails is kept as not verified instead of being dropped.
+          for var Attempt := 1 to 3 do
+          begin
+            ErrLog := '';
+            var CanRetry := False;
+            try
+              var Defs := IncCtx.Definition(Item.FilePath, Item.Line, Item.Col);
+              DefCount := System.Length(Defs);
+              if DefCount > 0 then
+              begin
+                var DefPath := TLspUri.FileUriToPath(Defs[0].Uri);
+                DefPathLog := DefPath;
+                if (DefPath <> '') and
+                   (TargetFiles.IndexOf(ExpandFileName(DefPath)) >= 0) then
+                  Resolves := True;
+              end;
+            except
+              on E: Exception do
+              begin
+                ErrLog := E.ClassName + ': ' + E.Message;
+                // a timeout or a lost connection is not cured by asking again
+                CanRetry := (E is ELspError) and Client.IsConnected;
+              end;
             end;
-          except
-            on E: Exception do
-              ErrLog := E.ClassName + ': ' + E.Message;
+            if not CanRetry or Cancelled or (Attempt = 3) then Break;
+            Client.WaitServerIdle(30000,
+              function: Boolean
+              begin
+                Application.ProcessMessages;
+                Result := not Cancelled;
+              end);
+            Sleep(500);
           end;
           var Elapsed := (Now - T0) * SecsPerDay * 1000;
           TraceNote(Format(
@@ -1068,7 +1136,14 @@ begin
                     IfThen(DefPathLog <> '',
                            '-> ' + ExtractFileName(DefPathLog), ''))]));
 
-          if not Resolves then
+          if ErrLog <> '' then
+          begin
+            // kept, and marked: the unit is then not reported unused on the
+            // strength of an answer that never came
+            Inc(UnverifiedCount);
+            Item.Preview := '[not verified - DelphiLSP did not answer] ' + Item.Preview;
+          end
+          else if not Resolves then
           begin
             Inc(DroppedNotResolving);
             Continue;
@@ -1154,9 +1229,9 @@ begin
     var LiveCount: Integer := UsingFiles.Count - DeadCount;
     Status(Format(
       '%d using unit(s): %d active, %d dead.  ' +
-      '[symbols=%d, raw matches=%d, verified-elsewhere=%d]',
+      '[symbols=%d, raw matches=%d, verified-elsewhere=%d, not verified=%d]',
       [UsingFiles.Count, LiveCount, DeadCount,
-       Symbols.Count, RawHitTotal, DroppedNonProject]));
+       Symbols.Count, RawHitTotal, DroppedNonProject, UnverifiedCount]));
   finally
     FinalItems.Free;
     HitsByFile.Free;

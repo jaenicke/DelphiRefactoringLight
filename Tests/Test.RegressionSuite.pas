@@ -386,12 +386,17 @@ type
   ///  (2) analyze_uses answered 'Expert.PluginSettings {$IFNDEF
   ///  STANDALONE_BUILD}' as a unit NAME for two days. That is structurally
   ///  impossible, and a tool that notices it says so instead of passing it
-  ///  to a caller who has no way to doubt it.</summary>
+  ///  to a caller who has no way to doubt it.
+  ///  (3) an argument name that is not in a tool's schema is never read, so
+  ///  the call ran with a default and the answer looked like a tool that
+  ///  did something else than it was asked (found by making that mistake:
+  ///  buffer_read with "from_line" answered the whole file).</summary>
   [TestFixture]
   TSelfProtectionTests = class
   public
     [Test] procedure AWriteFromAWorkerThreadIsRecordedAndCanBeRefused;
     [Test] procedure AnImpossibleUnitNameIsReportedAsADefect;
+    [Test] procedure AnArgumentTheToolDoesNotKnowIsReported;
   end;
 
   /// <summary>Audit issue #41, the three High findings of "Remove with".
@@ -422,7 +427,8 @@ uses
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
-  Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter;
+  Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
+  System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -2724,6 +2730,46 @@ begin
   Assert.IsTrue(S <> '', 'one bad name is enough');
   Assert.Contains(S, 'Expert.BlameGutter{$ENDIF}', 'it quotes the name');
   Assert.Contains(S, 'report', 'and says it is a defect in the plugin');
+end;
+
+procedure TSelfProtectionTests.AnArgumentTheToolDoesNotKnowIsReported;
+var
+  Known: TArray<string>;
+begin
+  // the schema is the contract, and it is read from the SHIPPED list
+  Known := KnownToolArguments('buffer_read');
+  Assert.IsTrue(Length(Known) > 0, 'buffer_read declares arguments');
+  Assert.IsTrue(MatchText('start_line', Known), 'start_line is one of them');
+  Assert.IsTrue(MatchText('instance', Known),
+    'and instance is accepted everywhere - the bridge may add it');
+
+  // the mistake that found this: buffer_read takes start_line / end_line
+  var Unknown := UnknownToolArguments('buffer_read',
+    ['file', 'from_line', 'to_line']);
+  Assert.AreEqual(2, Integer(Length(Unknown)), 'both wrong names are named');
+  Assert.AreEqual('from_line', Unknown[0]);
+  var Note := UnknownArgumentNote('buffer_read', ['file', 'from_line']);
+  Assert.Contains(Note, 'from_line', 'the note quotes what was dropped');
+  Assert.Contains(Note, 'start_line', 'and says what the tool does take');
+
+  // a correct call must stay silent
+  Assert.AreEqual(0, Integer(Length(UnknownToolArguments('buffer_read',
+    ['file', 'start_line', 'end_line', 'instance']))));
+  Assert.AreEqual('', UnknownArgumentNote('buffer_read',
+    ['file', 'start_line']));
+  // case is irrelevant - JSON keys are not Pascal, but the schema is ours
+  Assert.AreEqual(0, Integer(Length(UnknownToolArguments('buffer_read',
+    ['FILE', 'Start_Line']))));
+
+  // the bridge's own tools are in the same list, so they are checked too
+  Assert.AreEqual(1, Integer(Length(UnknownToolArguments('ide_instances',
+    ['whatever']))), 'ide_instances is described here as well');
+  // a tool the list does NOT describe (an IDE newer than this unit) has
+  // nothing to measure against, so it reports nothing rather than
+  // everything
+  Assert.AreEqual(0, Integer(Length(UnknownToolArguments('no_such_tool',
+    ['x', 'y']))));
+  Assert.AreEqual('', UnknownArgumentNote('no_such_tool', ['x']));
 end;
 
 { TRemoveWithSafetyTests }

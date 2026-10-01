@@ -431,6 +431,43 @@ begin
   end;
 end;
 
+function WithArgumentWarning(const AAnswer, ANote: string): string;
+// Puts the note where the caller cannot miss it: into the result object as
+// "argumentWarning", or - when the tool failed anyway - in front of the
+// error message, because then the ignored argument is usually the cause.
+// Only ever called when there IS something to report, so re-parsing the
+// answer costs nothing on the normal path. Any failure keeps the original
+// answer: a warning must never cost a result.
+var
+  V: TJSONValue;
+begin
+  Result := AAnswer;
+  V := nil;
+  try
+    V := TJSONObject.ParseJSONValue(AAnswer);
+    if not (V is TJSONObject) then Exit;
+    var O := TJSONObject(V);
+    var OkVal := O.GetValue('ok');
+    if (OkVal is TJSONBool) and TJSONBool(OkVal).AsBoolean then
+    begin
+      if O.GetValue('result') is TJSONObject then
+        TJSONObject(O.GetValue('result')).AddPair('argumentWarning', ANote)
+      else
+        O.AddPair('argumentWarning', ANote);
+    end
+    else
+    begin
+      var Msg := O.GetValue<string>('error', '');
+      O.RemovePair('error').Free;
+      O.AddPair('error', ANote + ' ' + Msg);
+    end;
+    Result := O.ToJSON;
+  except
+    Result := AAnswer;
+  end;
+  V.Free;
+end;
+
 function McpOk(AResult: TJSONValue): string;
 begin
   Result := OkResult(AResult);
@@ -1658,6 +1695,17 @@ begin
     if Req.GetValue('arguments') is TJSONObject then
       Args := TJSONObject(Req.GetValue('arguments'));
     GLastTool := Tool;
+    // An argument name the schema does not list is never read, so the call
+    // silently runs with a default. Collect the names BEFORE the dispatch -
+    // a handler may consume its arguments object.
+    var ArgNote: string := '';
+    if Args <> nil then
+    begin
+      var Names: TArray<string> := nil;
+      for var P in Args do
+        Names := Names + [P.JsonString.Value];
+      ArgNote := UnknownArgumentNote(Tool, Names);
+    end;
     var T0 := StatBegin(Tool);
     var Failed := True;
     try
@@ -1690,6 +1738,8 @@ begin
       else
         StatEnd(Tool, T0, Result);
     end;
+    if ArgNote <> '' then
+      Result := WithArgumentWarning(Result, ArgNote);
   finally
     V.Free;
   end;

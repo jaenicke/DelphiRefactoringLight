@@ -143,10 +143,28 @@ function McpToolDefinitions: TJSONArray;
 function McpToolsHash: string;
 function McpServerInstructions: string;
 
+/// <summary>The argument names a tool declares in its schema, plus
+///  'instance' - the bridge may add that one to any call, and most tools
+///  do not list it.</summary>
+function KnownToolArguments(const ATool: string): TArray<string>;
+/// <summary>The incoming names the tool does NOT declare. A handler reads
+///  its arguments BY NAME, so an unknown one is dropped without a word:
+///  "from_line" instead of "start_line" makes buffer_read answer the whole
+///  file and look like a tool that ignored half the request. Empty for a
+///  tool this list does not know (the bridge's own two), because then
+///  there is nothing to measure against.</summary>
+function UnknownToolArguments(const ATool: string;
+  const ANames: TArray<string>): TArray<string>;
+/// <summary>The sentence the server puts into such an answer, '' when
+///  every argument was understood.</summary>
+function UnknownArgumentNote(const ATool: string;
+  const ANames: TArray<string>): string;
+
 implementation
 
 uses
-  System.Classes, System.StrUtils, System.IOUtils;
+  System.Classes, System.StrUtils, System.IOUtils,
+  System.Generics.Collections;
 
 function McpPipeName(APid: Cardinal): string;
 begin
@@ -1225,6 +1243,102 @@ begin
   Result := IntToHex(Cardinal(H), 8);
 end;
 
+// ---------------------------------------------------------------------------
+//  Arguments a tool does not know
+// ---------------------------------------------------------------------------
+//  Every handler reads its arguments by name, so a name that is not in the
+//  schema is simply not read - the call runs with a default instead, and
+//  the answer looks like a tool that did something else than it was asked.
+//  Found by making that mistake: buffer_read with "from_line"/"to_line"
+//  (its schema says start_line/end_line) answered the whole file, with
+//  nothing in the result saying why.
+var
+  GArgMapLock: TObject = nil;
+  GArgMap: TDictionary<string, TArray<string>> = nil;
+
+procedure EnsureArgMap;
+var
+  Arr: TJSONArray;
+  Names: TArray<string>;
+begin
+  if GArgMap <> nil then Exit;
+  GArgMap := TDictionary<string, TArray<string>>.Create;
+  try
+    Arr := McpToolDefinitions;
+  except
+    Arr := nil;    // a broken list must never break a tool call
+  end;
+  if Arr = nil then Exit;
+  try
+    for var V in Arr do
+    begin
+      if not (V is TJSONObject) then Continue;
+      var O := TJSONObject(V);
+      var Tool := O.GetValue<string>('name', '');
+      if Tool = '' then Continue;
+      Names := ['instance'];
+      var Schema := O.GetValue('inputSchema');
+      if Schema is TJSONObject then
+      begin
+        var Props := TJSONObject(Schema).GetValue('properties');
+        if Props is TJSONObject then
+          for var P in TJSONObject(Props) do
+            if not MatchText(P.JsonString.Value, Names) then
+              Names := Names + [P.JsonString.Value];
+      end;
+      GArgMap.AddOrSetValue(LowerCase(Tool), Names);
+    end;
+  finally
+    Arr.Free;
+  end;
+end;
+
+function KnownToolArguments(const ATool: string): TArray<string>;
+begin
+  Result := nil;
+  if GArgMapLock = nil then Exit;    // finalized, or called from a DLL tail
+  TMonitor.Enter(GArgMapLock);
+  try
+    EnsureArgMap;
+    if not GArgMap.TryGetValue(LowerCase(ATool), Result) then
+      Result := nil;
+  finally
+    TMonitor.Exit(GArgMapLock);
+  end;
+end;
+
+function UnknownToolArguments(const ATool: string;
+  const ANames: TArray<string>): TArray<string>;
+var
+  Known: TArray<string>;
+begin
+  Result := nil;
+  Known := KnownToolArguments(ATool);
+  // A tool the list does not describe (the bridge's own two, or an IDE
+  // newer than this unit) says nothing - the alternative would be to
+  // report every argument of it as unknown.
+  if Length(Known) = 0 then Exit;
+  for var N in ANames do
+    if (N <> '') and not MatchText(N, Known) and not MatchText(N, Result) then
+      Result := Result + [N];
+end;
+
+function UnknownArgumentNote(const ATool: string;
+  const ANames: TArray<string>): string;
+var
+  Unknown: TArray<string>;
+begin
+  Result := '';
+  Unknown := UnknownToolArguments(ATool, ANames);
+  if Length(Unknown) = 0 then Exit;
+  Result := Format(
+    'IGNORED argument(s): %s. They are not in this tool''s schema, so ' +
+    'nothing read them - the call ran as if they had been left out. %s ' +
+    'takes: %s.',
+    [string.Join(', ', Unknown), ATool,
+     string.Join(', ', KnownToolArguments(ATool))]);
+end;
+
 function McpServerInstructions: string;
 begin
   // Loaded into EVERY Claude Code session that has the server registered,
@@ -1247,5 +1361,15 @@ begin
     'While no IDE runs only ide_instances and select_ide exist; the other ' +
     'tools appear when an IDE with the plugin starts.';
 end;
+
+initialization
+  GArgMapLock := TObject.Create;
+
+finalization
+  // The pipe handlers are stopped before this unit finalizes (StopMcpServer
+  // waits for them), but a nil lock must still not be entered - same rule
+  // as the main-thread guard's.
+  FreeAndNil(GArgMap);
+  FreeAndNil(GArgMapLock);
 
 end.

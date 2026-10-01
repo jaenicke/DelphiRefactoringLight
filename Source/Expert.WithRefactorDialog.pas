@@ -279,7 +279,11 @@ begin
   FBtnApplySelected.AlignWithMargins := True;
   FBtnApplySelected.Margins.SetBounds(0, 8, 6, 6);
   FBtnApplySelected.OnClick := DoBtnApplySelectedClick;
-  FBtnApplySelected.Default := True;
+  // NOT the default button (audit #41, M40e): Enter anywhere in the dialog -
+  // typically while browsing the list with the keyboard - rewrote the
+  // selected with-statement in the file without a word. A button that
+  // writes code must be clicked, and the list's own Enter is free for
+  // selecting a row.
 
   // Bottom-half: preview panel hosts a TPageControl with two tabs:
   //   - "Diff"  : Before / After memos side by side

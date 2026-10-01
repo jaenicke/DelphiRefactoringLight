@@ -308,6 +308,17 @@ function UsesContains(const AClause: TUsesClauseLocation;
 ///  rewrites. Pure (audit #41, H11).</summary>
 function DeclaredTypeIsValueType(const ADeclLine, ANextLine: string): Boolean;
 
+/// <summary>Every identifier the enclosing routine's DECLARATION PART
+///  already uses - parameters, locals, local types and constants. A temp
+///  name must avoid them: in classic mode a second declaration of the same
+///  name does not compile, and in inline mode the temp SHADOWS the local,
+///  so the code after the with sees the wrong variable (audit #41, M40c).
+///  Deliberately an over-approximation (every identifier in the range, not
+///  only the declared names): a false hit just adds a numeric suffix to a
+///  temp name, while a miss produces code that does not compile.</summary>
+function RoutineScopeNames(const ALines: TArray<string>;
+  AHeaderLine1, ABodyBeginLine1: Integer): TArray<string>;
+
 /// <summary>Does the statement on line ALine1 sit inside an ANONYMOUS
 ///  method declared within the method body that begins on ABodyBeginLine1?
 ///  (1-based, ALines are the raw source lines.) The classic form declares
@@ -799,6 +810,43 @@ begin
     W := FirstWord(Rest, Rest2);
   end;
   Result := (W = 'RECORD') or (W = 'OBJECT');
+end;
+
+function RoutineScopeNames(const ALines: TArray<string>;
+  AHeaderLine1, ABodyBeginLine1: Integer): TArray<string>;
+var
+  Masked: TArray<string>;
+  Seen: TStringList;
+begin
+  Result := nil;
+  if (AHeaderLine1 < 1) or (ABodyBeginLine1 < AHeaderLine1) then Exit;
+  if Length(ALines) = 0 then Exit;
+  Masked := MaskCommentsAndStrings(ALines);
+  Seen := TStringList.Create;
+  try
+    Seen.CaseSensitive := False;
+    Seen.Sorted := True;
+    Seen.Duplicates := dupIgnore;
+    for var L := AHeaderLine1 - 1 to ABodyBeginLine1 - 1 do
+    begin
+      if (L < 0) or (L > High(Masked)) then Continue;
+      var S := Masked[L];
+      var P := 1;
+      while P <= Length(S) do
+      begin
+        if not IsIdentStart(S[P]) then begin Inc(P); Continue; end;
+        var Q := P;
+        while (Q <= Length(S)) and IsIdentChar(S[Q]) do Inc(Q);
+        var W := Copy(S, P, Q - P);
+        P := Q;
+        if not IsPascalKeyword(W) then Seen.Add(W);
+      end;
+    end;
+    SetLength(Result, Seen.Count);
+    for var K := 0 to Seen.Count - 1 do Result[K] := Seen[K];
+  finally
+    Seen.Free;
+  end;
 end;
 
 function InsideAnonymousMethod(const ALines: TArray<string>;
@@ -1734,6 +1782,12 @@ var
   Stack: TList<TMethodInfo>;
   StateStack: TList<TPState>;
   BodyDepthStack: TList<Integer>;  // begin/try/case/asm depth in body
+  // Audit #41, M40b: 'procedure Go(var A: Integer);' switched to psInVar on
+  // the var PARAMETER, so the method was recorded with a var section ending
+  // at its HEADER line - and the classic temp was then inserted there,
+  // without a 'var' keyword or inside the parameter list. A header's
+  // parentheses are counted, and only 'var' at depth 0 opens a section.
+  ParenDepthStack: TList<Integer>;
 
   procedure PushNew(AHeaderLine: Integer);
   var
@@ -1744,6 +1798,7 @@ var
     Stack.Add(M);
     StateStack.Add(psInHeader);
     BodyDepthStack.Add(0);
+    ParenDepthStack.Add(0);
   end;
 
   procedure FinalizeTop(AEndLine: Integer);
@@ -1758,6 +1813,8 @@ var
     Stack.Delete(Stack.Count - 1);
     StateStack.Delete(StateStack.Count - 1);
     BodyDepthStack.Delete(BodyDepthStack.Count - 1);
+    if ParenDepthStack.Count > 0 then
+      ParenDepthStack.Delete(ParenDepthStack.Count - 1);
   end;
 
   function TopState: TPState;
@@ -1796,6 +1853,20 @@ var
     BodyDepthStack[BodyDepthStack.Count - 1] := AValue;
   end;
 
+  function TopParenDepth: Integer;
+  begin
+    if ParenDepthStack.Count = 0 then Exit(0);
+    Result := ParenDepthStack[ParenDepthStack.Count - 1];
+  end;
+
+  procedure AddTopParenDepth(ADelta: Integer);
+  begin
+    if ParenDepthStack.Count = 0 then Exit;
+    var V := ParenDepthStack[ParenDepthStack.Count - 1] + ADelta;
+    if V < 0 then V := 0;
+    ParenDepthStack[ParenDepthStack.Count - 1] := V;
+  end;
+
 var
   I, N, Line, Col: Integer;
   TokenStart, TokenStartLine, TokenStartCol: Integer;
@@ -1807,6 +1878,7 @@ begin
   Stack := TList<TMethodInfo>.Create;
   StateStack := TList<TPState>.Create;
   BodyDepthStack := TList<Integer>.Create;
+  ParenDepthStack := TList<Integer>.Create;
   try
     I := 1;
     N := Length(ASource);
@@ -1969,7 +2041,9 @@ begin
 
           psInHeader:
             begin
-              if WordUC = 'VAR' then
+              // only OUTSIDE the parameter list: inside it, 'var' is a
+              // parameter modifier (audit #41, M40b)
+              if (WordUC = 'VAR') and (TopParenDepth = 0) then
               begin
                 SetTopState(psInVar);
               end
@@ -2041,11 +2115,18 @@ begin
         Continue;
       end;
 
-      // Whitespace
+      // Punctuation: only the brackets matter, and only to tell a
+      // parameter list from a var section.
+      if (Ch = '(') or (Ch = '[') then
+        AddTopParenDepth(1)
+      else if (Ch = ')') or (Ch = ']') then
+        AddTopParenDepth(-1);
+
       Inc(I); Inc(Col);
     end;
     Result := Methods.ToArray;
   finally
+    ParenDepthStack.Free;
     BodyDepthStack.Free;
     StateStack.Free;
     Stack.Free;
@@ -2358,13 +2439,26 @@ begin
           Inc(I); Inc(Col);
         end;
         var Name := Copy(ASource, IdStart, I - IdStart);
-        var IsMember := (PrevSig = '.') or (PrevSig = '&') or (PrevSig = '@');
-        if (not IsMember) and (not IsPascalKeyword(Name)) then
+        // ONLY a dot means member access (audit #41, M40a). '@' is
+        // address-of and '&' is an escaped identifier: both used to count
+        // as "already qualified", so "with B do P := @X" kept @X - which
+        // then binds to whatever X is visible OUTSIDE the with, or does not
+        // compile - and "&Type := 1" stayed unqualified too.
+        var IsMember := (PrevSig = '.');
+        // An escaped identifier is an IDENTIFIER, so the keyword filter
+        // must not reject it; the prefix goes BEFORE the '&' ("B.&Type"),
+        // which is what moving StartIdx one character left does. The LSP
+        // position stays on the name itself.
+        var Escaped := (PrevSig = '&');
+        if (not IsMember) and (Escaped or not IsPascalKeyword(Name)) then
         begin
           Ref.Name := Name;
           Ref.Pos.Line := IdStartLine;
           Ref.Pos.Col := IdStartCol;
-          Ref.StartIdx := IdStart;
+          if Escaped then
+            Ref.StartIdx := IdStart - 1
+          else
+            Ref.StartIdx := IdStart;
           Ref.EndIdx := I;
           Refs.Add(Ref);
         end;
@@ -3624,6 +3718,38 @@ begin
           Targets[I].QualifyPrefix := Targets[I].InlineVarName + '.';
           Break;
         end;
+
+  // ENCLOSING-SCOPE collision check (audit #41, M40c). The two checks
+  // above look at the other targets and at the with BODY only - a local
+  // 'LFoo: Integer' declared outside the body was invisible, so the temp
+  // took its name: classic mode declared it a second time (does not
+  // compile), inline mode shadowed it (compiles, wrong variable from then
+  // on). Suffix until the name is free.
+  begin
+    var ScopeLines: TArray<string>;
+    SetLength(ScopeLines, Index.LineCount);
+    for var SL := 1 to Index.LineCount do
+      ScopeLines[SL - 1] := Index.LineText(SL);
+    var ScopeMethods := FindAllMethodsInSource(ASource, Index);
+    var ScopeMI: TMethodInfo;
+    if FindEnclosingMethod(ScopeMethods, AOccurrence.KeywordPos.Line, ScopeMI)
+      and (ScopeMI.BodyBeginLine > 0) then
+    begin
+      var Taken := RoutineScopeNames(ScopeLines, ScopeMI.HeaderLine,
+        ScopeMI.BodyBeginLine);
+      for I := 0 to High(Targets) do
+        if (Targets[I].InlineVarName <> '')
+          and MatchText(Targets[I].InlineVarName, Taken) then
+        begin
+          var Base := Targets[I].InlineVarName;
+          var Suffix := 2;
+          while MatchText(Base + IntToStr(Suffix), Taken) and (Suffix < 20) do
+            Inc(Suffix);
+          Targets[I].InlineVarName := Base + IntToStr(Suffix);
+          Targets[I].QualifyPrefix := Targets[I].InlineVarName + '.';
+        end;
+    end;
+  end;
 
   // Build a set of (StartIdx -> qualifying prefix) to apply when
   // rewriting. We iterate refs in order and on each successful match

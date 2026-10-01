@@ -50,6 +50,7 @@ type
     UsageCount: Integer;
     FirstUseLine: Integer;   // 0-based, -1 when unused
     Reason: string;          // why it is kept ('cxGrid1: TcxGrid'), else ''
+    Line: Integer;           // 0-based line of the entry in its uses clause
   end;
 
   /// <summary>Identifier -> declaring unit names (the index Lookup).</summary>
@@ -59,6 +60,13 @@ type
   /// <summary>'' = the form designer does not need this unit; otherwise the
   ///  component that asks for it ('cxGrid1: TcxGrid').</summary>
   TUnitReason = reference to function(const AUnitName: string): string;
+  /// <summary>Is the 0-based LINE inside an inactive {$IFDEF} region, i.e.
+  ///  not compiled in the current configuration? DelphiLSP reports those
+  ///  ranges with its diagnostics (TLspClient.IsLineInactive), so a clause
+  ///  WITH conditionals can be judged per entry instead of not at all.
+  ///  nil = no such information - then a conditional clause stays
+  ///  unanalysed, which is the behaviour before 1.16.2.</summary>
+  TLineInactive = reference to function(ALine: Integer): Boolean;
 
 /// <summary>Analyses AContent's uses entries. Pure function of the content
 ///  plus the injected lookups - unit-testable without an index or an IDE.
@@ -68,12 +76,16 @@ type
 ///  AUserKept: the user's keep list. AFormUnverified: this is a form unit
 ///  whose designer could NOT be asked, so a textually unused entry cannot
 ///  be verified - it becomes uvUnverified instead of uvUnused.</summary>
+///  AInactiveLine: which clause lines are not compiled right now (see
+///  TLineInactive) - an entry on such a line is never judged, an entry on an
+///  ACTIVE line of a conditional clause is judged normally.</summary>
 function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
   const AUnitKnown: TUnitKnown;
   const AHasInitCode: TUnitKnown;
   const ADesignerRequired: TUnitReason = nil;
   const AUserKept: TUnitKnown = nil;
-  AFormUnverified: Boolean = False): TArray<TUsesEntryInfo>;
+  AFormUnverified: Boolean = False;
+  const AInactiveLine: TLineInactive = nil): TArray<TUsesEntryInfo>;
 
 /// <summary>'Forms' and 'Vcl.Forms' name the same unit when the project
 ///  works with unit scope names - and the designer reports the RTTI name
@@ -97,6 +109,13 @@ function DesignerRequiredLookup(
 ///  tool's include_unverified can never disagree about it.</summary>
 function ResolveUnverified(const AEntry: TUsesEntryInfo): TUsesVerdict;
 
+/// <summary>The AInactiveLine callback for AFilePath, built from the LSP
+///  session the IDE already runs: nil when no session is there or it has not
+///  analysed this file yet, so a conditional clause then stays unanalysed
+///  exactly as before. ONE place, so the dialog and both MCP tools ask the
+///  same question.</summary>
+function InactiveLookup(const AFilePath: string): TLineInactive;
+
 /// <summary>Opens the cleanup dialog for the active editor file.</summary>
 procedure CleanupUsesCurrentUnit;
 
@@ -109,7 +128,8 @@ uses
   Vcl.Dialogs,
   Expert.UnitIndex, Expert.DialogHelper, Expert.DfmRename,
   Expert.IdeThemes, Expert.ListViewSort, Expert.PascalScanner,
-  Expert.PluginSettings;
+  Expert.PluginSettings
+  {$IFNDEF STANDALONE_BUILD}, Expert.LspManager, Lsp.Client{$ENDIF};
 
 // ---------------------------------------------------------------------------
 //  Analysis
@@ -120,7 +140,9 @@ type
     Section: TUsesSection;
     FirstLine, LastLine: Integer;   // 0-based span of the clause
     Names: TArray<string>;
-    HasDirectives: Boolean;         // {$IFDEF} etc. inside - do not analyse
+    NameLines: TArray<Integer>;     // 0-based line each name stands on
+    NamePaths: TArray<Boolean>;     // the entry carried an "in '<path>'" tail
+    HasDirectives: Boolean;         // {$IFDEF} / comments inside the clause
   end;
 
 const
@@ -169,6 +191,33 @@ begin
     Result := uvMovable;
 end;
 
+function InactiveLookup(const AFilePath: string): TLineInactive;
+{$IFDEF STANDALONE_BUILD}
+begin
+  // No DelphiLSP session is held outside the IDE, so a conditional clause
+  // stays unanalysed there.
+  Result := nil;
+end;
+{$ELSE}
+var
+  Client: TLspClient;
+begin
+  Result := nil;
+  // PeekClient, never GetClient: a cleanup must not cold-start a DelphiLSP
+  // session, and the answer is only meaningful once the server has pushed
+  // diagnostics FOR THIS FILE - before that "not inactive" would be a guess
+  // that reads as "active" and would let a conditional clause be edited.
+  Client := TLspManager.Instance.PeekClient;
+  if (Client = nil) or not Client.IsConnected
+    or not Client.HasReceivedDiagnostics(AFilePath) then Exit;
+  Result :=
+    function(ALine: Integer): Boolean
+    begin
+      Result := Client.IsLineInactive(AFilePath, ALine);
+    end;
+end;
+{$ENDIF}
+
 function DesignerRequiredLookup(
   const ARequired: TArray<TDesignerRequiredUnit>): TUnitReason;
 begin
@@ -201,47 +250,128 @@ begin
   Result := MaxInt;
 end;
 
-// Parses the uses clause of the section starting after ASectionLine.
-function ParseClause(const ALines: TArray<string>; AFrom, ATo: Integer;
+// The unit NAME at the start of a clause item: the leading dotted
+// identifier, so an "A in '..\src\A.pas'" entry yields 'A' and a blanked
+// directive or comment leaves nothing behind. APath says the item carried
+// an "in <something>" tail - that is a PROJECT FILE entry (.dpr/.dpk), and
+// removing one of those takes the unit out of the project.
+function ClauseItemName(const AItem: string; out APath: Boolean): string;
+var
+  P, S: Integer;
+begin
+  Result := '';
+  APath := False;
+  P := 1;
+  while (P <= Length(AItem)) and CharInSet(AItem[P], [' ', #9]) do Inc(P);
+  if (P > Length(AItem)) or not IsIdentStart(AItem[P]) then Exit;
+  S := P;
+  while (P <= Length(AItem)) and (IsIdentChar(AItem[P]) or (AItem[P] = '.')) do
+    Inc(P);
+  Result := AItem.Substring(S - 1, P - S);
+  // whatever follows can only be an "in <path>" tail - the literal itself is
+  // blanked in the masked text, so look for the keyword
+  var Rest := Trim(AItem.Substring(P - 1));
+  APath := SameText(Rest, 'in') or StartsText('in ', Rest) or StartsText('in'#9, Rest);
+end;
+
+// Parses the uses clause of the section between AFrom and ATo.
+//
+// REPORTED DEFECT (fork maintainer, 2026-10-01, reproduced live on this
+// repository's own Expert.OptionsFrame.pas): the names came out of the RAW
+// clause text, with only // comments cut. So a directive was GLUED onto its
+// neighbour ("Expert.PluginSettings {$IFNDEF STANDALONE_BUILD}",
+// "Expert.BlameGutter{$ENDIF}" - measured through analyze_uses), a ';' inside
+// a { } comment ENDED the clause and hid every unit behind it
+// ("uses A { was: X; }, B, C;" produced the single name "A { was: X"), and an
+// "in '<path>'" tail stayed part of the name. The mangled names then also
+// miss in every lookup keyed on them - the index, the designer answer, the
+// keep-list masks.
+// So the names are read from AMASKED, where Expert.PascalScanner has blanked
+// comments, directives and string literals while keeping every position.
+// HasDirectives is still decided on the RAW text: a clause with conditionals
+// is not rewritten blindly, whatever we can read out of it.
+function ParseClause(const ALines, AMasked: TArray<string>; AFrom, ATo: Integer;
   ASection: TUsesSection; out AInfo: TClauseInfo): Boolean;
 var
   I, J: Integer;
-  T, Joined: string;
+  Raw, M, Joined: string;
   InClause: Boolean;
+  // for each character of Joined: which 0-based line it came from
+  Origin: TArray<Integer>;
+
+  procedure Append(const AText: string; ALine: Integer);
+  var
+    Base: Integer;
+  begin
+    Joined := Joined + AText;
+    // one grow per LINE: "Origin := Origin + [ALine]" per character copies
+    // the whole array each time, and a real uses clause is thousands of
+    // characters long
+    Base := Length(Origin);
+    SetLength(Origin, Base + Length(AText));
+    for var K := 0 to Length(AText) - 1 do
+      Origin[Base + K] := ALine;
+  end;
+
 begin
   Result := False;
   AInfo := Default(TClauseInfo);
   AInfo.Section := ASection;
   InClause := False;
   Joined := '';
+  Origin := nil;
   for I := AFrom to Min(ATo, High(ALines)) do
   begin
-    T := Trim(StripLineComment(ALines[I]));
+    if I > High(AMasked) then Break;
+    M := AMasked[I];
+    Raw := Trim(StripLineComment(ALines[I]));
     if not InClause then
     begin
-      if SameText(T, 'uses') or StartsText('uses ', T) then
+      // 'uses' inside a comment is blanked in M, so it cannot start a clause
+      var MT := Trim(M);
+      if SameText(MT, 'uses') or StartsText('uses ', MT) or StartsText('uses'#9, MT) then
       begin
         InClause := True;
         AInfo.FirstLine := I;
+        // drop the keyword itself, keep the position of the rest
+        var KP := Pos('uses', LowerCase(M));
+        Append(StringOfChar(' ', KP + 3) + M.Substring(KP + 3), I);
       end
       else
         Continue;
-    end;
-    if (Pos('{', T) > 0) or (Pos('(*', T) > 0) then
+    end
+    else
+      Append(' ' + M, I);
+    if (Pos('{', Raw) > 0) or (Pos('(*', Raw) > 0) then
       AInfo.HasDirectives := True;
-    Joined := Joined + ' ' + T;
-    J := Pos(';', T);
+    // the terminator in the MASKED text - a ';' inside a comment is blanked
+    J := Pos(';', Joined);
     if J > 0 then
     begin
       AInfo.LastLine := I;
-      // Strip the 'uses' keyword and the terminator, split the names.
-      J := Pos(';', Joined);
-      if J > 0 then Joined := Copy(Joined, 1, J - 1);
-      J := Pos('uses', LowerCase(Joined));
-      if J > 0 then Joined := Copy(Joined, J + 4, MaxInt);
-      for var N in Joined.Split([',']) do
-        if Trim(N) <> '' then
-          AInfo.Names := AInfo.Names + [Trim(N)];
+      var Items := Copy(Joined, 1, J - 1);
+      var Pos0 := 1;
+      for var N in Items.Split([',']) do
+      begin
+        var Path: Boolean;
+        var Name := ClauseItemName(N, Path);
+        if Name <> '' then
+        begin
+          // the line this entry stands on: the first non-blank character of
+          // the item (needed to ask whether it sits in an INACTIVE region)
+          var L := AInfo.FirstLine;
+          for var K := 0 to Length(N) - 1 do
+            if not CharInSet(N[K + 1], [' ', #9]) then
+            begin
+              if Pos0 + K - 1 <= Length(Origin) then L := Origin[Pos0 + K - 1];
+              Break;
+            end;
+          AInfo.Names := AInfo.Names + [Name];
+          AInfo.NameLines := AInfo.NameLines + [L];
+          AInfo.NamePaths := AInfo.NamePaths + [Path];
+        end;
+        Inc(Pos0, Length(N) + 1);    // + the ',' the split removed
+      end;
       Exit(True);
     end;
   end;
@@ -252,9 +382,11 @@ function AnalyzeUses(const AContent: string; const ALookup: TIdentLookup;
   const AHasInitCode: TUnitKnown;
   const ADesignerRequired: TUnitReason;
   const AUserKept: TUnitKnown;
-  AFormUnverified: Boolean): TArray<TUsesEntryInfo>;
+  AFormUnverified: Boolean;
+  const AInactiveLine: TLineInactive): TArray<TUsesEntryInfo>;
 var
   Lines: TArray<string>;
+  Masked: TArray<string>;
   ImplLine, I, CI: Integer;
   Clauses: array[0..1] of TClauseInfo;
   HasClause: array[0..1] of Boolean;
@@ -420,11 +552,15 @@ var
 begin
   Result := nil;
   Lines := SplitLines(AContent);
+  // comments, DIRECTIVES and string literals blanked, positions kept - that
+  // is what the clause names are read from (see ParseClause)
+  Masked := MaskCommentsAndStrings(Lines);
   ImplLine := ImplLineOf(Lines);
 
-  HasClause[0] := ParseClause(Lines, 0, ImplLine - 1, usInterface, Clauses[0]);
+  HasClause[0] := ParseClause(Lines, Masked, 0, ImplLine - 1, usInterface,
+    Clauses[0]);
   if ImplLine < MaxInt then
-    HasClause[1] := ParseClause(Lines, ImplLine + 1, High(Lines),
+    HasClause[1] := ParseClause(Lines, Masked, ImplLine + 1, High(Lines),
       usImplementation, Clauses[1])
   else
     HasClause[1] := False;
@@ -437,16 +573,43 @@ begin
     for CI := 0 to 1 do
     begin
       if not HasClause[CI] then Continue;
-      for var N in Clauses[CI].Names do
+      for var NI := 0 to High(Clauses[CI].Names) do
       begin
+        var N := Clauses[CI].Names[NI];
         E := Default(TUsesEntryInfo);
         E.UnitName := N;
         E.Section := Clauses[CI].Section;
         E.FirstUseLine := -1;
-        if Clauses[CI].HasDirectives or not AUnitKnown(N) then
-          E.Verdict := uvUnknown
-        else
-          E.Verdict := uvUsed;   // refined below
+        E.Line := Clauses[CI].NameLines[NI];
+        E.Verdict := uvUsed;   // refined below
+        // An entry the compiler does not even see right now says nothing
+        // about this configuration - and it is compiled in ANOTHER one, where
+        // our usage analysis has no evidence at all. Never judged.
+        if Assigned(AInactiveLine) and AInactiveLine(E.Line) then
+        begin
+          E.Verdict := uvUnknown;
+          E.Reason := 'inactive in this configuration ({$IFDEF}) - not analysed';
+        end
+        else if Clauses[CI].NamePaths[NI] then
+        begin
+          // "X in '<path>'" is a PROJECT FILE entry: removing it takes the
+          // unit out of the project, which is not what a uses cleanup does.
+          E.Verdict := uvUnknown;
+          E.Reason := 'listed with "in <path>" - that is a project file entry';
+        end
+        else if Clauses[CI].HasDirectives and not Assigned(AInactiveLine) then
+        begin
+          // The names are read correctly now, but without knowing WHICH
+          // branch is compiled there is nothing to judge.
+          E.Verdict := uvUnknown;
+          E.Reason := 'the uses clause has compiler directives or comments - ' +
+            'never edited';
+        end
+        else if not AUnitKnown(N) then
+        begin
+          E.Verdict := uvUnknown;
+          E.Reason := 'no indexed source for this unit (.dcu only?)';
+        end;
         Entries.Add(E);
         if not ByName.ContainsKey(UpperCase(N)) then
           ByName.Add(UpperCase(N), Entries.Count - 1);
@@ -755,7 +918,14 @@ begin
         uvUnused:  Item.SubItems.Add('unused - remove?');
         uvMovable: Item.SubItems.Add('only used in implementation - move?');
         uvUsed:    Item.SubItems.Add('used');
-        uvUnknown: Item.SubItems.Add('not analysable (no indexed source / IFDEF)');
+        uvUnknown:
+          // The reason used to be missing entirely: a row said "not
+          // analysable" and left the user guessing which of three causes it
+          // was (fork maintainer, 2026-10-01).
+          if E.Reason <> '' then
+            Item.SubItems.Add('not analysable - ' + E.Reason)
+          else
+            Item.SubItems.Add('not analysable (no indexed source / IFDEF)');
         uvInitCode:
           Item.SubItems.Add('no direct usage, but has initialization code - kept');
         uvIdeManaged:
@@ -926,7 +1096,8 @@ begin
       begin
         Result := MatchesKeepList(AUnitName, KeepList);
       end,
-      IsForm and not Verified);
+      IsForm and not Verified,
+      InactiveLookup(Ctx.FileName));
 
     if not IsForm then
       DesignerNote := ''

@@ -340,6 +340,34 @@ type
     [Test] procedure OptingIntoAnUnverifiedRowFollowsTheText;
   end;
 
+  /// <summary>A fork maintainer's report (2026-10-01), reproduced live on
+  ///  this repository's own Expert.OptionsFrame.pas: the clause names came
+  ///  out of the RAW text with only // comments cut, so a directive was
+  ///  GLUED onto its neighbour ("Expert.PluginSettings {$IFNDEF
+  ///  STANDALONE_BUILD}"), a ';' inside a { } comment ENDED the clause and
+  ///  hid every unit behind it, and an "in '<path>'" tail stayed part of the
+  ///  name. The names are read from the MASKED text now - and because the
+  ///  LSP session reports which lines are inactive, a conditional clause can
+  ///  be judged per entry instead of not at all.</summary>
+  [TestFixture]
+  TUsesClauseParsingTests = class
+  private
+    function Analyze(const AClause: string;
+      const AInactive: TArray<Integer> = nil): TArray<TUsesEntryInfo>;
+    function Names(const AEntries: TArray<TUsesEntryInfo>): string;
+    function VerdictOf(const AEntries: TArray<TUsesEntryInfo>;
+      const AUnit: string): TUsesVerdict;
+    function ReasonOf(const AEntries: TArray<TUsesEntryInfo>;
+      const AUnit: string): string;
+  public
+    [Test] procedure ADirectiveIsNotPartOfTheUnitName;
+    [Test] procedure ASemicolonInACommentDoesNotEndTheClause;
+    [Test] procedure AnInPathTailIsNotPartOfTheName;
+    [Test] procedure APlainClauseIsUnchangedAndStillJudged;
+    [Test] procedure AnUnknownVerdictSaysWhy;
+    [Test] procedure AnInactiveBranchIsNeverJudgedButItsNeighbourIs;
+  end;
+
 implementation
 
 uses
@@ -2280,6 +2308,176 @@ begin
   Assert.AreEqual<TForeignAnswerVerdict>(favKeepMarked, ForeignAnswerVerdict(False, 5));
 end;
 
+{ TUsesClauseParsingTests }
+
+function TUsesClauseParsingTests.Analyze(const AClause: string;
+  const AInactive: TArray<Integer>): TArray<TUsesEntryInfo>;
+var
+  Inact: TLineInactive;
+begin
+  // A whole unit around the clause, so the line numbers are real: the
+  // clause starts on line 4 (0-based).
+  var Src := 'unit U;'#13#10 + 'interface'#13#10 + ''#13#10 + AClause +
+    #13#10 + 'implementation'#13#10 + 'end.';
+  Inact := nil;
+  if System.Length(AInactive) > 0 then
+    Inact :=
+      function(ALine: Integer): Boolean
+      begin
+        Result := False;
+        for var L in AInactive do
+          if L = ALine then Exit(True);
+      end;
+  Result := AnalyzeUses(Src,
+    function(const AIdent: string): TArray<string> begin Result := nil; end,
+    function(const AUnit: string): Boolean begin Result := True; end,
+    function(const AUnit: string): Boolean begin Result := False; end,
+    nil, nil, False, Inact);
+end;
+
+function TUsesClauseParsingTests.Names(
+  const AEntries: TArray<TUsesEntryInfo>): string;
+begin
+  Result := '';
+  for var E in AEntries do
+  begin
+    if Result <> '' then Result := Result + ',';
+    Result := Result + E.UnitName;
+  end;
+end;
+
+function TUsesClauseParsingTests.VerdictOf(
+  const AEntries: TArray<TUsesEntryInfo>; const AUnit: string): TUsesVerdict;
+begin
+  for var E in AEntries do
+    if SameText(E.UnitName, AUnit) then Exit(E.Verdict);
+  Assert.Fail('no entry for ' + AUnit);
+  Result := uvUsed;
+end;
+
+function TUsesClauseParsingTests.ReasonOf(
+  const AEntries: TArray<TUsesEntryInfo>; const AUnit: string): string;
+begin
+  Result := '';
+  for var E in AEntries do
+    if SameText(E.UnitName, AUnit) then Exit(E.Reason);
+end;
+
+procedure TUsesClauseParsingTests.ADirectiveIsNotPartOfTheUnitName;
+begin
+  // The reported shape, and the one this repository's own options frame has.
+  Assert.AreEqual('A,B,C,D', Names(Analyze(
+    'uses'#13#10 +
+    '  A, B, C {$IFNDEF STANDALONE_BUILD},'#13#10 +
+    '  D{$ENDIF};')),
+    'the directive must not stick to C or to D');
+  // ... and a clause whose branches span several lines, with a two-line
+  // brace comment in the middle
+  Assert.AreEqual('A,B,C,D', Names(Analyze(
+    'uses'#13#10 +
+    '  A,'#13#10 +
+    '  {$IFDEF DEBUG}'#13#10 +
+    '  B,'#13#10 +
+    '  {$ELSE}'#13#10 +
+    '  C,'#13#10 +
+    '  {$ENDIF}'#13#10 +
+    '  { a comment'#13#10 +
+    '    over two lines }'#13#10 +
+    '  D;')));
+end;
+
+procedure TUsesClauseParsingTests.ASemicolonInACommentDoesNotEndTheClause;
+begin
+  // Measured live before the fix: analyze_uses answered ONE entry named
+  // "System.SysUtils { was: System.Math" and B and C were missing entirely.
+  Assert.AreEqual('A,B,C', Names(Analyze(
+    'uses A { was: X; }, B (* old; *), C;')),
+    'a '';'' inside a comment is not the terminator');
+end;
+
+procedure TUsesClauseParsingTests.AnInPathTailIsNotPartOfTheName;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  E := Analyze('uses A in ''..\src\A.pas'', B in ''B.pas'';');
+  Assert.AreEqual('A,B', Names(E), 'the path is not part of the name');
+  // ... but such an entry belongs to a PROJECT file, and removing it takes
+  // the unit out of the project - so it is reported, never offered.
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'A'));
+  Assert.Contains(ReasonOf(E, 'A'), 'project file');
+end;
+
+procedure TUsesClauseParsingTests.APlainClauseIsUnchangedAndStillJudged;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // REGRESSION: an ordinary clause must behave exactly as before, and a
+  // trailing // comment must not block the analysis either.
+  E := Analyze('uses A, // the one we need'#13#10 + '  B;');
+  Assert.AreEqual('A,B', Names(E));
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'A'),
+    'nothing uses it in this fixture, and a // tail does not stop the analysis');
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'B'));
+end;
+
+procedure TUsesClauseParsingTests.AnUnknownVerdictSaysWhy;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // The row used to read "not analysable" with no reason given, leaving
+  // three different causes indistinguishable.
+  E := Analyze('uses A, B {$IFDEF X}, C{$ENDIF};');
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'A'));
+  Assert.Contains(ReasonOf(E, 'A'), 'directives');
+  // no indexed source is the other cause, and it must name itself
+  E := AnalyzeUses('unit U;'#13#10 + 'interface'#13#10 + 'uses A;'#13#10 +
+    'implementation'#13#10 + 'end.',
+    function(const AIdent: string): TArray<string> begin Result := nil; end,
+    function(const AUnit: string): Boolean begin Result := False; end,
+    function(const AUnit: string): Boolean begin Result := False; end);
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'A'));
+  Assert.Contains(ReasonOf(E, 'A'), 'no indexed source');
+end;
+
+procedure TUsesClauseParsingTests.AnInactiveBranchIsNeverJudgedButItsNeighbourIs;
+var
+  E: TArray<TUsesEntryInfo>;
+begin
+  // The LSP session reports which lines the compiler does not see
+  // (TLspClient.IsLineInactive, already used by remove-with). With that, a
+  // conditional clause no longer has to stay unanalysed as a whole:
+  // 0-based lines of the whole fixture unit:
+  //   3: uses
+  //   4:   A, {$IFDEF X}
+  //   5:   B,            <- inactive in this configuration
+  //   6:   {$ELSE}
+  //   7:   C,            <- active
+  //   8:   {$ENDIF} D;
+  var Clause :=
+    'uses'#13#10 +
+    '  A, {$IFDEF X}'#13#10 +
+    '  B,'#13#10 +
+    '  {$ELSE}'#13#10 +
+    '  C,'#13#10 +
+    '  {$ENDIF} D;';
+  E := Analyze(Clause, [5]);
+  Assert.AreEqual('A,B,C,D', Names(E), 'every entry is still reported');
+  // B is not compiled here, so our usage analysis has no evidence about it
+  // in the configuration where it IS compiled - never judged.
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'B'));
+  Assert.Contains(ReasonOf(E, 'B'), 'inactive in this configuration');
+  // the active ones are judged normally, which is the whole point
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'A'));
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'C'));
+  Assert.AreEqual<TUsesVerdict>(uvUnused, VerdictOf(E, 'D'));
+  // WITHOUT that information nothing in a conditional clause is judged -
+  // the behaviour before this round, and what the standalone keeps doing.
+  E := Analyze(Clause);
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'A'));
+  Assert.AreEqual<TUsesVerdict>(uvUnknown, VerdictOf(E, 'D'));
+  Assert.Contains(ReasonOf(E, 'A'), 'directives');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -2304,5 +2502,6 @@ initialization
   TDUnitX.RegisterTestFixture(TSignatureQualifierTests);
   TDUnitX.RegisterTestFixture(TInterfaceDeclLineTests);
   TDUnitX.RegisterTestFixture(TDesignerManagedUsesTests);
+  TDUnitX.RegisterTestFixture(TUsesClauseParsingTests);
 
 end.

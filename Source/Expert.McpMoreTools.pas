@@ -456,7 +456,7 @@ begin
 end;
 
 // The three injected lookups are the same for both tools.
-function AnalyzeUsesWithDesigner(const AContent: string;
+function AnalyzeUsesWithDesigner(const AContent, AFile: string;
   const ASnap: IUnitSnapshot; const AState: TDesignerState;
   const AKeepList: string): TArray<TUsesEntryInfo>;
 begin
@@ -479,7 +479,10 @@ begin
     begin
       Result := MatchesKeepList(AUnitName, AKeepList);
     end,
-    AState.IsForm and not AState.Verified);
+    AState.IsForm and not AState.Verified,
+    // which clause lines the compiler does not see right now - the same
+    // question the dialog asks (user, 2026-10-01)
+    InactiveLookup(AFile));
 end;
 
 function ToolAnalyzeUses(AArgs: TJSONObject; AStop: THandle): string;
@@ -513,7 +516,7 @@ begin
   var Snap := TUnitIndex.Instance.Snapshot;
   if (Snap = nil) or (Snap.IdentCount = 0) then
     Exit(McpErr('the identifier index is not ready yet'));
-  var Entries := AnalyzeUsesWithDesigner(C, Snap, St,
+  var Entries := AnalyzeUsesWithDesigner(C, F, Snap, St,
     TPluginSettings.UsesCleanupKeepUnits);
   var Arr := TJSONArray.Create;
   for var E in Entries do
@@ -2329,7 +2332,7 @@ begin
   var Snap := TUnitIndex.Instance.Snapshot;
   if (Snap = nil) or (Snap.IdentCount = 0) then
     Exit(McpErr('the identifier index is not ready yet - see get_status'));
-  Entries := AnalyzeUsesWithDesigner(C, Snap, St,
+  Entries := AnalyzeUsesWithDesigner(C, F, Snap, St,
     TPluginSettings.UsesCleanupKeepUnits);
 
   var Content := C;

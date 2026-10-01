@@ -103,6 +103,18 @@ type
 function LocateMoveDeclaration(const ASymbol, ASource: string;
   out AStartLine, AEndLine: Integer): Boolean;
 
+/// <summary>The implementation blocks "Move to unit" takes along with
+///  ASymbol - the routine's body, or every method of the class - as 1-based
+///  inclusive line ranges. Pure - exposed for the tests.</summary>
+function LocateMoveImplementation(const ASymbol, ASource: string;
+  out AStartLines, AEndLines: TArray<Integer>): Boolean;
+
+/// <summary>ATarget with the plan's declaration inserted before
+///  'implementation' and its implementation blocks at the end of the
+///  implementation section - before 'initialization' / 'finalization' when
+///  there is one. Pure - exposed for the tests.</summary>
+function SpliceMoveIntoTarget(const ATarget: string; const APlan: TMovePlan): string;
+
 type
   TLspMoveToUnit = class
   private
@@ -133,21 +145,16 @@ type
     ///  skips identifiers whose declaration falls inside any of the
     ///  AInSourceMovedRanges line spans (those are locals/params/etc.
     ///  that are themselves being moved). Skips ASourceUnit and
-    ///  ATargetUnit since the target doesn't need to use itself.</summary>
-    class function CollectRequiredUnits(AClient: TLspClient;
-      const ASourceFile: string;
-      const ARangesToScan: TArray<TPoint>;
-      const AInSourceMovedRanges: TArray<TPoint>;
-      const ASourceUnit, ATargetUnit: string): TArray<string>; overload;
-    /// <summary>As above; ASourceRefs receives the identifiers that are
-    ///  declared in the SOURCE unit itself (outside the moved ranges) -
-    ///  "Move to new unit" needs to know them.</summary>
+    ///  ATargetUnit since the target doesn't need to use itself.
+    ///  ASourceRefs receives the identifiers that are declared in the
+    ///  SOURCE unit itself (outside the moved ranges) - the move needs to
+    ///  know them.</summary>
     class function CollectRequiredUnits(AClient: TLspClient;
       const ASourceFile: string;
       const ARangesToScan: TArray<TPoint>;
       const AInSourceMovedRanges: TArray<TPoint>;
       const ASourceUnit, ATargetUnit: string;
-      out ASourceRefs: TArray<string>): TArray<string>; overload;
+      out ASourceRefs: TArray<string>): TArray<string>;
     class function ApplyPlanEx(const APlan: TMovePlan; ANewUnit: Boolean): Boolean;
     class function LspClientFor(const ASourceFile: string): TLspClient;
   public
@@ -490,6 +497,134 @@ begin
   Result := (not IsIdCh(After));
 end;
 
+// The last line (0-based) of the routine whose header is on line AHeader of
+// AStripped (comments and strings blanked), or -1. Counts every block that
+// has its own 'end' - begin, try, case, asm and local record types - word by
+// word, not line by line: counting only begin/end let the 'end' of a try, case
+// or asm block close the routine early, so a truncated body was moved and its
+// tail stayed in the source (audit C4). A 'case' inside a record is its variant
+// part and has no 'end' of its own. Nested routines declared before the body
+// are counted, so that their 'end;' does not end the outer routine.
+function RoutineBodyEnd(const AStripped: TArray<string>; AHeader: Integer): Integer;
+var
+  Stack: string;          // one letter per open block: b, t, c, a (asm), r
+  NestedPending, L, P, Q: Integer;
+  Line, W: string;
+  Popped: Char;
+begin
+  Result := -1;
+  Stack := '';
+  NestedPending := 0;
+  for L := AHeader to High(AStripped) do
+  begin
+    Line := AStripped[L];
+    if (L > AHeader) and (Stack = '') and
+      (StartsWithKeyword(Line, 'procedure') or StartsWithKeyword(Line, 'function')
+       or StartsWithKeyword(Line, 'constructor') or StartsWithKeyword(Line, 'destructor'))
+      and not (HasWord(Line, 'forward') or HasWord(Line, 'external')) then
+      Inc(NestedPending);
+    P := 1;
+    while P <= Length(Line) do
+    begin
+      if not IsIdCh(Line[P]) then
+      begin
+        Inc(P);
+        Continue;
+      end;
+      Q := P;
+      while (Q <= Length(Line)) and IsIdCh(Line[Q]) do Inc(Q);
+      W := LowerCase(Copy(Line, P, Q - P));
+      // X.End or &End is an identifier, not a keyword
+      var Qualified := (P > 1) and CharInSet(Line[P - 1], ['.', '&']);
+      P := Q;
+      if Qualified then Continue;
+      // inside an asm block only its own end counts
+      if (Stack <> '') and (Stack[Length(Stack)] = 'a') and (W <> 'end') then
+        Continue;
+      if W = 'begin' then Stack := Stack + 'b'
+      else if W = 'try' then Stack := Stack + 't'
+      else if W = 'asm' then Stack := Stack + 'a'
+      else if W = 'record' then Stack := Stack + 'r'
+      else if W = 'case' then
+      begin
+        if (Stack = '') or (Stack[Length(Stack)] <> 'r') then Stack := Stack + 'c';
+      end
+      else if (W = 'end') and (Stack <> '') then
+      begin
+        Popped := Stack[Length(Stack)];
+        Delete(Stack, Length(Stack), 1);
+        if (Stack = '') and CharInSet(Popped, ['b', 'a']) then
+        begin
+          if NestedPending > 0 then
+            Dec(NestedPending)
+          else
+            Exit(L);
+        end;
+      end;
+    end;
+  end;
+end;
+
+// Is the implementation header AHeader (comments blanked) qualified by
+// AClassName - the name at a word start, an optional generic parameter list,
+// then a dot? "TList2<T>.Add" as well as "TFoo.Bar". Looking for "TLIST2."
+// never matched a generic class, so its method bodies stayed behind (audit H28).
+function HeaderQualifiedBy(const AHeader, AClassName: string): Boolean;
+var
+  Up, UpName: string;
+  P, Q, Depth: Integer;
+begin
+  Result := False;
+  Up := AnsiUpperCase(AHeader);
+  UpName := AnsiUpperCase(AClassName);
+  if UpName = '' then Exit;
+  P := Pos(UpName, Up);
+  while P > 0 do
+  begin
+    Q := P + Length(UpName);
+    if ((P = 1) or CharInSet(Up[P - 1], [' ', #9])) and
+       ((Q > Length(Up)) or not IsIdCh(Up[Q])) then
+    begin
+      while (Q <= Length(Up)) and CharInSet(Up[Q], [' ', #9]) do Inc(Q);
+      if (Q <= Length(Up)) and (Up[Q] = '<') then
+      begin
+        Depth := 0;
+        while Q <= Length(Up) do
+        begin
+          if Up[Q] = '<' then Inc(Depth)
+          else if Up[Q] = '>' then
+          begin
+            Dec(Depth);
+            if Depth = 0 then Break;
+          end;
+          Inc(Q);
+        end;
+        Inc(Q);
+        while (Q <= Length(Up)) and CharInSet(Up[Q], [' ', #9]) do Inc(Q);
+      end;
+      if (Q <= Length(Up)) and (Up[Q] = '.') then Exit(True);
+    end;
+    P := Pos(UpName, Up, P + 1);
+  end;
+end;
+
+// Does the interface of ASource still name APlan.Symbol outside the
+// declaration that is moved away?
+function SymbolLeftInInterface(const ASource: string; const APlan: TMovePlan): Boolean;
+var
+  Stripped: TArray<string>;
+  I: Integer;
+begin
+  Result := False;
+  Stripped := SplitLines(StripCommentsAndStringsKeepNewlines(ASource));
+  for I := 0 to High(Stripped) do
+  begin
+    if StartsWithKeyword(Stripped[I], 'implementation') then Exit;
+    if (I + 1 >= APlan.DeclStartLine) and (I + 1 <= APlan.DeclEndLine) then Continue;
+    if HasWord(Stripped[I], APlan.Symbol) then Exit(True);
+  end;
+end;
+
 { TLspMoveToUnit }
 
 class function TLspMoveToUnit.ReadFile(const APath: string): string;
@@ -530,6 +665,33 @@ var
 begin
   Result := TLspMoveToUnit.LocateDeclaration(ASymbol, ASource, Kind,
     AStartLine, AEndLine, ClassLine);
+end;
+
+function LocateMoveImplementation(const ASymbol, ASource: string;
+  out AStartLines, AEndLines: TArray<Integer>): Boolean;
+var
+  Kind: TMoveSymbolKind;
+  DeclLine, EndLine, ClassLine, ImplS, ImplE: Integer;
+  Impl: string;
+  Blocks: TArray<string>;
+begin
+  AStartLines := nil;
+  AEndLines := nil;
+  Result := False;
+  if not TLspMoveToUnit.LocateDeclaration(ASymbol, ASource, Kind,
+    DeclLine, EndLine, ClassLine) then Exit;
+  if Kind = mskRoutine then
+  begin
+    Result := TLspMoveToUnit.LocateRoutineImpl(ASymbol, ASource, Impl, ImplS, ImplE);
+    if Result then
+    begin
+      AStartLines := [ImplS];
+      AEndLines := [ImplE];
+    end;
+  end
+  else if Kind = mskClass then
+    Result := TLspMoveToUnit.LocateClassMethods(ASymbol, ASymbol, ASource,
+      Blocks, AStartLines, AEndLines);
 end;
 
 class function TLspMoveToUnit.LocateDeclaration(const ASymbol: string;
@@ -826,7 +988,6 @@ var
   Stripped, Lines: TArray<string>;
   I, ImplStart, MyStart: Integer;
   Line: string;
-  BeginDepth: Integer;
 begin
   Result := False;
   AImpl := ''; AStartLine := 0; AEndLine := 0;
@@ -863,46 +1024,30 @@ begin
         var HasDot := (K <= Length(After)) and (After[K] = '.');
         if (not HasDot) and SameText(Name, ASymbol) then
         begin
-          // Found header. Find body: skip to 'begin', counting nested begin/end.
+          // Found header. The body runs to the end of its own begin (or
+          // asm) block - try/case/record/nested routines counted (C4).
           MyStart := I;
-          BeginDepth := 0;
-          var Found := False;
-          var J := I;
-          while J <= High(Stripped) do
+          var J := RoutineBodyEnd(Stripped, I);
+          if J >= 0 then
           begin
-            var LJ := Stripped[J];
-            if HasWord(LJ, 'begin') then
-            begin
-              Inc(BeginDepth);
-              Found := True;
-            end;
-            if Found and HasWord(LJ, 'end') then
-            begin
-              // skip 'end.'? we care about end at depth 1
-              Dec(BeginDepth);
-              if BeginDepth <= 0 then
+            AStartLine := MyStart + 1;
+            AEndLine := J + 1;
+            // Build text from original Lines (preserve formatting).
+            var Sub: TStringBuilder := TStringBuilder.Create;
+            try
+              for var KK := AStartLine - 1 to AEndLine - 1 do
               begin
-                AStartLine := MyStart + 1;
-                AEndLine := J + 1;
-                // Build text from original Lines (preserve formatting).
-                var Sub: TStringBuilder := TStringBuilder.Create;
-                try
-                  for var KK := AStartLine - 1 to AEndLine - 1 do
-                  begin
-                    if KK < Length(Lines) then
-                    begin
-                      if Sub.Length > 0 then Sub.Append(#13#10);
-                      Sub.Append(Lines[KK]);
-                    end;
-                  end;
-                  AImpl := Sub.ToString;
-                finally
-                  Sub.Free;
+                if KK < Length(Lines) then
+                begin
+                  if Sub.Length > 0 then Sub.Append(#13#10);
+                  Sub.Append(Lines[KK]);
                 end;
-                Exit(True);
               end;
+              AImpl := Sub.ToString;
+            finally
+              Sub.Free;
             end;
-            Inc(J);
+            Exit(True);
           end;
         end;
       end;
@@ -921,10 +1066,8 @@ var
   Stripped, Lines: TArray<string>;
   I, ImplStart, MyStart: Integer;
   Line: string;
-  BeginDepth: Integer;
   Blocks: TList<string>;
   StartList, EndList: TList<Integer>;
-  QName: string;
 begin
   AImplBlocks := nil;
   AStartLines := nil;
@@ -942,7 +1085,6 @@ begin
     end;
   if ImplStart < 0 then Exit;
 
-  QName := AnsiUpperCase(AClassName) + '.';
   Blocks := TList<string>.Create;
   StartList := TList<Integer>.Create;
   EndList := TList<Integer>.Create;
@@ -955,47 +1097,31 @@ begin
          or StartsWithKeyword(Line, 'constructor') or StartsWithKeyword(Line, 'destructor')
          or StartsWithKeyword(Line, 'class') then
       begin
-        var Up := AnsiUpperCase(Line);
-        if Pos(' ' + QName, ' ' + Up) > 0 then
+        // "TFoo.X" and "TList2<T>.X" alike (H28); the body runs to its own
+        // end, whatever try/case/asm blocks it holds (C4).
+        if HeaderQualifiedBy(Line, AClassName) then
         begin
           MyStart := I;
-          BeginDepth := 0;
-          var Found := False;
-          var J := I;
-          while J <= High(Stripped) do
+          var J := RoutineBodyEnd(Stripped, I);
+          if J >= 0 then
           begin
-            var LJ := Stripped[J];
-            if HasWord(LJ, 'begin') then
-            begin
-              Inc(BeginDepth);
-              Found := True;
-            end;
-            if Found and HasWord(LJ, 'end') then
-            begin
-              Dec(BeginDepth);
-              if BeginDepth <= 0 then
+            StartList.Add(MyStart + 1);
+            EndList.Add(J + 1);
+            var Sub: TStringBuilder := TStringBuilder.Create;
+            try
+              for var KK := MyStart to J do
               begin
-                StartList.Add(MyStart + 1);
-                EndList.Add(J + 1);
-                var Sub: TStringBuilder := TStringBuilder.Create;
-                try
-                  for var KK := MyStart to J do
-                  begin
-                    if KK < Length(Lines) then
-                    begin
-                      if Sub.Length > 0 then Sub.Append(#13#10);
-                      Sub.Append(Lines[KK]);
-                    end;
-                  end;
-                  Blocks.Add(Sub.ToString);
-                finally
-                  Sub.Free;
+                if KK < Length(Lines) then
+                begin
+                  if Sub.Length > 0 then Sub.Append(#13#10);
+                  Sub.Append(Lines[KK]);
                 end;
-                I := J;
-                Break;
               end;
+              Blocks.Add(Sub.ToString);
+            finally
+              Sub.Free;
             end;
-            Inc(J);
+            I := J;
           end;
         end;
       end;
@@ -1281,34 +1407,42 @@ begin
   end;
 end;
 
-class procedure TLspMoveToUnit.ApplyToTarget(const ATargetFile: string;
-  const APlan: TMovePlan);
+function SpliceMoveIntoTarget(const ATarget: string; const APlan: TMovePlan): string;
 // Splice declaration into target interface section (just before the
 // 'implementation' keyword). If implementation blocks exist, append them
-// to the end of the implementation section (just before final 'end.').
+// to the end of the implementation section (just before 'initialization' /
+// 'finalization', else before the final 'end.').
 var
-  Src: string;
   Lines: TArray<string>;
   Clean: string;
   Stripped: TArray<string>;
-  I, ImplKwLine, FinalEndLine: Integer;
+  I, ImplKwLine, FinalEndLine, InitLine, BlocksLine: Integer;
   Out_: TStringBuilder;
   HeaderForDecl: string;
 begin
-  Src := ReadFile(ATargetFile);
-  Lines := SplitLines(Src);
-  Clean := StripCommentsAndStringsKeepNewlines(Src);
+  Lines := SplitLines(ATarget);
+  Clean := StripCommentsAndStringsKeepNewlines(ATarget);
   Stripped := SplitLines(Clean);
 
   ImplKwLine := -1;
   FinalEndLine := -1;
+  InitLine := -1;
   for I := 0 to High(Stripped) do
   begin
     if (ImplKwLine < 0) and StartsWithKeyword(Stripped[I], 'implementation') then
       ImplKwLine := I;
+    if (ImplKwLine >= 0) and (InitLine < 0) and
+       (StartsWithKeyword(Stripped[I], 'initialization') or
+        StartsWithKeyword(Stripped[I], 'finalization')) then
+      InitLine := I;
     if StartsWithKeyword(Stripped[I], 'end') and (Pos('.', Trim(Stripped[I])) > 0) then
       FinalEndLine := I;
   end;
+  // The blocks belong to the implementation section: before initialization
+  // / finalization when the unit has one, not inside it (H26).
+  BlocksLine := FinalEndLine;
+  if InitLine >= 0 then
+    BlocksLine := InitLine;
 
   // Choose section header to prefix declaration with, since we don't
   // attempt to merge into an existing section.
@@ -1338,9 +1472,9 @@ begin
         Out_.Append(APlan.DeclarationText);
         Out_.Append(#13#10).Append(#13#10); // blank line BELOW decl
       end;
-      if (I = FinalEndLine) and (Length(APlan.ImplBlocks) > 0) then
+      if (I = BlocksLine) and (Length(APlan.ImplBlocks) > 0) then
       begin
-        // Insert implementation blocks before final 'end.', again with
+        // Insert implementation blocks before that line, again with
         // single-blank-line padding around / between blocks.
         Out_.Append(#13#10);                // blank line above block(s)
         for var K := 0 to High(APlan.ImplBlocks) do
@@ -1352,11 +1486,17 @@ begin
       if Out_.Length > 0 then Out_.Append(#13#10);
       Out_.Append(Lines[I]);
     end;
-    Editor.ReplaceFileContent(ATargetFile,
-      CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString)));
+    Result := CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString));
   finally
     Out_.Free;
   end;
+end;
+
+class procedure TLspMoveToUnit.ApplyToTarget(const ATargetFile: string;
+  const APlan: TMovePlan);
+begin
+  Editor.ReplaceFileContent(ATargetFile,
+    SpliceMoveIntoTarget(ReadFile(ATargetFile), APlan));
 end;
 
 class procedure TLspMoveToUnit.EnsureInterfaceUses(const AConsumerFile,
@@ -1530,18 +1670,6 @@ begin
   finally
     Missing.Free;
   end;
-end;
-
-class function TLspMoveToUnit.CollectRequiredUnits(AClient: TLspClient;
-  const ASourceFile: string;
-  const ARangesToScan: TArray<TPoint>;
-  const AInSourceMovedRanges: TArray<TPoint>;
-  const ASourceUnit, ATargetUnit: string): TArray<string>;
-var
-  Refs: TArray<string>;
-begin
-  Result := CollectRequiredUnits(AClient, ASourceFile, ARangesToScan,
-    AInSourceMovedRanges, ASourceUnit, ATargetUnit, Refs);
 end;
 
 class function TLspMoveToUnit.CollectRequiredUnits(AClient: TLspClient;
@@ -1826,6 +1954,7 @@ begin
     var Client: TLspClient := nil;
     var DeclUnits: TArray<string>;
     var ImplUnits: TArray<string>;
+    var DeclSourceRefs: TArray<string> := nil;
     var ImplSourceRefs: TArray<string> := nil;
     try
       var DelphiLspJson := Editor.FindDelphiLspJson;
@@ -1853,12 +1982,31 @@ begin
       // they're visible in the public surface (parameter types, parent
       // class, property types, ...).
       DeclUnits := CollectRequiredUnits(Client, APlan.SourceFile,
-        DeclRange, Moved, SourceUnit, TargetUnit);
+        DeclRange, Moved, SourceUnit, TargetUnit, DeclSourceRefs);
       // Impl-scope identifiers go to implementation-uses ONLY (so we
       // don't promote private dependencies into the public surface).
       // Filter out ones already in DeclUnits later.
       ImplUnits := CollectRequiredUnits(Client, APlan.SourceFile,
         ImplRange, Moved, SourceUnit, TargetUnit, ImplSourceRefs);
+    end;
+
+    // 0b) When the source's interface still names the symbol after the move,
+    //     step 2b puts the target into the source's INTERFACE uses. If the
+    //     target needs the source in its own interface as well - it uses it
+    //     there already, or the moved declaration needs something that stays
+    //     in the source - the two units would name each other in their
+    //     interface uses, which the compiler rejects. Refuse before writing.
+    if SymbolLeftInInterface(ReadFile(APlan.SourceFile), APlan) then
+    begin
+      var TgtSrc := ReadFile(APlan.TargetFile);
+      var TgtIdx: TLineIndex;
+      TgtIdx.Init(TgtSrc);
+      var TgtScan := ScanUsesClauses(TgtSrc, TgtIdx);
+      if (Length(DeclSourceRefs) > 0) or UsesContains(TgtScan.InterfaceUses, SourceUnit) then
+        raise Exception.CreateFmt('the interface of %0:s still uses %1:s, so %0:s ' +
+          'would need %2:s in its interface uses while %2:s needs %0:s in its own - ' +
+          'a circular unit reference. Nothing was changed.',
+          [SourceUnit, APlan.Symbol, TargetUnit]);
     end;
 
     // 1) Add declaration + implementation blocks to TARGET first.
@@ -1881,9 +2029,14 @@ begin
       end;
       EnsureImplementationUses(APlan.TargetFile, ImplOnly);
     end;
-    // a NEW unit whose moved implementation uses what stays in the source:
-    // the source goes into ITS implementation uses (no interface cycle)
-    if ANewUnit and (Length(ImplSourceRefs) > 0) then
+    // The moved code uses what stays in the source: its declaration needs
+    // the source in the target's interface uses (a cycle was refused above,
+    // and for a new unit in ExecuteToNewUnit), its implementation in the
+    // implementation uses. This used to happen for a NEW unit only, so a move
+    // into an existing unit left the target without the source (E2003).
+    if Length(DeclSourceRefs) > 0 then
+      EnsureInterfaceUses(APlan.TargetFile, SourceUnit)
+    else if Length(ImplSourceRefs) > 0 then
       EnsureImplementationUses(APlan.TargetFile, [SourceUnit]);
 
     // 2) Remove declaration + implementation blocks from SOURCE - but only

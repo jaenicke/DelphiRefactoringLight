@@ -219,9 +219,13 @@ the IDE plugin build is unchanged.
 - **Plain Memo, not TSynEdit.** No syntax highlighting; selection-based
   refactorings (Extract Method) are therefore unreachable. TSynEdit
   is the v2 candidate.
-- **No "dirty" indicator.** A modified buffer is auto-flushed to disk
-  on every Memo `OnChange`, so there is no concept of unsaved changes
-  - which is also why `Ctrl+S` is essentially a re-flush.
+- **Unsaved edits live in memory.** Typing updates the in-memory buffer
+  only - nothing is written until `Ctrl+S` (the older claim that every
+  `OnChange` was flushed to disk was never true, audit #33 / M34).
+  Switching files keeps an unsaved buffer and shows it again when you
+  come back, and closing the window asks before it drops anything; the
+  status bar names the files that are still unsaved. A wizard sees the
+  buffer, not the stale file on disk.
 - **No deep `.dproj` rewrite.** Beyond `DCCReference Include` entries,
   the standalone does not touch search paths, defines, or
   configurations.

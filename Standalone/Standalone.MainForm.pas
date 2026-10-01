@@ -181,6 +181,31 @@ type
     ///  Polled by the status timer so the UI can show "starting" while
     ///  LSP is still cold.</summary>
     FLspPrewarming: Boolean;
+    /// <summary>The prewarm worker, kept so FormDestroy can WAIT for it
+    ///  (audit #33, M35). It was started and forgotten: closing the window
+    ///  while a project was still indexing shut DelphiLsp down under the
+    ///  worker, whose request then failed into an except branch that writes
+    ///  the log - on a lock and a buffer FormDestroy was already freeing.
+    ///  </summary>
+    FPrewarmThread: TThread;
+    /// <summary>A project opened while a prewarm was still running used to
+    ///  be dropped by the FLspPrewarming guard - the same defect the IDE
+    ///  side had (audit #38, M4). Parked here and started when the worker
+    ///  finishes.</summary>
+    FPrewarmPending: Boolean;
+    /// <summary>The tree's file list. The node's Data used to be a
+    ///  StrNew'd PChar that nothing ever disposed, so every RefreshTree -
+    ///  one per refactoring - leaked the whole file list (audit #33,
+    ///  L4-sa). Data is an INDEX into this array now (1-based, so nil
+    ///  stays distinguishable).</summary>
+    FTreeFiles: TArray<string>;
+    /// <summary>Files the user typed in and has not saved. The README
+    ///  claimed edits were flushed to disk on every change, which was
+    ///  never true (audit #33, M34): they live in FState's buffer only, so
+    ///  a file switch reloaded from disk and overwrote them. Now the
+    ///  buffer is what a switch loads, and this set is what the close
+    ///  prompt asks about.</summary>
+    FDirty: TStringList;
     /// <summary>True after we have already hooked the LSP client's
     ///  OnLog callback in this session - prevents double-attaching when
     ///  StartLspPrewarm runs more than once per project.</summary>
@@ -240,6 +265,10 @@ type
     ///  from inside the callback - safe because the reference is
     ///  captured into the anonymous progress callback at start.</summary>
     procedure ApplyProgress(ACurrent, ATotal: Integer; const ACurrentFile: string);
+    function TreeFileOf(ANode: TTreeNode): string;
+    procedure MarkDirty(const AFile: string; AValue: Boolean);
+    function DirtyList: string;
+    procedure HandleCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure RefreshTree;
     procedure LoadFileIntoEditor(const AFile: string);
     procedure ReloadActiveFile;
@@ -293,7 +322,7 @@ var
 implementation
 
 uses
-  Winapi.Windows, System.DateUtils,
+  Winapi.Windows, System.DateUtils, System.UITypes,
   Lsp.Client, Expert.DialogHelper,
   Expert.SemanticReplaceWizard,
   Expert.RenameWizard,
@@ -322,6 +351,11 @@ procedure TMainForm.FormCreate(Sender: TObject);
 begin
   FLspLogBuffer := TStringList.Create;
   FLspLogLock := TCriticalSection.Create;
+  FDirty := TStringList.Create;
+  FDirty.CaseSensitive := False;
+  FDirty.Sorted := True;
+  FDirty.Duplicates := dupIgnore;
+  OnCloseQuery := HandleCloseQuery;
   FLspLogActive := Pages.ActivePage = TabLspLog;
   LspLogFlush.Enabled := True;
   FState := TStandaloneProjectState.Create;
@@ -394,37 +428,127 @@ begin
   except
     // Best-effort shutdown - never throw out of FormDestroy.
   end;
+  // AFTER the shutdown (which makes the worker's pending LSP call fail) and
+  // BEFORE the log lock and buffer are freed: the worker's except branch
+  // writes into both (audit #33, M35). Bounded - a worker that will not
+  // come back must not keep the window open for ever.
+  if FPrewarmThread <> nil then
+  begin
+    try
+      FPrewarmThread.WaitFor;
+    except
+      // a thread that already ended raises nothing we can act on
+    end;
+    FreeAndNil(FPrewarmThread);
+  end;
   FCompletionWizard.Free;
   FSignatureWizard.Free;
   SetEditorImpl(nil);
   FState.Free;
+  FDirty.Free;
   FLspLogLock.Free;
   FLspLogBuffer.Free;
 end;
 
-procedure TMainForm.RefreshTree;
+procedure TMainForm.HandleCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  // There is no auto-flush (see FDirty): without this, closing the window
+  // threw typed edits away without a word.
+  CanClose := True;
+  if FDirty.Count = 0 then Exit;
+  case MessageDlg(Format('%d file(s) have unsaved changes:'#13#10#13#10 +
+    '%s'#13#10#13#10'Save them before closing?', [FDirty.Count, DirtyList]),
+    mtWarning, [mbYes, mbNo, mbCancel], 0) of
+    mrYes:
+      begin
+        // the shown file first - its text lives in the Memo, not in a buffer
+        DoFileSave(nil);
+        for var I := FDirty.Count - 1 downto 0 do
+        begin
+          var F := FDirty[I];
+          var Content := '';
+          if FState.TryGetBuffer(F, Content) then
+            try Editor.ReplaceFileContent(F, Content); except end;
+        end;
+        FDirty.Clear;
+      end;
+    mrCancel: CanClose := False;
+  end;
+end;
+
+function TMainForm.TreeFileOf(ANode: TTreeNode): string;
 var
-  F: string;
+  Idx: NativeInt;
+begin
+  Result := '';
+  if ANode = nil then Exit;
+  Idx := NativeInt(ANode.Data);          // 1-based, 0 = nothing stored
+  if (Idx >= 1) and (Idx <= Length(FTreeFiles)) then
+    Result := FTreeFiles[Idx - 1];
+end;
+
+procedure TMainForm.MarkDirty(const AFile: string; AValue: Boolean);
+var
+  Idx: Integer;
+begin
+  if AFile = '' then Exit;
+  if AValue then
+    FDirty.Add(AFile)
+  else
+  begin
+    Idx := FDirty.IndexOf(AFile);
+    if Idx >= 0 then FDirty.Delete(Idx);
+  end;
+  UpdateStatusBar;
+end;
+
+function TMainForm.DirtyList: string;
+begin
+  Result := '';
+  for var I := 0 to FDirty.Count - 1 do
+  begin
+    if I = 8 then Exit(Result + '  ...');
+    Result := Result + '  ' + ExtractFileName(FDirty[I]) + #13#10;
+  end;
+end;
+
+procedure TMainForm.RefreshTree;
 begin
   Tree.Items.BeginUpdate;
   try
     Tree.Items.Clear;
-    for F in FState.SourceFiles do
-      Tree.Items.AddObject(nil, ExtractFileName(F), Pointer(StrNew(PChar(F))));
+    // The INDEX goes into Data (1-based), never a StrNew'd pointer: nothing
+    // ever disposed those, and RefreshTree runs after every refactoring.
+    FTreeFiles := FState.SourceFiles;
+    for var I := 0 to High(FTreeFiles) do
+      Tree.Items.AddObject(nil, ExtractFileName(FTreeFiles[I]),
+        Pointer(NativeInt(I + 1)));
   finally
     Tree.Items.EndUpdate;
   end;
 end;
 
 procedure TMainForm.LoadFileIntoEditor(const AFile: string);
+var
+  Buffered: string;
 begin
   if not TFile.Exists(AFile) then Exit;
+  // Before showing a file, SAVE what the Memo currently holds into its own
+  // buffer: a switch away from a file the user typed in used to lose the
+  // edits, because only disk was ever loaded back (audit #33, M34).
+  if (FMemoFile <> '') and not SameText(FMemoFile, AFile) then
+    FState.UpdateBuffer(FMemoFile, Memo.Lines.Text);
   // LoadFromFile fires OnChange while the state still names the previous
   // file, and DoMemoChange stored the NEW file's text as the PREVIOUS
   // file's buffer - the next wizard on that file wrote it to disk.
   FLoadingMemo := True;
   try
-    Memo.Lines.LoadFromFile(AFile);
+    // The BUFFER is the truth when it differs from disk - that is where an
+    // unsaved edit lives, and a wizard works on it too.
+    if (FDirty.IndexOf(AFile) >= 0) and FState.TryGetBuffer(AFile, Buffered) then
+      Memo.Lines.Text := Buffered
+    else
+      Memo.Lines.LoadFromFile(AFile);
   finally
     FLoadingMemo := False;
   end;
@@ -546,7 +670,11 @@ var
   RootPath, DelphiLspJson, ProjectFile: string;
   ScanFiles: TArray<string>;
 begin
-  if FLspPrewarming then Exit;
+  if FLspPrewarming then
+  begin
+    FPrewarmPending := True;   // not dropped - run when this one finishes
+    Exit;
+  end;
   RootPath := Editor.GetProjectRoot;
   if RootPath = '' then Exit;
   ProjectFile := Editor.GetCurrentProjectDproj;
@@ -563,6 +691,11 @@ begin
   if Length(ScanFiles) = 0 then Exit;
 
   FLspPrewarming := True;
+  FPrewarmPending := False;
+  // A worker of a PREVIOUS project may still be shutting down - its object
+  // is ours to free, and FormDestroy waits on whatever is here.
+  if (FPrewarmThread <> nil) and FPrewarmThread.Finished then
+    FreeAndNil(FPrewarmThread);
   FLspLogHooked := False;
   FPrewarmStart := Now;
   FLastProgressTime := Now;
@@ -571,7 +704,7 @@ begin
   AppendLspLog(Format('[prewarm] launching DelphiLsp for %s (%d source files)',
     [ExtractFileName(ProjectFile), Length(ScanFiles)]));
 
-  TThread.CreateAnonymousThread(
+  FPrewarmThread := TThread.CreateAnonymousThread(
     procedure
     var
       StartT: TDateTime;
@@ -601,13 +734,37 @@ begin
             end);
         except
           on E: Exception do
+          begin
             AppendLspLog(Format('[prewarm] FAILED after %.2fs: %s: %s',
               [(Now - StartT) * SecsPerDay, E.ClassName, E.Message]));
+            // The panel is only hidden on the success path, so a failure
+            // left it frozen on its last caption and the 500 ms poll timer
+            // running for the rest of the session (audit #33, L4-sb).
+            TThread.Queue(nil,
+              procedure
+              begin
+                if Assigned(ProgressPanel) then ProgressPanel.Visible := False;
+                if Assigned(LspPoll) then LspPoll.Enabled := False;
+                Status.Panels[3].Text := 'LSP: prewarm failed - see the ' +
+                  'LSP Diagnostics tab';
+              end);
+          end;
         end;
       finally
         FLspPrewarming := False;
+        TThread.Queue(nil,
+          procedure
+          begin
+            if FPrewarmPending then
+            begin
+              FPrewarmPending := False;
+              StartLspPrewarm;    // the project that arrived meanwhile
+            end;
+          end);
       end;
-    end).Start;
+    end);
+  FPrewarmThread.FreeOnTerminate := False;   // FormDestroy waits on it
+  FPrewarmThread.Start;
 end;
 
 procedure TMainForm.AttachLspLog;
@@ -833,7 +990,11 @@ begin
     end;
   end;
 
-  if TLspManager.Instance.ProjectIndexed then
+  // Stop when the index is there - or when nobody is working on it any
+  // more: a failed prewarm never sets ProjectIndexed, so the timer used to
+  // tick for the rest of the session (audit #33, L4-sb).
+  if TLspManager.Instance.ProjectIndexed
+    or (not FLspPrewarming and not TLspManager.Instance.ProjectIndexed) then
     LspPoll.Enabled := False;
 end;
 
@@ -841,6 +1002,7 @@ procedure TMainForm.DoFileSave(Sender: TObject);
 begin
   if FMemoFile = '' then Exit;
   Editor.ReplaceFileContent(FMemoFile, Memo.Lines.Text);
+  MarkDirty(FMemoFile, False);
 end;
 
 procedure TMainForm.DoFileExit(Sender: TObject);
@@ -855,7 +1017,7 @@ var
 begin
   N := Tree.Selected;
   if N = nil then Exit;
-  F := string(PChar(N.Data));
+  F := TreeFileOf(N);
   if F = '' then Exit;
   LoadFileIntoEditor(F);
 end;
@@ -864,6 +1026,7 @@ procedure TMainForm.DoMemoChange(Sender: TObject);
 begin
   if FLoadingMemo or (FMemoFile = '') then Exit;
   FState.UpdateBuffer(FMemoFile, Memo.Lines.Text);
+  MarkDirty(FMemoFile, True);   // the standalone has no auto-flush
   // While the completion popup is visible, keep its filter in sync
   // with what the user is typing in the editor. The popup never has
   // focus, so we drive it from here.
@@ -1253,7 +1416,16 @@ begin
   else
     Status.Panels[0].Text := 'No project loaded';
   if FState.ActiveFile <> '' then
-    Status.Panels[1].Text := 'File: ' + ExtractFileName(FState.ActiveFile)
+  begin
+    Status.Panels[1].Text := 'File: ' + ExtractFileName(FState.ActiveFile);
+    // The dirty marker the README used to say could not exist: edits are
+    // kept in the buffer and only Ctrl+S writes them (audit #33, M34).
+    if (FDirty <> nil) and (FDirty.IndexOf(FState.ActiveFile) >= 0) then
+      Status.Panels[1].Text := Status.Panels[1].Text + ' *';
+    if (FDirty <> nil) and (FDirty.Count > 1) then
+      Status.Panels[1].Text := Status.Panels[1].Text +
+        Format('  (%d unsaved)', [FDirty.Count]);
+  end
   else
     Status.Panels[1].Text := '';
   Status.Panels[2].Text := Format('Line %d  Col %d',

@@ -40,6 +40,7 @@ uses
   Test.LspReadiness in 'Test.LspReadiness.pas',
   Test.WithScanner in 'Test.WithScanner.pas',
   Test.WithRewriter in 'Test.WithRewriter.pas',
+  Test.WithRewriteText in 'Test.WithRewriteText.pas',
   Test.UnitIndexGenerics in 'Test.UnitIndexGenerics.pas',
   Test.UsesEditorMinimalWrite in 'Test.UsesEditorMinimalWrite.pas',
   Test.AutoImportGenericResolve in 'Test.AutoImportGenericResolve.pas',

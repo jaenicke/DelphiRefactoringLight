@@ -200,15 +200,20 @@ begin
   // Documented contract: Rewrite never raises; on LSP error it sets an issue
   // and returns a partial result. A wizard that let an exception out would
   // take it into the IDE's dispatch.
-  Assert.WillNotRaise(
+  // WillNotRaiseAny, not WillNotRaise(..., Exception, ...): the latter matches
+  // the class EXACTLY, so it swallowed every descendant - including the
+  // ETestFailure of an assertion inside the closure - and this test could not
+  // fail. The assertions on the result therefore sit OUTSIDE the closure.
+  Assert.WillNotRaiseAny(
     procedure
     begin
       R := RewriteOnly(Fixture, fmRaise);
-      Assert.IsFalse(R.IsAutoRewritable,
-        'a raising LSP must not yield an auto-rewritable result');
     end,
-    Exception,
     'Rewrite must never let an exception escape');
+  Assert.IsFalse(R.IsAutoRewritable,
+    'a raising LSP must not yield an auto-rewritable result');
+  Assert.IsTrue(wriTypeUnresolved in R.Issues,
+    'the swallowed LSP failure must surface as an unresolved target');
 end;
 
 initialization

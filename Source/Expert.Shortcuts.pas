@@ -201,8 +201,18 @@ begin
     if Reg.OpenKeyReadOnly(RegistryKey) then
     try
       for K := Low(TShortcutKind) to High(TShortcutKind) do
-        if Reg.ValueExists(ValueNames[K]) then
-          FShortcuts[K] := TShortCut(Reg.ReadInteger(ValueNames[K]))
+        // ONLY a DWORD (audit #40, L5l): ReadInteger raises on a value of
+        // another type - a hand-written REG_SZ, a .reg import - and this
+        // runs FIRST in Register, so the exception escaped before a single
+        // wizard was registered and the whole plugin was gone. Same rule
+        // as TPluginSettings' defensive readers.
+        if Reg.ValueExists(ValueNames[K])
+          and (Reg.GetDataType(ValueNames[K]) = rdInteger) then
+          try
+            FShortcuts[K] := TShortCut(Reg.ReadInteger(ValueNames[K]));
+          except
+            FShortcuts[K] := DefaultShortcuts[K];
+          end
         else
           FShortcuts[K] := DefaultShortcuts[K];
     finally

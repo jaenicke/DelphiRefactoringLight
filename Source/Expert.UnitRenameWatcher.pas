@@ -205,6 +205,14 @@ procedure TUnitRenameWatcher.DoDeferTick(Sender: TObject);
 var
   OldUnit, NewUnit: string;
 begin
+  // The timer fires from WHATEVER message loop is running - including a
+  // rename dialog's own ShowModal and the ProcessMessages of its preview
+  // scan. The wizard keeps ONE dialog/host/context, so opening a second
+  // one there overwrote them and nilled them on the way out: the outer
+  // dialog resumed with a nil host and raised (audit #40, M14). Keep the
+  // pending pair and try again on the next tick.
+  if (WizardInstance <> nil) and WizardInstance.DialogOpen then Exit;
+
   FDeferTimer.Enabled := False;
   OldUnit := FPendingOld;
   NewUnit := FPendingNew;

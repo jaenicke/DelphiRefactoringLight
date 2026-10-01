@@ -134,6 +134,13 @@ begin
         ShowThemedMessage('Could not create rules file: ' + E.Message); Exit;
       end;
     end;
+    // The question says "and open it in the rules editor" - so do that,
+    // and STOP (audit #40, L5c). It used to fall through and scan the
+    // code with the EXAMPLE rule, which nobody asked for.
+    ARules := TSemanticReplaceEngine.LoadRules(APath, Err);
+    if TSemanticReplaceRulesListDialog.Edit(Application.MainForm, ARules) then
+      TSemanticReplaceEngine.SaveRules(APath, ARules);
+    Exit;   // Result stays False: run the command again to apply them
   end;
   ARules := TSemanticReplaceEngine.LoadRules(APath, Err);
   if Err <> '' then
@@ -168,7 +175,20 @@ begin
     Exit;
   end;
   if TFile.Exists(Path) then
-    Rules := TSemanticReplaceEngine.LoadRules(Path, Err)
+  begin
+    Rules := TSemanticReplaceEngine.LoadRules(Path, Err);
+    // Err was never read (audit #40, M19): one stray comma made LoadRules
+    // return nothing, the editor opened EMPTY, and OK then wrote that over
+    // the user's rules. A file we cannot read is not a file we may
+    // replace - the apply path already reports the parse error this way.
+    if Err <> '' then
+    begin
+      ShowThemedMessage('The rules file cannot be read, so it will not be ' +
+        'edited (fix it by hand first):' + sLineBreak + sLineBreak +
+        Path + sLineBreak + sLineBreak + Err);
+      Exit;
+    end;
+  end
   else
     Rules := nil;
   if TSemanticReplaceRulesListDialog.Edit(Application.MainForm, Rules) then
@@ -628,7 +648,11 @@ var
   Ctx: TEditorContext;
 begin
   Ctx := Editor.GetCurrentContext;
-  if not Ctx.IsValid then
+  // IsValid also requires a WORD under the caret, which this command does
+  // not need - on a blank line it refused with "No file at cursor" while a
+  // file was open (audit #40, L5d). The same trap the completion path had
+  // twice; grep for IsValid before adding a guard.
+  if Ctx.FileName = '' then
   begin
     ShowThemedMessage('No file at cursor.'); Exit;
   end;

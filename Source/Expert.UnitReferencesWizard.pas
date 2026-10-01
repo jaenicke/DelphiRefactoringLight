@@ -69,6 +69,11 @@ type
     function Cancelled: Boolean;
     procedure DoGotoLocation(AItem: TUnitRefItem);
     procedure DoDialogClose(Sender: TObject);
+    /// <summary>Releases the log hook this search installed on the SHARED
+    ///  LSP client. Called from the search's own finally, not from a
+    ///  dialog close - the window may outlive the search (audit #40,
+    ///  M11).</summary>
+    procedure DetachLog;
     procedure SearchAndShow;
     procedure OpenTrace(const ARootPath: string);
     procedure CloseTrace;
@@ -92,6 +97,8 @@ type
     function GetMenuText: string;
 
     {$ENDIF}
+    constructor Create;
+    destructor Destroy; override;
     procedure Execute;
   end;
 
@@ -108,7 +115,7 @@ implementation
 
 
 uses
-  Expert.PascalScanner, Expert.IncludeExpansion;
+  Expert.PascalScanner, Expert.IncludeExpansion, Expert.PluginSettings;
 {$IFNDEF STANDALONE_BUILD}
 { TLspFindUnitReferencesWizard - IOTAWizard / IOTAMenuWizard / IOTANotifier glue.
   Only compiled into the IDE plugin; the standalone build does not
@@ -131,16 +138,38 @@ begin Result := [wsEnabled]; end;
 function TLspFindUnitReferencesWizard.GetMenuText: string;
 begin Result := 'Find unit references...'; end;
 {$ENDIF}
+constructor TLspFindUnitReferencesWizard.Create;
+begin
+  inherited Create;
+  // The trace lock lives as long as the wizard: TraceLine runs on the LSP
+  // reader thread, and freeing the lock at the end of a search meant the
+  // next message entered a freed critical section (audit #40, M12).
+  FTraceLock := TCriticalSection.Create;
+end;
+
+destructor TLspFindUnitReferencesWizard.Destroy;
+begin
+  CloseTrace;
+  FreeAndNil(FTraceLock);
+  inherited;
+end;
+
 procedure TLspFindUnitReferencesWizard.OpenTrace(const ARootPath: string);
 var
   Path: string;
   Stamp: string;
 begin
   CloseTrace;
-  FTraceLock := TCriticalSection.Create;
   FTraceStart := Now;
+  // ONLY when the user asked for LSP logging, and NOT into the project
+  // folder (audit #40, M12): every run used to drop a
+  // UnitRefsTrace_<stamp>.log next to the sources, whatever the option
+  // said - files nobody asked for, in a directory that is usually under
+  // version control.
+  if not TPluginSettings.LspLogging then Exit;
   Stamp := FormatDateTime('yyyymmdd_hhnnss', FTraceStart);
-  Path := IncludeTrailingPathDelimiter(ARootPath) + 'UnitRefsTrace_' + Stamp + '.log';
+  Path := TPath.Combine(TPath.GetTempPath, 'UnitRefsTrace_' + Stamp + '.log');
+  if ARootPath = '' then ;   // (kept: the caller's root is no longer used)
   try
     FTraceFile := TStreamWriter.Create(Path, False, TEncoding.UTF8);
     FTraceFile.AutoFlush := True;
@@ -153,26 +182,40 @@ end;
 
 procedure TLspFindUnitReferencesWizard.CloseTrace;
 begin
-  if FTraceFile <> nil then
-  begin
-    try
-      FTraceFile.WriteLine(Format('# trace closed %s, elapsed %.3fs',
-        [FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now),
-         (Now - FTraceStart) * SecsPerDay]));
-    except end;
-    FreeAndNil(FTraceFile);
+  // UNDER THE LOCK (audit #40, M12): TraceLine runs on the LSP READER
+  // thread, so closing the writer while a message is being written wrote
+  // into a freed object - and freeing the LOCK itself meant the next
+  // TraceLine entered a freed critical section. The lock now lives as long
+  // as the wizard does (constructor/destructor), and only the writer is
+  // dropped here.
+  if FTraceLock = nil then Exit;
+  FTraceLock.Enter;
+  try
+    if FTraceFile <> nil then
+    begin
+      try
+        FTraceFile.WriteLine(Format('# trace closed %s, elapsed %.3fs',
+          [FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now),
+           (Now - FTraceStart) * SecsPerDay]));
+      except end;
+      FreeAndNil(FTraceFile);
+    end;
+  finally
+    FTraceLock.Leave;
   end;
-  FreeAndNil(FTraceLock);
 end;
 
 procedure TLspFindUnitReferencesWizard.TraceLine(const ADirection, AMethod, ABody: string);
 var
   Elapsed: Double;
 begin
-  if FTraceFile = nil then Exit;
+  // The nil test must be INSIDE the lock: this runs on the reader thread
+  // while the main thread may be closing the trace (audit #40, M12).
+  if FTraceLock = nil then Exit;
   Elapsed := (Now - FTraceStart) * SecsPerDay;
   FTraceLock.Enter;
   try
+    if FTraceFile = nil then Exit;
     try
       FTraceFile.WriteLine(Format('[%9.3f] %s %s', [Elapsed, ADirection, AMethod]));
       if ABody <> '' then
@@ -204,22 +247,61 @@ begin
 
   UnitName := ChangeFileExt(ExtractFileName(FContext.FileName), '');
 
+  // ONE search at a time (audit #40, M11): there is a single FDialog
+  // field, so a second run started from the first one's message pump
+  // replaced it - the first window never became closable, and closing ANY
+  // older result window ran DoDialogClose, which nils FDialog and
+  // therefore CANCELS the search that is still running.
+  if FDialog <> nil then
+  begin
+    FDialog.BringToFront;
+    MessageDlg('A unit-references search is still running. Please wait for ' +
+      'it to finish (or close its window to stop it) before starting ' +
+      'another one.', mtInformation, [mbOK], 0);
+    Exit;
+  end;
+
   FDialog := TUnitReferencesDialog.CreateDialog(Application.MainForm, UnitName);
   FDialog.OnGotoLocation := DoGotoLocation;
   FDialog.OnDialogClose := DoDialogClose;
   TLspManager.Instance.ApplyStatusToCaption(FDialog);
   FDialog.Show;
   try
-    Application.ProcessMessages;
-    SearchAndShow;
-  except
-    on E: Exception do
-      if FDialog <> nil then
-        Status('Error: ' + E.Message);
+    try
+      Application.ProcessMessages;
+      SearchAndShow;
+    except
+      on E: Exception do
+        if FDialog <> nil then
+          Status('Error: ' + E.Message);
+    end;
+  finally
+    // The log hook and the trace belong to THIS search, so they are
+    // released here rather than in the dialog's close handler - which may
+    // never run (the window can outlive the search) or run for a window
+    // that is not ours.
+    DetachLog;
+    CloseTrace;
+    // Hand off ownership: from now on closing the dialog frees it.
+    if FDialog <> nil then
+      FDialog.SetClosable;
+    FDialog := nil;
   end;
-  // Hand off ownership: from now on closing the dialog frees it.
-  if FDialog <> nil then
-    FDialog.SetClosable;
+end;
+
+procedure TLspFindUnitReferencesWizard.DetachLog;
+begin
+  if not TLspManager.Instance.IsAlive then Exit;
+  try
+    var C := TLspManager.Instance.PeekClient;
+    if C <> nil then
+    begin
+      C.Verbose := False;
+      C.OnLog := nil;
+    end;
+  except
+    // a session that is going away needs nothing detached
+  end;
 end;
 
 procedure TLspFindUnitReferencesWizard.Status(const AText: string);
@@ -243,17 +325,12 @@ end;
 
 procedure TLspFindUnitReferencesWizard.DoDialogClose(Sender: TObject);
 begin
-  // Called from the dialog's OnClose right before it frees itself.
-  // Detach our log hook from the shared client and close the trace
-  // before letting go of the dialog reference.
-  if TLspManager.Instance.IsAlive then
-  try
-    var C := TLspManager.Instance.GetClient(
-      FContext.ProjectRoot, FContext.ProjectFile,
-      Editor.FindDelphiLspJson);
-    C.Verbose := False;
-    C.OnLog := nil;
-  except end;
+  // Called from the dialog's OnClose right before it frees itself. Only
+  // the CURRENT search's window may clear the field (audit #40, M11):
+  // closing an older result window used to nil FDialog and so cancel a
+  // search that was still running in another window.
+  if Sender <> FDialog then Exit;
+  DetachLog;
   CloseTrace;
   FDialog := nil;
 end;

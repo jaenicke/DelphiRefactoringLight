@@ -164,6 +164,14 @@ type
     ///  preview list and confirms just like with a normal identifier
     ///  rename.</summary>
     procedure ExecuteForUnit(const AOldUnitName, ANewUnitName: string);
+    /// <summary>True while a rename dialog of this wizard is open. The
+    ///  unit-rename watcher asks before it opens one from its timer: this
+    ///  wizard keeps ONE FDialog/FHost/FContext, so a second
+    ///  ExecuteForUnit inside the first one's ShowModal (or inside the
+    ///  ProcessMessages of its preview scan) overwrote them and nilled
+    ///  them in its finally - the outer dialog then continued with a nil
+    ///  host and raised (audit #40, M14).</summary>
+    function DialogOpen: Boolean;
 
     /// <summary>Identifier rename WITHOUT the dialog (MCP bridge): runs the
     ///  normal preview for AContext (file, 1-based line/column, the
@@ -309,6 +317,11 @@ begin
   finally
     FUnitRenameMode := False;
   end;
+end;
+
+function TLspRenameWizard.DialogOpen: Boolean;
+begin
+  Result := FDialog <> nil;
 end;
 
 procedure TLspRenameWizard.ApplyFEdit;
@@ -2066,7 +2079,36 @@ begin
       var DiagLine := Format('  [%d] %s:%d:%d => ', [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
 
       try
-        var Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+        var Defs: TArray<TLspLocation> := nil;
+        // A request that RAISED is no answer either (audit #40, M15): the
+        // DelphiLSP controller aborts requests after 10 s while a project
+        // loads, and such an occurrence was listed as UNVERIFIED and left
+        // unrenamed - a rename that does not compile, from a hiccup that
+        // passes in seconds. Retried up to three times, waiting for the
+        // server to go idle in between; a dead reader is not retried
+        // (nothing will answer) and whatever still fails stays UNVERIFIED.
+        for var Attempt := 1 to 3 do
+        begin
+          try
+            Defs := AIncludes.Definition(C.FilePath, C.Line, C.Col);
+            Break;
+          except
+            on E: Exception do
+            begin
+              if (Attempt = 3) or FHost.ScanCancelled
+                or not AClient.IsConnected then
+                raise;
+              FDiagLog := FDiagLog + Format('  retry %d after: %s',
+                [Attempt, E.Message]) + sLineBreak;
+              FHost.SetStatus('DelphiLSP was busy - retrying...');
+              AClient.WaitServerIdle(5000,
+                function: Boolean
+                begin
+                  Result := not FHost.ScanCancelled;
+                end);
+            end;
+          end;
+        end;
         // an EMPTY answer is retried briefly (the unit may still be in
         // analysis), a wrong one never
         if (Length(Defs) = 0) and not ATargets.Contains(C.FilePath, C.Line) then

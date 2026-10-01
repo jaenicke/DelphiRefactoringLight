@@ -15,6 +15,8 @@ type
   TRestartHint = class
   private
     class function GetMarkerFilePath: string; static;
+    class function ProcessStamp: string; static;
+    class procedure PruneDeadMarkers; static;
     class procedure ShowRestartHint; static;
   public
     /// <summary>Checks whether the package was (re-)installed inside a
@@ -33,7 +35,59 @@ uses
 
 class function TRestartHint.GetMarkerFilePath: string;
 begin
-  Result := TPath.Combine(TPath.GetTempPath, 'DelphiRefactoringLight.pid');
+  // ONE MARKER PER PROCESS (audit #40, L5j): a single shared file meant
+  // IDE B overwrote IDE A's pid, so reinstalling in A found B's number and
+  // showed no hint - and a stale marker whose pid Windows later reused
+  // produced a hint nobody earned. The file is named after the pid and
+  // holds the process's CREATION TIME, which is what tells "the same IDE
+  // again" from "a new process that happens to have that pid".
+  Result := TPath.Combine(TPath.GetTempPath,
+    Format('DelphiRefactoringLight.%d.pid', [GetCurrentProcessId]));
+end;
+
+/// <summary>The current process's creation time as a stable string - two
+///  processes can share a pid over time, never a pid plus a start
+///  time.</summary>
+class function TRestartHint.ProcessStamp: string;
+var
+  Created, Exited, Kernel, User: TFileTime;
+begin
+  Result := '';
+  if GetProcessTimes(GetCurrentProcess, Created, Exited, Kernel, User) then
+    Result := Format('%d-%d', [Created.dwHighDateTime, Created.dwLowDateTime]);
+end;
+
+/// <summary>Removes the markers of processes that are gone, so %TEMP% does
+///  not collect one file per IDE start for ever.</summary>
+class procedure TRestartHint.PruneDeadMarkers;
+var
+  Files: TArray<string>;
+begin
+  try
+    Files := TDirectory.GetFiles(TPath.GetTempPath,
+      'DelphiRefactoringLight.*.pid');
+  except
+    Exit;
+  end;
+  for var F in Files do
+  begin
+    var Name := TPath.GetFileNameWithoutExtension(F);   // ...Light.<pid>
+    var Dot := LastDelimiter('.', Name);
+    if Dot <= 0 then Continue;
+    var Pid := StrToUIntDef(Copy(Name, Dot + 1, MaxInt), 0);
+    if (Pid = 0) or (Pid = GetCurrentProcessId) then Continue;
+    // A handle we cannot open at all, or one whose process has exited,
+    // means the marker is stale.
+    var H := OpenProcess(SYNCHRONIZE, False, Pid);
+    var Dead := H = 0;
+    if H <> 0 then
+    begin
+      Dead := WaitForSingleObject(H, 0) = WAIT_OBJECT_0;
+      CloseHandle(H);
+    end;
+    if Dead then
+      try TFile.Delete(F); except end;
+  end;
 end;
 
 class procedure TRestartHint.ShowRestartHint;
@@ -56,25 +110,22 @@ end;
 
 class procedure TRestartHint.Check;
 var
-  CurrentPID: DWORD;
-  StoredPIDStr: string;
-  StoredPID: DWORD;
+  Stored: string;
   MarkerFile: string;
   MarkerExists: Boolean;
   ShouldHint: Boolean;
 begin
-  CurrentPID := GetCurrentProcessId;
+  PruneDeadMarkers;
   MarkerFile := GetMarkerFilePath;
   MarkerExists := FileExists(MarkerFile);
 
-  StoredPID := 0;
+  Stored := '';
   if MarkerExists then
   begin
     try
-      StoredPIDStr := Trim(TFile.ReadAllText(MarkerFile));
-      StoredPID := StrToUIntDef(StoredPIDStr, 0);
+      Stored := Trim(TFile.ReadAllText(MarkerFile));
     except
-      StoredPID := 0;
+      Stored := '';
     end;
   end;
 
@@ -86,11 +137,13 @@ begin
   // Missing marker means first load (e.g. after external install.cmd
   // while the IDE was closed). No restart needed in that case - the
   // IDE is starting fresh anyway.
-  ShouldHint := MarkerExists and (StoredPID = CurrentPID);
+  // The marker is already named after this pid, so what has to match is
+  // the process START: the same IDE loading the package a second time.
+  ShouldHint := MarkerExists and (Stored <> '') and (Stored = ProcessStamp);
 
-  // Always update the PID - also on normal IDE starts.
+  // Always update the marker - also on normal IDE starts.
   try
-    TFile.WriteAllText(MarkerFile, IntToStr(CurrentPID));
+    TFile.WriteAllText(MarkerFile, ProcessStamp);
   except
     // Tolerate write errors silently.
   end;

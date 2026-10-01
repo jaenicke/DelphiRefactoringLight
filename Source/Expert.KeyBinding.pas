@@ -204,35 +204,19 @@ procedure TLspKeyBinding.BindKeyboard(
   end;
 
 begin
-  // Ctrl+Alt+Shift+R -> Rename
-  BindingServices.AddKeyBinding([TExpertsShortCut.scRename], RenameKeyProc, nil);
-
-  // Ctrl+Alt+Shift+Space -> Completion
-  BindingServices.AddKeyBinding([TExpertsShortCut.scCompletion], CompletionKeyProc, nil);
-
-  // Ctrl+Alt+Shift+M -> Extract Method
-  BindingServices.AddKeyBinding([TExpertsShortCut.scExtract], ExtractMethodKeyProc, nil);
-
-  // Ctrl+Alt+Shift+U -> Find References (Usages)
-  BindingServices.AddKeyBinding([TExpertsShortCut.scFindRef], FindReferencesKeyProc, nil);
-
-  // Ctrl+Alt+Shift+I -> Find Implementations
-  BindingServices.AddKeyBinding([TExpertsShortCut.scFindImp], FindImplementationsKeyProc, nil);
-
-  // Ctrl+Alt+Shift+A -> Align method signature
-  BindingServices.AddKeyBinding([TExpertsShortCut.scAlign], SignatureCheckKeyProc, nil);
-
-  // Ctrl+Alt+Shift+W -> Remove with (project-wide)
-  BindingServices.AddKeyBinding([TExpertsShortCut.scRemoveWith], RemoveWithKeyProc, nil);
-
-  // Ctrl+Alt+Shift+F -> Find unit references (project-wide)
-  BindingServices.AddKeyBinding([TExpertsShortCut.scUnitRefs], UnitRefsKeyProc, nil);
-
-  // Ctrl+Shift+M -> Move to unit (project-wide)
-  BindingServices.AddKeyBinding([TExpertsShortCut.scMoveToUnit], MoveToUnitKeyProc, nil);
-
-  // Ctrl+G -> Find original symbol (go to declaration)
-  BindingServices.AddKeyBinding([TExpertsShortCut.scFindOriginal], FindOriginalKeyProc, nil);
+  // EVERY binding goes through Bind (audit #40, L5k): the ten calls below
+  // used to call AddKeyBinding directly, so a shortcut the user CLEARED in
+  // the options (0) was registered as key 0.
+  Bind(skRename, RenameKeyProc);
+  Bind(skCompletion, CompletionKeyProc);
+  Bind(skExtract, ExtractMethodKeyProc);
+  Bind(skFindRef, FindReferencesKeyProc);
+  Bind(skFindImp, FindImplementationsKeyProc);
+  Bind(skAlign, SignatureCheckKeyProc);
+  Bind(skRemoveWith, RemoveWithKeyProc);
+  Bind(skUnitRefs, UnitRefsKeyProc);
+  Bind(skMoveToUnit, MoveToUnitKeyProc);
+  Bind(skFindOriginal, FindOriginalKeyProc);
 
   // the refactorings that used to be menu-only (issue #11)
   Bind(skChangeSignature, ChangeSignatureKeyProc);

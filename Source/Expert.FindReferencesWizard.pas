@@ -147,6 +147,15 @@ begin
   PrevContext := FContext;
   var PrevTrace := FTrace;
   var PrevT0 := FTraceT0;
+  // ... and the four COUNTERS/VERDICT fields too (audit #40, M10): a
+  // nested Execute resets them in SearchAndShow, so the outer search used
+  // to finish with the inner one's numbers and its anchor verdict - a
+  // summary that describes another search, and a "no anchor" mode that
+  // may not apply.
+  var PrevPreSkipped := FPreSkipped;
+  var PrevSecondPassNote := FSecondPassNote;
+  var PrevLspErrors := FLspErrors;
+  var PrevNoAnchor := FNoAnchor;
   FTrace := TStringList.Create;
   FTraceT0 := GetTickCount64;
   try
@@ -182,6 +191,10 @@ begin
     FTraceT0 := PrevT0;
     FDialog := PrevDialog;
     FContext := PrevContext;
+    FPreSkipped := PrevPreSkipped;
+    FSecondPassNote := PrevSecondPassNote;
+    FLspErrors := PrevLspErrors;
+    FNoAnchor := PrevNoAnchor;
   end;
 end;
 

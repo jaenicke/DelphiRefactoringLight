@@ -1195,11 +1195,61 @@ begin
   if not IsIdentifier(Result) then Result := 'HandleEvent';
 end;
 
+// The first word of ALine (lower case, comments stripped, trimmed) and the
+// position after it.
+function FirstWordOf(const ALine: string; AFrom: Integer; out APosAfter: Integer): string;
+var
+  P: Integer;
+begin
+  P := AFrom;
+  while (P <= Length(ALine)) and (ALine[P] = ' ') do Inc(P);
+  APosAfter := P;
+  while (APosAfter <= Length(ALine)) and IsIdentChar(ALine[APosAfter]) do Inc(APosAfter);
+  Result := Copy(ALine, P, APosAfter - P);
+end;
+
+// True when ALine (lower case, comments stripped, trimmed) opens a nested
+// type body that runs to its own "end": "TInner = class", "= record",
+// "R: record" - not a forward "class;", a "class of", or a one-line body.
+function OpensNestedTypeBody(const ALine: string): Boolean;
+var
+  P, After: Integer;
+  W, Rest: string;
+begin
+  Result := False;
+  P := Pos('=', ALine);
+  if P = 0 then P := Pos(':', ALine);
+  if P = 0 then Exit;
+  W := FirstWordOf(ALine, P + 1, After);
+  if W = 'packed' then W := FirstWordOf(ALine, After, After);
+  if (W <> 'class') and (W <> 'record') and (W <> 'object') and
+     (W <> 'interface') and (W <> 'dispinterface') then Exit;
+  Rest := Trim(Copy(ALine, After, MaxInt));
+  if (Rest = 'of') or StartsStr('of ', Rest) then Exit;
+  if StartsStr('(', Rest) and (Pos(')', Rest) > 0) then
+    Rest := Trim(Copy(Rest, Pos(')', Rest) + 1, MaxInt));
+  if StartsStr(';', Rest) then Exit;
+  // "TX = class end;" closes on its own line
+  P := 1;
+  while P <= Length(Rest) do
+  begin
+    if IsIdentStart(Rest[P]) then
+    begin
+      W := FirstWordOf(Rest, P, After);
+      if W = 'end' then Exit;
+      P := After;
+    end
+    else
+      Inc(P);
+  end;
+  Result := True;
+end;
+
 function PlanEventHandler(const ALines: TArray<string>; ACaretLine0: Integer;
   const AName: string; const AInfo: TProcTypeInfo): TGenPlan;
 var
   Content, Hdr, Rest, Qualified, Cls, ClassIndent, MemberIndent, Head: string;
-  First, Last, ClsLine, EndLine, PrivLine, I, P: Integer;
+  First, Last, ClsLine, EndLine, PrivLine, PrivEnd, Depth, I, P: Integer;
 begin
   Result := Default(TGenPlan);
   Content := string.Join(sLineBreak, ALines);
@@ -1283,21 +1333,46 @@ begin
   end;
 
   MemberIndent := ClassIndent + '  ';
+  // The class's OWN private section (nested type bodies skipped - their
+  // "private" was taken before) and where it ends: the declaration goes
+  // after the private fields. Directly after "private" it came ahead of
+  // them, and a field after a method does not compile (E2169).
   PrivLine := -1;
+  PrivEnd := -1;
+  Depth := 0;
   for I := ClsLine + 1 to EndLine - 1 do
   begin
-    var T := LowerCase(Trim(ALines[I]));
-    if (T = 'private') or (T = 'strict private') then
+    var T := LowerCase(Trim(StripLineComment(ALines[I])));
+    if OpensNestedTypeBody(T) then
     begin
-      PrivLine := I;
-      Break;
+      Inc(Depth);
+      Continue;
+    end;
+    var After: Integer;
+    var W := FirstWordOf(T, 1, After);
+    if W = 'end' then
+    begin
+      if Depth > 0 then Dec(Depth);
+      Continue;
+    end;
+    if Depth > 0 then Continue;
+    if W = 'strict' then W := FirstWordOf(T, After, After);
+    if (W = 'private') or (W = 'protected') or (W = 'public') or (W = 'published') then
+    begin
+      if PrivLine >= 0 then
+      begin
+        PrivEnd := I;
+        Break;
+      end;
+      if W = 'private' then PrivLine := I;
     end;
   end;
+  if (PrivLine >= 0) and (PrivEnd < 0) then PrivEnd := EndLine;
 
   Head := ProcHeadText(AInfo, AName) + ';';
   if PrivLine >= 0 then
   begin
-    Result.DeclLine0 := PrivLine + 1;
+    Result.DeclLine0 := PrivEnd;
     Result.DeclText := MemberIndent + Head + sLineBreak;
     Result.DeclLines := 1;
   end

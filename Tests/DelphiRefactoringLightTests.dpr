@@ -68,7 +68,11 @@ uses
   Test.StandaloneState in 'Test.StandaloneState.pas',
   Expert.SelectionValidator in '..\Source\Expert.SelectionValidator.pas',
   Expert.ExtractMethod in '..\Source\Expert.ExtractMethod.pas',
-  Test.ExtractMethod in 'Test.ExtractMethod.pas';
+  Test.ExtractMethod in 'Test.ExtractMethod.pas',
+  Expert.ExtractInterface in '..\Source\Expert.ExtractInterface.pas',
+  Expert.EventGen in '..\Source\Expert.EventGen.pas',
+  Test.ExtractInterface in 'Test.ExtractInterface.pas',
+  Test.EventGenPlan in 'Test.EventGenPlan.pas';
 
 var
   Runner: ITestRunner;

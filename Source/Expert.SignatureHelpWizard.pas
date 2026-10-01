@@ -113,8 +113,8 @@ type
 implementation
 
 uses
-  System.StrUtils, System.Math, System.Generics.Collections,
-  Expert.LspManager, Lsp.Client, Expert.WorkerLatch;
+  System.Types, System.StrUtils, System.Math, System.Generics.Collections,
+  Expert.LspManager, Lsp.Client, Expert.WorkerLatch, Expert.DialogHelper;
 
 const
   PadX = 8;
@@ -292,11 +292,14 @@ begin
     TmpBmp.Free;
   end;
 
+  // Kept on the monitor the anchor is on - Screen.Width is the primary
+  // monitor's only, and 0 is not that monitor's left or top edge.
+  var WA := WorkAreaAt(Point(AScreenX, ALineTopY));
   Left := AScreenX;
   Top := ALineTopY - ClientHeight - 2;
-  if Left < 0 then Left := 0;
-  if Left + Width > Screen.Width then Left := Screen.Width - Width;
-  if Top < 0 then Top := ALineTopY + 22;
+  if Left + Width > WA.Right then Left := WA.Right - Width;
+  if Left < WA.Left then Left := WA.Left;
+  if Top < WA.Top then Top := ALineTopY + 22;
   ShowWindow(Handle, SW_SHOWNOACTIVATE);
   Visible := True;
   FPaintBox.Invalidate;

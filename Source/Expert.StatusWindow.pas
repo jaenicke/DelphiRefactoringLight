@@ -682,7 +682,14 @@ begin
 
   // ---- live quick-fix checker --------------------------------------------
   LiveStatusInfo(LiveFile, Analysing, Resolving, FromLsp, Fresh, FixCount);
-  if LiveFile = '' then
+  // A checker that stopped itself says so, in red (audit #37, M28).
+  var Stopped := LiveStoppedReason;
+  if Stopped <> '' then
+  begin
+    Row('Live checker', 'STOPPED after an error', Stopped, slBad);
+    Row('  diagnostics from', '-', 'nothing is being analysed any more');
+  end
+  else if LiveFile = '' then
   begin
     Row('Live checker', 'idle', 'no source buffer active');
     Row('  diagnostics from', '-', '');

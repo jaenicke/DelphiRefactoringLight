@@ -960,9 +960,12 @@ procedure TUsesCleanupDialog.DoApply(Sender: TObject);
 var
   I, Done, FailCount: Integer;
   E: TUsesEntryInfo;
+  Restored, Lost: TArray<string>;
 begin
   Done := 0;
   FailCount := 0;
+  Restored := nil;
+  Lost := nil;
   for I := 0 to FList.Items.Count - 1 do
   begin
     if not FList.Items[I].Checked then Continue;
@@ -983,8 +986,16 @@ begin
             Inc(Done)
           else
           begin
-            // Never leave the unit dropped entirely - restore it.
-            AddUnitToUses(FFile, E.UnitName, usInterface);
+            // Never leave the unit dropped entirely - restore it. The
+            // re-add lands at the END of the interface clause, which is
+            // not where it was: uses ORDER decides initialisation order
+            // and which unit wins a name clash, so a rollback that
+            // reorders is a change of its own (audit #37, L3i). Say so,
+            // and name the unit that could not be put back at all.
+            if AddUnitToUses(FFile, E.UnitName, usInterface) then
+              Restored := Restored + [E.UnitName]
+            else
+              Lost := Lost + [E.UnitName];
             Inc(FailCount);
           end;
         end
@@ -994,9 +1005,21 @@ begin
       Inc(FailCount);   // checked a non-actionable row
     end;
   end;
-  ShowThemedMessage(Format('%d change(s) applied.%s', [Done,
-    IfThen(FailCount > 0, Format(#13#10'%d entr%s could not be changed.',
-      [FailCount, IfThen(FailCount = 1, 'y', 'ies')]), '')]));
+  var Msg := Format('%d change(s) applied.', [Done]);
+  if FailCount > 0 then
+    Msg := Msg + Format(#13#10'%d entr%s could not be changed.',
+      [FailCount, IfThen(FailCount = 1, 'y', 'ies')]);
+  // What a rollback did has to be visible (audit #37, L3i): the unit is
+  // back, but at the END of the interface clause - and uses order decides
+  // initialisation order and name resolution.
+  if Length(Restored) > 0 then
+    Msg := Msg + Format(#13#10#13#10'Put back into the interface uses, but ' +
+      'at the END of the clause (check the order): %s',
+      [string.Join(', ', Restored)]);
+  if Length(Lost) > 0 then
+    Msg := Msg + Format(#13#10#13#10'COULD NOT BE PUT BACK - add %s to the ' +
+      'uses clause by hand.', [string.Join(', ', Lost)]);
+  ShowThemedMessage(Msg);
   Close;
 end;
 

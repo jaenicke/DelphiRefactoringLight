@@ -261,6 +261,18 @@ begin
       FBlameUseTortoise := ReadBoolDef(Reg, 'BlameUseTortoise', FBlameUseTortoise);
       FLspLogging := ReadBoolDef(Reg, 'LspLogging', FLspLogging);
       FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
+      // ALL of them (audit #37, L4e): these five were missing, so Save
+      // wrote their DEFAULTS to the new key and DeleteKey then took the
+      // user's values away with the old branch - a migration that loses
+      // settings is worse than none.
+      FScopeIncludeOpenUnits := ReadBoolDef(Reg, 'ScopeIncludeOpenUnits',
+        FScopeIncludeOpenUnits);
+      FScopeIncludeUsedUnits := ReadBoolDef(Reg, 'ScopeIncludeUsedUnits',
+        FScopeIncludeUsedUnits);
+      FRenameScope := ReadIntDef(Reg, 'RenameScope', FRenameScope);
+      FRenameBackup := ReadBoolDef(Reg, 'RenameBackup', FRenameBackup);
+      FUsesCleanupKeepUnits := ReadStrDef(Reg, 'UsesCleanupKeepUnits',
+        FUsesCleanupKeepUnits);
     finally
       Reg.CloseKey;
     end;

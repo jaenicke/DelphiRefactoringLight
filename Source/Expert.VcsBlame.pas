@@ -717,12 +717,17 @@ begin
         end;
       until GetTickCount > Deadline;
 
-      if GetTickCount > Deadline then
+      var TimedOut := GetTickCount > Deadline;
+      if TimedOut then
         TerminateProcess(PI.hProcess, 1);
       // git speaks UTF-8; decode ONCE over the whole output (never per
       // chunk - that splits multi-byte characters at buffer boundaries).
       AOutput := DecodeVcsOutput(Raw.Bytes, Raw.Size);
-      Result := AOutput <> '';
+      // A KILLED PROCESS IS A FAILURE (audit #37, M33): its output is
+      // truncated porcelain, and returning True meant the worker cached
+      // that as the file's blame - every line past the cut showed nothing,
+      // for the rest of the session. Failing lets the next tick retry.
+      Result := (AOutput <> '') and not TimedOut;
     finally
       CloseHandle(PI.hThread);
       CloseHandle(PI.hProcess);
@@ -1198,6 +1203,16 @@ begin
           Exit;
         end;
         Parts := Out1.Replace(#13#10, #10).Split([#10]);
+        // stderr shares the pipe, so "fatal: bad object <hash>" arrived as
+        // the first line and was shown as the AUTHOR (audit #37, L4c).
+        if (Length(Parts) > 0)
+          and (StartsText('fatal:', Trim(Parts[0]))
+               or StartsText('error:', Trim(Parts[0]))
+               or StartsText('warning:', Trim(Parts[0]))) then
+        begin
+          SetStatus(Trim(Parts[0]));
+          Exit;
+        end;
         if Length(Parts) > 0 then AInfo.Author := Parts[0];
         if Length(Parts) > 1 then AInfo.DateStr := Parts[1];
         if Length(Parts) > 2 then AInfo.Subject := Parts[2];

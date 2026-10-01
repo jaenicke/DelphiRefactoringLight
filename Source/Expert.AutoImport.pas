@@ -266,6 +266,11 @@ procedure LiveResetResults;
 procedure LiveStatusInfo(out AFile: string; out AAnalysing, AResolving,
   AFromLsp, AFresh: Boolean; out AFixCount: Integer);
 
+/// <summary>Why the live checker stopped itself ('' while it runs). A
+///  feature that switches itself off has to SAY so - that is what the
+///  status window is for (audit #37, M28).</summary>
+function LiveStoppedReason: string;
+
 /// <summary>ESTIMATED heap bytes the live checker holds: the last pending
 ///  buffer copy with its diagnostics and the published fixes. MAIN THREAD.</summary>
 function LiveMemoryBytes: Int64;
@@ -2473,12 +2478,27 @@ begin
   if ASection = usInterface then Result := 'interface' else Result := 'implementation';
 end;
 
-function ApplyOne(const AFile, AUnit: string; ASection: TUsesSection): Boolean;
+function ApplyOne(const AFile, AUnit: string; ASection: TUsesSection;
+  out ADeclined: Boolean): Boolean; overload;
 begin
+  ADeclined := False;
   // Units the index only found via a BROWSING path are invisible to the
-  // compiler - offer to make them project-visible first.
-  if not EnsureUnitAvailable(AUnit) then Exit(False);
+  // compiler - offer to make them project-visible first. Saying NO there
+  // is a DECISION, not a failure (audit #37, L3r): it used to be counted
+  // as "already present / not written".
+  if not EnsureUnitAvailable(AUnit) then
+  begin
+    ADeclined := True;
+    Exit(False);
+  end;
   Result := AddUnitToUses(AFile, AUnit, ASection);
+end;
+
+function ApplyOne(const AFile, AUnit: string; ASection: TUsesSection): Boolean; overload;
+var
+  Declined: Boolean;
+begin
+  Result := ApplyOne(AFile, AUnit, ASection, Declined);
 end;
 
 // ---------------------------------------------------------------------------
@@ -4100,6 +4120,12 @@ var
   A: TQuickFixAction;
   Ok: Boolean;
 begin
+  // The ARM TIMER off first (audit #37, M29): picking a fix within 250 ms
+  // of the popup opening and then pumping messages (the availability
+  // question, a failure box) let DoArmDeactivate re-arm OnDeactivate,
+  // which closes the popup - caFree - inside that modal loop, while this
+  // method goes on using FFixes / FFile of a freed object.
+  FArmDeactivate.Enabled := False;
   if (FList.ItemIndex < 0) or (FList.ItemIndex > High(FActions)) then Exit;
   A := FActions[FList.ItemIndex];
   // Browsing-path-only units: offer to make them project-visible first
@@ -4418,16 +4444,28 @@ procedure TAutoImportDialog.DoApply(Sender: TObject);
 var Added, Failed: Integer;
 begin
   Added := 0; Failed := 0;
+  var Declined := 0;
   for var I := 0 to FList.Items.Count - 1 do
     if FList.Items[I].Checked then
     begin
       var Idx := NativeInt(FList.Items[I].Data);
       if (Idx < 0) or (Idx > High(FItems)) then Continue;
-      if ApplyOne(FFile, FItems[Idx].Units[FSel[Idx]].UnitName, FSecSel[Idx]) then Inc(Added)
-      else Inc(Failed);
+      var WasDeclined: Boolean;
+      if ApplyOne(FFile, FItems[Idx].Units[FSel[Idx]].UnitName, FSecSel[Idx],
+           WasDeclined) then
+        Inc(Added)
+      else if WasDeclined then
+        Inc(Declined)
+      else
+        Inc(Failed);
     end;
-  ShowThemedMessage(Format('%d unit(s) added.%s', [Added,
-    IfThen(Failed > 0, Format(#13#10'%d already present / not written.', [Failed]), '')]));
+  var Msg := Format('%d unit(s) added.', [Added]);
+  if Declined > 0 then
+    Msg := Msg + Format(#13#10'%d skipped at your request (availability ' +
+      'question answered with no).', [Declined]);
+  if Failed > 0 then
+    Msg := Msg + Format(#13#10'%d already present / not written.', [Failed]);
+  ShowThemedMessage(Msg);
   Close;
 end;
 
@@ -4642,10 +4680,18 @@ type
     // Last results revision the editor markers were repainted for.
     FLastPaintFile: string;
     FLastPaintHash: Integer;
+    /// <summary>Why the live checker stopped itself, '' while it runs.
+    ///  Shown in the status window - a feature that switched itself off
+    ///  silently is the worst of both (audit #37, M28).</summary>
+    FTickError: string;
     procedure ApplyExternalDiags(const AFile, AContent: string;
       const ADiags: TArray<TLspErrorDiag>; const ASource: string);
     procedure StartPendingResolve;
+    /// <summary>The timer handler - a guard around DoTickBody, so one
+    ///  persistent exception cannot produce a dialog every 120 ms
+    ///  (audit #37, M28).</summary>
     procedure DoTick(Sender: TObject);
+    procedure DoTickBody;
     procedure StartAnalysis(const AFile, AContent: string; AHash: Integer);
     procedure AnalysisDone(const AFile: string; AHash: Integer;
       const AResults: TArray<TQuickFix>);
@@ -4942,6 +4988,25 @@ begin
 end;
 
 procedure TAutoImportLive.DoTick(Sender: TObject);
+begin
+  // ONE GUARD AROUND THE WHOLE TICK (audit #37, M28): an exception
+  // anywhere in it reached Application.HandleException every 120 ms for as
+  // long as the condition lasted - a dialog storm nobody can work
+  // through. The timer stops and the reason is kept for the status
+  // window, once.
+  try
+    DoTickBody;
+  except
+    on E: Exception do
+    begin
+      FTimer.Enabled := False;
+      FTickError := Format('%s: %s (the live checker stopped - reopen the ' +
+        'project or restart the IDE)', [E.ClassName, E.Message]);
+    end;
+  end;
+end;
+
+procedure TAutoImportLive.DoTickBody;
 var
   F, Content: string;
   H: Integer;
@@ -5265,6 +5330,9 @@ begin
   BeforeVer := Client.GetFileDiagnosticsVersion(AFile);
 
   FAnalysing := True;
+  // Cleared here, and set BACK in the except below when the thread could
+  // not be started (audit #37, L3n) - otherwise that buffer state was
+  // never analysed again until the next edit.
   FDirty := False;
 
   TInterlocked.Increment(GLiveWorkers);
@@ -5348,6 +5416,11 @@ begin
   except
     TInterlocked.Decrement(GLiveWorkers);
     FAnalysing := False;
+    // A thread that could not be created leaves this buffer state
+    // UNANALYSED, so it must stay dirty - otherwise nothing looked at it
+    // again until the next edit (audit #37, L3n).
+    FDirty := True;
+    FDirtyTick := GetTickCount;
   end;
 end;
 
@@ -5739,6 +5812,12 @@ begin
   AFixCount := Length(GLive.FResults);
 end;
 
+function LiveStoppedReason: string;
+begin
+  if GLive = nil then Exit('');
+  Result := GLive.FTickError;
+end;
+
 procedure LiveRefreshAfterCompile;
 begin
   if GLive <> nil then
@@ -5998,6 +6077,24 @@ begin
 
   if not LiveAllFixes(Ctx.FileName, Fixes) then
   begin
+    // NOTHING CAN ANSWER? Then do not make the user wait (audit #37,
+    // L3o): without an LSP session - or with the live checker stopped -
+    // the 8 s hourglass below ended in "try again in a moment" every
+    // time. Say what is missing instead.
+    var Stopped := LiveStoppedReason;
+    if Stopped <> '' then
+    begin
+      ShowThemedMessage('The live checker stopped after an error, so there ' +
+        'is nothing to show:' + sLineBreak + sLineBreak + Stopped);
+      Exit;
+    end;
+    if TLspManager.Instance.PeekClient = nil then
+    begin
+      ShowThemedMessage('No DelphiLSP session is running for this project, ' +
+        'so there are no live quick fixes yet. Open or edit a unit (or run ' +
+        'a refactoring) to start one, then try again.');
+      Exit;
+    end;
     // No fresh analysis for the current buffer state yet: re-arm one (the
     // same state-only signal the post-compile refresh uses - the poll
     // tick acts on it) and wait briefly for the result.

@@ -393,7 +393,9 @@ begin
   if Key = VK_RETURN then
   begin
     GotoSelected;
-    ModalResult := mrOk;
+    // NO ModalResult (audit #37, L3g): this dialog is shown MODELESS, so
+    // the value closed nothing and only sat there - while Enter is
+    // supposed to mean "go to this row", which GotoSelected just did.
     Key := 0;
   end;
 end;

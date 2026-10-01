@@ -51,7 +51,7 @@ uses
   System.SysUtils, System.Classes, System.Types, System.IOUtils, System.UITypes,
   System.StrUtils, System.Character, System.Generics.Collections, System.JSON,
   Vcl.Dialogs, Vcl.Forms,
-  Expert.EditorHelperIntf, Expert.WithRewriter,
+  Expert.EditorHelperIntf, Expert.WithRewriter, Expert.PascalScanner,
   Expert.LspManager,
   Lsp.Client, Lsp.Uri, Lsp.Protocol, Delphi.FileEncoding;
 
@@ -74,6 +74,11 @@ type
     DeclarationText: string;
     /// <summary>1-based line range of declaration in source.</summary>
     DeclStartLine, DeclEndLine: Integer;
+    /// <summary>1-based range of a FORWARD declaration of the same symbol
+    ///  ("TFoo = class;"), 0 when there is none. It has to go with the
+    ///  type: left behind it is a forward with nothing completing it,
+    ///  which is E2086 (audit #39, M39a).</summary>
+    FwdStartLine, FwdEndLine: Integer;
 
     /// <summary>For classes/routines: implementation block(s) to move.</summary>
     ImplBlocks: TArray<string>;
@@ -119,9 +124,18 @@ type
   TLspMoveToUnit = class
   private
     class function ReadFile(const APath: string): string;
+    /// <summary>AFwdStart/AFwdEnd report a FORWARD declaration of the same
+    ///  symbol (audit #39, M39a) - it has to be removed WITH the type, or
+    ///  the source keeps a forward nothing completes (E2086). They are 0
+    ///  when there is none, and equal to the declaration's own range when
+    ///  the forward IS the only declaration.</summary>
     class function LocateDeclaration(const ASymbol: string;
       const ASource: string; out AKind: TMoveSymbolKind;
-      out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer): Boolean;
+      out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer): Boolean; overload;
+    class function LocateDeclaration(const ASymbol: string;
+      const ASource: string; out AKind: TMoveSymbolKind;
+      out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer;
+      out AFwdStart, AFwdEnd: Integer): Boolean; overload;
     class function LocateClassMethods(const ASymbol, AClassName: string;
       const ASource: string; out AImplBlocks: TArray<string>;
       out AStartLines, AEndLines: TArray<Integer>): Boolean;
@@ -131,8 +145,11 @@ type
     class function TargetHasSymbol(const ATargetSource, ASymbol: string): Boolean;
     class procedure ApplyToTarget(const ATargetFile: string;
       const APlan: TMovePlan);
-    class procedure RemoveRangeFromSource(const ASourceFile: string;
-      const APlan: TMovePlan);
+    /// <summary>False when the source could not be written (audit #39,
+    ///  M39c): ApplyPlan used to report success although the symbol then
+    ///  existed in BOTH units.</summary>
+    class function RemoveRangeFromSource(const ASourceFile: string;
+      const APlan: TMovePlan): Boolean;
     class procedure EnsureInterfaceUses(const AConsumerFile, ATargetUnit: string);
     class procedure EnsureImplementationUses(const ATargetFile: string;
       const AUnits: TArray<string>);
@@ -281,6 +298,20 @@ begin
   end;
 end;
 
+var
+  /// <summary>Set by ApplyPlanEx when it catches an exception, so a caller
+  ///  that has no user (the MCP tool) can REPORT it instead of a modal
+  ///  dialog nobody can click (audit #39, M39c).</summary>
+  GMoveError: string = '';
+
+/// <summary>Does ASource end with a line break? SplitLines drops it, so
+///  everything built from its result has to put it back (audit #39,
+///  L7k).</summary>
+function EndsWithLineBreak(const ASource: string): Boolean;
+begin
+  Result := (ASource <> '') and CharInSet(ASource[Length(ASource)], [#10, #13]);
+end;
+
 function SplitLines(const ASource: string): TArray<string>;
 var
   SL: TStringList;
@@ -321,19 +352,63 @@ end;
 ///  dangling blank-line pairs where the removed declaration used to
 ///  be, and the target unit doesn't accumulate extra gaps around the
 ///  freshly inserted block.</summary>
+/// <summary>The quote run that starts ALINE's content (after blanks), or 0
+///  - that is what closes a Delphi 12 multi-line string.</summary>
+function LeadingQuoteRun(const ALine: string): Integer;
+var
+  P: Integer;
+begin
+  Result := 0;
+  P := 1;
+  while (P <= Length(ALine)) and CharInSet(ALine[P], [' ', #9]) do Inc(P);
+  while (P <= Length(ALine)) and (ALine[P] = '''') do
+  begin
+    Inc(Result);
+    Inc(P);
+  end;
+end;
+
+/// <summary>The quote run of a multi-line string OPENED on ALine, or 0.
+///  </summary>
+function OpensMultiLineString(const ALine: string): Integer;
+var
+  P: Integer;
+begin
+  Result := 0;
+  for P := 1 to Length(ALine) do
+  begin
+    var Run := MultiLineStringOpener(ALine, P);
+    if Run > 0 then Exit(Run);
+  end;
+end;
+
 function CollapseBlankLines(const ASource: string): string;
 var
   Lines: TArray<string>;
   Out_: TStringBuilder;
   I, BlankRun: Integer;
   Trimmed: string;
+  InMulti: Integer;    // open quote run of a Delphi 12 ''' string, 0 = none
 begin
   Lines := SplitLines(ASource);
   Out_ := TStringBuilder.Create;
   try
     BlankRun := 0;
+    InMulti := 0;
     for I := 0 to High(Lines) do
     begin
+      // A MULTI-LINE STRING IS DATA (audit #39, L7k): dropping a blank line
+      // inside ''' ... ''' changes the VALUE of a string this move never
+      // touched. Those lines are copied verbatim.
+      if InMulti > 0 then
+      begin
+        if Out_.Length > 0 then Out_.Append(#13#10);
+        Out_.Append(Lines[I]);
+        if LeadingQuoteRun(Lines[I]) >= InMulti then InMulti := 0;
+        BlankRun := 0;
+        Continue;
+      end;
+      InMulti := OpensMultiLineString(Lines[I]);
       Trimmed := Trim(Lines[I]);
       if Trimmed = '' then
       begin
@@ -355,6 +430,44 @@ end;
 function IsIdCh(C: Char): Boolean; inline;
 begin
   Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_']);
+end;
+
+/// <summary>How many top-level routine headers of ANAME the unit has -
+///  either in the INTERFACE (AImplementation = False) or in the
+///  implementation section. Used to recognise overloads (audit #39,
+///  M39b); comments and strings are masked out first.</summary>
+function CountRoutineHeaders(const ASource, AName: string;
+  AImplementation: Boolean): Integer;
+var
+  Lines: TArray<string>;
+  PastImpl: Boolean;
+begin
+  Result := 0;
+  Lines := SplitLines(StripCommentsAndStringsKeepNewlines(ASource));
+  PastImpl := False;
+  for var L in Lines do
+  begin
+    var T := Trim(L);
+    var U := UpperCase(T);
+    if U = 'IMPLEMENTATION' then
+    begin
+      PastImpl := True;
+      Continue;
+    end;
+    if PastImpl <> AImplementation then Continue;
+    // "procedure Name(" / "function Name:" / "procedure Name;" at the
+    // start of the line - a method of a class is indented, and a
+    // qualified header (TFoo.Name) is not this routine.
+    if (Length(L) > 0) and CharInSet(L[1], [' ', #9]) then Continue;
+    var Kw := '';
+    if U.StartsWith('PROCEDURE ') then Kw := 'PROCEDURE '
+    else if U.StartsWith('FUNCTION ') then Kw := 'FUNCTION '
+    else Continue;
+    var Rest := Trim(Copy(T, Length(Kw) + 1, MaxInt));
+    var P := 1;
+    while (P <= Length(Rest)) and IsIdCh(Rest[P]) do Inc(P);
+    if SameText(Copy(Rest, 1, P - 1), AName) then Inc(Result);
+  end;
 end;
 
 /// <summary>True iff the (trimmed) line consists of nothing but a
@@ -700,6 +813,17 @@ end;
 class function TLspMoveToUnit.LocateDeclaration(const ASymbol: string;
   const ASource: string; out AKind: TMoveSymbolKind;
   out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer): Boolean;
+var
+  IgnoreS, IgnoreE: Integer;
+begin
+  Result := LocateDeclaration(ASymbol, ASource, AKind, AStartLine, AEndLine,
+    AClassDeclLine, IgnoreS, IgnoreE);
+end;
+
+class function TLspMoveToUnit.LocateDeclaration(const ASymbol: string;
+  const ASource: string; out AKind: TMoveSymbolKind;
+  out AStartLine, AEndLine: Integer; out AClassDeclLine: Integer;
+  out AFwdStart, AFwdEnd: Integer): Boolean;
 // Walk the interface section line-by-line. Track current section header
 // (const/var/type/resourcestring). For routines, recognise signature
 // lines. For a hit on ASymbol, determine the start/end of the declaration.
@@ -819,6 +943,7 @@ begin
   Result := False;
   AKind := mskUnknown;
   AStartLine := 0; AEndLine := 0; AClassDeclLine := 0;
+  AFwdStart := 0; AFwdEnd := 0;
 
   Clean := StripCommentsAndStringsKeepNewlines(ASource);
   Stripped := SplitLines(Clean);
@@ -892,6 +1017,11 @@ begin
         end;
         AStartLine := I + 1;         // 1-based
         AEndLine := DeclEnd + 1;
+        if FwdStart >= 0 then
+        begin
+          AFwdStart := FwdStart + 1;
+          AFwdEnd := FwdEnd + 1;
+        end;
         if Section = 'type' then
         begin
           AClassDeclLine := AStartLine;
@@ -974,6 +1104,8 @@ begin
   begin
     AStartLine := FwdStart + 1;
     AEndLine := FwdEnd + 1;
+    AFwdStart := AStartLine;      // the same range: nothing extra to remove
+    AFwdEnd := AEndLine;
     AClassDeclLine := AStartLine;
     AKind := mskType;
     Result := True;
@@ -1165,6 +1297,7 @@ class function TLspMoveToUnit.BuildPlan(const ASymbol, ASourceFile,
 var
   Src, Tgt: string;
   DeclLine, EndLine, ClassDeclLine: Integer;
+  FwdLine, FwdEndLine: Integer;
   Kind: TMoveSymbolKind;
   Lines: TArray<string>;
   I: Integer;
@@ -1202,7 +1335,8 @@ begin
     end;
   end;
 
-  if not LocateDeclaration(ASymbol, Src, Kind, DeclLine, EndLine, ClassDeclLine) then
+  if not LocateDeclaration(ASymbol, Src, Kind, DeclLine, EndLine, ClassDeclLine,
+       FwdLine, FwdEndLine) then
   begin
     APlan.ProblemDetail := Format(
       'Could not locate declaration of "%s" in the interface section of %s.',
@@ -1210,9 +1344,38 @@ begin
     Exit;
   end;
 
+  // OVERLOADS ARE REFUSED (audit #39, M39b). The unit header promises that
+  // all overloads of a name move together, but both the declaration scan
+  // and the body scan stop at the FIRST match - and those two need not be
+  // the same overload, so one declaration and one (possibly unrelated)
+  // body moved while the rest stayed behind. Moving the whole family needs
+  // a signature-aware pairing; until then this says so instead of
+  // producing two half-broken units.
+  if Kind = mskRoutine then
+  begin
+    var Decls := CountRoutineHeaders(Src, ASymbol, False);
+    var Impls := CountRoutineHeaders(Src, ASymbol, True);
+    if (Decls > 1) or (Impls > 1) then
+    begin
+      APlan.ProblemDetail := Format(
+        '%s is overloaded (%d declaration(s), %d implementation(s)). Moving ' +
+        'one overload without the others would leave the unit broken, and ' +
+        'this refactoring cannot pair them up by signature yet - move them ' +
+        'by hand.', [ASymbol, Decls, Impls]);
+      Exit;
+    end;
+  end;
+
   APlan.Kind := Kind;
   APlan.DeclStartLine := DeclLine;
   APlan.DeclEndLine := EndLine;
+  // Only when it is a DIFFERENT range than the declaration itself (a unit
+  // whose only declaration IS the forward answers with it).
+  if (FwdLine > 0) and (FwdLine <> DeclLine) then
+  begin
+    APlan.FwdStartLine := FwdLine;
+    APlan.FwdEndLine := FwdEndLine;
+  end;
 
   // Capture declaration text
   Lines := SplitLines(Src);
@@ -1329,8 +1492,8 @@ begin
   Result := True;
 end;
 
-class procedure TLspMoveToUnit.RemoveRangeFromSource(const ASourceFile: string;
-  const APlan: TMovePlan);
+class function TLspMoveToUnit.RemoveRangeFromSource(const ASourceFile: string;
+  const APlan: TMovePlan): Boolean;
 var
   Src: string;
   Lines: TArray<string>;
@@ -1344,6 +1507,11 @@ begin
 
   for I := APlan.DeclStartLine - 1 to APlan.DeclEndLine - 1 do
     if (I >= 0) and (I < Length(Lines)) then Remove[I] := True;
+  // The forward goes with the type (audit #39, M39a): "TFoo = class;"
+  // without the real declaration is E2086.
+  if APlan.FwdStartLine > 0 then
+    for I := APlan.FwdStartLine - 1 to APlan.FwdEndLine - 1 do
+      if (I >= 0) and (I < Length(Lines)) then Remove[I] := True;
 
   for var K := 0 to High(APlan.ImplBlocks) do
   begin
@@ -1364,10 +1532,13 @@ begin
       if (ProbeIdx >= 0) then
       begin
         var Probe := Trim(Lines[ProbeIdx]);
-        // '{ TFoo }' / '{ TFoo<T> }' / '{ TFoo: comment }' patterns.
-        // Match: starts '{', contains the qualifier (the part before
-        // '.' in the symbol's qualified name), ends '}'.
+        // '{ TFoo }' / '{ TFoo<T> }' marker only - the EXACT name, never a
+        // line that merely CONTAINS it (audit #39, L7j): "Contains" deleted
+        // '{$IFDEF USE_TFoo}' above the body and left its '{$ENDIF}', which
+        // leaves the unit unbalanced, and it took '{ TFooBar }' - another
+        // class's marker - with it.
         if Probe.StartsWith('{') and Probe.EndsWith('}')
+          and not Probe.StartsWith('{$')          // a directive is not a marker
           and (APlan.Symbol <> '') then
         begin
           // qualifier = symbol before the first '.'.
@@ -1377,7 +1548,12 @@ begin
             Qual := Copy(APlan.Symbol, 1, DotPos - 1)
           else
             Qual := APlan.Symbol;
-          if (Qual <> '') and Probe.Contains(Qual) then
+          // the comment's content must BE the qualifier (generic arguments
+          // allowed), not just contain it somewhere
+          var Inner := Trim(Copy(Probe, 2, Length(Probe) - 2));
+          var Angle := Pos('<', Inner);
+          if Angle > 0 then Inner := Trim(Copy(Inner, 1, Angle - 1));
+          if (Qual <> '') and SameText(Inner, Qual) then
           begin
             Remove[ProbeIdx] := True;
             // Also drop the blank line between marker and block (if
@@ -1403,8 +1579,13 @@ begin
     // the surrounding pre-/post-padding meets, plus possibly an
     // orphaned section header ('type' with no body). Two clean-up
     // passes: collapse runs of blank lines, then drop empty sections.
-    Editor.ReplaceFileContent(ASourceFile,
-      CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString)));
+    // The file's FINAL LINE BREAK is restored: SplitLines drops it, so
+    // every move used to take the unit's last CRLF with it (audit #39,
+    // L7k).
+    var NewText := CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString));
+    if EndsWithLineBreak(Src) and not EndsWithLineBreak(NewText) then
+      NewText := NewText + #13#10;
+    Result := Editor.ReplaceFileContent(ASourceFile, NewText);
   finally
     Out_.Free;
   end;
@@ -1490,6 +1671,9 @@ begin
       Out_.Append(Lines[I]);
     end;
     Result := CollapseBlankLines(RemoveEmptySectionHeaders(Out_.ToString));
+    // the target's final line break, like the source side (audit #39, L7k)
+    if EndsWithLineBreak(ATarget) and not EndsWithLineBreak(Result) then
+      Result := Result + #13#10;
   finally
     Out_.Free;
   end;
@@ -2064,7 +2248,20 @@ begin
       if (FirstDeclLine <> '') and (Pos(FirstDeclLine, TargetNow) = 0) then
         Exit(False);
     end;
-    RemoveRangeFromSource(APlan.SourceFile, APlan);
+    // A REFUSED SOURCE WRITE IS NOT SUCCESS (audit #39, M39c): the symbol
+    // would exist in BOTH units, and the caller was told the move worked.
+    if not RemoveRangeFromSource(APlan.SourceFile, APlan) then
+    begin
+      // NO DIALOG HERE: this routine is called from the menu, from the MCP
+      // tool and from tests. It REPORTS (GMoveError) and the caller
+      // decides how to show it - a message box in a headless call blocks
+      // until someone finds the IDE (audit #39, M39c).
+      GMoveError := 'the declaration was copied into ' +
+        ExtractFileName(APlan.TargetFile) + ', but ' +
+        ExtractFileName(APlan.SourceFile) + ' could not be written - it ' +
+        'still holds the original. Remove it there by hand.';
+      Exit(False);
+    end;
 
     // 2b) The SOURCE itself may still use the moved symbol (the rest of the
     //     unit using the class that was taken out - the normal case for a
@@ -2126,7 +2323,10 @@ begin
     Result := True;
   except
     on E: Exception do
-      MessageDlg('Move failed: ' + E.Message, mtError, [mbOK], 0);
+    begin
+      // Reported, not shown (see above) - Execute shows it for the menu.
+      GMoveError := 'Move failed: ' + E.Message;
+    end;
   end;
 end;
 
@@ -2185,7 +2385,7 @@ begin
     AError := 'the folder does not exist: ' + ExtractFileDir(ANewFile);
     Exit;
   end;
-  Editor.SaveAllFiles;
+  if not APreview then Editor.SaveAllFiles;   // audit #39, M39d
   TDelphiFileEncoding.WriteAll(ANewFile, EmptyUnitText(UnitName), TEncoding.UTF8);
   var Keep := False;
   try
@@ -2224,12 +2424,21 @@ begin
       Result := True;
       Exit;
     end;
+    // THE MOVE FIRST, the project entry after it (audit #39, L7l): the
+    // file used to be kept and added before ApplyPlanEx, so a move that
+    // did not land left an empty unit on disk AND in the project.
+    GMoveError := '';
+    Result := ApplyPlanEx(Plan, True);
+    if (not Result) and (GMoveError <> '') then AError := GMoveError;
+    if not Result then
+    begin
+      if AError = '' then AError := 'the move could not be applied';
+      Exit;      // Keep stays False: the finally deletes the new file
+    end;
     Keep := True;
     if not Editor.AddFileToActiveProject(ANewFile) then
       AError := 'moved, but ' + ExtractFileName(ANewFile) + ' could not be added to ' +
         'the project - add it yourself';
-    Result := ApplyPlanEx(Plan, True);
-    if not Result and (AError = '') then AError := 'the move could not be applied';
   finally
     // nothing happened: the empty file must not stay behind
     if not Keep then
@@ -2254,7 +2463,11 @@ begin
       MessageDlg(Plan.ProblemDetail, mtWarning, [mbOK], 0);
     Exit;
   end;
+  GMoveError := '';
   Result := ApplyPlan(Plan);
+  // the menu path is where a message box belongs
+  if (not Result) and (GMoveError <> '') then
+    MessageDlg(GMoveError, mtError, [mbOK], 0);
 end;
 
 class function TLspMoveToUnit.ExecuteToExistingUnit(const ASymbol, ASourceFile,
@@ -2271,7 +2484,11 @@ begin
     AError := ATargetFile + ' does not exist - use "move to new unit" to create it';
     Exit;
   end;
-  Editor.SaveAllFiles;
+  // SAVE ONLY WHEN APPLYING (audit #39, M39d): a preview used to save
+  // every modified file in the IDE - a side effect nobody asked for from
+  // a call whose whole point is to change nothing. The plan is built from
+  // the editor BUFFERS anyway.
+  if not APreview then Editor.SaveAllFiles;
   if not BuildPlan(ASymbol, ASourceFile, ATargetFile, Plan) then
   begin
     AError := Plan.ProblemDetail;
@@ -2281,8 +2498,13 @@ begin
   end;
   APlan := Plan;
   if APreview then Exit(True);
+  GMoveError := '';
   Result := ApplyPlan(Plan);
-  if not Result then AError := 'the move could not be applied';
+  if not Result then
+  begin
+    AError := GMoveError;
+    if AError = '' then AError := 'the move could not be applied';
+  end;
 end;
 
 end.

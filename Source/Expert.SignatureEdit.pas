@@ -1304,7 +1304,21 @@ begin
               Continue;
             end;
             if T <> '' then
-              AddEdit(C.FileIndex, C.NameEnd + 1, C.NameEnd, '(' + T + ')', C.Line, 'call');
+            begin
+              // AFTER the generic arguments (audit #39, L7m): inserting at
+              // NameEnd + 1 turned "F.Run<Integer>;" into
+              // "F.Run(5)<Integer>;". CallContextAt skips them the same
+              // way when it looks for the parameter list.
+              var InsAt := C.NameEnd;
+              var MJ := Joined[C.FileIndex];
+              var NG := NextCode(MJ, C.NameEnd + 1);
+              if (NG <= Length(MJ)) and (MJ[NG] = '<') and (NG = C.NameEnd + 1) then
+              begin
+                var G := GenericClose(MJ, NG, Length(MJ));
+                if G > 0 then InsAt := G;
+              end;
+              AddEdit(C.FileIndex, InsAt + 1, InsAt, '(' + T + ')', C.Line, 'call');
+            end;
           end;
       end;
     end;
@@ -1332,8 +1346,13 @@ begin
   for var I := 1 to High(Plan.Edits) do
     if (Plan.Edits[I].FileIndex = Plan.Edits[I - 1].FileIndex) and
        (Plan.Edits[I].Start <= Plan.Edits[I - 1].Stop) then
-      Err(Format('overlapping edits at %s - please report this', [Loc(Plan.Edits[I].FileIndex,
-        Plan.Edits[I].Line)]));
+      // ORDINARY CODE, not a planner bug (audit #39, L7n): a call nested
+      // in a call of the SAME routine ("Foo(Foo(1))") produces two edits
+      // that overlap. Refusing is right, the wording was not.
+      Err(Format('%s: this call contains another call of the same routine, ' +
+        'so the new argument list cannot be placed automatically - change ' +
+        'that line by hand and run the refactoring again',
+        [Loc(Plan.Edits[I].FileIndex, Plan.Edits[I].Line)]));
   Result := Plan;
 end;
 

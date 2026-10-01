@@ -111,12 +111,28 @@ end;
 /// <summary>Reads the lines of a unit, preferring the IDE's live editor
 ///  buffer over the on-disk file. Ensures we modify the user's current
 ///  unsaved state, not a stale copy.</summary>
+/// <summary>True for a constructor / destructor / class member - none of
+///  which an interface can declare (audit #39, M38b).</summary>
+function IsCtorOrDtor(const AMember: TClassMember): Boolean;
+var
+  U: string;
+begin
+  U := UpperCase(TrimLeft(AMember.Signature));
+  Result := AMember.IsClassMember
+    or U.StartsWith('CONSTRUCTOR') or U.StartsWith('DESTRUCTOR')
+    or U.StartsWith('CLASS ');
+end;
+
 function ReadSourceLines(const AFile: string): TArray<string>;
 var
   Content: string;
 begin
   if Editor.ReadEditorContent(AFile, Content) then
-    Result := Content.Split([sLineBreak], TStringSplitOptions.None)
+    // ANY line ending (audit #39, M38f): splitting on sLineBreak alone
+    // returned an LF-only buffer - a unit checked out without autocrlf -
+    // as ONE line, and then "no class declaration found around line 4".
+    Result := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10],
+      TStringSplitOptions.None)
   else
     Result := TDelphiFileEncoding.ReadLines(AFile);
 end;
@@ -437,12 +453,17 @@ begin
     if InInterface and StartsText('USES', U) then begin Idx := I; Break; end;
   end;
   if Idx < 0 then Exit;
-  // Collect text until ';'.
+  // MASKED (audit #39, L7g): the raw text was concatenated, so
+  // "System.SysUtils, // the RTL" and the next line ended up on ONE line
+  // of the new unit - where the comment swallows the rest of the clause
+  // including its ';'. Masking blanks comments, directives and strings
+  // and keeps the positions, so the ';' we look for is a real one.
+  var MaskedLines := MaskCommentsAndStrings(Lines);
   Acc := '';
-  for I := Idx to High(Lines) do
+  for I := Idx to High(MaskedLines) do
   begin
-    Acc := Acc + ' ' + Lines[I];
-    if Pos(';', Lines[I]) > 0 then Break;
+    Acc := Acc + ' ' + MaskedLines[I];
+    if Pos(';', MaskedLines[I]) > 0 then Break;
   end;
   // Strip leading 'uses', trailing ';' and split by ','.
   L := Trim(Acc);
@@ -554,8 +575,11 @@ begin
     ParenClose := Pos(')', Copy(Line, Abs_, MaxInt));
     if ParenClose = 0 then Exit;
     var Body := Copy(Line, Abs_ + 1, ParenClose - 2);
-    // Skip if interface already in list.
-    if Pos(UpperCase(AInterfaceName), UpperCase(Body)) > 0 then Exit;
+    // Already listed? ENTRY BY ENTRY (audit #39, M38e): a substring test
+    // meant "class(TInterfacedObject, IFooBar)" never got IFoo, because
+    // IFooBar contains it.
+    for var Entry in Body.Split([',']) do
+      if SameText(Trim(Entry), AInterfaceName) then Exit;
     var Insert := Body + ', ' + AInterfaceName;
     NewLine := Copy(Line, 1, Abs_) + Insert + Copy(Line, Abs_ + ParenClose - 1, MaxInt);
   end
@@ -563,12 +587,26 @@ begin
   begin
     // No ancestor list yet: "TFoo = class" -> "TFoo = class(TObject, IFoo)"
     var Tail := Trim(Copy(Line, ClassPos + 5, MaxInt));
+    // A CLASS MODIFIER has to stay BEFORE the ancestor list (audit #39,
+    // M38e): "TFoo = class abstract" became "class(TObject, IFoo) abstract",
+    // which does not compile. The modifier keeps its place and the list
+    // goes after it.
+    var Modifier := '';
+    var TailU := UpperCase(Tail);
+    for var Mod_ in ['ABSTRACT', 'SEALED'] do
+      if (TailU = Mod_) or TailU.StartsWith(Mod_ + ' ')
+        or TailU.StartsWith(Mod_ + ';') then
+      begin
+        Modifier := ' ' + Copy(Tail, 1, Length(Mod_));
+        Tail := Trim(Copy(Tail, Length(Mod_) + 1, MaxInt));
+        Break;
+      end;
     if (Tail = '') or (Tail[1] = ';') then
-      NewLine := Copy(Line, 1, ClassPos + 4) + '(TObject, ' + AInterfaceName + ')'
-        + Copy(Line, ClassPos + 5, MaxInt)
+      NewLine := Copy(Line, 1, ClassPos + 4) + Modifier +
+        '(TObject, ' + AInterfaceName + ')' + Tail
     else
-      NewLine := Copy(Line, 1, ClassPos + 4) + '(TObject, ' + AInterfaceName + ')'
-        + ' ' + Tail;
+      NewLine := Copy(Line, 1, ClassPos + 4) + Modifier +
+        '(TObject, ' + AInterfaceName + ')' + ' ' + Tail;
   end;
 
   ALines[ADeclLine - 1] := NewLine;
@@ -901,9 +939,11 @@ begin
         ExtractInterfaceUses(AInfo.SourceFile));
     UnitText := TExtractInterfaceEngine.BuildNewUnitText(InfoWithUses);
   end;
+  // The new unit is written, but it is NOT handed to the project yet
+  // (audit #39, L7h): the source edit below can fail - a read-only file,
+  // a refused editor write - and the project then held an interface unit
+  // for an extraction that never happened. Both steps happen at the end.
   WriteTextEnc(AInfo.TargetFile, UnitText);
-  AddFileToActiveProject(AInfo.TargetFile);
-  OpenModuleInIDE(AInfo.TargetFile);
 
   UnitName := ChangeFileExt(ExtractFileName(AInfo.TargetFile), '');
 
@@ -934,7 +974,14 @@ begin
   AddAncestorToClassLines(Lines, AInfo.ClassDeclLine, AInfo.InterfaceName);
   EnsureUsesContainsInLines(Lines, UnitName);
 
+  // The source write is the step that can fail; everything the new unit
+  // needs from the IDE happens only after it (audit #39, L7h). An
+  // exception leaves the written .pas on disk - the caller reports it, and
+  // a file nobody added to the project is harmless - but the project is
+  // not changed behind a failure.
   WriteSourceLines(AInfo.SourceFile, Lines);
+  AddFileToActiveProject(AInfo.TargetFile);
+  OpenModuleInIDE(AInfo.TargetFile);
 end;
 
 /// <summary>0-based index of the "end;" of the interface AName in ALines,
@@ -1266,7 +1313,11 @@ begin
       Info.Members[I].Selected := Wanted(M.Name)
     else
       Info.Members[I].Selected :=
-        (M.Visibility in [mvPublic, mvPublished]) and (M.Kind <> mkField);
+        // An interface holds no constructor, destructor or CLASS member
+        // (audit #39, M38b): those were pre-ticked, so the default
+        // extraction produced an interface the class cannot implement.
+        (M.Visibility in [mvPublic, mvPublished]) and (M.Kind <> mkField)
+        and not M.IsClassMember and not IsCtorOrDtor(M);
     if Info.Members[I].Selected then Inc(Picked);
   end;
   if Picked = 0 then
@@ -1369,7 +1420,8 @@ begin
   begin
     M := Info.Members[I];
     Info.Members[I].Selected :=
-      (M.Visibility in [mvPublic, mvPublished]) and (M.Kind <> mkField);
+      (M.Visibility in [mvPublic, mvPublished]) and (M.Kind <> mkField)
+      and not M.IsClassMember and not IsCtorOrDtor(M);   // audit #39, M38b
   end;
 
   Existing := nil;
@@ -1512,7 +1564,17 @@ begin
             StartsText('FUNCTION ', Upper) or
             StartsText('CLASS PROCEDURE ', Upper) or
             StartsText('CLASS FUNCTION ', Upper)) then Continue;
-    if Pos(HeaderUpper, Upper) = 0 then Continue;
+    // EXACTLY this method (audit #39, M38d): a substring match put the
+    // statement into TFoo.AfterConstructionHelper when that was
+    // implemented above TFoo.AfterConstruction. What may follow the name
+    // is '(', ';' or ':' - nothing else.
+    begin
+      var HPos := Pos(HeaderUpper, Upper);
+      if HPos = 0 then Continue;
+      var After := Trim(Copy(Upper, HPos + Length(HeaderUpper), MaxInt));
+      if not ((After = '') or After.StartsWith('(') or After.StartsWith(';')
+              or After.StartsWith(':')) then Continue;
+    end;
 
     // Find 'begin' that opens this routine.
     BeginLine := -1;
@@ -1526,26 +1588,42 @@ begin
     end;
     if BeginLine < 0 then Exit;
 
-    // Track depth to the matching closing 'end;'.
+    // Track depth to the matching closing 'end;' - TOKEN BY TOKEN
+    // (audit #39, M38d). The old line-based test only counted a block
+    // word that STARTED the line, so "if FFlag then begin" did not raise
+    // the depth while its "end;" lowered it: the statement landed inside
+    // the if, i.e. it ran only when the condition was true.
     Depth := 1;
     EndLine := -1;
     for J := BeginLine + 1 to High(ALines) do
     begin
-      Trimmed := Trim(StripLineComment(ALines[J]));
+      Trimmed := StripLineComment(ALines[J]);
       Upper := UpperCase(Trimmed);
-      while (Upper <> '') and (Upper[Length(Upper)] = ';') do
-        Upper := Trim(Copy(Upper, 1, Length(Upper) - 1));
-
-      if (Upper = 'BEGIN') or StartsText('BEGIN ', Upper) or
-         (Upper = 'TRY') or StartsText('TRY ', Upper) or
-         (Upper = 'CASE') or StartsText('CASE ', Upper) or
-         (Upper = 'RECORD') or StartsText('RECORD ', Upper) then
-        Inc(Depth)
-      else if (Upper = 'END') or StartsText('END ', Upper) then
+      var P := 1;
+      while P <= Length(Upper) do
       begin
-        Dec(Depth);
-        if Depth = 0 then begin EndLine := J; Break; end;
+        if IsIdentStart(Upper[P]) then
+        begin
+          var Q := P;
+          while (Q <= Length(Upper)) and IsIdentChar(Upper[Q]) do Inc(Q);
+          var W := Copy(Upper, P, Q - P);
+          P := Q;
+          if (W = 'BEGIN') or (W = 'TRY') or (W = 'CASE') or (W = 'ASM') then
+            Inc(Depth)
+          else if W = 'END' then
+          begin
+            Dec(Depth);
+            if Depth = 0 then
+            begin
+              EndLine := J;
+              Break;
+            end;
+          end;
+        end
+        else
+          Inc(P);
       end;
+      if EndLine >= 0 then Break;
     end;
     if EndLine < 0 then Exit;
 

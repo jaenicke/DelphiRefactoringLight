@@ -84,6 +84,10 @@ type
   private
     FDialog: TExtractMethodDialog;      // nil = headless (MCP)
     FHeadlessError: string;
+    /// <summary>True while a PREVIEW runs: nothing may be written, and
+    ///  that includes saving the IDE's modified buffers (audit #39,
+    ///  M37b) - the answer says "nothing was written".</summary>
+    FPreviewOnly: Boolean;
     FCurrentInfo: TExtractMethodInfo;
     FInfoReady: Boolean;
     procedure UpdatePreview;
@@ -1707,7 +1711,14 @@ begin
     AError := 'file not found: ' + AFile;
     Exit;
   end;
-  Lines := TDelphiFileEncoding.ReadLines(AFile);
+  // THE BUFFER, not the disk (audit #39, M37b): ApplyExtraction edits the
+  // editor by LINE NUMBER, so analysing the saved file while the buffer
+  // holds unsaved edits above the block means the numbers do not match.
+  var BufContent: string;
+  if Editor.ReadEditorContent(AFile, BufContent) then
+    Lines := BufContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10])
+  else
+    Lines := TDelphiFileEncoding.ReadLines(AFile);
   if (AFromLine1 < 1) or (AToLine1 < AFromLine1) or (AToLine1 > Length(Lines)) then
   begin
     AError := Format('the block %d..%d is not inside the file (%d lines)',
@@ -1744,6 +1755,7 @@ begin
   W := TLspExtractMethodWizard.Create;
   try
     W.FDialog := nil;
+    W.FPreviewOnly := not AApply;
     W.DoAnalyzeAndPreview(Info);
     if not W.FInfoReady then
     begin
@@ -1802,7 +1814,13 @@ begin
   end;
   if FDialog <> nil then FDialog.SetBusy(True);
   try
-    Status('Saving files...'); Editor.SaveAllFiles;
+    // A preview saves NOTHING (audit #39, M37b). The analysis reads the
+    // buffers anyway, so there is nothing to flush first.
+    if not FPreviewOnly then
+    begin
+      Status('Saving files...');
+      Editor.SaveAllFiles;
+    end;
     Status('Connecting to LSP...');
     Client := TLspManager.Instance.GetClient(RP, Editor.GetCurrentProjectDproj, DJ);
 

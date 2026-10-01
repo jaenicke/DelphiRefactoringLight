@@ -462,17 +462,21 @@ begin
   end;
   if DeclLine < 1 then Exit;
 
-  // Find end of class declaration. Track 'record'/'class' depth so a
-  // nested record/class doesn't close us prematurely.
+  // Find end of class declaration. EVERY comment form is masked and every
+  // nested BODY counts (audit #39, M38a): only 'record' used to open one
+  // and only '//' was stripped, so "type TInner = class end;" inside the
+  // class, or a "{ the old end }" comment, ended it there - and every
+  // member below was never offered for the interface.
   EndLine := -1;
   Depth := 1;
+  var MaskedBody := MaskCommentsAndStrings(AFileLines);
   for I := DeclLine to Length(AFileLines) - 1 do
   begin
-    Line := StripLineComment(AFileLines[I]);
+    if I <= High(MaskedBody) then Line := MaskedBody[I]
+    else Line := StripLineComment(AFileLines[I]);
     Upper := UpperCase(Line);
-    // Tokenize words and react to 'record'/'class' (opens) and 'end'
-    // (closes). String-content is ignored for simplicity (v1).
     var Pos_ := 1;
+    var PrevW := '';
     while Pos_ <= Length(Upper) do
     begin
       if IsIdentStart(Upper[Pos_]) then
@@ -480,17 +484,29 @@ begin
         var Q := Pos_;
         while (Q <= Length(Upper)) and IsIdentChar(Upper[Q]) do Inc(Q);
         var W := Copy(Upper, Pos_, Q - Pos_);
-        if (W = 'RECORD') then
+        // What follows the keyword decides: "class procedure" / "class
+        // function" / "class var" are MODIFIERS, and "TFoo = class;" is a
+        // forward - neither opens a body.
+        var Tail := Trim(Copy(Upper, Q, MaxInt));
+        if (W = 'RECORD') or (W = 'OBJECT')
+          or (((W = 'CLASS') or (W = 'INTERFACE') or (W = 'DISPINTERFACE'))
+              and (PrevW = '=')
+              and not Tail.StartsWith(';')
+              and not Tail.StartsWith('OF ')) then
           Inc(Depth)
         else if (W = 'END') then
         begin
           Dec(Depth);
           if Depth = 0 then begin EndLine := I + 1; Break; end;
         end;
+        PrevW := W;
         Pos_ := Q;
       end
       else
+      begin
+        if not CharInSet(Upper[Pos_], [' ', #9]) then PrevW := Upper[Pos_];
         Inc(Pos_);
+      end;
     end;
     if EndLine > 0 then Break;
   end;
@@ -768,6 +784,12 @@ begin
     for M in AInfo.Members do
     begin
       if not M.Selected then Continue;
+      // A CLASS member cannot be an interface method (audit #39, M38c):
+      // "class function Make: TFoo" was emitted as "function Make: TFoo",
+      // and the class then does not implement the interface (E2291). Such
+      // a member is skipped - an interface describes what an INSTANCE can
+      // do.
+      if M.IsClassMember then Continue;
       case M.Kind of
         mkMethod:
           SB.Append(Indent).Append(M.Signature).Append(';').AppendLine;

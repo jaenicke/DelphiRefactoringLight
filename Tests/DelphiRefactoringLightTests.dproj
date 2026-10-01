@@ -104,6 +104,7 @@
         <DCCReference Include="Test.AuditReproRemoveWith.pas"/>
         <DCCReference Include="Test.AuditReproSearch.pas"/>
         <DCCReference Include="Test.AuditReproChecks.pas"/>
+        <DCCReference Include="Test.AuditReproRefactorings.pas"/>
         <DCCReference Include="Test.Issue11.pas"/>
         <DCCReference Include="Test.ChangeSignature.pas"/>
         <DCCReference Include="..\Standalone\Standalone.EditorHelper.pas"/>

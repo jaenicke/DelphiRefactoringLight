@@ -445,24 +445,65 @@ end;
 
 procedure ApplyPlainEdits(const AEdits: TArray<TPlainEdit>;
   out AOk, AFailed: Integer);
+// The edits are applied BOTTOM-UP, so every position still refers to the
+// text as it is before the first write - which is what makes a pre-check
+// possible at all.
+//
+// PRE-CHECK PER FILE (audit #41, H15): a var-section or uses insertion
+// carries OldText = '', so ApplyEditViaEditor verifies NOTHING for it.
+// When a body edit of the same file no longer matched - its line had
+// moved because an earlier apply landed - the insert went in anyway, the
+// row stayed in the dialog, and every retry added the same declaration
+// again. Now either every edit of a file still fits, or none of its edits
+// is written and they are all reported as failed.
 var
   Sorted: TArray<TPlainEdit>;
+  Contents: TDictionary<string, string>;
+  Stale: TDictionary<string, Boolean>;
   I: Integer;
+  Key, Content: string;
 begin
   AOk := 0;
   AFailed := 0;
   Sorted := Copy(AEdits);
   SortPlainEdits(Sorted);
-  for I := 0 to High(Sorted) do
-    if Editor.ApplyEditViaEditor(
-        Sorted[I].FileName,
-        Sorted[I].Line - 1,
-        Sorted[I].Col - 1,
-        Sorted[I].OldText,
-        Sorted[I].NewText) then
-      Inc(AOk)
-    else
-      Inc(AFailed);
+  Contents := TDictionary<string, string>.Create;
+  Stale := TDictionary<string, Boolean>.Create;
+  try
+    for I := 0 to High(Sorted) do
+    begin
+      if Sorted[I].OldText = '' then Continue;
+      Key := LowerCase(Sorted[I].FileName);
+      if not Contents.TryGetValue(Key, Content) then
+      begin
+        // Unreadable (not open, no module): no pre-check for that file -
+        // "cannot verify" must never become "refuse".
+        if not Editor.ReadEditorContent(Sorted[I].FileName, Content) then
+          Content := '';
+        Contents.AddOrSetValue(Key, Content);
+      end;
+      if (Content <> '')
+        and not TextMatchesAt(Content, Sorted[I].Line, Sorted[I].Col,
+              Sorted[I].OldText) then
+        Stale.AddOrSetValue(Key, True);
+    end;
+
+    for I := 0 to High(Sorted) do
+      if Stale.ContainsKey(LowerCase(Sorted[I].FileName)) then
+        Inc(AFailed)
+      else if Editor.ApplyEditViaEditor(
+          Sorted[I].FileName,
+          Sorted[I].Line - 1,
+          Sorted[I].Col - 1,
+          Sorted[I].OldText,
+          Sorted[I].NewText) then
+        Inc(AOk)
+      else
+        Inc(AFailed);
+  finally
+    Stale.Free;
+    Contents.Free;
+  end;
 end;
 
 /// <summary>Inline-mode apply: one edit per item, replacing the
@@ -711,6 +752,9 @@ begin
     Result := 'the target type could not be resolved'
   else if wriClassRangeUnknown in AIssues then
     Result := 'the class range could not be determined'
+  else if wriValueTypeTemp in AIssues then
+    Result := 'the target is a record / object and would need a temp - a copy, ' +
+      'so writes through the with would be lost; rewrite it by hand'
   else if wriNameClash in AIssues then
     Result := 'the inline variable would shadow an existing name'
   else if wriRequiresInlineVar in AIssues then
@@ -1102,7 +1146,10 @@ begin
                 'selected one - run "Remove with" again for them.',
                 [ROk, RFailed, RSkipped]), mtInformation, [mbOK], 0)
             else if RFailed > 0 then
-              MessageDlg(Format('Applied %d edit(s); %d failed.',
+              MessageDlg(Format('Applied %d edit(s); %d failed.' + sLineBreak +
+                sLineBreak + 'A failed row refers to a position that has moved, ' +
+                'so nothing of its file was written - run "Remove with" again ' +
+                'to get fresh positions.',
                 [ROk, RFailed]), mtWarning, [mbOK], 0);
             if RSkipped > 0 then
             begin

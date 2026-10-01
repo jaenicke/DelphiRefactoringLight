@@ -85,7 +85,12 @@ type
     ///  the body ("with A do {$IFDEF X} begin ..."). The rewrite replaces
     ///  that span, so it would be DROPPED - an {$IFDEF}/{$ENDIF} pair then
     ///  even ends up unbalanced. Left for manual review.</summary>
-    wriCommentInHeader
+    wriCommentInHeader,
+    /// <summary>The rewrite would need a TEMP variable, but the target's
+    ///  type is a VALUE type (record / object). A temp then holds a COPY,
+    ///  so every write made through the with would be lost - and it
+    ///  compiles, so nobody notices (audit #41, H11). Left untouched.</summary>
+    wriValueTypeTemp
   );
 
   /// <summary>Caller-controlled toggles for the rewriter.</summary>
@@ -294,6 +299,33 @@ function ScanUsesClauses(const ASource: string;
 /// <summary>True iff AUnit appears in AClause.Units (case-insensitive).</summary>
 function UsesContains(const AClause: TUsesClauseLocation;
   const AUnit: string): Boolean;
+
+/// <summary>Is the type whose declaration starts on ADeclLine a VALUE type
+///  (record / object, packed or not)? ANextLine covers the wrapped form
+///  "TFoo =" with the keyword on the following line. Anything we do not
+///  positively recognise as a value type answers False - the caller
+///  REFUSES on True, and refusing on a guess would block legitimate
+///  rewrites. Pure (audit #41, H11).</summary>
+function DeclaredTypeIsValueType(const ADeclLine, ANextLine: string): Boolean;
+
+/// <summary>Does the statement on line ALine1 sit inside an ANONYMOUS
+///  method declared within the method body that begins on ABodyBeginLine1?
+///  (1-based, ALines are the raw source lines.) The classic form declares
+///  its temp in the ENCLOSING method's var section, so inside an anonymous
+///  method every invocation would share ONE variable - in a
+///  TParallel.For a data race that compiles cleanly (audit #41, H13).
+///  Pure.</summary>
+function InsideAnonymousMethod(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer): Boolean;
+
+/// <summary>Does AContent still hold AOld at (ALine1, ACol1), both
+///  1-based? #13 is ignored on both sides, because an edit's old text
+///  spans several lines and the buffer's line breaks need not match.
+///  An empty AOld is a pure insertion and always matches - which is
+///  exactly why the apply must check the OTHER edits of the same file
+///  before writing any of them (audit #41, H15). Pure.</summary>
+function TextMatchesAt(const AContent: string; ALine1, ACol1: Integer;
+  const AOld: string): Boolean;
 
 implementation
 
@@ -726,6 +758,192 @@ end;
 
 /// <summary>If AExpr ends in '^' (after trim), returns AExpr without
 ///  the trailing caret; otherwise returns AExpr unchanged.</summary>
+function DeclaredTypeIsValueType(const ADeclLine, ANextLine: string): Boolean;
+
+  // First word of S, upper case, '' when there is none.
+  function FirstWord(const S: string; out ARest: string): string;
+  var
+    I, J: Integer;
+  begin
+    Result := '';
+    ARest := '';
+    I := 1;
+    while (I <= Length(S)) and CharInSet(S[I], [' ', #9]) do Inc(I);
+    if (I > Length(S)) or not IsIdentStart(S[I]) then Exit;
+    J := I;
+    while (J <= Length(S)) and IsIdentChar(S[J]) do Inc(J);
+    Result := UpperCase(Copy(S, I, J - I));
+    ARest := Copy(S, J, MaxInt);
+  end;
+
+var
+  After, Rest, W: string;
+  P: Integer;
+begin
+  Result := False;
+  // Everything after the FIRST '=' is the type itself. ':=' / '<=' / '>='
+  // cannot occur in a type declaration line before that '='.
+  P := Pos('=', ADeclLine);
+  if P > 0 then
+    After := Copy(ADeclLine, P + 1, MaxInt)
+  else
+    Exit;
+  W := FirstWord(After, Rest);
+  if W = '' then
+    W := FirstWord(ANextLine, Rest);     // "TFoo =" / next line "record"
+  if W = 'PACKED' then
+  begin
+    // NOT FirstWord(Rest, Rest): an 'out' parameter is cleared on entry,
+    // and with one variable in both roles the function would read ''.
+    var Rest2: string;
+    W := FirstWord(Rest, Rest2);
+  end;
+  Result := (W = 'RECORD') or (W = 'OBJECT');
+end;
+
+function InsideAnonymousMethod(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer): Boolean;
+var
+  Masked: TArray<string>;
+  Stack: TArray<Boolean>;     // one entry per open block: is it an anon body?
+  AnonPending, ExpectName, IsIdent: Boolean;
+  ParenDepth, L, P, Q: Integer;
+  Line, W: string;
+begin
+  Result := False;
+  if (ABodyBeginLine1 < 1) or (ALine1 <= ABodyBeginLine1) then Exit;
+  if ALine1 > Length(ALines) then Exit;
+  Masked := MaskCommentsAndStrings(ALines);
+  AnonPending := False;
+  ExpectName := False;
+  ParenDepth := 0;
+  for L := ABodyBeginLine1 - 1 to ALine1 - 2 do    // 0-based, up to the line BEFORE
+  begin
+    if (L < 0) or (L > High(Masked)) then Continue;
+    Line := Masked[L];
+    P := 1;
+    while P <= Length(Line) do
+    begin
+      if Line[P] <= ' ' then begin Inc(P); Continue; end;
+      if IsIdentStart(Line[P]) then
+      begin
+        Q := P;
+        while (Q <= Length(Line)) and IsIdentChar(Line[Q]) do Inc(Q);
+        W := UpperCase(Copy(Line, P, Q - P));
+        P := Q;
+        IsIdent := True;
+      end
+      else
+      begin
+        W := Line[P];
+        Inc(P);
+        IsIdent := False;
+      end;
+
+      // ONLY the token directly after procedure/function decides. A NAME
+      // means a nested named routine; '(' / ':' / 'begin' mean there is
+      // none, so it is anonymous. (Checking every identifier was wrong:
+      // the first PARAMETER name cleared the flag again.)
+      if ExpectName then
+      begin
+        ExpectName := False;
+        if IsIdent and (W <> 'BEGIN') then AnonPending := False;
+      end;
+
+      if not IsIdent then
+      begin
+        if W = '(' then
+          Inc(ParenDepth)
+        else if W = ')' then
+        begin
+          if ParenDepth > 0 then Dec(ParenDepth);
+        end
+        // A ';' OUTSIDE brackets ends a declaration, so "var P: procedure;"
+        // never arms the flag; inside a parameter list it separates
+        // parameters and must not clear it.
+        else if (W = ';') and (ParenDepth = 0) then
+          AnonPending := False;
+        Continue;
+      end;
+
+      if (W = 'PROCEDURE') or (W = 'FUNCTION') then
+      begin
+        AnonPending := True;
+        ExpectName := True;
+      end
+      else if W = 'BEGIN' then
+      begin
+        Stack := Stack + [AnonPending];
+        AnonPending := False;
+      end
+      else if (W = 'TRY') or (W = 'CASE') or (W = 'ASM') then
+        Stack := Stack + [False]
+      else if W = 'END' then
+      begin
+        if Length(Stack) > 0 then SetLength(Stack, Length(Stack) - 1);
+      end;
+    end;
+  end;
+  for var B in Stack do
+    if B then Exit(True);
+end;
+
+function TextMatchesAt(const AContent: string; ALine1, ACol1: Integer;
+  const AOld: string): Boolean;
+var
+  Idx, I, J, Line: Integer;
+begin
+  Result := False;
+  if AOld = '' then Exit(True);        // pure insertion - nothing to verify
+  if (ALine1 < 1) or (ACol1 < 1) then Exit;
+  Idx := 1;
+  Line := 1;
+  while (Line < ALine1) and (Idx <= Length(AContent)) do
+  begin
+    if AContent[Idx] = #10 then Inc(Line);
+    Inc(Idx);
+  end;
+  if Line <> ALine1 then Exit;
+  Inc(Idx, ACol1 - 1);
+  if Idx < 1 then Exit;
+  I := Idx;
+  J := 1;
+  while J <= Length(AOld) do
+  begin
+    if AOld[J] = #13 then begin Inc(J); Continue; end;
+    while (I <= Length(AContent)) and (AContent[I] = #13) do Inc(I);
+    if I > Length(AContent) then Exit;
+    if AContent[I] <> AOld[J] then Exit;
+    Inc(I);
+    Inc(J);
+  end;
+  Result := True;
+end;
+
+function TargetTempWouldCopy(const ATypeFile: string;
+  AClassStartLine: Integer): Boolean;
+// A temp variable of a VALUE type holds a COPY, so every write made
+// through the with would be lost - and it compiles (audit #41, H11).
+// Reads the one declaration line the type resolution already located.
+var
+  Src, Nxt: string;
+  Idx: TLineIndex;
+begin
+  Result := False;
+  if (ATypeFile = '') or (AClassStartLine <= 0) then Exit;
+  if not TFile.Exists(ATypeFile) then Exit;
+  try
+    Src := TFile.ReadAllText(ATypeFile);
+  except
+    Exit;
+  end;
+  Idx.Init(Src);
+  if AClassStartLine > Idx.LineCount then Exit;
+  if AClassStartLine < Idx.LineCount then
+    Nxt := Idx.LineText(AClassStartLine + 1);
+  Result := DeclaredTypeIsValueType(Idx.LineText(AClassStartLine), Nxt);
+end;
+
 function StripTrailingCaret(const AExpr: string): string;
 begin
   Result := AExpr.TrimRight;
@@ -3348,6 +3566,18 @@ begin
       Targets[I].InlineVarName := FallbackTempName(Targets[I].Expression, I + 1);
       Targets[I].QualifyPrefix := Targets[I].InlineVarName + '.';
     end;
+
+    // The temp would hold a COPY of a record / object, so every write
+    // through the with would be lost - silently, because it compiles
+    // (audit #41, H11). A target that needs NO temp is unaffected: it is
+    // qualified with the expression itself ('R.Inner.Count := 0'), and
+    // that includes the 'p^' form.
+    if (Targets[I].InlineVarName <> '')
+      and TargetTempWouldCopy(Targets[I].TypeFile, Targets[I].ClassStartLine) then
+    begin
+      Include(Result.Issues, wriValueTypeTemp);
+      Exit;
+    end;
   end;
 
   // Cross-target collision check: if two targets ended up with the same
@@ -3799,6 +4029,23 @@ begin
     var Methods := FindAllMethodsInSource(ASource, Index);
     var MI: TMethodInfo;
     var HaveMethod := FindEnclosingMethod(Methods, AOccurrence.KeywordPos.Line, MI);
+    // Inside an ANONYMOUS method the classic temp would go into the
+    // ENCLOSING method's var section, so every invocation of the anonymous
+    // method shares ONE variable - in a TParallel.For a data race that
+    // compiles cleanly (audit #41, H13). The INLINE form is local to the
+    // anonymous body and stays available; only the classic one is withheld,
+    // and BuildClassicEdits reports such an item as failed instead of
+    // dropping it.
+    if HaveMethod then
+    begin
+      var SrcLines: TArray<string>;
+      SetLength(SrcLines, Index.LineCount);
+      for var SL := 1 to Index.LineCount do
+        SrcLines[SL - 1] := Index.LineText(SL);
+      if InsideAnonymousMethod(SrcLines, MI.BodyBeginLine,
+           AOccurrence.KeywordPos.Line) then
+        HaveMethod := False;
+    end;
     if HaveMethod then
     begin
       Result.Classic.MethodKey :=

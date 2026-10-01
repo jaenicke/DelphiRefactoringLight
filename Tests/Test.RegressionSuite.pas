@@ -394,6 +394,24 @@ type
     [Test] procedure AnImpossibleUnitNameIsReportedAsADefect;
   end;
 
+  /// <summary>Audit issue #41, the three High findings of "Remove with".
+  ///  All three produce code that COMPILES and behaves differently, which
+  ///  is why each is refused rather than guessed at.</summary>
+  [TestFixture]
+  TRemoveWithSafetyTests = class
+  public
+    /// <summary>H11: a temp of a record / object type is a COPY, so a
+    ///  write through the with is lost.</summary>
+    [Test] procedure AValueTypeIsRecognisedInItsDeclaration;
+    /// <summary>H13: the classic temp of a with inside an anonymous method
+    ///  would land in the OUTER method's var section - one variable shared
+    ///  by every invocation.</summary>
+    [Test] procedure AWithInsideAnAnonymousMethodIsRecognised;
+    /// <summary>H15: an insertion carries no old text, so the apply has to
+    ///  check the OTHER edits of the same file before writing any.</summary>
+    [Test] procedure AnEditIsVerifiedAgainstTheCurrentText;
+  end;
+
 implementation
 
 uses
@@ -404,7 +422,7 @@ uses
   Expert.WorkerLatch, Expert.Version, Expert.PascalScanner, System.RegularExpressions,
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
-  Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools;
+  Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter;
 
 const
   NL = sLineBreak;
@@ -2708,6 +2726,89 @@ begin
   Assert.Contains(S, 'report', 'and says it is a defect in the plugin');
 end;
 
+{ TRemoveWithSafetyTests }
+
+procedure TRemoveWithSafetyTests.AValueTypeIsRecognisedInItsDeclaration;
+begin
+  // the reported shape: "with R.Inner do Count := 0" with Inner a record
+  Assert.IsTrue(DeclaredTypeIsValueType('  TInner = record', ''),
+    'a record is a value type');
+  Assert.IsTrue(DeclaredTypeIsValueType('  TInner = packed record', ''),
+    'a packed record too');
+  Assert.IsTrue(DeclaredTypeIsValueType('  TOld = object', ''),
+    'an old-style object too');
+  Assert.IsTrue(DeclaredTypeIsValueType('  TInner =', '    record'),
+    'the keyword may stand on the next line');
+  // ... and everything that is a REFERENCE must stay rewritable
+  Assert.IsFalse(DeclaredTypeIsValueType('  TFoo = class(TObject)', ''));
+  Assert.IsFalse(DeclaredTypeIsValueType('  TFoo = class', '  private'));
+  Assert.IsFalse(DeclaredTypeIsValueType('  IFoo = interface', ''));
+  Assert.IsFalse(DeclaredTypeIsValueType('  IFoo = dispinterface', ''));
+  // 'procedure of object' must not be read as 'object'
+  Assert.IsFalse(DeclaredTypeIsValueType('  TEvent = procedure of object;', ''),
+    'the FIRST word after the = decides');
+  Assert.IsFalse(DeclaredTypeIsValueType('  TFoo = class helper for TBar', ''));
+  Assert.IsFalse(DeclaredTypeIsValueType('no equals sign here', ''));
+end;
+
+procedure TRemoveWithSafetyTests.AWithInsideAnAnonymousMethodIsRecognised;
+const
+  // 1 unit U; 2 interface 3 implementation
+  Src =
+    'unit U;'#13#10 +                               // 1
+    'interface'#13#10 +                             // 2
+    'implementation'#13#10 +                        // 3
+    'procedure Outer;'#13#10 +                      // 4
+    'begin'#13#10 +                                 // 5
+    '  with FFoo do'#13#10 +                        // 6  <- NOT anonymous
+    '    Bar;'#13#10 +                              // 7
+    '  TParallel.For(0, 9, procedure(I: Integer)'#13#10 +   // 8
+    '    begin'#13#10 +                             // 9
+    '      with TFoo.Create do'#13#10 +             // 10 <- anonymous
+    '      try'#13#10 +                             // 11
+    '        Run;'#13#10 +                          // 12
+    '      finally'#13#10 +                         // 13
+    '        Free;'#13#10 +                         // 14
+    '      end;'#13#10 +                            // 15
+    '    end);'#13#10 +                             // 16
+    '  with FBaz do'#13#10 +                        // 17 <- after it: NOT
+    '    Qux;'#13#10 +                              // 18
+    'end;'#13#10 +                                  // 19
+    'end.';
+var
+  Lines: TArray<string>;
+begin
+  Lines := Src.Replace(#13#10, #10).Split([#10]);
+  Assert.IsFalse(InsideAnonymousMethod(Lines, 5, 6),
+    'a with directly in the method body is not inside an anonymous one');
+  Assert.IsTrue(InsideAnonymousMethod(Lines, 5, 10),
+    'the with inside the anonymous method must be recognised');
+  Assert.IsFalse(InsideAnonymousMethod(Lines, 5, 17),
+    'after the anonymous method ends, we are back in the outer body');
+end;
+
+procedure TRemoveWithSafetyTests.AnEditIsVerifiedAgainstTheCurrentText;
+const
+  Content = 'unit U;'#13#10'begin'#13#10'  with A do B;'#13#10'end.';
+begin
+  // line 3 starts with two blanks, so the 'with' is at column 3
+  Assert.IsTrue(TextMatchesAt(Content, 3, 3, 'with A do B;'),
+    'the text is still where the edit expects it');
+  Assert.IsFalse(TextMatchesAt(Content, 3, 3, 'with X do B;'),
+    'a changed line must not pass');
+  Assert.IsFalse(TextMatchesAt(Content, 2, 3, 'with A do B;'),
+    'the same text one line up is not a match');
+  Assert.IsFalse(TextMatchesAt(Content, 99, 1, 'anything'),
+    'a line beyond the end is no match');
+  // an old text spanning lines: the line breaks need not agree
+  Assert.IsTrue(TextMatchesAt(Content, 2, 1, 'begin'#10'  with A do B;'),
+    'CR is ignored on both sides');
+  // an insertion has nothing to verify - which is exactly why the caller
+  // must check the other edits of the file
+  Assert.IsTrue(TextMatchesAt(Content, 1, 1, ''),
+    'an empty old text always matches');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -2734,5 +2835,6 @@ initialization
   TDUnitX.RegisterTestFixture(TDesignerManagedUsesTests);
   TDUnitX.RegisterTestFixture(TUsesClauseParsingTests);
   TDUnitX.RegisterTestFixture(TSelfProtectionTests);
+  TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
 
 end.

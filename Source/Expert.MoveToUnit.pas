@@ -534,8 +534,11 @@ begin
       Q := P;
       while (Q <= Length(Line)) and IsIdCh(Line[Q]) do Inc(Q);
       W := LowerCase(Copy(Line, P, Q - P));
-      // X.End or &End is an identifier, not a keyword
-      var Qualified := (P > 1) and CharInSet(Line[P - 1], ['.', '&']);
+      // X.End or &End is an identifier, not a keyword - and so is an asm
+      // LABEL named @@end, which otherwise closed the block at its first
+      // mention (measured: the body of a routine jumping to @@end ended at
+      // the JZ line).
+      var Qualified := (P > 1) and CharInSet(Line[P - 1], ['.', '&', '@']);
       P := Q;
       if Qualified then Continue;
       // inside an asm block only its own end counts

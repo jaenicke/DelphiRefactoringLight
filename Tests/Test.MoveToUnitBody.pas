@@ -32,6 +32,8 @@ type
     /// <summary>Audit H26: the blocks were inserted before the final 'end.',
     ///  i.e. inside an initialization / finalization section.</summary>
     [Test] procedure Splice_GoesBeforeInitialization;
+    /// <summary>An asm LABEL named @@end is not the block's end.</summary>
+    [Test] procedure AsmLabelNamedEnd_IsNotTheBlocksEnd;
   end;
 
 implementation
@@ -159,6 +161,32 @@ begin
   Assert.AreEqual(11, E[0]);
   Assert.AreEqual(12, S[1]);
   Assert.AreEqual(15, E[1]);
+end;
+
+procedure TMoveToUnitBodyTests.AsmLabelNamedEnd_IsNotTheBlocksEnd;
+const
+  Src =
+    'unit U;'#13#10 +                      // 1
+    'interface'#13#10 +                    // 2
+    'function Fast: Integer;'#13#10 +      // 3
+    'implementation'#13#10 +               // 4
+    'function Fast: Integer;'#13#10 +      // 5
+    'asm'#13#10 +                          // 6
+    '  CMP EAX, 0'#13#10 +                 // 7
+    '  JZ  @@end'#13#10 +                  // 8
+    '  MOV EAX, 1'#13#10 +                 // 9
+    '@@end:'#13#10 +                       // 10
+    'end;'#13#10 +                         // 11
+    'procedure Other;'#13#10 +             // 12
+    'begin'#13#10 +                        // 13
+    'end;'#13#10 +                         // 14
+    'end.';
+var
+  S, E: TArray<Integer>;
+begin
+  Assert.IsTrue(LocateMoveImplementation('Fast', Src, S, E), 'found: Fast');
+  Assert.AreEqual(5, S[0]);
+  Assert.AreEqual(11, E[0], 'a label @@end is not the asm block''s end');
 end;
 
 procedure TMoveToUnitBodyTests.Splice_GoesBeforeInitialization;

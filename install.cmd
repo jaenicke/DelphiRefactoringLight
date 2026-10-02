@@ -86,6 +86,11 @@ echo  reconnect it with /mcp or start a new session.
 echo  Check which IDEs the bridge sees:
 echo.
 echo       "%MCPEXE%" --list
+:: WITHOUT this goto the block FALLS THROUGH into :mcp_failed below.
+:: That is what happened from 1.15.2 until 1.16.30: every user whose
+:: bridge was already registered got the "MCP BRIDGE IS NOT installed"
+:: warning on every SUCCESSFUL install.
+goto :restart_hint
 
 :mcp_failed
 :: The package IS installed, so this must not read like a plain success - a

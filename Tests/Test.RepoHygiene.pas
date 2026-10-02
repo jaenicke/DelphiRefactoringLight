@@ -26,6 +26,15 @@ type
     [Test] procedure Sources_HaveBomAndCrLfOnly;
     [Test] procedure TextForms_UseCrLfOnly;
     [Test] procedure GitAttributes_PinDelphiLineEndings;
+    /// <summary>
+    ///  Every label block of the install scripts must END with a goto or an
+    ///  exit. A block that falls into the NEXT label is invisible in the
+    ///  source and loud on screen: from 1.15.2 to 1.16.30 install.cmd
+    ///  printed the framed "the MCP BRIDGE IS NOT installed" warning after
+    ///  every SUCCESSFUL install, because the "bridge already registered"
+    ///  block had no terminator and ran straight into :mcp_failed.
+    /// </summary>
+    [Test] procedure InstallScripts_HaveNoLabelFallThrough;
   end;
 
 implementation
@@ -138,6 +147,69 @@ begin
     Assert.IsTrue(Pos(Ext, Rules) > 0, Ext + ' has no rule in .gitattributes');
   Assert.IsTrue(Pos('eol=crlf', Rules) > 0, '.gitattributes does not pin CRLF');
   Assert.IsTrue(Pos('*.res        binary', Rules) > 0, '.res files must be binary');
+end;
+
+const
+  // every batch script of the repository that uses labels
+  ScriptFiles: array[0..4] of string = ('install.cmd', 'uninstall.cmd',
+    'rebuild.cmd', 'Mcp\buildmcp.cmd', 'dih\builddih.cmd');
+
+// A label line is ':name' - ':: text' is a comment, which is why the second
+// character decides.
+function IsLabelLine(const ALine: string): Boolean;
+begin
+  var T := Trim(ALine);
+  Result := (Length(T) > 1) and (T[1] = ':') and (T[2] <> ':');
+end;
+
+// the last line of a block that cmd really executes ('' when there is none)
+function LastExecutedLine(ALines: TStrings; AFrom, ATo: Integer): string;
+begin
+  Result := '';
+  for var I := AFrom to ATo do
+  begin
+    var T := Trim(ALines[I]);
+    if (T = '') or T.StartsWith('::') or T.StartsWith('rem ', True) then Continue;
+    Result := T;
+  end;
+end;
+
+procedure TRepoHygieneTests.InstallScripts_HaveNoLabelFallThrough;
+var
+  Checked: Integer;
+  Bad: string;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository must be reachable from ' + ParamStr(0));
+  Checked := 0;
+  Bad := '';
+  var SL := TStringList.Create;
+  try
+    for var Rel in ScriptFiles do
+    begin
+      var F := TPath.Combine(Root, Rel);
+      Assert.IsTrue(TFile.Exists(F), 'the script is missing: ' + Rel);
+      SL.Text := TEncoding.ANSI.GetString(TFile.ReadAllBytes(F));
+      var Labels: TArray<Integer> := nil;
+      for var I := 0 to SL.Count - 1 do
+        if IsLabelLine(SL[I]) then Labels := Labels + [I];
+      // The LAST block has nothing to fall into, so only the others count.
+      for var K := 0 to High(Labels) - 1 do
+      begin
+        Inc(Checked);
+        var Last := LowerCase(LastExecutedLine(SL, Labels[K] + 1, Labels[K + 1] - 1));
+        if Last.StartsWith('goto ') or Last.StartsWith('exit') then Continue;
+        if Bad = '' then
+          Bad := Format('%s %s ends with "%s" and falls into %s',
+            [Rel, Trim(SL[Labels[K]]), Last, Trim(SL[Labels[K + 1]])]);
+      end;
+    end;
+  finally
+    SL.Free;
+  end;
+  Assert.IsTrue(Checked >= 10,
+    Format('the check must really see label blocks (%d)', [Checked]));
+  Assert.AreEqual('', Bad, Bad);
 end;
 
 initialization

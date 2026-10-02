@@ -40,10 +40,27 @@ type
       AStartLine, AEndLine, AInsertLine: Integer; const AEnclosingClass: string): TValidationResult;
   end;
 
+/// <summary>Every identifier of ALINES that the text shows being
+///  WRITTEN: an assignment at a statement boundary (not only at the
+///  start of a line), a for-loop variable, and an argument of a routine
+///  whose parameter is known to be var (Inc, Dec, Read, ReadLn, Val,
+///  FillChar, SetLength, ...). Extract method only recognised
+///  "^identifier :=", so a block with Inc(N) or "for I := 0 to 9" made
+///  N / I a CONST parameter and the result did not compile
+///  (audit #39, L7f). Comments and string literals are masked first, so
+///  nothing inside them counts. Upper case, no duplicates.</summary>
+function WrittenIdentifiersIn(const ALines: TArray<string>): TArray<string>;
+
+/// <summary>'' when ANAME is usable as a method name, else why not: empty,
+///  not a Pascal identifier ('2Foo', 'My Method') or a reserved word
+///  ('begin'). Extract method accepted any non-empty text and produced
+///  code that does not compile (audit #39, L7e).</summary>
+function MethodNameProblem(const AName: string): string;
+
 implementation
 
 uses
-  System.StrUtils, Expert.PascalScanner;
+  System.StrUtils, Expert.PascalScanner, Expert.IdentifierCheck;
 
 { TValidationResult }
 
@@ -570,6 +587,145 @@ begin
   finally
     Issues.Free;
   end;
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Written identifiers / method name (audit #39, L7f + L7e)
+// ---------------------------------------------------------------------------
+
+// Routines whose FIRST argument the compiler passes as var - an
+// identifier handed to one of them is written, whatever the text looks
+// like. Deliberately a short, certain list: the point is to stop calling
+// such a variable "const", and a name that is not on the list still goes
+// through the assignment tests below.
+function VarParamRoutine(const AUpperName: string): Boolean;
+begin
+  Result := (AUpperName = 'INC') or (AUpperName = 'DEC') or
+    (AUpperName = 'READ') or (AUpperName = 'READLN') or
+    (AUpperName = 'VAL') or (AUpperName = 'FILLCHAR') or
+    (AUpperName = 'SETLENGTH') or (AUpperName = 'SETSTRING') or
+    (AUpperName = 'FREEANDNIL') or (AUpperName = 'MOVE') or
+    (AUpperName = 'NEW') or (AUpperName = 'GETMEM') or
+    (AUpperName = 'REALLOCMEM') or (AUpperName = 'FREEMEM') or
+    (AUpperName = 'INSERT') or (AUpperName = 'DELETE') or
+    (AUpperName = 'EXCLUDE') or (AUpperName = 'INCLUDE');
+end;
+
+// A statement can also start right after one of these, so
+// "if Flag then Count := 1;" writes Count just as much as a line of its
+// own does.
+function StatementStarter(const AWord: string): Boolean;
+begin
+  Result := SameText(AWord, 'then') or SameText(AWord, 'else') or
+    SameText(AWord, 'do') or SameText(AWord, 'begin') or
+    SameText(AWord, 'repeat') or SameText(AWord, 'of') or
+    SameText(AWord, 'try') or SameText(AWord, 'finally') or
+    SameText(AWord, 'except') or SameText(AWord, 'var');
+end;
+
+function WrittenIdentifiersIn(const ALines: TArray<string>): TArray<string>;
+var
+  Masked: TArray<string>;
+  Found: TStringList;
+
+  procedure Note(const AName: string);
+  begin
+    if (AName <> '') and (Found.IndexOf(UpperCase(AName)) < 0) then
+      Found.Add(UpperCase(AName));
+  end;
+
+begin
+  Result := nil;
+  if Length(ALines) = 0 then Exit;
+  Masked := MaskCommentsAndStrings(ALines);
+  Found := TStringList.Create;
+  try
+    Found.Sorted := True;
+    for var L := 0 to High(Masked) do
+    begin
+      var S := Masked[L];
+      var Prev := '';        // the previous identifier on this line
+      var PrevPrev := '';
+      var I := 1;
+      var AtBoundary := True;  // start of line = start of a statement
+      while I <= Length(S) do
+      begin
+        if IsIdentStart(S[I]) then
+        begin
+          var Start := I;
+          while (I <= Length(S)) and IsIdentChar(S[I]) do Inc(I);
+          var W := Copy(S, Start, I - Start);
+          // Skip blanks and look at what follows.
+          var J := I;
+          while (J <= Length(S)) and (S[J] = ' ') do Inc(J);
+          // X := ... at a statement boundary, and "for X :=" / "for X in"
+          if (J + 1 <= Length(S)) and (S[J] = ':') and (S[J + 1] = '=') then
+          begin
+            if AtBoundary or SameText(Prev, 'for') or SameText(Prev, 'with') then
+              Note(W);
+          end
+          else if SameText(Prev, 'for') and SameText(W, 'var') then
+            // "for var I := ..." - the name follows, handled next round
+          else if SameText(PrevPrev, 'for') and SameText(Prev, 'var') then
+            Note(W)
+          else if SameText(Prev, 'for') and (J <= Length(S)) and
+            (Copy(S, J, 3) = 'in ') then
+            Note(W)
+          else if (J <= Length(S)) and (S[J] = '(') and VarParamRoutine(UpperCase(W)) then
+          begin
+            // ... and the identifiers inside its argument list
+            var Depth := 0;
+            var K := J;
+            while K <= Length(S) do
+            begin
+              if S[K] = '(' then Inc(Depth)
+              else if S[K] = ')' then
+              begin
+                Dec(Depth);
+                if Depth = 0 then Break;
+              end
+              else if IsIdentStart(S[K]) then
+              begin
+                var AS_ := K;
+                while (K <= Length(S)) and IsIdentChar(S[K]) do Inc(K);
+                Note(Copy(S, AS_, K - AS_));
+                Continue;
+              end;
+              Inc(K);
+            end;
+          end;
+          PrevPrev := Prev;
+          Prev := W;
+          AtBoundary := StatementStarter(W);
+          Continue;
+        end;
+        if S[I] = ';' then
+        begin
+          AtBoundary := True;
+          Prev := '';
+          PrevPrev := '';
+        end
+        else if S[I] > ' ' then
+          AtBoundary := False;
+        Inc(I);
+      end;
+    end;
+    Result := Found.ToStringArray;
+  finally
+    Found.Free;
+  end;
+end;
+
+function MethodNameProblem(const AName: string): string;
+begin
+  if Trim(AName) = '' then Exit('Enter a method name.');
+  if AName <> Trim(AName) then
+    Exit('The method name must not start or end with a space.');
+  if not IsIdentifier(AName) then
+    Exit(Format('"%s" is not a valid Pascal identifier.', [AName]));
+  if TIdentifierChecker.IsPascalKeyword(AName) then
+    Exit(Format('"%s" is a reserved word.', [AName]));
 end;
 
 end.

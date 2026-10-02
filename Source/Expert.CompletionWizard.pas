@@ -67,6 +67,7 @@ type
     procedure DoInsert(const AText: string);
     function GetCaretScreenPos: TPoint;
     function TryCaretScreenPos(out APos: TPoint): Boolean;
+    function MouseOverPopup: Boolean;
     /// <summary>Walks left from the current editor cursor collecting
     ///  word characters until a non-word character (or column 1) is
     ///  reached. Returns the collected characters as a prefix string.
@@ -159,17 +160,21 @@ begin
   Ctx := Editor.GetCurrentContext;
   if not Ctx.IsValid then Exit;
   if not Editor.ReadEditorContent(Ctx.FileName, Content) then Exit;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   if (Ctx.Line < 1) or (Ctx.Line > Length(Lines)) then Exit;
   Line := Lines[Ctx.Line - 1];
   // Ctx.Column is 1-based. The character at Column belongs after the
   // caret (LSP / IDE convention), so we look at characters at positions
   // Column-1, Column-2, ... and stop at the first non-word char.
-  Col := Ctx.Column - 1;
+  // The IDE reports a tab-EXPANDED column; as a string index that is
+  // wrong as soon as the line holds a tab (audit #39, M36a).
+  Col := Editor.RawColumn(Ctx.FileName, Ctx.Line, Ctx.Column) - 1;
   // Caret in virtual space beyond the line end: nothing typed there.
   if Col > Length(Line) then Exit;
   Start := Col;
-  while (Start >= 1) and CharInSet(Line[Start], ['A'..'Z','a'..'z','0'..'9','_']) do
+  // IsIdentChar, not an ASCII set: 'Größe' is one identifier, and the
+  // prefix used to be read as 'e' (audit #39, L7o).
+  while (Start >= 1) and IsIdentChar(Line[Start]) do
     Dec(Start);
   Result := Copy(Line, Start + 1, Col - Start);
 end;
@@ -208,6 +213,22 @@ begin
   Result := True;
 end;
 
+// True while the mouse pointer is over the completion popup: the user is
+// picking an entry with the mouse, so the window must stay (audit #39,
+// L7r). The popup never takes focus, so the focus test above cannot tell
+// this case from "clicked somewhere else".
+function TLspCompletionWizard.MouseOverPopup: Boolean;
+var
+  Pt: TPoint;
+  R: TRect;
+begin
+  Result := False;
+  if (FPopup = nil) or not FPopup.IsOnScreen then Exit;
+  if not GetCursorPos(Pt) then Exit;
+  if not GetWindowRect(FPopup.Handle, R) then Exit;
+  Result := PtInRect(R, Pt);
+end;
+
 function TLspCompletionWizard.GetCaretScreenPos: TPoint;
 begin
   if TryCaretScreenPos(Result) then Exit;
@@ -228,7 +249,8 @@ begin
   // first tick and close the popup before the result arrived (tester).
   if Col > Length(ALine) then Exit(ACol1);
   Result := Col;
-  while (Result >= 1) and CharInSet(ALine[Result], ['A'..'Z','a'..'z','0'..'9','_']) do
+  // IsIdentChar: a word may hold non-ASCII letters (audit #39, L7o).
+  while (Result >= 1) and IsIdentChar(ALine[Result]) do
     Dec(Result);
   Inc(Result);   // first char OF the word (= ACol1 when there is no word)
 end;
@@ -264,10 +286,12 @@ begin
   end;
 
   // Focus / caret checks double as the "clicked somewhere else" and
-  // "scrolled out of view" dismissal.
+  // "scrolled out of view" dismissal - but NOT while the mouse is inside
+  // our own list: a tick between the two clicks of a double-click used to
+  // hide the popup, so OnDblClick never fired (audit #39, L7r).
   if not TryCaretScreenPos(Pt) then
   begin
-    HidePopup;
+    if not MouseOverPopup then HidePopup;
     Exit;
   end;
 
@@ -276,7 +300,7 @@ begin
     HidePopup;
     Exit;
   end;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   if (Line < 1) or (Line > Length(Lines)) then
   begin
     HidePopup;
@@ -890,8 +914,22 @@ begin
     ShowThemedMessage('The implementation could not be inserted.');
     Exit;
   end;
-  Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol + Consume, Pad + Name + Closing);
-  Editor.InsertTextAtLineStart(F, Plan.DeclLine0 + 1, Plan.DeclText);
+  if not Editor.ReplaceSelection(F, Line, StartCol, Line, EndCol + Consume,
+    Pad + Name + Closing) then
+  begin
+    ShowThemedMessage('The handler was generated, but the call could not be ' +
+      'written at the caret - add it by hand.');
+    Exit;
+  end;
+  // ... and the DECLARATION was the one write nobody checked: without it
+  // the call and the body are in place and the unit does not compile
+  // (audit #39, L7q).
+  if not Editor.InsertTextAtLineStart(F, Plan.DeclLine0 + 1, Plan.DeclText) then
+  begin
+    ShowThemedMessage('The handler and its call were written, but the ' +
+      'declaration in the class was NOT - add it by hand.');
+    Exit;
+  end;
   Editor.GotoLocation(F, Plan.ImplBodyLine0 + Plan.DeclLines, 2);
 end;
 
@@ -912,10 +950,10 @@ begin
   // nothing (tester) - the same trap Execute had.
   if Ctx.FileName = '' then Exit;
   if not Editor.ReadEditorContent(Ctx.FileName, Content) then Exit;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   if (Ctx.Line < 1) or (Ctx.Line > Length(Lines)) then Exit;
   Line := Lines[Ctx.Line - 1];
-  Col := Ctx.Column;
+  Col := Editor.RawColumn(Ctx.FileName, Ctx.Line, Ctx.Column);
   // Caret in virtual space beyond the line end: the blanks up to it do
   // not exist in the buffer - insert them with the text.
   var Pad := '';
@@ -926,12 +964,12 @@ begin
   end;
   // Walk left to find the start of the word.
   StartCol := Col;
-  while (StartCol > 1) and CharInSet(Line[StartCol - 1], ['A'..'Z','a'..'z','0'..'9','_']) do
+  while (StartCol > 1) and IsIdentChar(Line[StartCol - 1]) do
     Dec(StartCol);
   // Walk right to extend past anything still belonging to the same
   // identifier (rare - normally the caret sits right after the prefix).
   EndCol := Col;
-  while (EndCol <= Length(Line)) and CharInSet(Line[EndCol], ['A'..'Z','a'..'z','0'..'9','_']) do
+  while (EndCol <= Length(Line)) and IsIdentChar(Line[EndCol]) do
     Inc(EndCol);
   Editor.ReplaceSelection(Ctx.FileName, Ctx.Line, StartCol, Ctx.Line, EndCol, Pad + AText);
 end;

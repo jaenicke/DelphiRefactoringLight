@@ -228,6 +228,22 @@ var
     Result := False;
   end;
 
+  // The temps of all withs in ONE method share its var section, and they
+  // were merged by NAME alone (audit #41, M40c): two withs whose temp
+  // happens to be called the same but has a DIFFERENT type then shared
+  // one declaration, and the second rewrite worked on a variable of the
+  // wrong type. A name/type clash answers False here and the item is left
+  // out instead.
+  function DeclConflicts(const AArr: TArray<TClassicVarDecl>;
+    const ADecl: TClassicVarDecl): Boolean;
+  var K: Integer;
+  begin
+    for K := 0 to High(AArr) do
+      if SameText(AArr[K].Name, ADecl.Name) then
+        Exit(not SameText(AArr[K].TypeName, ADecl.TypeName));
+    Result := False;
+  end;
+
   procedure AppendDecl(var AArr: TArray<TClassicVarDecl>;
     const ADecl: TClassicVarDecl);
   var K: Integer;
@@ -266,6 +282,27 @@ begin
       begin
         Inc(ASkipped);
         Continue;
+      end;
+
+      // A temp that collides with another with's temp of the same name
+      // but another type (audit #41, M40c): leave the item out rather
+      // than letting the two share one declaration. Checked BEFORE the
+      // body edit is emitted, so nothing of this item is written.
+      if Item.Classic.MethodKey <> '' then
+      begin
+        var Clash := False;
+        if ByMethod.TryGetValue(Item.Classic.MethodKey, MA) then
+          for J := 0 to High(Item.Classic.VarDecls) do
+            if DeclConflicts(MA.AllDecls, Item.Classic.VarDecls[J]) then
+            begin
+              Clash := True;
+              Break;
+            end;
+        if Clash then
+        begin
+          Inc(ASkipped);
+          Continue;
+        end;
       end;
 
       // 1) Body-replacement edit.

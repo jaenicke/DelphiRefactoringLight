@@ -117,6 +117,10 @@ type
     ///  False so the host editor still gets Enter / Up / Down for
     ///  normal keystroke handling.</summary>
     function IsActive: Boolean;
+    /// <summary>Enter / Tab would really insert something: a FILTERED
+    ///  item is selected. IsActive only says the popup holds items at
+    ///  all (audit #39, M36b).</summary>
+    function HasSelection: Boolean;
 
     property OnInsert: TCompletionInsertEvent read FOnInsert write FOnInsert;
     property OnGenerate: TCompletionGenerateEvent read FOnGenerate write FOnGenerate;
@@ -170,13 +174,41 @@ begin
       Exit(1);                // nonzero = discard the keystroke
     end;
     if GHookPopup.IsActive then
-      case WParam of
-        VK_UP:     begin GHookPopup.MoveSelection(-1); Exit(1); end;
-        VK_DOWN:   begin GHookPopup.MoveSelection(1);  Exit(1); end;
-        VK_PRIOR:  begin GHookPopup.MoveSelection(-8); Exit(1); end;
-        VK_NEXT:   begin GHookPopup.MoveSelection(8);  Exit(1); end;
-        VK_RETURN,
-        VK_TAB:    begin GHookPopup.InsertSelected;    Exit(1); end;
+      // Nothing may escape from here: this runs inside the WH_KEYBOARD
+      // dispatcher, where an exception unwinds through Windows' own hook
+      // chain (audit #39, M36c).
+      try
+        case WParam of
+          VK_UP:     begin GHookPopup.MoveSelection(-1); Exit(1); end;
+          VK_DOWN:   begin GHookPopup.MoveSelection(1);  Exit(1); end;
+          VK_PRIOR:  begin GHookPopup.MoveSelection(-8); Exit(1); end;
+          VK_NEXT:   begin GHookPopup.MoveSelection(8);  Exit(1); end;
+          VK_RETURN,
+          VK_TAB:
+            // Only when there is something TO insert: with an empty
+            // filter result we used to swallow the key and insert
+            // nothing, so the user lost the line break (audit #39,
+            // M36b). Then the popup gets out of the way and the key
+            // does what it normally does.
+            if GHookPopup.HasSelection then
+            begin
+              GHookPopup.InsertSelected;
+              Exit(1);
+            end
+            else
+            begin
+              GHookPopup.HidePopup;
+              Exit(CallNextHookEx(GKeyHook, Code, WParam, LParam));
+            end;
+        end;
+      except
+        on E: Exception do
+        begin
+          // The popup is in an unknown state - take it off screen and let
+          // the key through rather than eating it.
+          try GHookPopup.HidePopup; except end;
+          Exit(CallNextHookEx(GKeyHook, Code, WParam, LParam));
+        end;
       end;
     // Loading state / other keys: fall through - typing stays normal.
   end;
@@ -453,6 +485,15 @@ end;
 function TCompletionPopup.IsActive: Boolean;
 begin
   Result := IsOnScreen and (Length(FAllItems) > 0);
+end;
+
+function TCompletionPopup.HasSelection: Boolean;
+begin
+  // IsActive looks at the UNFILTERED list, which is what makes Enter
+  // reachable while nothing matches what the user typed (audit #39,
+  // M36b). This is the honest test for "Enter would insert something".
+  Result := IsOnScreen and (FFilteredItems <> nil) and (FFilteredItems.Count > 0)
+    and (FListBox.ItemIndex >= 0);
 end;
 
 procedure TCompletionPopup.MoveSelection(ADelta: Integer);

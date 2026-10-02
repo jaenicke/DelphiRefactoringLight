@@ -2127,12 +2127,15 @@ begin
       begin
         // locate the expression on the line - at "column" when given,
         // else its first occurrence
-        var P := 0;
-        if Col1 >= 1 then P := Pos(Expr, LineText, Col1);
-        if P = 0 then P := Pos(Expr, LineText);
+        // Only a CODE occurrence on identifier boundaries counts: a
+        // plain Pos() picked the "Count" inside 'Count: ' and matched
+        // "Idx" inside "MaxIdx" (audit #39, L7d).
+        var P := CodeOccurrenceOf(LineText, Expr, Col1);
         if P = 0 then
         begin
-          Msg := 'the expression is not on line ' + IntToStr(L1);
+          Msg := Format('the expression is not on line %d as code ' +
+            '(a match inside a string, a comment or another identifier ' +
+            'does not count)', [L1]);
           Exit;
         end;
         Start0 := P - 1;

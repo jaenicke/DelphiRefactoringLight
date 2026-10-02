@@ -446,6 +446,20 @@ type
   ///  decides: a second file of the same unit name is left out of the
   ///  uses graph and must be NAMED (L3k), and the library path has to be
   ///  expanded per PLATFORM instead of always for Win32 (L3c).</summary>
+  /// <summary>Audit issue #39, the four items of its remainder that pure
+  ///  code decides: extract method must see every WRITE in the block
+  ///  (L7f) and refuse a name that is no identifier (L7e), the MCP
+  ///  extract_variable must match its expression as CODE (L7d), and an
+  ///  LF-only buffer is more than one line (L7p).</summary>
+  [TestFixture]
+  TExtractAndCompletionTests = class
+  public
+    [Test] procedure EveryWriteInTheBlockIsFound;
+    [Test] procedure AMethodNameMustBeAnIdentifier;
+    [Test] procedure TheExpressionIsMatchedAsCode;
+    [Test] procedure LinesAreSplitOnEveryLineBreakStyle;
+  end;
+
   [TestFixture]
   TCheckScopeTests = class
   public
@@ -472,7 +486,7 @@ uses
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
-  Expert.SemanticReplace, System.StrUtils;
+  Expert.SemanticReplace, Expert.SelectionValidator, System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -3076,6 +3090,96 @@ end;
 
 
 
+
+{ TExtractAndCompletionTests }
+
+procedure TExtractAndCompletionTests.EveryWriteInTheBlockIsFound;
+var
+  Written: TArray<string>;
+
+  function Has(const AName: string): Boolean;
+  begin
+    Result := False;
+    for var S in Written do
+      if SameText(S, AName) then Exit(True);
+  end;
+
+begin
+  // Only "^identifier :=" counted, so these three made N / I / S a CONST
+  // parameter and the extracted method did not compile.
+  Written := WrittenIdentifiersIn([
+    '  Inc(N);',
+    '  for I := 0 to 9 do',
+    '    ReadLn(S);',
+    '  Total := Total + 1;',
+    '  Other.Field := 2;',       // a member, not a local
+    '  if Flag then Count := 1;' // an assignment that does not start the line
+  ]);
+  Assert.IsTrue(Has('N'), 'Inc(N) writes N');
+  Assert.IsTrue(Has('I'), 'the for-loop variable is written');
+  Assert.IsTrue(Has('S'), 'ReadLn(S) writes S');
+  Assert.IsTrue(Has('Total'), 'a plain assignment');
+  Assert.IsTrue(Has('Count'), 'an assignment after "then"');
+  Assert.IsFalse(Has('Flag'), 'a condition is only read');
+
+  // Nothing inside a comment or a string counts.
+  Written := WrittenIdentifiersIn([
+    '  // Hidden := 1;',
+    '  S := ''Quoted := 2'';',
+    '  { Blocked := 3 }'
+  ]);
+  Assert.IsTrue(Has('S'), 'the real assignment');
+  Assert.IsFalse(Has('Hidden'), 'a // comment');
+  Assert.IsFalse(Has('Quoted'), 'a string literal');
+  Assert.IsFalse(Has('Blocked'), 'a block comment');
+end;
+
+procedure TExtractAndCompletionTests.AMethodNameMustBeAnIdentifier;
+begin
+  Assert.AreEqual('', MethodNameProblem('DoSomething'), 'a plain name');
+  Assert.AreEqual('', MethodNameProblem('_Do2'), 'digits and underscore');
+  Assert.IsTrue(MethodNameProblem('') <> '', 'empty');
+  Assert.IsTrue(ContainsText(MethodNameProblem('2Foo'), 'identifier'),
+    '2Foo is no identifier');
+  Assert.IsTrue(MethodNameProblem('My Method') <> '', 'a blank inside');
+  Assert.IsTrue(ContainsText(MethodNameProblem('begin'), 'reserved'),
+    'begin is a reserved word');
+  Assert.IsTrue(ContainsText(MethodNameProblem('BEGIN'), 'reserved'),
+    '... whatever its case');
+end;
+
+procedure TExtractAndCompletionTests.TheExpressionIsMatchedAsCode;
+const
+  LineA = '  X := ''Count: '' + IntToStr(Count);';
+  LineB = '  Y := MaxIdx + Idx;';
+begin
+  // The string literal must not win over the real occurrence.
+  var P := CodeOccurrenceOf(LineA, 'Count', 0);
+  Assert.IsTrue(P > 0, 'there IS a code occurrence');
+  Assert.AreEqual('Count);', Copy(LineA, P, 7), 'and it is the argument');
+  // "Idx" must not match inside "MaxIdx".
+  P := CodeOccurrenceOf(LineB, 'Idx', 0);
+  Assert.IsTrue(P > 0, 'Idx occurs on its own too');
+  Assert.AreEqual(' Idx;', Copy(LineB, P - 1, 5), 'the standalone one');
+  // Nothing to find at all.
+  Assert.AreEqual(0, CodeOccurrenceOf('  // Count', 'Count', 0),
+    'a comment is no occurrence');
+  Assert.AreEqual(0, CodeOccurrenceOf('  S := ''Count'';', 'Count', 0),
+    'a string is no occurrence');
+  // An expression that is not an identifier keeps working.
+  Assert.IsTrue(CodeOccurrenceOf('  X := A + B;', 'A + B', 0) > 0,
+    'a composed expression');
+end;
+
+procedure TExtractAndCompletionTests.LinesAreSplitOnEveryLineBreakStyle;
+begin
+  Assert.AreEqual(3, Integer(Length(SplitEditorLines('a'#10'b'#10'c'))), 'LF only');
+  Assert.AreEqual(3, Integer(Length(SplitEditorLines('a'#13#10'b'#13#10'c'))), 'CRLF');
+  Assert.AreEqual(3, Integer(Length(SplitEditorLines('a'#13'b'#13'c'))), 'CR only');
+  var L := SplitEditorLines('unit U;'#10'interface'#10);
+  Assert.AreEqual('interface', L[1], 'and the lines themselves are right');
+end;
+
 { TCheckScopeTests }
 
 procedure TCheckScopeTests.ADuplicateUnitNameIsReportedAsSkipped;
@@ -3344,5 +3448,6 @@ initialization
   TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
   TDUnitX.RegisterTestFixture(TUnitRenameScopeTests);
   TDUnitX.RegisterTestFixture(TCheckScopeTests);
+  TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
 
 end.

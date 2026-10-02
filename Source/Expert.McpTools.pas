@@ -90,6 +90,15 @@ function UnitNameSelfCheck(const ANames: TArray<string>): string;
 ///  reviewed Foo.</summary>
 function PreviewArgsFingerprint(AArgs: TJSONObject): string;
 
+/// <summary>1-based position of AEXPR in ALINE as CODE: not inside a
+///  comment or a string literal, and - when AEXPR starts and ends with an
+///  identifier character - on identifier boundaries, so "Idx" does not
+///  match inside "MaxIdx". Searching from AFROMCOL when that is >= 1,
+///  else from the start; 0 when there is no such occurrence. The MCP
+///  extract_variable used a plain Pos() and happily picked the "Count"
+///  inside 'Count: ' (audit #39, L7d).</summary>
+function CodeOccurrenceOf(const ALine, AExpr: string; AFromCol: Integer): Integer;
+
 function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
   const AContents: TArray<string>): string; overload;
 /// <summary>With the call's ARGUMENTS, so the apply can be refused when
@@ -276,6 +285,47 @@ var
   GPreviews: TDictionary<string, TPreviewEntry> = nil;
   GPreviewLock: TObject = nil;
   GPreviewCounter: Integer = 0;
+
+function CodeOccurrenceOf(const ALine, AExpr: string; AFromCol: Integer): Integer;
+var
+  Masked: TArray<string>;
+  M: string;
+  Start: Integer;
+begin
+  Result := 0;
+  if (ALine = '') or (AExpr = '') then Exit;
+  Masked := MaskCommentsAndStrings([ALine]);
+  if Length(Masked) = 0 then Exit;
+  M := Masked[0];
+  Start := 1;
+  var Restarted := False;
+  if AFromCol >= 1 then Start := AFromCol;
+  while Start <= Length(ALine) do
+  begin
+    var P := Pos(AExpr, ALine, Start);
+    if P = 0 then
+    begin
+      // Nothing (more) from here on. The caller's column is only a hint,
+      // so try the whole line - ONCE: restarting again after a rejected
+      // match would loop forever (found by the suite hanging).
+      if Restarted or (Start = 1) then Exit;
+      Restarted := True;
+      Start := 1;
+      Continue;
+    end;
+    Start := P + 1;
+    // Code, not a comment or a string: the masked copy keeps every
+    // position, so an unchanged character is code.
+    if (P + Length(AExpr) - 1 > Length(M)) or (M[P] <> ALine[P]) then Continue;
+    // Whole-token when the expression itself begins / ends like an
+    // identifier - "Idx" must not match inside "MaxIdx".
+    if IsIdentChar(AExpr[1]) and (P > 1) and IsIdentChar(ALine[P - 1]) then Continue;
+    var After := P + Length(AExpr);
+    if IsIdentChar(AExpr[Length(AExpr)]) and (After <= Length(ALine))
+      and IsIdentChar(ALine[After]) then Continue;
+    Exit(P);
+  end;
+end;
 
 function PreviewArgsFingerprint(AArgs: TJSONObject): string;
 var

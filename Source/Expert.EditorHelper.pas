@@ -27,6 +27,7 @@ type
     function GetCurrentContext: TEditorContext;
     function GetActiveFileName: string;
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+    function RawColumn(const AFile: string; ALine, ADisplayCol: Integer): Integer;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -161,6 +162,44 @@ begin
   Module := EditBuffer.Module;
   if Module <> nil then
     Result := Module.FileName;
+end;
+
+
+function TIDEEditorHelper.RawColumn(const AFile: string; ALine,
+  ADisplayCol: Integer): Integer;
+var
+  EditorServices: IOTAEditorServices;
+  Buf: IOTAEditBuffer;
+  View: IOTAEditView;
+  EdPos: TOTAEditPos;
+  ChPos: TOTACharPos;
+  Content: string;
+  Lines: TArray<string>;
+begin
+  Result := ADisplayCol;
+  if (ALine < 1) or (ADisplayCol < 1) then Exit;
+  // A line without a tab needs no conversion - and that is the normal
+  // case, so it must not depend on any IDE service being reachable.
+  if ReadEditorContent(AFile, Content) then
+  begin
+    Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+    if (ALine <= Length(Lines)) and (Pos(#9, Lines[ALine - 1]) = 0) then Exit;
+  end;
+  if not Supports(BorlandIDEServices, IOTAEditorServices, EditorServices) then Exit;
+  Buf := EditorServices.TopBuffer;
+  if (Buf = nil) or not SameFileName(Buf.FileName, AFile) then Exit;
+  View := Buf.TopView;         // ConvertPos lives on the VIEW
+  if View = nil then Exit;
+  EdPos.Line := ALine;
+  EdPos.Col := ADisplayCol;
+  ChPos.Line := ALine;
+  ChPos.CharIndex := 0;
+  try
+    View.ConvertPos(True, EdPos, ChPos);   // EdPos -> CharPos
+    if ChPos.CharIndex >= 0 then Result := ChPos.CharIndex + 1;
+  except
+    // keep the display column - better than refusing to complete
+  end;
 end;
 
 function TIDEEditorHelper.GetCaretLineCol(out ALine, ACol: Integer): Boolean;

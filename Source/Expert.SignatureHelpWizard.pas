@@ -114,7 +114,8 @@ implementation
 
 uses
   System.Types, System.StrUtils, System.Math, System.Generics.Collections,
-  Expert.LspManager, Lsp.Client, Expert.WorkerLatch, Expert.DialogHelper;
+  Expert.LspManager, Lsp.Client, Expert.WorkerLatch, Expert.DialogHelper,
+  Expert.PascalScanner;
 
 const
   PadX = 8;
@@ -423,7 +424,7 @@ function TLspSignatureHelpWizard.ComputeActiveParam(const ALines: TArray<string>
 var
   L, Col, EndCol, Depth, Commas: Integer;
   Line: string;
-  InStr, InComment: Boolean;
+  InStr, InComment, InStar: Boolean;
   Ch: Char;
 begin
   Result := 0;
@@ -437,6 +438,7 @@ begin
   Commas := 0;
   InStr := False;
   InComment := False;
+  InStar := False;
 
   L := FTriggerLine;
   Col := FTriggerCol;
@@ -456,6 +458,15 @@ begin
       begin
         if Ch = '}' then InComment := False;
       end
+      else if InStar then
+      begin
+        // (* ... *) - closes on the PAIR, so look one char ahead
+        if (Ch = '*') and (Col < Length(Line)) and (Line[Col + 1] = ')') then
+        begin
+          InStar := False;
+          Inc(Col);
+        end;
+      end
       else if InStr then
       begin
         if Ch = '''' then InStr := False;
@@ -464,7 +475,22 @@ begin
         case Ch of
           '''': InStr := True;
           '{':  InComment := True;
-          '(':  Inc(Depth);
+          '/':
+            // A // comment runs to the end of the line: the commas in
+            // "Foo(A, // x, y" used to count (audit #39, L7s).
+            if (Col < Length(Line)) and (Line[Col + 1] = '/') then
+            begin
+              Col := EndCol + 1;
+              Continue;
+            end;
+          '(':
+            if (Col < Length(Line)) and (Line[Col + 1] = '*') then
+            begin
+              InStar := True;
+              Inc(Col);
+            end
+            else
+              Inc(Depth);
           ')':
             begin
               Dec(Depth);
@@ -550,7 +576,7 @@ begin
   Context := Editor.GetCurrentContext;
   if not Context.IsValid then Exit;
   if not Editor.ReadEditorContent(Context.FileName, Content) then Exit;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   if (Context.Line < 1) or (Context.Line > Length(Lines)) then Exit;
   Line := Lines[Context.Line - 1];
   Ident := FindIdentBeforeOpenParen(Line, Context.Column, IdentCol);
@@ -705,10 +731,23 @@ var
   NewActive: Integer;
 begin
   if not FActive then Exit;
+  // The caret belongs to whatever file is ACTIVE; after a tab switch that
+  // is not the file the popup was triggered in, and applying it there
+  // moved the active parameter of a call in another unit (audit #39,
+  // L7s). A switch dismisses the popup instead.
+  if (Editor <> nil) and (FTriggerFile <> '') then
+  begin
+    var Active := Editor.GetActiveFileName;
+    if (Active <> '') and not SameFileName(Active, FTriggerFile) then
+    begin
+      HidePopup;
+      Exit;
+    end;
+  end;
   // If we have not received the async response yet, leave the popup
   // alone - it will catch up via the queued result handler.
   if not Editor.ReadEditorContent(FTriggerFile, Content) then Exit;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   NewActive := ComputeActiveParam(Lines, ALine, ACol, StillInside);
   if not StillInside then
   begin
@@ -731,7 +770,7 @@ begin
   Context := Editor.GetCurrentContext;
   if not Context.IsValid then Exit;
   if not Editor.ReadEditorContent(Context.FileName, Content) then Exit;
-  Lines := Content.Split([sLineBreak], TStringSplitOptions.None);
+  Lines := SplitEditorLines(Content);
   if not FindEnclosingOpenParen(Lines, Context.Line, Context.Column,
        OpenLine, OpenCol, Ident, IdentCol) then
   begin

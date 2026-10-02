@@ -122,6 +122,7 @@ type
     function GetCurrentContext: TEditorContext;
     function GetActiveFileName: string;
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+    function RawColumn(const AFile: string; ALine, ADisplayCol: Integer): Integer;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -354,6 +355,15 @@ end;
 function TStandaloneEditorHelper.GetActiveFileName: string;
 begin
   Result := FState.ActiveFile;
+end;
+
+
+function TStandaloneEditorHelper.RawColumn(const AFile: string; ALine,
+  ADisplayCol: Integer): Integer;
+begin
+  // The standalone editor is a TMemo: no tab expansion of its own, so the
+  // display column IS the string index.
+  Result := ADisplayCol;
 end;
 
 function TStandaloneEditorHelper.GetCaretLineCol(out ALine, ACol: Integer): Boolean;

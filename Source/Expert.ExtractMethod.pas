@@ -11,8 +11,9 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.JSON, System.Types, System.Generics.Collections, System.RegularExpressions,
-  Winapi.Windows, Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.LspManager, Expert.ExtractMethodDialog,
-  Expert.SelectionValidator, Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding;
+  System.Math, Winapi.Windows, Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.LspManager, Expert.ExtractMethodDialog,
+  Expert.SelectionValidator, Lsp.Uri, Lsp.Protocol, Lsp.Client, Delphi.FileEncoding,
+  Expert.DialogHelper, Expert.AutoImport, Expert.UnitIndex;
 
 type
   /// <summary>What an extraction would produce - the review question here
@@ -90,6 +91,10 @@ type
     FPreviewOnly: Boolean;
     FCurrentInfo: TExtractMethodInfo;
     FInfoReady: Boolean;
+    /// <summary>An extraction is running. Its dialog, preview and
+    ///  warm-up all pump messages, so the command can be invoked again
+    ///  from that pump (audit #39, M37e).</summary>
+    FRunning: Boolean;
     procedure UpdatePreview;
     procedure OnMethodNameChange(Sender: TObject);
     function GetSelectedBlock(out AInfo: TExtractMethodInfo): Boolean;
@@ -118,8 +123,11 @@ type
     /// <summary>The four editor writes of one extraction - shared by the
     ///  dialog path and the headless one, so both write the SAME way
     ///  (user request 2026-09-29).</summary>
-    procedure ApplyExtraction(const AInfo: TExtractMethodInfo;
-      const AMethodText, ACallText, ADeclText: string);
+    /// <summary>False + AERROR when one of the writes did not land -
+    ///  nothing after it is attempted (audit #39, M37c).</summary>
+    function ApplyExtraction(const AInfo: TExtractMethodInfo;
+      const AMethodText, ACallText, ADeclText: string;
+      out AError: string): Boolean;
     procedure Status(const AText: string);
   public
     procedure Execute;
@@ -820,6 +828,31 @@ begin
   Result.AddPair('position', Pos);
 end;
 
+// '' when the selection covers its first and last line completely (only
+// whitespace before AStartCol and after AEndCol), else what stands
+// outside it. The apply works on whole lines, so anything else would be
+// lost (audit #39, M37a).
+function BoundaryCodeOutsideSelection(const AFile: string;
+  AStartLine, AStartCol, AEndLine, AEndCol: Integer): string;
+var
+  Content: string;
+  Lines: TArray<string>;
+begin
+  Result := '';
+  if (Editor = nil) or not Editor.ReadEditorContent(AFile, Content) then Exit;
+  Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  if (AStartLine < 1) or (AStartLine > Length(Lines)) then Exit;
+  if (AEndLine < 1) or (AEndLine > Length(Lines)) then Exit;
+  var Before := Copy(Lines[AStartLine - 1], 1, Max(0, AStartCol - 1));
+  if Trim(Before) <> '' then
+    Exit(Format('line %d holds code before the selection ("%s")',
+      [AStartLine, Trim(Before)]));
+  var Tail := Copy(Lines[AEndLine - 1], AEndCol, MaxInt);
+  if Trim(Tail) <> '' then
+    Exit(Format('line %d holds code after the selection ("%s")',
+      [AEndLine, Trim(Tail)]));
+end;
+
 function TLspExtractMethodWizard.GetSelectedBlock(out AInfo: TExtractMethodInfo): Boolean;
 begin
   Result := False;
@@ -835,6 +868,21 @@ begin
   // that line does NOT belong to the selection
   if AInfo.EndCol = 1 then Dec(AInfo.EndLine);
   if Trim(AInfo.SelectedText) = '' then begin MessageDlg('Selection is empty.', mtWarning, [mbOK], 0); Exit; end;
+  // THE APPLY REPLACES WHOLE LINES (StartLine,1 .. EndLine+1,1), while
+  // only the SELECTION is analysed - so code left of the start or right
+  // of the end on those lines was deleted and did not turn up in the new
+  // routine either (audit #39, M37a). Selecting "DoB; DoC;" out of
+  // "DoA; DoB; DoC;" silently lost DoA.
+  var Outside := BoundaryCodeOutsideSelection(AInfo.FileName,
+    AInfo.StartLine, AInfo.StartCol, AInfo.EndLine, AInfo.EndCol);
+  if Outside <> '' then
+  begin
+    MessageDlg('This selection cannot be extracted: ' + Outside + '.' + sLineBreak +
+      sLineBreak + 'Extract method replaces whole lines, so select the ' +
+      'complete statements (from the start of the first line to the end of ' +
+      'the last).', mtWarning, [mbOK], 0);
+    Exit;
+  end;
   var Lines := AInfo.SelectedText.Split([#10]);
   var MinI := MaxInt;
   for var L in Lines do begin var S := L.TrimRight([#13,#10]); if Trim(S)='' then Continue;
@@ -920,7 +968,6 @@ var
   NeedDef: TList<Integer>;
   PL: TList<TExtractedParam>;
   LVL: TList<TLocalVar>;
-  Line: string;
   I: Integer;
 begin
   Result := True;
@@ -934,12 +981,12 @@ begin
     AInfo.DiagLog := AInfo.DiagLog + '=== Variable analysis (parallel) ===' + sLineBreak;
     // Collect identifiers
     if FDialog<>nil then FDialog.SetStatus('Collecting identifiers...');
-    for I := 0 to High(Lines) do
-    begin
-      Line := Lines[I].TrimRight([#13,#10]);
-      var AM := TRegEx.Match(Line, '^\s*(\w+)\s*:=');
-      if AM.Success then Assigned_.AddOrSetValue(UpperCase(AM.Groups[1].Value), True);
-    end;
+    // Every identifier the TEXT shows being written - not just
+    // "^identifier :=" (audit #39, L7f): a block with Inc(N) or
+    // "for I := 0 to 9" used to make N / I a CONST parameter, and the
+    // extracted method then did not compile.
+    for var WName in WrittenIdentifiersIn(Lines) do
+      Assigned_.AddOrSetValue(WName, True);
     for var ET in ExtractBlockTokens(AInfo.SelectedText, AInfo.StartLine, AInfo.StartCol) do
     begin
       var TI: TTokenInfo;
@@ -1222,40 +1269,88 @@ function TLspExtractMethodWizard.FindInsertPoint(var AInfo: TExtractMethodInfo):
 var
   FL: TArray<string>;
   I: Integer;
-  U: string;
 begin
-  FL := TDelphiFileEncoding.ReadLines(AInfo.FileName);
+  // The BUFFER, not the disk: the apply edits the buffer by line number,
+  // so an unsaved edit above the block would shift everything.
+  var FContent: string;
+  if (Editor <> nil) and Editor.ReadEditorContent(AInfo.FileName, FContent) then
+    FL := FContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10])
+  else
+    FL := TDelphiFileEncoding.ReadLines(AInfo.FileName);
   AInfo.EnclosingClass := ''; AInfo.InsertLine := AInfo.StartLine; AInfo.ClassDeclLine := -1;
   for I := AInfo.StartLine-2 downto 0 do
   begin
-    U := UpperCase(Trim(FL[I]));
-    if U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ') or
-       U.StartsWith('CONSTRUCTOR ') or U.StartsWith('DESTRUCTOR ') then
-    begin
-      AInfo.InsertLine := I+1;
-      var L := Trim(FL[I]); var DP := Pos('.', L);
-      if DP>0 then begin var AK := Trim(Copy(L, Pos(' ',L)+1));
-        AInfo.EnclosingClass := Copy(AK, 1, Pos('.',AK)-1); end;
-      Break;
-    end;
+    // 'class procedure TFoo.Bar' is a header too, and an ANONYMOUS
+    // 'procedure (A: Integer)' is none - the old test missed the first
+    // and accepted the second, so the insert point could end up in the
+    // previous routine (audit #39, M37d). IsHeaderLine knows both.
+    var HKind: string;
+    var HIsClass: Boolean;
+    if not IsHeaderLine(FL[I], HKind, HIsClass) then Continue;
+    AInfo.InsertLine := I+1;
+    // The owner type of an implementation header, generics and nested
+    // types included - the old code cut at the first '.' by hand.
+    AInfo.EnclosingClass := OwnerTypeOfImplHeader(FL[I]);
+    Break;
   end;
   if AInfo.EnclosingClass<>'' then
   begin
-    var CP := UpperCase(AInfo.EnclosingClass+' = CLASS');
     for I := 0 to Length(FL)-1 do
     begin
-      U := UpperCase(Trim(FL[I]));
-      if Pos(CP, U)>0 then
+      // ClassOpenerName answers only for a real class/record opener, so a
+      // FORWARD declaration ('TFoo = class;') no longer matches - it used
+      // to, and the declaration was then placed in the wrong spot.
+      if not SameText(ClassOpenerName(FL[I]), AInfo.EnclosingClass) then Continue;
+      // The declaration goes at the END of the first private section (or
+      // of the default one when there is none): a METHOD may follow
+      // fields, but a FIELD may not follow methods - inserting right
+      // after the 'private' line put our declaration in front of the
+      // existing fields, which is E2169 (audit #39, M37d).
+      var SectionStart := I + 1;
+      var Found := False;
+      for var J := I+1 to Length(FL)-1 do
       begin
-        for var J := I+1 to Length(FL)-1 do
+        var SU := UpperCase(Trim(FL[J]));
+        if (SU='PRIVATE') or SU.StartsWith('PRIVATE ')
+          or SU.StartsWith('STRICT PRIVATE') then
+        begin
+          SectionStart := J + 1;
+          Found := True;
+          Break;
+        end;
+        if (SU='PUBLIC') or SU.StartsWith('PUBLIC ')
+          or (SU='PROTECTED') or SU.StartsWith('PROTECTED ')
+          or (SU='PUBLISHED') or SU.StartsWith('PUBLISHED ')
+          or SU.StartsWith('END;') or (SU='END') then
+        begin
+          // No private section: put it before the first other section,
+          // i.e. at the end of the default one.
+          AInfo.ClassDeclLine := J + 1;
+          Found := True;
+          Break;
+        end;
+      end;
+      if Found and (AInfo.ClassDeclLine < 0) then
+      begin
+        // End of the private section = the next visibility keyword or the
+        // class's own 'end'.
+        AInfo.ClassDeclLine := SectionStart + 1;
+        for var J := SectionStart to Length(FL)-1 do
         begin
           var SU := UpperCase(Trim(FL[J]));
-          if (SU='PRIVATE') or SU.StartsWith('PRIVATE ') then begin AInfo.ClassDeclLine:=J+2; Break; end;
-          if (SU='PUBLIC') or SU.StartsWith('PUBLIC ') then begin AInfo.ClassDeclLine:=J+1; Break; end;
-          if SU.StartsWith('END;') then begin AInfo.ClassDeclLine:=J+1; Break; end;
+          if (SU='PRIVATE') or SU.StartsWith('PRIVATE ')
+            or (SU='PUBLIC') or SU.StartsWith('PUBLIC ')
+            or (SU='PROTECTED') or SU.StartsWith('PROTECTED ')
+            or (SU='PUBLISHED') or SU.StartsWith('PUBLISHED ')
+            or SU.StartsWith('STRICT ')
+            or SU.StartsWith('END;') or (SU='END') then
+          begin
+            AInfo.ClassDeclLine := J + 1;
+            Break;
+          end;
         end;
-        Break;
       end;
+      Break;
     end;
   end;
   Result := True;
@@ -1659,9 +1754,12 @@ begin
   if not FInfoReady then Exit;
   // Take MethodName from the current dialog value
   FCurrentInfo.MethodName := FDialog.GetMethodName;
-  if FCurrentInfo.MethodName = '' then
+  // '2Foo', 'My Method' or 'begin' used to be accepted and produced code
+  // that does not compile (audit #39, L7e).
+  var NameProblem := MethodNameProblem(FCurrentInfo.MethodName);
+  if NameProblem <> '' then
   begin
-    FDialog.SetPreviewText('Please enter a method name.');
+    FDialog.SetPreviewText(NameProblem);
     FDialog.EnableExtract(False);
     Exit;
   end;
@@ -1773,8 +1871,10 @@ begin
     APreview.ParamCount := Length(Info.Params);
     APreview.LocalCount := Length(Info.LocalVars);
     if AApply then
-      W.ApplyExtraction(Info, APreview.MethodText, APreview.CallText,
-        APreview.DeclText);
+      // A failed write is an ERROR, not a success with a nice preview
+      // (audit #39, M37c).
+      if not W.ApplyExtraction(Info, APreview.MethodText, APreview.CallText,
+        APreview.DeclText, AError) then Exit;
     Result := True;
   finally
     W.Free;
@@ -1891,17 +1991,27 @@ begin
   if FDialog <> nil then FDialog.SetBusy(False);
 end;
 
-procedure TLspExtractMethodWizard.ApplyExtraction(const AInfo: TExtractMethodInfo;
-  const AMethodText, ACallText, ADeclText: string);
+function TLspExtractMethodWizard.ApplyExtraction(const AInfo: TExtractMethodInfo;
+  const AMethodText, ACallText, ADeclText: string; out AError: string): Boolean;
 var
   Client: TLspClient;
 begin
+  Result := False;
+  AError := '';
+  // EVERY editor write is checked now (audit #39, M37c): when the replace
+  // did not land, the routine and the declaration were inserted anyway
+  // and the locals removed - and the user was told the extraction had
+  // worked.
   // Replace the block with the call, byte-exact via Writer (no auto-indent).
   // Delete from (StartLine, 1) to the start of the line after EndLine so that
   // indentation and the trailing newline of the block are removed too.
-  Editor.ReplaceSelection(AInfo.FileName,
+  if not Editor.ReplaceSelection(AInfo.FileName,
     AInfo.StartLine, 1, AInfo.EndLine + 1, 1,
-    ACallText + #13#10);
+    ACallText + #13#10) then
+  begin
+    AError := 'the selected block could not be replaced - nothing was changed';
+    Exit;
+  end;
 
   // Insert the new method and class declaration via a direct Writer
   // (avoids the IDE's auto-indent)
@@ -1911,9 +2021,19 @@ begin
   if Length(AInfo.LocalVars)>0 then
     RemoveLocalVarsFromDeclaration(AInfo);
 
-  Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.InsertLine, AMethodText);
+  if not Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.InsertLine, AMethodText) then
+  begin
+    AError := 'the call replaced the block, but the new routine could not be ' +
+      'inserted - press Ctrl+Z and try again';
+    Exit;
+  end;
   if (AInfo.ClassDeclLine>0) and (ADeclText<>'') then
-    Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.ClassDeclLine, ADeclText);
+    if not Editor.InsertTextAtLineStart(AInfo.FileName, AInfo.ClassDeclLine, ADeclText) then
+    begin
+      AError := 'the routine was inserted, but its declaration in the class ' +
+        'was not - add it by hand or press Ctrl+Z';
+      Exit;
+    end;
 
   // Notify the form designer about class changes
   Editor.NotifyClassStructureChanged(AInfo.FileName);
@@ -1921,14 +2041,26 @@ begin
   try Client := TLspManager.Instance.GetClient(Editor.GetProjectRoot,
     Editor.GetCurrentProjectDproj, Editor.FindDelphiLspJson);
     Client.RefreshDocument(AInfo.FileName); except end;
+  Result := True;
 end;
 
 procedure TLspExtractMethodWizard.Execute;
 var
   Info: TExtractMethodInfo;
-  NMC, CC, CDC: string;
+  NMC, CC, CDC, ApplyErr: string;
 begin
+  // The run below pumps messages (the warm-up, the preview, ShowModal),
+  // so the command can be invoked again from that pump - which used to
+  // overwrite FDialog, leak the first one and let the first invocation
+  // continue on nil (audit #39, M37e).
+  if FRunning then
+  begin
+    ShowThemedMessage('Extract method is already running - finish or cancel ' +
+      'that dialog first.');
+    Exit;
+  end;
   if not GetSelectedBlock(Info) then Exit;
+  FRunning := True;
   FInfoReady := False;
   FDialog := TExtractMethodDialog.CreateDialog(Application.MainForm, 'ExtractedMethod');
   try
@@ -1945,9 +2077,16 @@ begin
     if Info.MethodName='' then Exit;
     NMC := GenerateMethod(Info); CC := GenerateCall(Info);
     if Info.EnclosingClass<>'' then CDC := GenerateClassDeclaration(Info) else CDC := '';
-    ApplyExtraction(Info, NMC, CC, CDC);
-    MessageDlg('Method "'+Info.MethodName+'" extracted. Ctrl+Z to undo.', mtInformation, [mbOK], 0);
-  finally FDialog.Free; FDialog := nil; end;
+    if ApplyExtraction(Info, NMC, CC, CDC, ApplyErr) then
+      MessageDlg('Method "'+Info.MethodName+'" extracted. Ctrl+Z to undo.',
+        mtInformation, [mbOK], 0)
+    else
+      ShowThemedMessage('The method was NOT extracted: ' + ApplyErr + '.');
+  finally
+    FDialog.Free;
+    FDialog := nil;
+    FRunning := False;
+  end;
 end;
 
 end.

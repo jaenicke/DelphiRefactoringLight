@@ -70,6 +70,16 @@ type
     ///  CHEAP and read-only like GetActiveFileName (never moves the edit
     ///  position). False when no editor is active.</summary>
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+    /// <summary>The 1-based STRING index in ALINE that the IDE's 1-based
+    ///  DISPLAY column ADISPLAYCOL points at. The two differ as soon as
+    ///  the line contains a TAB: CursorPos.Col is tab-expanded, and using
+    ///  it as a string index made the completion replace the wrong span
+    ///  ("<Tab>Foo.Ba" + "Bar" became "<Tab>Foo.        Bar", audit #39,
+    ///  M36a). The IDE converts it for us (IOTAEditBuffer.ConvertPos);
+    ///  outside the IDE, and for a line without tabs, the answer is
+    ///  ADISPLAYCOL itself.</summary>
+    function RawColumn(const AFile: string; ALine, ADisplayCol: Integer): Integer;
+
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;

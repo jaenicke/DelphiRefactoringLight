@@ -88,6 +88,7 @@ type
     function GetCurrentContext: TEditorContext;
     function GetActiveFileName: string;
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+    function RawColumn(const AFile: string; ALine, ADisplayCol: Integer): Integer;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -162,6 +163,12 @@ end;
 function TAuditFakeEditor.GetActiveFileName: string;
 begin
   Result := '';
+end;
+
+function TAuditFakeEditor.RawColumn(const AFile: string; ALine,
+  ADisplayCol: Integer): Integer;
+begin
+  Result := ADisplayCol;   // no tab expansion in a test stand-in
 end;
 
 function TAuditFakeEditor.GetCaretLineCol(out ALine, ACol: Integer): Boolean;

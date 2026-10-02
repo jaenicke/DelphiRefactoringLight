@@ -114,6 +114,12 @@ function NameColumnOnLine(const ALine, AName: string; AHint: Integer = -1): Inte
 ///  Masked[L][P] is code iff Masked[L][P] = ALines[L][P].</summary>
 function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 
+/// <summary>ACONTENT split into lines, whatever its line breaks are -
+///  CRLF, LF or a lone CR. Splitting on sLineBreak alone made an LF-only
+///  buffer ONE line, and the completion then read the wrong one
+///  (audit #39, L7p).</summary>
+function SplitEditorLines(const AContent: string): TArray<string>;
+
 /// <summary>Quote count of a Delphi 12 multi-line string opener at AIndex
 ///  (an odd run of >= 3 apostrophes followed only by blanks up to the line
 ///  end), else 0.</summary>
@@ -513,6 +519,11 @@ begin
         end;
     end;
   Result := False;
+end;
+
+function SplitEditorLines(const AContent: string): TArray<string>;
+begin
+  Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
 end;
 
 function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;

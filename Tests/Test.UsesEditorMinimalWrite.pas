@@ -126,6 +126,7 @@ type
     function GetCurrentContext: TEditorContext;
     function GetActiveFileName: string;
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
+    function RawColumn(const AFile: string; ALine, ADisplayCol: Integer): Integer;
     function GetCurrentProjectDproj: string;
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
@@ -300,6 +301,13 @@ end;
 function TFakeEditor.GetActiveFileName: string;
 begin
   Result := '';
+end;
+
+
+function TFakeEditor.RawColumn(const AFile: string; ALine,
+  ADisplayCol: Integer): Integer;
+begin
+  Result := ADisplayCol;
 end;
 
 function TFakeEditor.GetCaretLineCol(out ALine, ACol: Integer): Boolean;

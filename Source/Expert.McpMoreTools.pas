@@ -2013,10 +2013,11 @@ end;
 // One place for "a planner produced new content -> preview or write".
 function ContentResult(const AFile, AOld, ANewContent, ATool: string;
   ADoApply: Boolean; const AToken: string; AExtra: TJSONObject;
-  AArgs: TJSONObject = nil): string;
+  AArgs: TJSONObject; AStop: THandle): string;
 var
   SL: TStringList;
-  NewContent, Problem, Token: string;
+  NewContent, Problem, Token, RunErr: string;
+  Written: Boolean;
 begin
   Token := AToken;
   NewContent := ANewContent;
@@ -2033,11 +2034,29 @@ begin
         AExtra.Free;
         Exit(McpErr(Problem));
       end;
+      // THE WRITE BELONGS ON THE MAIN THREAD. This runs on a pipe handler
+      // thread, and ApplyLinesMinimal goes through the editor helper -
+      // ToolsAPI, main thread only (Ian's audit, critical 1; our own
+      // main-thread guard reported it live as "1 violation(s) - last:
+      // ReplaceFileContent"). ApplyLinesMinimal also compares the live
+      // buffer against AOld, so a buffer that changed since the plan was
+      // made is refused rather than overwritten.
+      Written := False;
       SL.Text := NewContent;
-      if not ApplyLinesMinimal(AFile, SL, AOld) then
+      if not McpRunOnMain(
+        procedure
+        begin
+          Written := ApplyLinesMinimal(AFile, SL, AOld);
+        end, False, AStop, RunErr) then
       begin
         AExtra.Free;
-        Exit(McpErr('the change could not be written'));
+        Exit(McpErr(RunErr));
+      end;
+      if not Written then
+      begin
+        AExtra.Free;
+        Exit(McpErr('the change could not be written (the buffer changed ' +
+          'since it was read?) - read the file again and retry'));
       end;
     end
     else
@@ -2070,7 +2089,7 @@ end;
 // so a trailing empty element stays the file's final line break.
 function LinesResult(const AFile, AOld: string; const ANewLines: TArray<string>;
   const ATool: string; ADoApply: Boolean; const AToken: string;
-  AExtra: TJSONObject; AArgs: TJSONObject = nil): string;
+  AExtra: TJSONObject; AArgs: TJSONObject; AStop: THandle): string;
 var
   LB: string;
 begin
@@ -2078,7 +2097,7 @@ begin
   else if Pos(#10, AOld) > 0 then LB := #10
   else LB := sLineBreak;
   Result := ContentResult(AFile, AOld, string.Join(LB, ANewLines), ATool,
-    ADoApply, AToken, AExtra, AArgs);
+    ADoApply, AToken, AExtra, AArgs, AStop);
 end;
 
 function ToolExtractVariable(AArgs: TJSONObject; AStop: THandle): string;
@@ -2169,7 +2188,7 @@ begin
   Extra.AddPair('declaredBeforeLine', TJSONNumber.Create(Plan.StatementLine + 1));
   Extra.AddPair('declaration', Trim(Plan.DeclText));
   Result := LinesResult(F, Content, Plan.NewLines, 'extract_variable', DoApply,
-    ArgStr(AArgs, 'token'), Extra, AArgs);
+    ArgStr(AArgs, 'token'), Extra, AArgs, AStop);
 end;
 
 function ToolWrapTryFinally(AArgs: TJSONObject; AStop: THandle): string;
@@ -2232,7 +2251,7 @@ begin
     Extra.AddPair('cleanup', 'none - a TODO comment is inserted instead; pass ' +
       '"cleanup" with the statement that releases what the block acquires');
   Result := LinesResult(F, Content, NewLines, 'wrap_try_finally', DoApply,
-    ArgStr(AArgs, 'token'), Extra, AArgs);
+    ArgStr(AArgs, 'token'), Extra, AArgs, AStop);
 end;
 
 // apply=false reports the plan only (user request 2026-09-29).
@@ -2453,7 +2472,7 @@ begin
     Exit(McpOk(Extra));
   end;
   Result := ContentResult(F, C, Content, 'cleanup_uses', DoApply,
-    ArgStr(AArgs, 'token'), Extra, AArgs);
+    ArgStr(AArgs, 'token'), Extra, AArgs, AStop);
 end;
 
 

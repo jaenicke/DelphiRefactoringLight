@@ -230,11 +230,13 @@ type
 
 var
   /// <summary>Turn a violation into an exception instead of a counter.
-  ///  OFF by default ON PURPOSE: three MCP tools are known to violate the
-  ///  rule today (reported, fix pending), and a guard that turns a
-  ///  working-by-luck tool into a hard error before the tool is fixed would
-  ///  be a regression of its own. Switch it on once MainThreadViolations
-  ///  stays 0 through a full round of the tools.</summary>
+  ///  Still OFF by default: the three MCP tools that broke the rule
+  ///  (extract_variable, wrap_try_finally, cleanup_uses - they wrote from
+  ///  the pipe handler thread) write through McpRunOnMain since 1.16.29,
+  ///  but that was found by RUNNING them, so the flip waits for one live
+  ///  round in which MainThreadViolations stays 0. Reading the code is not
+  ///  the same evidence - this guard exists because reading it missed the
+  ///  violation twice.</summary>
   StrictMainThread: Boolean = False;
 
 /// <summary>True iff the caller runs on the main thread.</summary>

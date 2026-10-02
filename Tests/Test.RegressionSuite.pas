@@ -476,6 +476,12 @@ type
   TUnitRenameScopeTests = class
   public
     [Test] procedure OnlyUnitPlacesCountForAUnitRename;
+    /// <summary>The same rule over this repository's OWN sources: every
+    ///  entry of every real uses clause must be recognised. A filter that
+    ///  drops one would make a unit rename leave that reference
+    ///  behind - and a fixture cannot cover the shapes a hundred real
+    ///  units have.</summary>
+    [Test] procedure NoRealUsesClauseEntryIsMissed;
     [Test] procedure ThePreviewChangesTheOccurrenceTheApplyChanges;
     [Test] procedure AReintroducedMemberIsAnotherSymbol;
   end;
@@ -3210,6 +3216,68 @@ begin
   Assert.AreEqual(3, Integer(Length(SplitEditorLines('a'#13'b'#13'c'))), 'CR only');
   var L := SplitEditorLines('unit U;'#10'interface'#10);
   Assert.AreEqual('interface', L[1], 'and the lines themselves are right');
+end;
+
+
+procedure TUnitRenameScopeTests.NoRealUsesClauseEntryIsMissed;
+var
+  Dir, Content: string;
+  Files: TArray<string>;
+  Checked, Missed: Integer;
+  MissedWhere: string;
+begin
+  // The repository's own Source folder, found from the test exe (…\Tests\Win32\Debug).
+  // Walk up from the test exe until the repository's Source folder is
+  // there. NOT an Assert.Pass when it is not: a sweep that silently skips
+  // proves nothing, and that is exactly what the first version did (the
+  // negative check failed only the fixture, not this test).
+  Dir := ExtractFilePath(ParamStr(0));
+  for var Up := 1 to 6 do
+  begin
+    Dir := ExtractFilePath(ExcludeTrailingPathDelimiter(Dir));
+    if TDirectory.Exists(TPath.Combine(Dir, 'Source')) then Break;
+  end;
+  Dir := TPath.Combine(Dir, 'Source');
+  Assert.IsTrue(TDirectory.Exists(Dir),
+    'the repository Source folder must be reachable from ' + ParamStr(0));
+  Files := TDirectory.GetFiles(Dir, '*.pas');
+  Assert.IsTrue(Length(Files) > 50, 'the sweep must see the real units');
+  Checked := 0;
+  Missed := 0;
+  MissedWhere := '';
+  for var F in Files do
+  begin
+    try
+      Content := ReadDelphiFile(F);
+    except
+      Continue;
+    end;
+    var Lines := SplitEditorLines(Content);
+    var Masked := MaskCommentsAndStrings(Lines);
+    var Regions := CollectUnitRefRegions(Masked);
+    for var E in TUsesGraphAnalyzer.ParseUsesEntries(Content) do
+    begin
+      if (E.Line < 1) or (E.Line > Length(Lines)) then Continue;
+      // the LAST segment of a dotted name is what a rename would look for
+      var Name := E.UnitName;
+      var Dot := LastDelimiter('.', Name);
+      if Dot > 0 then Name := Copy(Name, Dot + 1, MaxInt);
+      var C := Pos(Name, Lines[E.Line - 1]);
+      if C = 0 then Continue;          // wrapped differently - not this test's point
+      Inc(Checked);
+      if not UnitNameOccurrenceIsUnitReference(Masked, Regions, E.Line - 1, C,
+        Length(Name)) then
+      begin
+        Inc(Missed);
+        if MissedWhere = '' then
+          MissedWhere := Format('%s:%d %s', [ExtractFileName(F), E.Line, E.UnitName]);
+      end;
+    end;
+  end;
+  Assert.IsTrue(Checked > 300,
+    Format('the sweep must really look at the clauses (checked %d)', [Checked]));
+  Assert.AreEqual(0, Missed, Format('%d uses entry/entries not recognised, ' +
+    'first: %s', [Missed, MissedWhere]));
 end;
 
 { TCheckScopeTests }

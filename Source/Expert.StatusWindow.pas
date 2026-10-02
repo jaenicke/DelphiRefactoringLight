@@ -154,6 +154,7 @@ type
       out AStat: TMcpToolStat): Boolean;
   public
     constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
   end;
 
   // One class for both windows - they differ only in caption, identifier
@@ -189,12 +190,37 @@ var
   GToolsForm: TCustomForm;
   GToolsRegistered: Boolean;
 
+/// <summary>Records / clears the dock window that hosts a frame
+///  (audit #37, M30). AForm is the global the dock pair uses; the frame's
+///  own Owner chain gives the host form.</summary>
+procedure NoteDockHost(AFrame: TFrame; var AForm: TCustomForm;
+  AAttached: Boolean);
+var
+  Host: TCustomForm;
+begin
+  Host := nil;
+  var C: TComponent := AFrame;
+  while (C <> nil) and (Host = nil) do
+  begin
+    if C is TCustomForm then Host := TCustomForm(C);
+    C := C.Owner;
+  end;
+  if AAttached then
+  begin
+    if Host <> nil then AForm := Host;
+  end
+  else
+    // the IDE may free the window itself - never leave a dangling pointer
+    if (Host = nil) or (AForm = Host) then AForm := nil;
+end;
+
 { TStatusFrame }
 
 constructor TStatusFrame.Create(AOwner: TComponent);
 begin
   inherited;
   Name := '';   // the IDE names the embedded instance
+  NoteDockHost(Self, GForm, True);
   FC := TStatusCollector.Create;
 
   FList := TThemedListView.Create(Self);
@@ -241,6 +267,7 @@ end;
 
 destructor TStatusFrame.Destroy;
 begin
+  NoteDockHost(Self, GForm, False);
   FreeAndNil(FTimer);
   inherited;
   FreeAndNil(FC);
@@ -883,6 +910,7 @@ constructor TMcpToolsFrame.Create(AOwner: TComponent);
 begin
   inherited;
   Name := '';
+  NoteDockHost(Self, GToolsForm, True);   // audit #37, M30
   FHeader := TLabel.Create(Self);
   FHeader.Parent := Self;
   FHeader.Align := alTop;
@@ -933,6 +961,12 @@ begin
   FTimer.Enabled := True;
   ApplyThemeToControls(Self);   // the frame's children are ours to theme
   RefreshRows;
+end;
+
+destructor TMcpToolsFrame.Destroy;
+begin
+  NoteDockHost(Self, GToolsForm, False);   // audit #37, M30
+  inherited;
 end;
 
 procedure TMcpToolsFrame.LoadDefs;

@@ -653,6 +653,14 @@ begin
   end;
 end;
 
+var
+  /// <summary>Set by the unload wait. Declared HERE, before RunCapture,
+  ///  because that is the loop which has to give up on it (audit #37,
+  ///  L4a): svn runs blame and then log, up to 30 s each, and the worker
+  ///  only looked at the flag AFTERWARDS - so the package could be
+  ///  unmapped while a worker was still inside a process wait.</summary>
+  GShutdown: Boolean = False;
+
 function RunCapture(const ACmdLine, ADir: string; ATimeoutMs: Cardinal;
   out AOutput: string): Boolean;
 var
@@ -715,8 +723,16 @@ begin
           end;
           Break;
         end;
-      until GetTickCount > Deadline;
+      until (GetTickCount > Deadline) or GShutdown;
 
+      // The unload is waiting for us: stop the child and report failure -
+      // a half-read blame is worthless anyway (audit #37, L4a).
+      if GShutdown then
+      begin
+        TerminateProcess(PI.hProcess, 1);
+        AOutput := '';
+        Exit(False);
+      end;
       var TimedOut := GetTickCount > Deadline;
       if TimedOut then
         TerminateProcess(PI.hProcess, 1);
@@ -756,7 +772,6 @@ var
   GCache: TObjectDictionary<string, TBlameEntry> = nil;
   GStatus: string = 'not used yet';
   GWorkers: Integer = 0;
-  GShutdown: Boolean = False;
 
 function NormKey(const AFile: string): string;
 begin

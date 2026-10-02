@@ -70,6 +70,22 @@ procedure RegisterDialogClass(AClass: TCustomFormClass);
 ///  them as well.</summary>
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 
+/// <summary>Remembers AFORM as one of this plugin's windows, so the
+///  package can close it before it unloads (audit #40, M31 / #37, L3s).
+///  A modeless result window lives on after the wizard returns (caFree,
+///  owned by the IDE main form), and the quick-fix popup even keeps a
+///  250 ms timer - when the package is reinstalled meanwhile, their
+///  handlers point into unmapped code. PrepareDialog does this for every
+///  dialog; windows that do not go through it (the popup) call it
+///  themselves. The form is dropped from the list when it is destroyed,
+///  through a tracker component it owns - no event is taken over.</summary>
+procedure TrackPluginForm(AForm: TCustomForm);
+
+/// <summary>Closes and frees every tracked window. Called FIRST in the
+///  package's finalization - after it, nothing of ours is on screen.
+///  </summary>
+procedure CloseTrackedPluginForms;
+
 /// <summary>Scales a dialog whose controls were placed with HARD-CODED
 ///  96-dpi coordinates (all of ours are built in code) up to the DPI the
 ///  form actually runs at. GEOMETRY ONLY - fonts are left alone on
@@ -141,7 +157,7 @@ function FitPopup(const AWorkArea: TRect; const APt: TPoint;
 implementation
 
 uses
-  Winapi.Windows, Vcl.Graphics, Expert.IdeThemes,
+  Winapi.Windows, Vcl.Graphics, System.Generics.Collections, Expert.IdeThemes,
   Expert.AutoImport
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 
@@ -231,6 +247,59 @@ begin
   end;
 end;
 
+type
+  /// <summary>Lives as a CHILD COMPONENT of the tracked form, so its
+  ///  destructor runs when the form is destroyed - whoever frees it.
+  ///  </summary>
+  TPluginFormTracker = class(TComponent)
+  private
+    FForm: TCustomForm;
+  public
+    constructor Create(AForm: TCustomForm); reintroduce;
+    destructor Destroy; override;
+  end;
+
+var
+  GTrackedForms: TList<TCustomForm> = nil;
+
+constructor TPluginFormTracker.Create(AForm: TCustomForm);
+begin
+  inherited Create(AForm);      // owned by the form
+  FForm := AForm;
+  if GTrackedForms = nil then GTrackedForms := TList<TCustomForm>.Create;
+  if GTrackedForms.IndexOf(AForm) < 0 then GTrackedForms.Add(AForm);
+end;
+
+destructor TPluginFormTracker.Destroy;
+begin
+  if GTrackedForms <> nil then GTrackedForms.Remove(FForm);
+  inherited;
+end;
+
+procedure TrackPluginForm(AForm: TCustomForm);
+begin
+  if AForm = nil then Exit;
+  // already tracked? the tracker is a child of the form
+  for var I := 0 to AForm.ComponentCount - 1 do
+    if AForm.Components[I] is TPluginFormTracker then Exit;
+  TPluginFormTracker.Create(AForm);
+end;
+
+procedure CloseTrackedPluginForms;
+var
+  Copy_: TArray<TCustomForm>;
+begin
+  if GTrackedForms = nil then Exit;
+  Copy_ := GTrackedForms.ToArray;    // freeing one removes it from the list
+  for var F in Copy_ do
+    try
+      F.Free;
+    except
+      // a window that cannot be freed must not stop the unload
+    end;
+  GTrackedForms.Clear;
+end;
+
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
 var
   Anchor: TCustomForm;
@@ -241,6 +310,7 @@ begin
   // Anchor the dialog to the IDE main window. This both fixes the
   // multi-monitor jump and makes Windows treat the dialog as a child
   // of the IDE for task switching / focus purposes.
+  TrackPluginForm(AForm);
   if AOwner is TCustomForm then
     Anchor := TCustomForm(AOwner)
   else
@@ -668,5 +738,13 @@ begin
   if Result.Y < AWorkArea.Top then
     Result.Y := AWorkArea.Top;
 end;
+
+initialization
+  // (a finalization section needs one)
+
+finalization
+  // Nothing of ours may stay on screen past the unload (audit #40, M31).
+  CloseTrackedPluginForms;
+  FreeAndNil(GTrackedForms);
 
 end.

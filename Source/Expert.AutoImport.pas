@@ -3932,6 +3932,10 @@ var
   OnlyAdds: Boolean;
 begin
   inherited CreateNew(nil);
+  // Unowned and with a 250 ms timer of its own, this window used to
+  // survive a package unload with every handler pointing into unmapped
+  // code (audit #37, L3s). Tracked, so the finalization closes it.
+  TrackPluginForm(Self);
   FFile := AFile;
   FFixes := AFixes;
   BorderStyle := bsNone;

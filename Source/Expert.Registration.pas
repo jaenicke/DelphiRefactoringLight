@@ -156,8 +156,12 @@ end;
 initialization
 
 finalization
-  // Before anything else: hand the dockable form back to the IDE - it
-  // must not outlive the BPL.
+  // Our own windows first: a modeless result window or the quick-fix
+  // popup that is still on screen would keep handlers - and a 250 ms
+  // timer - in code this unload is about to unmap (audit #40, M31 /
+  // #37, L3s).
+  CloseTrackedPluginForms;
+  // Then the dockable form back to the IDE - it must not outlive the BPL.
   UnregisterStatusWindow;
   UnregisterAboutBox;
   // Before the live checker: MCP requests read its data, and the server

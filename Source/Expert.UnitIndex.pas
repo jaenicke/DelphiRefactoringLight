@@ -249,6 +249,16 @@ function FindBdsRoot: string;
 ///  it cannot be asked, the newest installed version.</summary>
 function IdeVersionRegistryKey: string;
 
+/// <summary>The IDE version key at or above ABase, decided by EVIDENCE:
+///  the key that HAS a RootDir value (AHasRootDir answers that), because
+///  only below that one do the Library / Browsing paths exist. ABase is
+///  normally already the version key; a caller that appended its own
+///  branch is cut back one level at a time, never further than two.
+///  '' when no key qualifies - a wrong key is worse than none, since
+///  'Software\Embarcadero\BDS' opens fine and holds nothing.</summary>
+function TrimToIdeVersionKey(const ABase: string;
+  const AHasRootDir: TFunc<string, Boolean>): string;
+
 /// <summary>Parses the interface section of a .pas into its exported
 ///  identifiers; AHasInit reports an initialization/finalization section
 ///  (load-time side effects). Exposed for the console test suite.</summary>
@@ -1023,27 +1033,54 @@ end;
 // IOTAServices for it (and the standalone falls back to a constant), so
 // this is the ONE place that knows which Delphi is actually hosting us -
 // 'Software\Embarcadero\BDS\37.0\<our branch>' with the branch cut off.
-function IdeVersionRegistryKey: string;
+function TrimToIdeVersionKey(const ABase: string;
+  const AHasRootDir: TFunc<string, Boolean>): string;
 var
-  Base: string;
+  Key: string;
 begin
   Result := '';
-  Base := TPluginSettings.BaseRegistryKey;    // ...\BDS\37.0\DelphiRefactoringLight
-  var P := Base.LastIndexOf('\');
-  if P > 0 then Base := Copy(Base, 1, P);     // strip our own branch
-  Base := ExcludeTrailingPathDelimiter(Base);
-  if Base = '' then Exit;
-  var Reg := TRegistry.Create(KEY_READ);
-  try
-    Reg.RootKey := HKEY_CURRENT_USER;
-    if Reg.OpenKeyReadOnly(Base) then
-    begin
-      Result := Base;
-      Reg.CloseKey;
-    end;
-  finally
-    Reg.Free;
+  if not Assigned(AHasRootDir) then Exit;
+  Key := ExcludeTrailingPathDelimiter(Trim(ABase));
+  // At most two steps up: the IDE's base key IS the version key, and a caller
+  // that appends its own branch adds one level, not a path.
+  for var Attempt := 0 to 2 do
+  begin
+    if Key = '' then Exit('');
+    if AHasRootDir(Key) then Exit(Key);
+    var P := Key.LastIndexOf('\');   // 0-based, so also the prefix length
+    if P <= 0 then Exit('');
+    Key := ExcludeTrailingPathDelimiter(Copy(Key, 1, P));
   end;
+end;
+
+function IdeVersionRegistryKey: string;
+begin
+  // THE KEY IS IDENTIFIED BY EVIDENCE, not by its shape: it is the one that
+  // has a RootDir value. BaseRegistryKey already returns the IDE's version
+  // key, and from 1.16.24 to 1.16.30 this function stripped a level from it
+  // unconditionally - 'Software\Embarcadero\BDS', which opens fine and has
+  // neither RootDir nor a Library branch. Measured live on 2026-10-02: the
+  // whole LIBRARY scope of the identifier index was empty (0 units, 0
+  // identifiers), so every RTL / VCL / third-party identifier was unknown to
+  // find unit, the add-unit fixes and the uses cleanup.
+  Result := TrimToIdeVersionKey(TPluginSettings.BaseRegistryKey,
+    function(AKey: string): Boolean
+    var
+      Reg: TRegistry;
+    begin
+      Result := False;
+      Reg := TRegistry.Create(KEY_READ);
+      try
+        Reg.RootKey := HKEY_CURRENT_USER;
+        if Reg.OpenKeyReadOnly(AKey) then
+        begin
+          Result := Reg.ValueExists('RootDir');
+          Reg.CloseKey;
+        end;
+      finally
+        Reg.Free;
+      end;
+    end);
 end;
 
 function FindBdsRoot: string;

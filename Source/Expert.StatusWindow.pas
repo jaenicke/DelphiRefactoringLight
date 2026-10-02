@@ -537,6 +537,25 @@ begin
       'directories behind these are NOT indexed - define them under ' +
       'Tools > Options > IDE > Environment Variables');
 
+  // A LIBRARY SCOPE OF ZERO UNITS IS A FAILURE, and it has to say so: every
+  // RTL / VCL / third-party identifier is then unknown, so find unit, the
+  // add-unit fixes, "did you mean" and the uses cleanup only ever know this
+  // project - while the row above still reads "ready". That is exactly what
+  // happened between 1.16.24 and 1.16.30 (a wrong registry key, found by
+  // reading the memory row rather than this one).
+  var Mem := TUnitIndex.Instance.MemoryInfo;
+  if Mem.GlobalUnits > 0 then
+    Row('  library scope', Format('%d unit(s), %d identifier(s)',
+      [Mem.GlobalUnits, Mem.GlobalIdents]),
+      'RTL, VCL and third-party sources from the IDE Library and Browsing paths')
+  else if TUnitIndex.Instance.Ready then
+    Row('  library scope', 'EMPTY - not one library unit is indexed',
+      'the IDE Library / Browsing paths gave no directory, so RTL, VCL and ' +
+      'third-party identifiers are missing: find unit, "add unit" and the ' +
+      'uses cleanup only know this project''s own units', slBad)
+  else
+    Row('  library scope', 'building...', '');
+
   // ---- LSP session --------------------------------------------------------
   // ONE LINE IN PLAIN WORDS FIRST (user request 2026-09-30): what the
   // session means for the features, not what it consists of. The rows below

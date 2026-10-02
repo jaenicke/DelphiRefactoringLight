@@ -470,6 +470,14 @@ type
   public
     [Test] procedure ADuplicateUnitNameIsReportedAsSkipped;
     [Test] procedure ThePathVariablesKnowTheirPlatform;
+    /// <summary>The follow-up of L3c, found by looking at the status window
+    ///  of a running IDE: the IDE's base registry key IS the version key,
+    ///  so stripping a level off it unconditionally landed on
+    ///  'Software\Embarcadero\BDS' - a key that opens and holds nothing.
+    ///  The LIBRARY scope of the identifier index was empty from 1.16.24
+    ///  to 1.16.30 (measured: 0 units), so every RTL / VCL / third-party
+    ///  identifier was unknown.</summary>
+    [Test] procedure TheIdeVersionKeyIsFoundByEvidence;
   end;
 
   [TestFixture]
@@ -3418,6 +3426,45 @@ begin
   var Key := IdeVersionRegistryKey;
   Assert.IsFalse(ContainsText(Key, 'DelphiRefactoringLight'),
     'the version key is the IDE''s, not ours: ' + Key);
+  // ... and it must be a VERSION key: the Library / Browsing paths live
+  // below 'BDS\37.0', not below 'BDS'. An empty answer is allowed (another
+  // machine, no RAD Studio in HKCU), a wrong one is not.
+  if Key <> '' then
+  begin
+    var Last := Copy(Key, Key.LastIndexOf('\') + 2, MaxInt);
+    var Num: Double;
+    Assert.IsTrue(TryStrToFloat(Last, Num, TFormatSettings.Invariant),
+      'the last segment must be the IDE version: ' + Key);
+  end;
+end;
+
+procedure TCheckScopeTests.TheIdeVersionKeyIsFoundByEvidence;
+var
+  NoProbe: TFunc<string, Boolean>;
+begin
+  // EVIDENCE = the key has a RootDir value; only below that one do the
+  // Library / Browsing paths exist.
+  var HasRootDir: TFunc<string, Boolean> :=
+    function(AKey: string): Boolean
+    begin
+      Result := SameText(AKey, 'Software\Embarcadero\BDS\37.0');
+    end;
+  Assert.AreEqual('Software\Embarcadero\BDS\37.0',
+    TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0', HasRootDir),
+    'the base key already IS the version key and must be left alone');
+  Assert.AreEqual('Software\Embarcadero\BDS\37.0',
+    TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0\DelphiRefactoringLight',
+      HasRootDir), 'a caller''s own branch below it is cut back');
+  Assert.AreEqual('Software\Embarcadero\BDS\37.0',
+    TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0\', HasRootDir),
+    'a trailing backslash is not a level');
+  // The hive root opens fine and holds nothing - answering it was the bug.
+  Assert.AreEqual('', TrimToIdeVersionKey('Software\Embarcadero\BDS', HasRootDir),
+    'the hive root is no version key');
+  Assert.AreEqual('', TrimToIdeVersionKey('', HasRootDir), 'nothing to trim');
+  NoProbe := nil;
+  Assert.AreEqual('', TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0', NoProbe),
+    'without a probe there is no evidence, so no key');
 end;
 
 { TUnitRenameScopeTests }

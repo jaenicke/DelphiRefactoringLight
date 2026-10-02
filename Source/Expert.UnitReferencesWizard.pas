@@ -798,8 +798,7 @@ begin
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
-    Status('No .delphilsp.json found - enable Tools > Options > '
-      + 'Editor > Language > Code Insight > "Generate LSP Config".');
+    Status(LspConfigMissingHint);
     Exit;
   end;
 

@@ -676,8 +676,7 @@ begin
   var LspJson := Editor.FindDelphiLspJson;
   if LspJson = '' then
   begin
-    AError := 'no .delphilsp.json found - the target types cannot be resolved ' +
-      '(Tools > Options > Editor > Language > Code Insight > "Generate LSP Config")';
+    AError := 'the target types cannot be resolved: ' + LspConfigMissingHint;
     Exit;
   end;
   var RootPath := Editor.GetProjectRoot;
@@ -951,8 +950,7 @@ begin
       DelphiLspJson := Editor.FindDelphiLspJson;
       if DelphiLspJson = '' then
       begin
-        Dialog.SetStatus('No .delphilsp.json found - cannot resolve target types. ' +
-          'Enable Tools > Options > Editor > Language > Code Insight > "Generate LSP Config".');
+        Dialog.SetStatus('Cannot resolve the target types. ' + LspConfigMissingHint);
         Dialog.Hide;
         Dialog.ShowModal;
         Exit;

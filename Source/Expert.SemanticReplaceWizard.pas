@@ -431,7 +431,7 @@ begin
   var Dproj := Editor.GetCurrentProjectDproj;
   if (Json = '') or (Dproj = '') then
   begin
-    ANote := 'No .delphilsp.json / project - the matches are NOT verified (text only).';
+    ANote := 'The matches are NOT verified (text only). ' + LspConfigMissingHint;
     Exit;
   end;
   try

@@ -98,6 +98,8 @@ type
     FResValid: Boolean;
     FMemText, FMemDetail: string;  // refreshed every 10th tick (walks caches)
     FMemValid: Boolean;
+    FLspJson: string;      // .delphilsp.json of the current project,
+    FLspJsonValid: Boolean;  // looked up every 10th tick (disk + modules)
     procedure Row(const ACaption, AValue, ADetail: string;
       ALevel: TStatusLevel = slNeutral);
   public
@@ -610,6 +612,27 @@ begin
     Row('DelphiLSP', 'ready',
       Format('Everything works: %d answer(s) given, %d diagnostic push(es) ' +
         'received for %d file(s).', [Answered, DiagCount, DiagFiles]), slGood);
+
+  // WITHOUT THAT FILE NOTHING ABOVE CAN EVER WORK, and the user cannot guess
+  // it: the IDE generates it per project, but only while the Code Insight
+  // option is on (forum screenshot 2026-10-02 - a dialog that said no more
+  // than "No .delphilsp.json found."). The lookup reads the project and the
+  // disk, so it runs every 10th tick like the memory row.
+  if not FLspJsonValid or (FTicks mod 10 = 0) then
+  begin
+    FLspJson := '';
+    try
+      if Editor <> nil then FLspJson := Editor.FindDelphiLspJson;
+    except
+      FLspJson := '';
+    end;
+    FLspJsonValid := True;
+  end;
+  if FLspJson <> '' then
+    Row('  project configuration', 'found', FLspJson)
+  else
+    Row('  project configuration', '.delphilsp.json is MISSING',
+      LspConfigMissingHintLong, slBad);
 
   // The VERIFICATION session is the one that answers the scans since 1.10.0,
   // and it pushes no diagnostics at all - so its own line, or a freshly

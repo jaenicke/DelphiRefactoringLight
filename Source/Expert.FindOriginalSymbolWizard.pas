@@ -433,8 +433,7 @@ begin
   Json := Editor.FindDelphiLspJson;
   if Json = '' then
   begin
-    ShowThemedMessage('DelphiLSP is not configured for this project ' +
-      '(missing .delphilsp.json next to the project file).');
+    ShowThemedMessage(LspConfigMissingHintLong);
     Exit;
   end;
   Root := Editor.GetProjectRoot;

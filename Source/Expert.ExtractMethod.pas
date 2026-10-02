@@ -1895,11 +1895,13 @@ begin
   DJ := Editor.FindDelphiLspJson;
   if DJ='' then
   begin
-    FHeadlessError := 'no .delphilsp.json found for this project';
+    // The forum screenshot of 2026-10-02 showed exactly this preview memo
+    // with nothing but "No .delphilsp.json found." in it.
+    FHeadlessError := LspConfigMissingHint;
     if FDialog <> nil then
     begin
-      FDialog.SetPreviewText('No .delphilsp.json found.');
-      FDialog.SetStatus('Error');
+      FDialog.SetPreviewText(LspConfigMissingHintLong);
+      FDialog.SetStatus('DelphiLSP is not configured for this project');
     end;
     Exit;
   end;

@@ -1489,7 +1489,7 @@ begin
     var Diag: string := sLineBreak + sLineBreak + 'LSP type resolution:' + sLineBreak;
     if not Stats.LspAvailable then
       Diag := Diag + '  - LSP client could not be acquired (' +
-        IfThen(Stats.LspError = '', 'no .delphilsp.json?', Stats.LspError) + ').' + sLineBreak +
+        IfThen(Stats.LspError = '', LspConfigMissingHint, Stats.LspError) + ').' + sLineBreak +
         '  - Fell back to the source unit''s full interface-uses.'
     else
       Diag := Diag + Format(

@@ -212,6 +212,31 @@ function Editor: IEditorHelper;
 procedure SetEditorImpl(const AImpl: IEditorHelper);
 
 // ---------------------------------------------------------------------------
+//  "No .delphilsp.json found" - ONE message, and it names the switch
+// ---------------------------------------------------------------------------
+//
+// Without that file DelphiLSP cannot be started, so EVERY feature that
+// resolves a symbol stops before it begins. The file is not something the
+// user writes: the IDE generates it per project, but only while the Code
+// Insight option is ON - and a forum screenshot (2026-10-02) showed the
+// Extract Method dialog saying just "No .delphilsp.json found.", which tells
+// nobody what to do. Nine places reported this, in five different wordings,
+// and three of them named an option path that is missing its "Delphi" level.
+// So the text lives HERE, once, and the sweep test refuses a second copy.
+
+/// <summary>Where the IDE option sits that generates the file - the path a
+///  user can follow in Tools > Options.</summary>
+function LspConfigOptionPath: string;
+
+/// <summary>One line for a status bar: what is missing and what to switch
+///  on.</summary>
+function LspConfigMissingHint: string;
+
+/// <summary>The same for a message box or a preview memo: adds where the
+///  file appears and what the option is called on a German IDE.</summary>
+function LspConfigMissingHintLong: string;
+
+// ---------------------------------------------------------------------------
 //  The main-thread rule, made visible
 // ---------------------------------------------------------------------------
 //
@@ -302,6 +327,28 @@ begin
     raise EOffMainThread.CreateFmt('%s was called from a worker thread. ' +
       'ToolsAPI and the editor buffers are main thread only - run it through ' +
       'RunOnMain / McpRunOnMain.', [AWhat]);
+end;
+
+function LspConfigOptionPath: string;
+begin
+  // The "Delphi" level is part of it - Code Insight sits under the LANGUAGE,
+  // and the three wizards that named the path before left it out.
+  Result := 'Tools > Options > Editor > Language > Delphi > Code Insight > ' +
+    '"Generate LSP Config"';
+end;
+
+function LspConfigMissingHint: string;
+begin
+  Result := 'No .delphilsp.json for this project, so DelphiLSP cannot start - ' +
+    'switch ON ' + LspConfigOptionPath + ' and open the project again.';
+end;
+
+function LspConfigMissingHintLong: string;
+begin
+  Result := LspConfigMissingHint + sLineBreak + sLineBreak +
+    'The IDE writes that file next to the .dproj. On a German IDE the option ' +
+    'reads "LSP-Konfiguration generieren" under Tools > Optionen > Editor > ' +
+    'Sprache > Delphi > Code Insight.';
 end;
 
 function MainThreadViolations: Integer;

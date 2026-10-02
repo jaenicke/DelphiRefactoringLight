@@ -266,7 +266,7 @@ begin
   if (Editor = nil) or not Editor.ReadEditorContent(AFile, Buf) then
   begin
     if not TFile.Exists(AFile) then Exit;
-    try Buf := TFile.ReadAllText(AFile); except Exit; end;
+    try Buf := ReadDelphiFile(AFile); except Exit; end;
   end;
   SL := TStringList.Create;
   try
@@ -314,7 +314,7 @@ begin
   if (Editor = nil) or not Editor.ReadEditorContent(AFile, Buf) then
   begin
     if not TFile.Exists(AFile) then Exit;
-    try Buf := TFile.ReadAllText(AFile); except Exit; end;
+    try Buf := ReadDelphiFile(AFile); except Exit; end;
   end;
   SL := TStringList.Create;
   try
@@ -2470,7 +2470,10 @@ begin
   begin
     if not TFile.Exists(AIssue.PasFile) then
     begin AFailReason := 'file not found: ' + AIssue.PasFile; Exit; end;
-    try Content := TFile.ReadAllText(AIssue.PasFile);
+    // ONE decoder for read, write and verify (audit #37, H30): the
+    // RTL's one-argument reader has its own default, the checker itself
+    // reads through TDelphiFileEncoding.
+    try Content := ReadDelphiFile(AIssue.PasFile);
     except AFailReason := 'read error: ' + AIssue.PasFile; Exit; end;
   end;
 
@@ -2637,7 +2640,7 @@ begin
     begin
       var Written: string;
       if not Editor.ReadEditorContent(AIssue.PasFile, Written) then
-        try Written := TFile.ReadAllText(AIssue.PasFile); except Written := ''; end;
+        try Written := ReadDelphiFile(AIssue.PasFile); except Written := ''; end;
       if Written <> '' then
       begin
         var OwnLine := False;

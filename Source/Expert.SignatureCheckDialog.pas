@@ -59,6 +59,13 @@ type
     procedure SetEntries(const AEntries: TSignatureEntries);
     procedure SetStatus(const AText: string);
 
+    /// <summary>The user closed the window while the check was still
+    ///  waiting for DelphiLSP. Closing only HIDES a modeless dialog, so
+    ///  the wizard must poll this - otherwise the IDE keeps sleeping in
+    ///  one-second blocks and then runs the check for nobody
+    ///  (audit #37, L3h).</summary>
+    property CloseRequested: Boolean read FCloseRequested;
+
     /// <summary>Hands the dialog ownership over to itself: closing
     ///  (X / Close / Esc) frees the dialog. Before SetClosable is
     ///  called, close requests are deferred so the still-running

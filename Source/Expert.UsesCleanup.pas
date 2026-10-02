@@ -1053,6 +1053,9 @@ begin
     ShowThemedMessage('Open a .pas unit first.');
     Exit;
   end;
+  // Read once to fail early on an unreadable buffer; the content the
+  // PLAN is built from is read AFTER the index wait below, which pumps
+  // messages for up to five seconds (audit #37, L3j).
   if not Editor.ReadEditorContent(Ctx.FileName, Content) then
   begin
     ShowThemedMessage('Could not read the editor buffer.');
@@ -1074,6 +1077,14 @@ begin
       Sleep(50);
       Inc(Waited, 50);
       Application.ProcessMessages;
+    end;
+
+    // The wait pumped messages, so the user may have typed meanwhile -
+    // plan from what the buffer holds NOW (audit #37, L3j).
+    if not Editor.ReadEditorContent(Ctx.FileName, Content) then
+    begin
+      ShowThemedMessage('Could not read the editor buffer.');
+      Exit;
     end;
 
     Snap := TUnitIndex.Instance.Snapshot;

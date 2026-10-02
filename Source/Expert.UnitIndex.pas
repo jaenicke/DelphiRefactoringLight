@@ -237,9 +237,17 @@ function EstimateSnapshotBytes(const ASnap: IUnitSnapshot): Int64;
 ///  gave, without ever copying the global layer.</summary>
 function ComposeUnitSnapshots(const AProject, AGlobal: IUnitSnapshot): IUnitSnapshot;
 
-/// <summary>Root directory of the newest installed RAD Studio (registry
-///  RootDir), '' when none is found.</summary>
+/// <summary>Root directory of the RAD Studio this plugin runs in
+///  (registry RootDir under its own version key), falling back to the
+///  newest installed one and '' when none is found. With two versions
+///  installed the newest one need not be the one that is running
+///  (audit #37, L3c).</summary>
 function FindBdsRoot: string;
+
+/// <summary>The registry version key of the IDE we run in -
+///  'Software\Embarcadero\BDS\37.0' - taken from the IDE itself; when
+///  it cannot be asked, the newest installed version.</summary>
+function IdeVersionRegistryKey: string;
 
 /// <summary>Parses the interface section of a .pas into its exported
 ///  identifiers; AHasInit reports an initialization/finalization section
@@ -343,7 +351,8 @@ function DeclaredTypeOfIdentifierIn(const ALines, AMasked: TArray<string>;
 ///  AVars supplies the user-defined values; pass nil to read them from
 ///  the registry. Anything still unresolved is left in place - callers
 ///  skip such directories.</summary>
-function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings): string;
+function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings;
+  const APlatform: string = 'Win32'): string;
 
 /// <summary>Path variables that could NOT be resolved during the last
 ///  library-path scan, e.g. "$(DXVCL)" - directories behind them are not
@@ -368,6 +377,7 @@ implementation
 uses
   System.IOUtils, System.StrUtils, System.Win.Registry, System.Types,
   System.Generics.Defaults, System.Math, Winapi.Windows,
+  Expert.PluginSettings,
   Expert.EditorHelperIntf, Delphi.FileEncoding, Expert.ResourceMonitor, Expert.PascalScanner, Expert.IncludeExpansion;
 
 const
@@ -1009,6 +1019,33 @@ end;
 //  Source-root gathering (MAIN THREAD - uses ToolsAPI / registry)
 // ---------------------------------------------------------------------------
 
+// The version key of the IDE this code runs in. TPluginSettings asks
+// IOTAServices for it (and the standalone falls back to a constant), so
+// this is the ONE place that knows which Delphi is actually hosting us -
+// 'Software\Embarcadero\BDS\37.0\<our branch>' with the branch cut off.
+function IdeVersionRegistryKey: string;
+var
+  Base: string;
+begin
+  Result := '';
+  Base := TPluginSettings.BaseRegistryKey;    // ...\BDS\37.0\DelphiRefactoringLight
+  var P := Base.LastIndexOf('\');
+  if P > 0 then Base := Copy(Base, 1, P);     // strip our own branch
+  Base := ExcludeTrailingPathDelimiter(Base);
+  if Base = '' then Exit;
+  var Reg := TRegistry.Create(KEY_READ);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    if Reg.OpenKeyReadOnly(Base) then
+    begin
+      Result := Base;
+      Reg.CloseKey;
+    end;
+  finally
+    Reg.Free;
+  end;
+end;
+
 function FindBdsRoot: string;
 
   function TryHive(ARootKey: HKEY): string;
@@ -1046,7 +1083,28 @@ function FindBdsRoot: string;
     end;
   end;
 
+  // The IDE we are loaded into, before any "newest installed" guess.
+  function TryRunningIde: string;
+  var
+    Key: string;
+  begin
+    Result := '';
+    Key := IdeVersionRegistryKey;
+    if Key = '' then Exit;
+    var Reg := TRegistry.Create(KEY_READ);
+    try
+      Reg.RootKey := HKEY_CURRENT_USER;
+      if Reg.OpenKeyReadOnly(Key) and Reg.ValueExists('RootDir') then
+        Result := Reg.ReadString('RootDir');
+      Reg.CloseKey;
+    finally
+      Reg.Free;
+    end;
+  end;
+
 begin
+  Result := TryRunningIde;
+  if Result <> '' then Exit;
   Result := TryHive(HKEY_CURRENT_USER);
   if Result = '' then Result := TryHive(HKEY_LOCAL_MACHINE);
 end;
@@ -1124,7 +1182,8 @@ begin
   end;
 end;
 
-function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings): string;
+function ExpandIdeVars(const S, ABdsRoot: string; AVars: TStrings;
+  const APlatform: string = 'Win32'): string;
 const
   MaxDepth = 8;
 var
@@ -1163,7 +1222,7 @@ begin
         Value := IncludeTrailingPathDelimiter(ABdsRoot) + 'lib'
       else if SameText(Name, 'BDSINCLUDE') then
         Value := IncludeTrailingPathDelimiter(ABdsRoot) + 'include'
-      else if SameText(Name, 'Platform') then Value := 'Win32'
+      else if SameText(Name, 'Platform') then Value := APlatform
       else if SameText(Name, 'Config') then Value := 'Release'
       else
       begin
@@ -1204,7 +1263,7 @@ function GatherIdeLibraryDirsEx(const ABdsRoot: string;
   end;
 
 var
-  Raw, Dir, VerKey: string;
+  Raw, Dir, VerPath: string;
   Dirs: TList<string>;
   EnvVars: TStringList;
 begin
@@ -1216,44 +1275,55 @@ begin
   try
     // Read the user-defined IDE variables ONCE for the whole scan.
     ReadIdeEnvVars(EnvVars);
-    var Reg := TRegistry.Create(KEY_READ);
-    VerKey := '';
-    try
-      Reg.RootKey := HKEY_CURRENT_USER;
-      if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
-      begin
-        var Vers := TStringList.Create;
-        try
-          Reg.GetKeyNames(Vers);
-          var BestNum: Double := -1; var FS := TFormatSettings.Invariant;
-          for var V in Vers do
-          begin
-            var Nn: Double;
-            if TryStrToFloat(V, Nn, FS) and (Nn > BestNum) then begin BestNum := Nn; VerKey := V; end;
+    // The key of the IDE we RUN IN; only if that cannot be determined,
+    // the newest installed version (audit #37, L3c).
+    VerPath := IdeVersionRegistryKey;
+    if VerPath = '' then
+    begin
+      var Reg := TRegistry.Create(KEY_READ);
+      var VerKey := '';
+      try
+        Reg.RootKey := HKEY_CURRENT_USER;
+        if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
+        begin
+          var Vers := TStringList.Create;
+          try
+            Reg.GetKeyNames(Vers);
+            var BestNum: Double := -1; var FS := TFormatSettings.Invariant;
+            for var V in Vers do
+            begin
+              var Nn: Double;
+              if TryStrToFloat(V, Nn, FS) and (Nn > BestNum) then begin BestNum := Nn; VerKey := V; end;
+            end;
+          finally
+            Vers.Free;
           end;
-        finally
-          Vers.Free;
+          Reg.CloseKey;
         end;
-        Reg.CloseKey;
+      finally
+        Reg.Free;
       end;
-    finally
-      Reg.Free;
+      if VerKey = '' then Exit;
+      VerPath := 'Software\Embarcadero\BDS\' + VerKey;
     end;
-    if VerKey = '' then Exit;
-    var Raws: TArray<string> :=
-      [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Search Path')];
-    if AIncludeBrowsing then
-      Raws := Raws +
-        [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Browsing Path')];
-    for Raw in Raws do
-      for Dir in Raw.Split([';'], TStringSplitOptions.ExcludeEmpty) do
-      begin
-        var D := ExpandIdeVars(Trim(Dir), ABdsRoot, EnvVars);
-        if Pos('$(', D) > 0 then Continue;   // still unresolved - see
-                                             // UnresolvedPathVars
-        D := ExcludeTrailingPathDelimiter(D);
-        if TDirectory.Exists(D) and not Dirs.Contains(D) then Dirs.Add(D);
-      end;
+    // BOTH platforms: a Win64-only project resolves its components
+    // against the Win64 library path, and the two lists differ.
+    for var Plat in ['Win32', 'Win64'] do
+    begin
+      var Raws: TArray<string> :=
+        [ReadPath(VerPath + '\Library\' + Plat, 'Search Path')];
+      if AIncludeBrowsing then
+        Raws := Raws + [ReadPath(VerPath + '\Library\' + Plat, 'Browsing Path')];
+      for Raw in Raws do
+        for Dir in Raw.Split([';'], TStringSplitOptions.ExcludeEmpty) do
+        begin
+          var D := ExpandIdeVars(Trim(Dir), ABdsRoot, EnvVars, Plat);
+          if Pos('$(', D) > 0 then Continue;   // still unresolved - see
+                                               // UnresolvedPathVars
+          D := ExcludeTrailingPathDelimiter(D);
+          if TDirectory.Exists(D) and not Dirs.Contains(D) then Dirs.Add(D);
+        end;
+    end;
     Result := Dirs.ToArray;
   finally
     EnvVars.Free;

@@ -93,7 +93,8 @@ uses
   Lsp.Protocol, Lsp.Client, Lsp.Uri, Expert.LspManager,
   Expert.EditorHelperIntf, Expert.AutoImport, Expert.DiagStore,
   Expert.McpTools, Expert.UnitIndex, Expert.UnitAvailability, Expert.UsesEditor,
-  Mcp.Protocol, Mcp.PipeServer, Expert.StatusWindow, Expert.Version;
+  Mcp.Protocol, Mcp.PipeServer, Expert.StatusWindow, Expert.Version,
+  Delphi.FileEncoding;
 
 const
   WM_MCP_CALL = WM_APP + $3A1;
@@ -350,7 +351,8 @@ begin
   Result := (Editor <> nil) and Editor.ReadEditorContent(AFile, AContent);
   if not Result and FileExists(AFile) then
   begin
-    AContent := TFile.ReadAllText(AFile);
+    // the same decoder the rest of the plugin reads with (audit #37, H31)
+    AContent := ReadDelphiFile(AFile);
     Result := True;
   end;
 end;

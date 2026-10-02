@@ -133,6 +133,11 @@ var
   // The ORIGINAL width per buffer. Remembered, never re-derived - see
   // EnsureGutterWidth for why (the gutter grew on every switch).
   GOrigWidths: TDictionary<string, Integer> = nil;
+  // What we ADDED to that buffer, per buffer. Comparing against the
+  // CURRENT GColumnWidth is wrong the moment the user changes the width:
+  // no widened buffer is recognised any more and the extra width stays
+  // for good (audit #37, L4b).
+  GAddedWidths: TDictionary<string, Integer> = nil;
   GLastOrig: Integer = -1;
   GRestorePending: Boolean = False;
   GSetWidth: Integer = -1;       // what WE set it to - see RestoreGutterWidth
@@ -556,14 +561,22 @@ begin
   try
     Opt := TopBufferOptions;
     if Opt = nil then Exit;
+    // TopBufferOptions is the buffer that is on TOP, which need not be
+    // the one we widened (audit #37, L4b) - restoring then writes our
+    // remembered width into somebody else's buffer.
+    if not SameText(NormFile(Editor.GetActiveFileName), NormFile(GWidenedFile)) then
+      Exit;
     if not GOrigWidths.TryGetValue(NormFile(GWidenedFile), Orig) then Exit;
+    var Added := GColumnWidth;
+    GAddedWidths.TryGetValue(NormFile(GWidenedFile), Added);
     // WE ARE NOT ALONE IN THE GUTTER. Other add-ons set this same option,
     // and the IDE has its own page for it - so put our value back ONLY
     // while the width is still exactly what we set. If it differs,
     // somebody changed it after us and now owns it.
-    if Opt.LeftGutterWidth = Orig + GColumnWidth then
+    if Opt.LeftGutterWidth = Orig + Added then
       Opt.LeftGutterWidth := Orig;
     GOrigWidths.Remove(NormFile(GWidenedFile));
+    GAddedWidths.Remove(NormFile(GWidenedFile));
   except
     // the buffer may already be gone - nothing to restore then
   end;
@@ -606,6 +619,7 @@ begin
     Want := Orig + GColumnWidth;
     if Cur <> Want then
       Opt.LeftGutterWidth := Want;
+    GAddedWidths.AddOrSetValue(Key, GColumnWidth);
     GSavedWidth := Orig;
     GSetWidth := Want;
     GWidenedFile := AFile;
@@ -628,13 +642,18 @@ begin
     Exit;
   end;
   if not GOrigWidths.TryGetValue(NormFile(AFile), Orig) then Exit;
+  // The column we really added to THIS buffer, not today's setting
+  // (audit #37, L4b) - the width may have been changed since.
+  var Added := GColumnWidth;
+  GAddedWidths.TryGetValue(NormFile(AFile), Added);
   try
     Opt := TopBufferOptions;
-    if (Opt <> nil) and (Opt.LeftGutterWidth = Orig + GColumnWidth) then
+    if (Opt <> nil) and (Opt.LeftGutterWidth = Orig + Added) then
       Opt.LeftGutterWidth := Orig;
   except
   end;
   GOrigWidths.Remove(NormFile(AFile));
+  GAddedWidths.Remove(NormFile(AFile));
 end;
 
 function ActiveFileIsModified(const AFile: string): Boolean;
@@ -918,6 +937,7 @@ begin
     Exit;
   end;
   GOrigWidths := TDictionary<string, Integer>.Create;
+  GAddedWidths := TDictionary<string, Integer>.Create;
   GTicker := TBlameTicker.Create;
   GTimer := TTimer.Create(nil);
   GTimer.Interval := 1000;
@@ -945,6 +965,7 @@ begin
   GNotifierIndex := -1;
   GNotifier := nil;
   FreeAndNil(GOrigWidths);
+  FreeAndNil(GAddedWidths);
   ShutdownBlame;
 end;
 

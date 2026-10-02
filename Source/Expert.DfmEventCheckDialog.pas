@@ -34,7 +34,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.DfmEventCheck, Expert.DialogHelper,
-  Expert.IdeThemes, Expert.ListViewSort;
+  Expert.IdeThemes, Expert.ListViewSort, Expert.UnitIndex;
 
 type
   // ListView that re-applies native double buffering on every handle
@@ -67,9 +67,11 @@ type
     /// <summary>Check state per ISSUE (not per row): the list is sortable
     ///  and filterable, so rows come and go - ticks must survive both.</summary>
     FChecked: TArray<Boolean>;
+    FFixing: Boolean;        // a fix batch is running (audit #37, M22)
     FFillingRows: Boolean;
     procedure FillRows;
     procedure DoFilterChange(Sender: TObject);
+    function RowOfIssue(AIdx: Integer): TListItem;
     procedure DoItemChecked(Sender: TObject; Item: TListItem);
     procedure DoAdvancedDrawSubItem(Sender: TCustomListView; Item: TListItem;
       SubItem: Integer; State: TCustomDrawState; Stage: TCustomDrawStage;
@@ -423,6 +425,20 @@ end;
 procedure TDfmEventCheckDialog.DoFilterChange(Sender: TObject);
 begin
   FillRows;
+  // The rows come back in FILL order, so a sort arrow left over from an
+  // earlier click would promise an order that is no longer there
+  // (audit #37, L3l).
+  SetListViewSortArrow(FListView, -1, True);
+end;
+
+// The row that currently shows issue AIDX, or nil when the filter hides
+// it. Rows map to issues through Item.Data - never through Item.Index.
+function TDfmEventCheckDialog.RowOfIssue(AIdx: Integer): TListItem;
+begin
+  Result := nil;
+  for var I := 0 to FListView.Items.Count - 1 do
+    if NativeInt(FListView.Items[I].Data) = AIdx then
+      Exit(FListView.Items[I]);
 end;
 
 procedure TDfmEventCheckDialog.DoItemChecked(Sender: TObject; Item: TListItem);
@@ -653,16 +669,33 @@ var
   FirstReasons: TStringList;   // a few example failure reasons for the user
   Ctx: TFixContext;     // shared LSP client + type->unit cache for the batch
   Prog: TCheckProgressWindow;
+  Picked: TArray<Integer>;   // the issues that were checked when Fix was hit
 begin
+  // The dialog is MODELESS and Prog.Step pumps messages, so typing in
+  // the filter box rebuilds the rows while this loop walks them by index
+  // (audit #37, M22). So: take a snapshot of the checked ISSUES, lock the
+  // controls for the batch, and refuse a second click.
+  if FFixing then Exit;
   CheckedCount := 0; Fixed := 0; NotFixable := 0; Failed := 0; Done := 0;
   Total := 0;
+  Picked := nil;
   for I := 0 to FListView.Items.Count - 1 do
-    if FListView.Items[I].Checked then Inc(Total);
+    if FListView.Items[I].Checked then
+    begin
+      var PIdx := NativeInt(FListView.Items[I].Data);
+      if (PIdx >= 0) and (PIdx < Length(FIssues)) then
+        Picked := Picked + [PIdx];
+      Inc(Total);
+    end;
   if Total = 0 then
   begin
     ShowThemedMessage('No rows checked. Tick the signature mismatches you want to correct.');
     Exit;
   end;
+  FFixing := True;
+  FBtnFix.Enabled := False;
+  FEdtFilter.Enabled := False;
+  FListView.Enabled := False;
 
   Forms := TStringList.Create;
   FirstReasons := TStringList.Create;
@@ -678,11 +711,12 @@ begin
     Screen.Cursor := crHourGlass;
     try
       try
-      // Rows map to issues through Item.Data (sortable/filterable list).
-      for I := 0 to FListView.Items.Count - 1 do
+      // The snapshot decides what is fixed; the ROW for an issue is
+      // looked up again afterwards, because the list may have been
+      // refilled in between.
+      for I := 0 to High(Picked) do
       begin
-        if not FListView.Items[I].Checked then Continue;
-        var Idx := NativeInt(FListView.Items[I].Data);
+        var Idx := Picked[I];
         Inc(CheckedCount);
         Inc(Done);
         if (Idx >= 0) and (Idx < Length(FIssues)) then
@@ -699,10 +733,14 @@ begin
         begin
           Inc(Fixed);
           Forms.Add(FIssues[Idx].PasFile);
-          FListView.Items[I].SubItems[FListView.Items[I].SubItems.Count - 1] :=
-            'FIXED -> (' + FIssues[Idx].ExpectedRawParams + ')';
-          FListView.Items[I].Checked := False;
           FChecked[Idx] := False;
+          var Row := RowOfIssue(Idx);
+          if Row <> nil then
+          begin
+            Row.SubItems[Row.SubItems.Count - 1] :=
+              'FIXED -> (' + FIssues[Idx].ExpectedRawParams + ')';
+            Row.Checked := False;
+          end;
         end
         else
         begin
@@ -754,6 +792,10 @@ begin
                [rfReplaceAll]),
            '')]));
   finally
+    FFixing := False;
+    FBtnFix.Enabled := True;
+    FEdtFilter.Enabled := True;
+    FListView.Enabled := True;
     Forms.Free;
     FirstReasons.Free;
     Ctx.Free;
@@ -771,142 +813,11 @@ begin
   Action := caFree;
 end;
 
-/// <summary>Highest-installed BDS root directory (via registry), '' if
-///  none found. Used to locate global library/browsing paths and to
-///  exclude the built-in Studio source tree from scanning.</summary>
-function FindBdsRoot: string;
+// FindBdsRoot and GatherGlobalLibraryDirs used to be duplicated here,
+// with their own "newest installed version, Win32 only" registry walk.
+// Expert.UnitIndex owns them (it asks the IDE for ITS version key and
+// reads both platforms) - audit #37, L3c.
 
-  function TryHive(ARootKey: HKEY): string;
-  var
-    Reg: TRegistry;
-    Versions: TStringList;
-    V, Best: string;
-    BestNum, Num: Double;
-    FS: TFormatSettings;
-  begin
-    Result := '';
-    Best := ''; BestNum := -1;
-    FS := TFormatSettings.Invariant;
-    Reg := TRegistry.Create(KEY_READ);
-    try
-      Reg.RootKey := ARootKey;
-      if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
-      begin
-        Versions := TStringList.Create;
-        try
-          Reg.GetKeyNames(Versions);
-          for V in Versions do
-            if TryStrToFloat(V, Num, FS) and (Num > BestNum) then
-            begin BestNum := Num; Best := V; end;
-        finally
-          Versions.Free;
-        end;
-        Reg.CloseKey;
-      end;
-      if (Best <> '')
-         and Reg.OpenKeyReadOnly('Software\Embarcadero\BDS\' + Best) then
-      begin
-        if Reg.ValueExists('RootDir') then
-          Result := Reg.ReadString('RootDir');
-        Reg.CloseKey;
-      end;
-    finally
-      Reg.Free;
-    end;
-  end;
-
-begin
-  Result := TryHive(HKEY_CURRENT_USER);
-  if Result = '' then Result := TryHive(HKEY_LOCAL_MACHINE);
-end;
-
-/// <summary>Reads the global Library "Search Path" + "Browsing Path"
-///  for Win32 from the highest BDS, expands the common macros, and
-///  returns the existing directories that are NOT under the BDS root
-///  (the built-in RTL/VCL/FMX source is huge and already covered by
-///  the signature table, so we skip it).</summary>
-function GatherGlobalLibraryDirs(const ABdsRoot: string): TArray<string>;
-
-  function ReadPath(const ASubKey, AValue: string): string;
-  var Reg: TRegistry;
-  begin
-    Result := '';
-    Reg := TRegistry.Create(KEY_READ);
-    try
-      Reg.RootKey := HKEY_CURRENT_USER;
-      if Reg.OpenKeyReadOnly(ASubKey) and Reg.ValueExists(AValue) then
-        Result := Reg.ReadString(AValue);
-      Reg.CloseKey;
-    finally
-      Reg.Free;
-    end;
-  end;
-
-  function Expand(const S: string): string;
-  begin
-    Result := S;
-    Result := StringReplace(Result, '$(BDSLIB)',
-      IncludeTrailingPathDelimiter(ABdsRoot) + 'lib', [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(BDSINCLUDE)',
-      IncludeTrailingPathDelimiter(ABdsRoot) + 'include', [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(BDS)', ABdsRoot, [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(Platform)', 'Win32', [rfReplaceAll, rfIgnoreCase]);
-    Result := StringReplace(Result, '$(Config)', 'Release', [rfReplaceAll, rfIgnoreCase]);
-  end;
-
-var
-  Raw, Dir: string;
-  Dirs: TList<string>;
-  RootPref: string;
-begin
-  Result := nil;
-  if ABdsRoot = '' then Exit;
-  RootPref := IncludeTrailingPathDelimiter(ABdsRoot);
-  Dirs := TList<string>.Create;
-  try
-    // Locate the versioned Library\Win32 subkey again.
-    var Reg := TRegistry.Create(KEY_READ);
-    var VerKey := '';
-    try
-      Reg.RootKey := HKEY_CURRENT_USER;
-      if Reg.OpenKeyReadOnly('Software\Embarcadero\BDS') then
-      begin
-        var Vers := TStringList.Create;
-        try
-          Reg.GetKeyNames(Vers);
-          var BestNum: Double := -1; var FS := TFormatSettings.Invariant;
-          for var V in Vers do
-          begin
-            var N: Double;
-            if TryStrToFloat(V, N, FS) and (N > BestNum) then
-            begin BestNum := N; VerKey := V; end;
-          end;
-        finally
-          Vers.Free;
-        end;
-        Reg.CloseKey;
-      end;
-    finally
-      Reg.Free;
-    end;
-    if VerKey = '' then Exit;
-
-    for Raw in [ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Search Path'),
-                ReadPath('Software\Embarcadero\BDS\' + VerKey + '\Library\Win32', 'Browsing Path')] do
-      for Dir in Raw.Split([';'], TStringSplitOptions.ExcludeEmpty) do
-      begin
-        var D := Expand(Trim(Dir));
-        if Pos('$(', D) > 0 then Continue;                  // unresolved macro
-        D := ExcludeTrailingPathDelimiter(D);
-        if not TDirectory.Exists(D) then Continue;
-        if StartsText(RootPref, IncludeTrailingPathDelimiter(D)) then Continue; // built-in
-        if not Dirs.Contains(D) then Dirs.Add(D);
-      end;
-    Result := Dirs.ToArray;
-  finally
-    Dirs.Free;
-  end;
-end;
 
 /// <summary>Reads DCC_UnitSearchPath directories from the .dproj,
 ///  resolved relative to the .dproj directory.</summary>

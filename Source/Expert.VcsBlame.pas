@@ -108,6 +108,17 @@ function MapBufferToDiskLines(const ADisk, ABuf: TArray<string>): TArray<Integer
 ///  disk. Never blocks: a miss just means "not (yet) available".</summary>
 function BlameForFile(const AFile: string; out ALines: TBlameLines): Boolean;
 
+/// <summary>The same blame, but aligned to ABUFFERCONTENT - the text the
+///  user is looking at, which may have lines inserted above the caret.
+///  The blame itself always describes the file ON DISK, so indexing it
+///  with a buffer line number showed the commit of a DIFFERENT line
+///  (audit #37, M32; the gutter has remapped all along, the dialogs did
+///  not). An edited or new line comes back as "not committed yet", the
+///  same shape a VCS reports for it. ABufferContent = '' behaves exactly
+///  like BlameForFile.</summary>
+function BlameAlignedToBuffer(const AFile, ABufferContent: string;
+  out ALines: TBlameLines): Boolean;
+
 /// <summary>True when the last load for AFile has FINISHED without data
 ///  (untracked file, client error) - BlameStatus says why. Lets a caller
 ///  that waits for a result stop instead of running into its timeout.
@@ -908,6 +919,42 @@ begin
   finally
     GLock.Leave;
   end;
+end;
+
+function BlameAlignedToBuffer(const AFile, ABufferContent: string;
+  out ALines: TBlameLines): Boolean;
+var
+  Disk: TBlameLines;
+  DiskText: string;
+  DiskLines, BufLines: TArray<string>;
+  Map: TArray<Integer>;
+begin
+  Result := BlameForFile(AFile, ALines);
+  if not Result or (ABufferContent = '') then Exit;
+  Disk := ALines;
+  try
+    DiskText := TFile.ReadAllText(AFile);
+  except
+    Exit;   // cannot compare - the disk blame is all we have
+  end;
+  // Identical? Then the buffer IS the file and no mapping is needed.
+  if DiskText = ABufferContent then Exit;
+  DiskLines := DiskText.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  BufLines := ABufferContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  Map := MapBufferToDiskLines(DiskLines, BufLines);
+  SetLength(ALines, Length(Map));
+  for var I := 0 to High(Map) do
+    if (Map[I] >= 1) and (Map[I] <= Length(Disk)) then
+      ALines[I] := Disk[Map[I] - 1]
+    else
+    begin
+      // Edited or brand new - the same shape the gutter's remap uses
+      // (IsUncommitted is a function, not a field: an empty hash is
+      // what says "no revision for this line").
+      ALines[I] := Default(TBlameLine);
+      ALines[I].Kind := DetectVcs(AFile);
+      ALines[I].Hash := '';
+    end;
 end;
 
 function BlameLoadFailed(const AFile: string): Boolean;

@@ -40,10 +40,15 @@ type
     class var FRenameBackup: Boolean;
     class var FUsesCleanupKeepUnits: string;
     class var FLoaded: Boolean;
-    class function BaseRegistryKey: string; static;
     class function LegacyRegistryKey: string; static;
     class procedure MigrateLegacyKey; static;
   public
+    /// <summary>Our own registry branch under the key of the IDE this
+    ///  plugin runs in (the IDE's own version key plus our branch). Public
+    ///  because it is the ONE place that knows WHICH Delphi is hosting
+    ///  us - Expert.UnitIndex derives the version key from it instead of
+    ///  guessing the newest installed one (audit #37, L3c).</summary>
+    class function BaseRegistryKey: string; static;
     /// <summary>Reads the settings from the registry. Called automatically
     ///  by the property getters on first access; can be called manually to
     ///  re-read after an external change.</summary>

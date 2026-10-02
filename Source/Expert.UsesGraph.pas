@@ -131,6 +131,10 @@ type
     FAllIntf: TArray<TList<Boolean>>;
     FAllLine: TArray<TList<Integer>>;
     FEdges: TArray<TCycleEdge>;
+    // Project files that were NOT taken into the graph because another
+    // file of the same UNIT NAME came first - their edges are missing
+    // from the report, and nothing used to say so (audit #37, L3k).
+    FSkippedFiles: TArray<string>;
     FCompToGroup: TDictionary<Integer, Integer>;
     function ComponentGirth(const AMembers: TArray<Integer>): Integer;
     /// <summary>Number of nodes in components of size >= 2 when every
@@ -143,6 +147,11 @@ type
     /// <summary>Flat list of every uses edge inside a cycle group -
     ///  the master list shown in the dialog.</summary>
     property Edges: TArray<TCycleEdge> read FEdges;
+    /// <summary>Files the analysis left out: a second file with the same
+    ///  unit name (a copy in another folder). Their uses edges are not in
+    ///  the result, so a caller that reports "no cycle" should say that
+    ///  these were not looked at (audit #37, L3k).</summary>
+    property SkippedFiles: TArray<string> read FSkippedFiles;
     /// <summary>Given a clicked edge, returns the shortest concrete
     ///  cycle that runs through it: hop 0 is the clicked edge itself,
     ///  the remaining hops form the shortest path back from ToUnit to
@@ -1300,6 +1309,7 @@ var
   NextGroup: Integer;
 begin
   R := TUsesCycleResult.Create;
+  try
 
   // ---- collect nodes (project .pas units) ----
   N := 0;
@@ -1309,7 +1319,13 @@ begin
   begin
     if not SameText(ExtractFileExt(AFiles[I]), '.pas') then Continue;
     var UName := ChangeFileExt(ExtractFileName(AFiles[I]), '');
-    if R.FNameToIdx.ContainsKey(UpperCase(UName)) then Continue;
+    if R.FNameToIdx.ContainsKey(UpperCase(UName)) then
+    begin
+      // A second file of the same unit name - only one of them can be
+      // the node, and the loser's edges are missing from the result.
+      R.FSkippedFiles := R.FSkippedFiles + [AFiles[I]];
+      Continue;
+    end;
     R.FNames[N] := UName;
     R.FFiles[N] := AFiles[I];
     R.FNameToIdx.Add(UpperCase(UName), N);
@@ -1437,6 +1453,14 @@ begin
     RawEdges.Free;
     for I := 0 to N - 1 do
       Adj[I].Free;
+  end;
+
+  except
+    // Anything that goes wrong between the Create above and here used to
+    // LEAK the result (audit #37, L3k) - it is only handed to the caller
+    // on the way out.
+    R.Free;
+    raise;
   end;
 end;
 

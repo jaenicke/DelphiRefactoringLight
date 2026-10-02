@@ -87,13 +87,27 @@ begin
   Result := (AFile <> '') and Editor.GetCaretLineCol(ALine, Col) and (ALine > 0);
 end;
 
+// The blame of AFILE as it fits the text the user SEES: the editor
+// buffer when the file is open, the file on disk otherwise. Indexing a
+// disk blame with a buffer line number names the wrong commit as soon as
+// a line was inserted above the caret (audit #37, M32).
+function BlameForVisibleText(const AFile: string;
+  out ALines: TBlameLines): Boolean;
+var
+  Content: string;
+begin
+  if (Editor = nil) or not Editor.ReadEditorContent(AFile, Content) then
+    Content := EMPTYSTR;
+  Result := BlameAlignedToBuffer(AFile, Content, ALines);
+end;
+
 function BlameAvailableForCaretFile: Boolean;
 var
   F: string;
   Line: Integer;
   Lines: TBlameLines;
 begin
-  Result := CaretFileAndLine(F, Line) and BlameForFile(F, Lines)
+  Result := CaretFileAndLine(F, Line) and BlameForVisibleText(F, Lines)
     and (Length(Lines) > 0);
 end;
 
@@ -458,7 +472,7 @@ begin
     ShowThemedMessage(MSGNOLINE);
     Exit;
   end;
-  if not BlameForFile(F, Lines) or (Line > Length(Lines)) then
+  if not BlameForVisibleText(F, Lines) or (Line > Length(Lines)) then
   begin
     ShowThemedMessage(MSGNODATA);
     Exit;
@@ -584,7 +598,7 @@ begin
   if TPluginSettings.BlameUseTortoise
     and TortoiseShowBlame(F, DetectVcs(F), Line) then Exit;
 
-  if not BlameForFile(F, Lines) or (Length(Lines) = 0) then
+  if not BlameForVisibleText(F, Lines) or (Length(Lines) = 0) then
   begin
     ShowThemedMessage('No blame data for this file yet.'#13#10 + BlameStatus);
     Exit;

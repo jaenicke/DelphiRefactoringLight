@@ -1350,9 +1350,20 @@ begin
     Res.AddPair('cycles', Arr);
     Res.AddPair('truncated', TJSONBool.Create(Truncated));
     Res.AddPair('bestLevers', Levers);
+    // A second file of the same unit name is not a node, so its edges
+    // are missing - say so instead of answering as if nothing was left
+    // out (audit #37, L3k).
+    if Length(R.SkippedFiles) > 0 then
+    begin
+      var Skipped := TJSONArray.Create;
+      for var S in R.SkippedFiles do Skipped.Add(S);
+      Res.AddPair('skippedFiles', Skipped);
+    end;
     Res.AddPair('note', 'Cycles over ALL uses (interface and implementation) of ' +
       'the project units. bestLevers: the uses entries whose removal breaks the ' +
-      'most cycles.');
+      'most cycles.' + IfThen(Length(R.SkippedFiles) > 0,
+      ' skippedFiles: another file of the same unit name came first, so these ' +
+      'files and their uses edges are NOT part of this answer.', ''));
     Result := McpOk(Res);
   finally
     R.Free;

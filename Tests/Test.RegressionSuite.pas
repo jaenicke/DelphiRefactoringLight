@@ -442,6 +442,17 @@ type
   ///  the occurrence the apply changes (L5a), and a descendant's
   ///  reintroduced or differently-overloaded member is not the symbol
   ///  being renamed (M21b).</summary>
+  /// <summary>Audit issue #37, the two remaining items that pure code
+  ///  decides: a second file of the same unit name is left out of the
+  ///  uses graph and must be NAMED (L3k), and the library path has to be
+  ///  expanded per PLATFORM instead of always for Win32 (L3c).</summary>
+  [TestFixture]
+  TCheckScopeTests = class
+  public
+    [Test] procedure ADuplicateUnitNameIsReportedAsSkipped;
+    [Test] procedure ThePathVariablesKnowTheirPlatform;
+  end;
+
   [TestFixture]
   TUnitRenameScopeTests = class
   public
@@ -3064,6 +3075,74 @@ begin
 end;
 
 
+
+{ TCheckScopeTests }
+
+procedure TCheckScopeTests.ADuplicateUnitNameIsReportedAsSkipped;
+var
+  R: TUsesCycleResult;
+begin
+  // Two files named Foo.pas in different folders: only one can be the
+  // graph's node, and the other one's uses edges are simply not in the
+  // answer. That used to happen without a word.
+  R := TUsesGraphAnalyzer.Analyze(
+    ['C:\a\Foo.pas', 'C:\b\Foo.pas', 'C:\a\Bar.pas'], nil,
+    function(AFile: string): string
+    begin
+      if SameText(AFile, 'C:\a\Foo.pas') then
+        Result := 'unit Foo;' + NL + 'interface' + NL + 'uses Bar;' + NL +
+          'implementation' + NL + 'end.'
+      else if SameText(AFile, 'C:\b\Foo.pas') then
+        Result := 'unit Foo;' + NL + 'interface' + NL + 'implementation' + NL + 'end.'
+      else
+        Result := 'unit Bar;' + NL + 'interface' + NL + 'uses Foo;' + NL +
+          'implementation' + NL + 'end.';
+    end);
+  try
+    Assert.AreEqual(1, Integer(Length(R.SkippedFiles)),
+      'the second Foo.pas must be reported as skipped');
+    Assert.AreEqual('C:\b\Foo.pas', R.SkippedFiles[0]);
+    // ... and the analysis itself still works on the first one.
+    Assert.IsTrue(Length(R.Edges) > 0, 'Foo <-> Bar is a cycle');
+  finally
+    R.Free;
+  end;
+
+  // Nothing to report when every unit name is unique.
+  R := TUsesGraphAnalyzer.Analyze(['C:\a\Foo.pas'], nil,
+    function(AFile: string): string
+    begin
+      Result := 'unit Foo;' + NL + 'interface' + NL + 'implementation' + NL + 'end.';
+    end);
+  try
+    Assert.AreEqual(0, Integer(Length(R.SkippedFiles)), 'no duplicates');
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TCheckScopeTests.ThePathVariablesKnowTheirPlatform;
+const
+  Root = 'C:\Studio\37.0';
+begin
+  // $(Platform) was hard-coded to Win32, so a Win64 library path
+  // resolved to directories that do not exist - and with two Delphi
+  // versions installed the check read the wrong one's paths.
+  Assert.AreEqual('C:\lib\Win32\Release',
+    ExpandIdeVars('C:\lib\$(Platform)\$(Config)', Root, nil),
+    'Win32 stays the default');
+  Assert.AreEqual('C:\lib\Win64\Release',
+    ExpandIdeVars('C:\lib\$(Platform)\$(Config)', Root, nil, 'Win64'),
+    'and Win64 is honoured when asked for');
+  Assert.AreEqual(Root + '\lib\Win64',
+    ExpandIdeVars('$(BDSLIB)\$(Platform)', Root, nil, 'Win64'),
+    'together with the other built-ins');
+  // The IDE's own version key must not carry our settings branch.
+  var Key := IdeVersionRegistryKey;
+  Assert.IsFalse(ContainsText(Key, 'DelphiRefactoringLight'),
+    'the version key is the IDE''s, not ours: ' + Key);
+end;
+
 { TUnitRenameScopeTests }
 
 procedure TUnitRenameScopeTests.OnlyUnitPlacesCountForAUnitRename;
@@ -3264,5 +3343,6 @@ initialization
   TDUnitX.RegisterTestFixture(TSelfProtectionTests);
   TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
   TDUnitX.RegisterTestFixture(TUnitRenameScopeTests);
+  TDUnitX.RegisterTestFixture(TCheckScopeTests);
 
 end.

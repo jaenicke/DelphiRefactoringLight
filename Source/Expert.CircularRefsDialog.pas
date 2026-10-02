@@ -147,6 +147,7 @@ type
     procedure DoLeverDblClick(Sender: TObject);
     procedure DoEdgeColumnClick(Sender: TObject; Column: TListColumn);
     procedure DoEdgeData(Sender: TObject; Item: TListItem);
+    procedure ClearPathPane;
     procedure DoEdgeSelect(Sender: TObject; Item: TListItem; Selected: Boolean);
     procedure DoEdgeDraw(Sender: TCustomListView; Item: TListItem;
       State: TCustomDrawState; var DefaultDraw: Boolean);
@@ -1114,8 +1115,27 @@ begin
         Result := -Result;
     end));
   FEdgeList.ClearSelection;   // old selected index = a different edge now
+  // ClearSelection does not call OnSelectItem with Selected = False, and
+  // DoEdgeSelect exits on "not Selected" anyway - so the pane kept
+  // showing the cycle of an edge nobody has selected any more
+  // (audit #37, L3m).
+  ClearPathPane;
   FEdgeList.Invalidate;
   SetListViewSortArrow(FEdgeList, Col, Asc);
+end;
+
+// Empties the path pane: no edge is selected, so there is no cycle to
+// show. Saying nothing is better than showing the previous answer.
+procedure TCircularRefsDialog.ClearPathPane;
+begin
+  FCurPath := nil;
+  FPathLbl.Caption := 'Select an edge above to see its shortest cycle.';
+  FPathList.Items.BeginUpdate;
+  try
+    FPathList.Items.Clear;
+  finally
+    FPathList.Items.EndUpdate;
+  end;
 end;
 
 procedure TCircularRefsDialog.DoEdgeData(Sender: TObject; Item: TListItem);

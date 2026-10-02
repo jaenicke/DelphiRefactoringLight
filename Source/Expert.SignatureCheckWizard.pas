@@ -207,6 +207,8 @@ begin
   begin
     for var Retry := 1 to 30 do
     begin
+      // A closed window is a cancel (audit #37, L3h).
+      if FDialog.CloseRequested then Exit;
       FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
       try
@@ -214,7 +216,14 @@ begin
           FContext.Line - 1, FContext.Column - 1);
         if H <> '' then Break;
       except end;
-      Sleep(1000);
+      // In 100 ms steps, so closing the window ends the wait at once
+      // instead of after the current second.
+      for var Slice := 1 to 10 do
+      begin
+        if FDialog.CloseRequested then Exit;
+        Sleep(100);
+        Application.ProcessMessages;
+      end;
     end;
   end
   else

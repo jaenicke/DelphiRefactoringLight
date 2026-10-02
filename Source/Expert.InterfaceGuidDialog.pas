@@ -55,6 +55,10 @@ type
     FWatchTimer: TTimer;
     FWatchFile: string;
     FWatchContent: string;
+    /// <summary>The files the CHECK looked at. A file outside this set
+    ///  never changes the result, however often the user edits it
+    ///  (audit #37, L3e). nil = no set given, then everything counts.</summary>
+    FScanned: TStringList;
     // Header-click sort state (-1 = default duplicates-first ordering).
     // Virtual list: sorting means reordering FEntries + Invalidate.
     FSortCol: Integer;
@@ -64,6 +68,7 @@ type
     procedure DoColumnClick(Sender: TObject; Column: TListColumn);
     procedure DoWatchTick(Sender: TObject);
     procedure RefreshFileEntries(const AFile: string);
+    function WasScanned(const AFile: string): Boolean;
     procedure UpdateSummary;
     procedure DoCustomDrawItem(Sender: TCustomListView; Item: TListItem;
       State: TCustomDrawState; var DefaultDraw: Boolean);
@@ -76,11 +81,29 @@ type
     procedure FillList;
   public
     constructor CreateDialog(AOwner: TComponent;
-      const AEntries: TArray<TInterfaceGuidEntry>);
+      const AEntries: TArray<TInterfaceGuidEntry>;
+      const AScannedFiles: TArray<string> = nil);
+    destructor Destroy; override;
   end;
 
+// Only a file the CHECK itself looked at may change the result (audit
+// #37, L3e): the watcher follows the active editor file, and a Ctrl+click
+// into an RTL or vendor unit used to pull ITS interfaces into the list,
+// where they appeared as duplicates of the project's own.
+function TInterfaceGuidDialog.WasScanned(const AFile: string): Boolean;
+begin
+  Result := (FScanned = nil) or (FScanned.IndexOf(AFile) >= 0);
+end;
+
+destructor TInterfaceGuidDialog.Destroy;
+begin
+  FScanned.Free;
+  inherited;
+end;
+
 constructor TInterfaceGuidDialog.CreateDialog(AOwner: TComponent;
-  const AEntries: TArray<TInterfaceGuidEntry>);
+  const AEntries: TArray<TInterfaceGuidEntry>;
+  const AScannedFiles: TArray<string>);
 var
   Col: TListColumn;
 begin
@@ -95,6 +118,13 @@ begin
   OnClose := DoFormClose;
 
   FEntries := AEntries;
+  if Length(AScannedFiles) > 0 then
+  begin
+    FScanned := TStringList.Create;
+    FScanned.CaseSensitive := False;
+    FScanned.Sorted := True;
+    FScanned.AddStrings(AScannedFiles);
+  end;
 
   FLblSummary := TLabel.Create(Self);
   FLblSummary.Parent := Self;
@@ -204,7 +234,8 @@ begin
     // watch file one final check: if the user closed it without
     // saving, its effective content reverted to the disk state and
     // the list would keep showing the discarded edits.
-    if (FWatchFile <> '') and ReadEffectiveContent(FWatchFile, OldEffective)
+    if (FWatchFile <> '') and WasScanned(FWatchFile)
+       and ReadEffectiveContent(FWatchFile, OldEffective)
        and (OldEffective <> FWatchContent) then
       RefreshFileEntries(FWatchFile);
     // Baseline for the new file; refresh on the NEXT change so merely
@@ -215,7 +246,7 @@ begin
   end;
   if Content = FWatchContent then Exit;
   FWatchContent := Content;
-  RefreshFileEntries(FileName);
+  if WasScanned(FileName) then RefreshFileEntries(FileName);
 end;
 
 procedure TInterfaceGuidDialog.RefreshFileEntries(const AFile: string);
@@ -440,7 +471,7 @@ begin
   end;
   // Non-modal (frees itself on close) so the user can keep navigating
   // and editing while the list stays open.
-  Dlg := TInterfaceGuidDialog.CreateDialog(Application.MainForm, Entries);
+  Dlg := TInterfaceGuidDialog.CreateDialog(Application.MainForm, Entries, Files);
   Dlg.Show;
 end;
 

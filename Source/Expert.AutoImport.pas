@@ -2441,10 +2441,24 @@ begin
   if Root = '' then Root := ExtractFilePath(AFile);
   Proj := Editor.GetCurrentProjectDproj;
 
+  // The wait below pumps messages for up to ~6 s, so a second call can
+  // arrive from that pump. Its finally would clear GOnDemandBusy while
+  // THIS call is still waiting, and the live tick would resume right into
+  // the middle of our didOpen sequence (audit #37, L3q).
+  if GOnDemandBusy then
+  begin
+    if Assigned(AStatus) then
+      AStatus('An analysis is already running - try again in a moment.');
+    Exit;
+  end;
   GOnDemandBusy := True;
   try
     // Keep the index warm and the file synced to disk (so LSP sees the buffer).
     TUnitIndex.Instance.RefreshSourcesFromEditor;
+    // DelphiLSP reads the buffer we send, but the index parses from DISK -
+    // so the file is saved. Say so: writing the user's unit without a
+    // word is a surprise (audit #37, L3q).
+    if Assigned(AStatus) then AStatus('Saving ' + ExtractFileName(AFile) + '...');
     Editor.SaveFile(AFile);
 
     if Assigned(AStatus) then AStatus('Starting LSP...');
@@ -4142,6 +4156,19 @@ begin
     if not EnsureUnitAvailable(FFixes[A.FixIdx].UnitNames[A.UnitChoice]) then
     begin
       Close;   // user cancelled - no message
+      Exit;
+    end;
+  end;
+  // The FOLLOW-UP unit of a rename / declare fix ("(+ uses X)") is written
+  // by the planner and went through no gate at all, so a unit only the
+  // BROWSING path can see was added and the unit then did not compile
+  // (audit #37, L3p).
+  if FFixes[A.FixIdx].FollowUpUnit <> '' then
+  begin
+    OnDeactivate := nil;
+    if not EnsureUnitAvailable(FFixes[A.FixIdx].FollowUpUnit) then
+    begin
+      Close;
       Exit;
     end;
   end;

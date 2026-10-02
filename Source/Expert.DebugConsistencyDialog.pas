@@ -448,6 +448,10 @@ begin
     end;
   end;
   FillRows;
+  // The refill puts the rows back in FILL order, so a sort arrow from an
+  // earlier header click would promise an order that is gone
+  // (audit #37, L3l).
+  SetListViewSortArrow(FList, -1, True);
   UpdateButtons;
   if Skipped > 0 then
     ShowThemedMessage(Format('%d file(s) converted to CRLF, %d skipped:%s',

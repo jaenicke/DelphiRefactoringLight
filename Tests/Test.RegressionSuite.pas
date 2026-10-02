@@ -482,6 +482,11 @@ type
     ///  behind - and a fixture cannot cover the shapes a hundred real
     ///  units have.</summary>
     [Test] procedure NoRealUsesClauseEntryIsMissed;
+    /// <summary>The other side of the same risk: MemberIsOtherSymbol
+    ///  DROPS a rename target, so a false positive silently leaves a
+    ///  member unrenamed. Swept over the repository's own overrides,
+    ///  where the answer must always be "this IS the symbol".</summary>
+    [Test] procedure NoRealOverrideIsTakenForAnotherSymbol;
     [Test] procedure ThePreviewChangesTheOccurrenceTheApplyChanges;
     [Test] procedure AReintroducedMemberIsAnotherSymbol;
   end;
@@ -3278,6 +3283,74 @@ begin
     Format('the sweep must really look at the clauses (checked %d)', [Checked]));
   Assert.AreEqual(0, Missed, Format('%d uses entry/entries not recognised, ' +
     'first: %s', [Missed, MissedWhere]));
+end;
+
+
+procedure TUnitRenameScopeTests.NoRealOverrideIsTakenForAnotherSymbol;
+var
+  Dir, Content, Why: string;
+  Files: TArray<string>;
+  Checked, Wrong: Integer;
+  WrongWhere: string;
+begin
+  Dir := ExtractFilePath(ParamStr(0));
+  for var Up := 1 to 6 do
+  begin
+    Dir := ExtractFilePath(ExcludeTrailingPathDelimiter(Dir));
+    if TDirectory.Exists(TPath.Combine(Dir, 'Source')) then Break;
+  end;
+  Dir := TPath.Combine(Dir, 'Source');
+  Assert.IsTrue(TDirectory.Exists(Dir),
+    'the repository Source folder must be reachable from ' + ParamStr(0));
+  Files := TDirectory.GetFiles(Dir, '*.pas');
+  Checked := 0;
+  Wrong := 0;
+  WrongWhere := '';
+  for var F in Files do
+  begin
+    try
+      Content := ReadDelphiFile(F);
+    except
+      Continue;
+    end;
+    var Lines := SplitEditorLines(Content);
+    for var L := 0 to High(Lines) do
+    begin
+      var T := Trim(Lines[L]);
+      // "procedure Foo(...); override;" inside a class body, with its
+      // owning type read from the lines above.
+      if not HasWholeWordCI(T, 'override') then Continue;
+      var Kind: string;
+      var IsClassMethod: Boolean;
+      if not IsHeaderLine(T, Kind, IsClassMethod) then Continue;
+      var Owner := EnclosingContainerName(Lines, L);
+      if Owner = '' then Continue;
+      // the member's name: the token after the keyword
+      var Rest := Trim(Copy(T, Pos(' ', T) + 1, MaxInt));
+      if IsClassMethod then Rest := Trim(Copy(Rest, Pos(' ', Rest) + 1, MaxInt));
+      var NameEnd := 1;
+      while (NameEnd <= Length(Rest)) and IsIdentChar(Rest[NameEnd]) do Inc(NameEnd);
+      var Member := Copy(Rest, 1, NameEnd - 1);
+      if Member = '' then Continue;
+      Inc(Checked);
+      // An override IS the symbol - whatever the parameter count, which is
+      // why the rule only ever acts on reintroduce or an overload.
+      if MemberIsOtherSymbol(Content, Owner, Member, -1, Why)
+        or MemberIsOtherSymbol(Content, Owner, Member, 1, Why) then
+      begin
+        Inc(Wrong);
+        if WrongWhere = '' then
+          WrongWhere := Format('%s:%d %s.%s - %s',
+            [ExtractFileName(F), L + 1, Owner, Member, Why]);
+      end;
+    end;
+  end;
+  // 63 override declarations exist in Source today (counted with grep);
+  // the bound only has to prove the sweep really looked.
+  Assert.IsTrue(Checked >= 50,
+    Format('the sweep must really see overrides (checked %d)', [Checked]));
+  Assert.AreEqual(0, Wrong, Format('%d override(s) taken for another ' +
+    'symbol, first: %s', [Wrong, WrongWhere]));
 end;
 
 { TCheckScopeTests }

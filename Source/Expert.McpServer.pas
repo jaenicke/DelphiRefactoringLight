@@ -96,7 +96,22 @@ uses
   Mcp.Protocol, Mcp.PipeServer, Expert.StatusWindow, Expert.Version,
   Delphi.FileEncoding;
 
+type
+  /// <summary>One answered get_quick_fixes: its generation, the buffer
+  ///  state it describes and the fixes in the order they were listed
+  ///  (audit #36, H36).</summary>
+  TFixListing = record
+    Gen: Integer;
+    Hash: Cardinal;
+    Fixes: TArray<TQuickFix>;
+  end;
+
 const
+  /// <summary>How many listings per file are kept. A client applies an id
+  ///  of the listing it just read; a handful covers a stale listing
+  ///  followed by a corrected one, and anything older is refused rather
+  ///  than silently reinterpreted.</summary>
+  MaxFixListings = 4;
   WM_MCP_CALL = WM_APP + $3A1;
   MainCallTimeoutMs = 15000;
   LspWaitMs = 8000;
@@ -137,7 +152,11 @@ var
   GDispatcher: TDispatcher = nil;
   GWnd: HWND = 0;
   GFixLock: TCriticalSection = nil;
-  GFixCache: TDictionary<string, TPair<Cardinal, TArray<TQuickFix>>> = nil;
+  // Per file the last few LISTINGS, newest last: an id carries the
+  // generation it came from, so an older id can no longer pick a fix out
+  // of a newer listing (audit #36, H36).
+  GFixCache: TDictionary<string, TArray<TFixListing>> = nil;
+  GFixGen: Integer = 0;
   // Written by every pipe HANDLER thread, read by the status tick on the
   // MAIN thread: a managed string assigned while another thread reads it can
   // be read mid-replacement, and two handlers assigning at once can free the
@@ -600,26 +619,67 @@ begin
   Result := True;
 end;
 
-procedure CacheFixes(const AFile: string; AHash: Cardinal; const AFixes: TArray<TQuickFix>);
+// Records one listing and returns its GENERATION, which goes into every
+// id of that listing.
+function CacheFixes(const AFile: string; AHash: Cardinal;
+  const AFixes: TArray<TQuickFix>): Integer;
+var
+  List: TArray<TFixListing>;
+  Entry: TFixListing;
 begin
   GFixLock.Enter;
   try
-    GFixCache.AddOrSetValue(UpperCase(AFile),
-      TPair<Cardinal, TArray<TQuickFix>>.Create(AHash, AFixes));
+    Inc(GFixGen);
+    Result := GFixGen;
+    Entry.Gen := Result;
+    Entry.Hash := AHash;
+    Entry.Fixes := AFixes;
+    GFixCache.TryGetValue(UpperCase(AFile), List);
+    List := List + [Entry];
+    // Only the last few are kept: an id older than that is refused, which
+    // is the honest answer - its listing is gone.
+    if Length(List) > MaxFixListings then
+      List := Copy(List, Length(List) - MaxFixListings, MaxFixListings);
+    GFixCache.AddOrSetValue(UpperCase(AFile), List);
   finally
     GFixLock.Leave;
   end;
 end;
 
-function CachedFixes(const AFile: string; AHash: Cardinal;
+// The fixes of listing AGEN for this buffer state; AGEN < 0 = the NEWEST
+// listing of it (an id in the older two-part form).
+function CachedFixes(const AFile: string; AHash: Cardinal; AGen: Integer;
   out AFixes: TArray<TQuickFix>): Boolean;
 var
-  P: TPair<Cardinal, TArray<TQuickFix>>;
+  List: TArray<TFixListing>;
 begin
+  Result := False;
   GFixLock.Enter;
   try
-    Result := GFixCache.TryGetValue(UpperCase(AFile), P) and (P.Key = AHash);
-    if Result then AFixes := P.Value;
+    if not GFixCache.TryGetValue(UpperCase(AFile), List) then Exit;
+    for var I := High(List) downto 0 do
+      if (List[I].Hash = AHash) and ((AGen < 0) or (List[I].Gen = AGen)) then
+      begin
+        AFixes := List[I].Fixes;
+        Exit(True);
+      end;
+  finally
+    GFixLock.Leave;
+  end;
+end;
+
+// Is AGEN the newest listing of this buffer state? An id of an older
+// listing must not select by index in the newest one (audit #36, H36).
+function CachedIsNewest(const AFile: string; AHash: Cardinal; AGen: Integer): Boolean;
+var
+  List: TArray<TFixListing>;
+begin
+  Result := False;
+  GFixLock.Enter;
+  try
+    if not GFixCache.TryGetValue(UpperCase(AFile), List) then Exit;
+    for var I := High(List) downto 0 do
+      if List[I].Hash = AHash then Exit(List[I].Gen = AGen);
   finally
     GFixLock.Leave;
   end;
@@ -656,7 +716,7 @@ begin
     if Note <> '' then Note := Note + ' ';
     Note := Note + 'Declined: ' + Declined;
   end;
-  CacheFixes(Snap.FileName, Snap.Hash, Fixes);
+  var Gen := CacheFixes(Snap.FileName, Snap.Hash, Fixes);
 
   // Whether the compiler can actually see a candidate unit needs the
   // project's search paths - ToolsAPI, so one trip to the main thread.
@@ -675,7 +735,7 @@ begin
             if not Avail.ContainsKey(UpperCase(U)) then
               Avail.Add(UpperCase(U), AvailabilityName(U));
         end, True, AStop, Err);
-    Result := OkResult(QuickFixesToJson(Snap.FileName, Snap.Hash, Fixes, Line1,
+    Result := OkResult(QuickFixesToJson(Snap.FileName, Snap.Hash, Gen, Fixes, Line1,
       function(const AUnit: string): string
       begin
         if not Avail.TryGetValue(UpperCase(AUnit), Result) then Result := 'unknown';
@@ -690,7 +750,7 @@ function ToolApplyQuickFix(AArgs: TJSONObject; AStop: THandle): string;
 var
   F, FixId, UnitArg, SectionArg, Err: string;
   IdHash: Cardinal;
-  Idx: Integer;
+  Idx, IdGen: Integer;
   Res: TJSONObject;
 begin
   if AArgs = nil then Exit(ErrResult('arguments "file" and "fix_id" are required'));
@@ -700,7 +760,7 @@ begin
   SectionArg := AArgs.GetValue<string>('section', '');
   if (F = '') or (FixId = '') then
     Exit(ErrResult('arguments "file" and "fix_id" are required'));
-  if not ParseFixId(FixId, IdHash, Idx) then
+  if not ParseFixId(FixId, IdHash, IdGen, Idx) then
     Exit(ErrResult('malformed fix_id "' + FixId + '" - use an id from get_quick_fixes'));
   F := ExpandFileName(F);
 
@@ -730,9 +790,11 @@ begin
           [IntToHex(IdHash, 8), IntToHex(Cur, 8)]);
         Exit;
       end;
-      if not CachedFixes(F, Cur, Fixes) then
+      if not CachedFixes(F, Cur, IdGen, Fixes) then
       begin
-        Msg := 'unknown fix id - call get_quick_fixes for this file first';
+        Msg := 'unknown fix id - the listing it came from is gone ' +
+          '(the fixes were listed again since). Call get_quick_fixes for ' +
+          'this file and use an id from the new answer.';
         Exit;
       end;
       if Idx > High(Fixes) then
@@ -884,7 +946,9 @@ begin
         Exit;
       end;
       var Cur := DiagContentHash(C);
-      if not CachedFixes(F, Cur, Fixes) then
+      // The batch takes the NEWEST listing of this buffer state; the ids
+      // below are matched against it with their own generation.
+      if not CachedFixes(F, Cur, -1, Fixes) then
       begin
         Msg := 'no current fix list for this buffer state - call get_quick_fixes ' +
           'for this file first (fix lists expire with every edit)';
@@ -897,8 +961,9 @@ begin
         for var Id in Ids do
         begin
           var H: Cardinal;
-          var Idx: Integer;
-          if ParseFixId(Id, H, Idx) and (H = Cur) and (Idx = I) then Take := True;
+          var Idx, G: Integer;
+          if ParseFixId(Id, H, G, Idx) and (H = Cur) and (Idx = I)
+            and ((G < 0) or CachedIsNewest(F, Cur, G)) then Take := True;
         end;
         if Take then Chosen := Chosen + [Fixes[I]];
       end;
@@ -1814,7 +1879,7 @@ procedure StartMcpServer;
 begin
   if GServer <> nil then Exit;
   GFixLock := TCriticalSection.Create;
-  GFixCache := TDictionary<string, TPair<Cardinal, TArray<TQuickFix>>>.Create;
+  GFixCache := TDictionary<string, TArray<TFixListing>>.Create;
   GHeadless := TList<string>.Create;
   GScratch := TDictionary<string, string>.Create;
   GDispatcher := TDispatcher.Create;

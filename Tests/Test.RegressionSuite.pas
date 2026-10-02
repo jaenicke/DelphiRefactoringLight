@@ -416,6 +416,11 @@ type
     ///  "add_unit Foo" was accepted by "add_unit apply=true Bar" - the
     ///  answer then described Bar while the user had reviewed Foo.</summary>
     [Test] procedure APreviewTokenBelongsToItsArguments;
+    /// <summary>Audit #36, H36: a quick-fix id carries the GENERATION of
+    ///  the listing it came from. With an unchanged buffer but changed
+    ///  diagnostics the indices shift, and an id of the first listing
+    ///  used to select a different fix in the second one.</summary>
+    [Test] procedure AFixIdNamesItsOwnListing;
   end;
 
   /// <summary>Audit issue #41, the three High findings of "Remove with".
@@ -3003,6 +3008,33 @@ begin
   Assert.AreEqual(0, Integer(Length(UnknownToolArguments('no_such_tool',
     ['x', 'y']))));
   Assert.AreEqual('', UnknownArgumentNote('no_such_tool', ['x']));
+end;
+
+
+procedure TSelfProtectionTests.AFixIdNamesItsOwnListing;
+var
+  H: Cardinal;
+  Gen, Idx: Integer;
+begin
+  // The id says which listing it came from.
+  Assert.AreEqual('0000002A-7-3', MakeFixId($2A, 7, 3), 'the id format');
+  Assert.IsTrue(ParseFixId('0000002A-7-3', H, Gen, Idx), 'and it parses back');
+  Assert.AreEqual(Cardinal($2A), H, 'the buffer state');
+  Assert.AreEqual(7, Gen, 'the generation');
+  Assert.AreEqual(3, Idx, 'the index');
+
+  // The OLDER two-part form still parses and means "the newest listing of
+  // this buffer state" - a client that kept an id must not break.
+  Assert.IsTrue(ParseFixId('0000002A-3', H, Gen, Idx), 'the old form');
+  Assert.AreEqual(Cardinal($2A), H);
+  Assert.AreEqual(-1, Gen, 'no generation = the newest listing');
+  Assert.AreEqual(3, Idx);
+
+  // Nonsense is refused rather than read as something.
+  Assert.IsFalse(ParseFixId('', H, Gen, Idx), 'empty');
+  Assert.IsFalse(ParseFixId('nothex00-1-2', H, Gen, Idx), 'no hash');
+  Assert.IsFalse(ParseFixId('0000002A-1-x', H, Gen, Idx), 'no index');
+  Assert.IsFalse(ParseFixId('0000002A--1', H, Gen, Idx), 'a negative generation');
 end;
 
 { TRemoveWithSafetyTests }

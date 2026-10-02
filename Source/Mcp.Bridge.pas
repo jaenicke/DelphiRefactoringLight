@@ -36,7 +36,8 @@ unit Mcp.Bridge;
 interface
 
 uses
-  System.SysUtils, System.JSON, Mcp.Protocol, Expert.Version;
+  System.SysUtils, System.JSON, System.Generics.Collections,
+  Mcp.Protocol, Expert.Version;
 
 type
   IMcpTransport = interface
@@ -54,6 +55,12 @@ type
     FLock: TObject;
     FAnnounced: string;       // ToolsSignature behind the last tools/list
     FAnnouncedSet: Boolean;
+    /// <summary>pid -> tick count until which that instance is skipped
+    ///  because it did not answer (audit #36, L2e).</summary>
+    FPenalty: TDictionary<Cardinal, UInt64>;
+    function IsPenalised(APid: Cardinal): Boolean;
+    procedure Penalise(APid: Cardinal);
+    procedure Forgive(APid: Cardinal);
     function ToolsSignature(const ACtxs: TArray<TMcpInstanceContext>): string;
     function EffectiveTools(const ACtxs: TArray<TMcpInstanceContext>): TJSONArray;
     function QueryContexts(out AErrors: string): TArray<TMcpInstanceContext>;
@@ -115,10 +122,15 @@ function UnclassifiedWaitTools: TArray<string>;
 implementation
 
 uses
-  System.Generics.Collections, System.Generics.Defaults, System.IOUtils;
+  System.Generics.Defaults, System.IOUtils, Winapi.Windows;
 
 const
   ContextTimeoutMs = 5000;
+  /// <summary>How long an instance that did not answer its context query
+  ///  is skipped. Short enough that an IDE which recovers is used again
+  ///  within a few calls, long enough that a frozen one does not cost the
+  ///  timeout over and over (audit #36, L2e).</summary>
+  PenaltyMs = 20000;
   ToolTimeoutMs = 45000;
   /// <summary>The IDE's own longest budget (300 s on the main thread) plus
   ///  room for the handler-thread waits that can precede it, so the bridge
@@ -238,10 +250,12 @@ begin
   FCwd := ACwd;
   FTransport := ATransport;
   FLock := TObject.Create;
+  FPenalty := TDictionary<Cardinal, UInt64>.Create;
 end;
 
 destructor TMcpBridge.Destroy;
 begin
+  FPenalty.Free;
   FLock.Free;
   inherited;
 end;
@@ -368,11 +382,23 @@ begin
   AErrors := '';
   for var Pid in FTransport.ListPids do
   begin
+    // An IDE that did not answer is left alone for a while (audit #36,
+    // L2e): every call queries EVERY instance, so one frozen IDE used to
+    // add the full context timeout to each of them - even to a call
+    // pinned to another IDE.
+    if IsPenalised(Pid) then
+    begin
+      AErrors := AErrors + Format('pid %d: skipped, did not answer within ' +
+        '%d ms (retried in a moment)', [Pid, ContextTimeoutMs]) + sLineBreak;
+      Continue;
+    end;
     if not FTransport.Request(Pid, '{"method":"context"}', ContextTimeoutMs, Resp, Err) then
     begin
+      Penalise(Pid);
       AErrors := AErrors + Format('pid %d: %s', [Pid, Err]) + sLineBreak;
       Continue;
     end;
+    Forgive(Pid);
     V := TJSONObject.ParseJSONValue(Resp);
     try
       if (V is TJSONObject) and TJSONObject(V).GetValue<Boolean>('ok', False) and
@@ -385,6 +411,27 @@ begin
       V.Free;
     end;
   end;
+end;
+
+// --- the penalty box of an unreachable IDE (audit #36, L2e) ------------
+// Not a cache of answers, only of SILENCE: the pid is skipped for
+// PenaltyMs and then asked again, so an IDE that comes back is picked up
+// by itself. One successful answer clears it immediately.
+function TMcpBridge.IsPenalised(APid: Cardinal): Boolean;
+var
+  Until_: UInt64;
+begin
+  Result := FPenalty.TryGetValue(APid, Until_) and (GetTickCount64 < Until_);
+end;
+
+procedure TMcpBridge.Penalise(APid: Cardinal);
+begin
+  FPenalty.AddOrSetValue(APid, GetTickCount64 + PenaltyMs);
+end;
+
+procedure TMcpBridge.Forgive(APid: Cardinal);
+begin
+  FPenalty.Remove(APid);
 end;
 
 function TMcpBridge.ToolResult(const AText: string; AIsError: Boolean): TJSONObject;

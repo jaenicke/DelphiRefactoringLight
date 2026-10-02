@@ -32,8 +32,18 @@ function SeverityName(ASeverity: Integer): string;
 function FixKindName(AKind: TQuickFixKind): string;
 function FixDescription(const AFix: TQuickFix): string;
 
-function MakeFixId(AHash: Cardinal; AIndex: Integer): string;
-function ParseFixId(const AId: string; out AHash: Cardinal; out AIndex: Integer): Boolean;
+/// <summary>The id of one listed quick fix: the content hash, the
+///  LISTING's generation and the index in it. The generation is what
+///  stops an id of an older listing from selecting a different fix: with
+///  an unchanged buffer (same hash) but changed diagnostics the indices
+///  shift, and an id from the first listing then applied the wrong fix
+///  (audit #36, H36).</summary>
+function MakeFixId(AHash: Cardinal; AGen, AIndex: Integer): string;
+/// <summary>Reads both forms: '<hash>-<gen>-<index>' and the older
+///  '<hash>-<index>', which answers AGen = -1 = "whichever listing of
+///  this buffer state is the newest".</summary>
+function ParseFixId(const AId: string; out AHash: Cardinal;
+  out AGen, AIndex: Integer): Boolean;
 
 type
   /// <summary>One changed line of a PREVIEW. Line is 1-based in the OLD
@@ -126,7 +136,7 @@ function DiagnosticsToJson(const AFile: string; AHash: Cardinal;
 ///  then also carries its diagnostic, the affected line verbatim and the
 ///  CHANGES it would make (user request 2026-09-24 - a caller has to be
 ///  able to judge a fix before applying it). '' = the short form.</summary>
-function QuickFixesToJson(const AFile: string; AHash: Cardinal;
+function QuickFixesToJson(const AFile: string; AHash: Cardinal; AGen: Integer;
   const AFixes: TArray<TQuickFix>; ALine1: Integer;
   const AAvailability: TUnitAvailabilityFunc;
   const ADiagCount: Integer; const AUsed, AStale, ANote: string;
@@ -524,23 +534,33 @@ begin
   end;
 end;
 
-function MakeFixId(AHash: Cardinal; AIndex: Integer): string;
+function MakeFixId(AHash: Cardinal; AGen, AIndex: Integer): string;
 begin
-  Result := IntToHex(AHash, 8) + '-' + IntToStr(AIndex);
+  Result := IntToHex(AHash, 8) + '-' + IntToStr(AGen) + '-' + IntToStr(AIndex);
 end;
 
-function ParseFixId(const AId: string; out AHash: Cardinal; out AIndex: Integer): Boolean;
+function ParseFixId(const AId: string; out AHash: Cardinal;
+  out AGen, AIndex: Integer): Boolean;
 var
   P: Integer;
   H: Int64;
+  Rest: string;
 begin
   Result := False;
   AHash := 0;
+  AGen := -1;
   AIndex := -1;
   P := Pos('-', AId);
   if P <> 9 then Exit;
   if not TryStrToInt64('$' + Copy(AId, 1, 8), H) then Exit;
-  if not TryStrToInt(Copy(AId, P + 1, MaxInt), AIndex) or (AIndex < 0) then Exit;
+  Rest := Copy(AId, P + 1, MaxInt);
+  P := Pos('-', Rest);
+  if P > 0 then
+  begin
+    if not TryStrToInt(Copy(Rest, 1, P - 1), AGen) or (AGen < 0) then Exit;
+    Rest := Copy(Rest, P + 1, MaxInt);
+  end;
+  if not TryStrToInt(Rest, AIndex) or (AIndex < 0) then Exit;
   AHash := Cardinal(H);
   Result := True;
 end;
@@ -587,7 +607,7 @@ begin
   if ANote <> '' then Result.AddPair('note', ANote);
 end;
 
-function QuickFixesToJson(const AFile: string; AHash: Cardinal;
+function QuickFixesToJson(const AFile: string; AHash: Cardinal; AGen: Integer;
   const AFixes: TArray<TQuickFix>; ALine1: Integer;
   const AAvailability: TUnitAvailabilityFunc;
   const ADiagCount: Integer; const AUsed, AStale, ANote: string;
@@ -617,7 +637,7 @@ begin
     var F := AFixes[I];
     if (ALine1 > 0) and (F.Line + 1 <> ALine1) then Continue;
     var O := TJSONObject.Create;
-    O.AddPair('id', MakeFixId(AHash, I));
+    O.AddPair('id', MakeFixId(AHash, AGen, I));
     O.AddPair('kind', FixKindName(F.Kind));
     O.AddPair('line', TJSONNumber.Create(F.Line + 1));
     if F.TokenLen > 0 then

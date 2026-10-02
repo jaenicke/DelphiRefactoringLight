@@ -1002,6 +1002,24 @@ begin
       Exit(True);
 end;
 
+/// <summary>True when any file of the module has an editor VIEW, i.e. a
+///  tab the user can see. A module the bridge loaded headless has none -
+///  until someone opens it (audit #36, M42).</summary>
+function ModuleHasEditView(const M: IOTAModule): Boolean;
+var
+  SE: IOTASourceEditor;
+begin
+  Result := False;
+  if M = nil then Exit;
+  for var I := 0 to M.GetModuleFileCount - 1 do
+  begin
+    var FE := M.GetModuleFileEditor(I);
+    if FE = nil then Continue;
+    if Supports(FE, IOTASourceEditor, SE) and (SE.EditViewCount > 0) then
+      Exit(True);
+  end;
+end;
+
 function SplitLinesLF(const S: string): TArray<string>;
 begin
   Result := S.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
@@ -1304,6 +1322,21 @@ begin
       var M := LoadedModule(F);
       if M <> nil then
       begin
+        // GHeadless is not cleared when the USER opens the same file in
+        // the editor themselves, so a file this bridge once loaded
+        // headless could be closed - with their unsaved edits - by a
+        // save=false call (audit #36, M42). A module with an edit VIEW is
+        // on screen: that is the user's tab, and it is not ours to
+        // discard.
+        if (not DoSave) and ModuleHasEditView(M) then
+        begin
+          GHeadless.Remove(UpperCase(F));   // it is the user's now
+          Msg := F + ' is open in the editor (someone opened the tab after ' +
+            'this bridge loaded it headless), so discarding its changes ' +
+            'from here is refused - close the tab in the IDE, or call ' +
+            'buffer_close with save=true';
+          Exit;
+        end;
         if DoSave then
         begin
           Saved := M.Save(False, True);

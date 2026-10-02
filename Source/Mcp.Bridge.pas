@@ -115,7 +115,7 @@ function UnclassifiedWaitTools: TArray<string>;
 implementation
 
 uses
-  System.Generics.Collections, System.Generics.Defaults;
+  System.Generics.Collections, System.Generics.Defaults, System.IOUtils;
 
 const
   ContextTimeoutMs = 5000;
@@ -452,6 +452,27 @@ begin
     'Call ide_instances for the list.', [Pid]), True);
 end;
 
+/// <summary>Makes a RELATIVE path absolute against ABase. The IDE resolves
+///  what it receives against ITS OWN current directory - bds.exe's - so a
+///  client that passes "Source\Foo.pas" used to hit a wrong file or none
+///  at all (audit #36, M41). The bridge knows the session's directory, and
+///  it is the only side that does.</summary>
+function AbsolutePathFor(const APath, ABase: string): string;
+begin
+  Result := APath;
+  if (APath = '') or (ABase = '') then Exit;
+  // already absolute? a drive letter, a UNC path, or a rooted path
+  if (Length(APath) >= 2) and (APath[2] = ':') then Exit;
+  if APath.StartsWith('\\') then Exit;
+  if (APath[1] = '\') or (APath[1] = '/') then Exit;
+  Result := TPath.Combine(ABase, APath);
+  try
+    Result := TPath.GetFullPath(Result);
+  except
+    // a path we cannot normalise is passed on as it was
+  end;
+end;
+
 function TMcpBridge.CallForward(const ATool: string; AArgs: TJSONObject): TJSONObject;
 var
   Ctxs: TArray<TMcpInstanceContext>;
@@ -468,6 +489,33 @@ begin
   if AArgs <> nil then
   begin
     Pid := AArgs.GetValue<Cardinal>('instance', 0);
+    // Relative paths are resolved HERE, against the session's working
+    // directory (audit #36, M41) - the IDE would use bds.exe's.
+    for var Key in ['file', 'target_file', 'new_file', 'directory'] do
+    begin
+      var PV := AArgs.GetValue(Key);
+      if (PV is TJSONString) and (TJSONString(PV).Value <> '') then
+      begin
+        var Abs_ := AbsolutePathFor(TJSONString(PV).Value, FCwd);
+        if Abs_ <> TJSONString(PV).Value then
+        begin
+          AArgs.RemovePair(Key).Free;
+          AArgs.AddPair(Key, Abs_);
+        end;
+      end;
+    end;
+    var FilesV := AArgs.GetValue('files');
+    if FilesV is TJSONArray then
+    begin
+      var NewArr := TJSONArray.Create;
+      for var FV in TJSONArray(FilesV) do
+        if FV is TJSONString then
+          NewArr.Add(AbsolutePathFor(TJSONString(FV).Value, FCwd))
+        else
+          NewArr.AddElement(FV.Clone as TJSONValue);
+      AArgs.RemovePair('files').Free;
+      AArgs.AddPair('files', NewArr);
+    end;
     FileArg := AArgs.GetValue<string>('file', '');
   end;
   Target := Default(TMcpInstanceContext);

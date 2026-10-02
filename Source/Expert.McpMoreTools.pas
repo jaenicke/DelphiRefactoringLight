@@ -311,7 +311,7 @@ begin
       Changes := DiffToChanges(F, C, NewContent, 40, Total);
       if not DoApply then
       begin
-        Token := NewPreviewToken('add_unit', [F], [C]);
+        Token := NewPreviewToken('add_unit', [F], [C], AArgs);
         Ok := True;
         Exit;
       end;
@@ -319,7 +319,7 @@ begin
         function(AFile: string): string
         begin
           if not McpReadContent(AFile, Result) then Result := '';
-        end, Msg) then Exit;
+        end, AArgs, Msg) then Exit;
       Ok := AddUnitToUses(F, U, Section);
       if not Ok then
         Msg := U + ' could not be added (the buffer changed?)';
@@ -379,7 +379,7 @@ begin
       Changes := DiffToChanges(F, C, NewContent, 40, Total);
       if not DoApply then
       begin
-        Token := NewPreviewToken('remove_unit', [F], [C]);
+        Token := NewPreviewToken('remove_unit', [F], [C], AArgs);
         Ok := True;
         Exit;
       end;
@@ -387,7 +387,7 @@ begin
         function(AFile: string): string
         begin
           if not McpReadContent(AFile, Result) then Result := '';
-        end, Msg) then Exit;
+        end, AArgs, Msg) then Exit;
       Ok := RemoveUnitFromUses(F, U);
       if not Ok then Msg := U + ' could not be removed (the buffer changed?)';
     end, not DoApply, AStop, Err) then Exit(McpErr(Err));
@@ -1964,10 +1964,10 @@ begin
         function(AFile: string): string
         begin
           if not McpReadContent(AFile, Result) then Result := '';
-        end, Msg) then Exit;
+        end, AArgs, Msg) then Exit;
       Ok := TLspMoveToUnit.ExecuteToNewUnit(Ident, F, NewFile, not DoApply, Plan, Msg);
       if Ok and not DoApply then
-        Token := NewPreviewToken('move_to_new_unit', [F], [C]);
+        Token := NewPreviewToken('move_to_new_unit', [F], [C], AArgs);
     end, False, AStop, Err, 300000) then Exit(McpErr(Err));
   if not Ok then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
@@ -2001,7 +2001,8 @@ end;
 
 // One place for "a planner produced new content -> preview or write".
 function ContentResult(const AFile, AOld, ANewContent, ATool: string;
-  ADoApply: Boolean; const AToken: string; AExtra: TJSONObject): string;
+  ADoApply: Boolean; const AToken: string; AExtra: TJSONObject;
+  AArgs: TJSONObject = nil): string;
 var
   SL: TStringList;
   NewContent, Problem, Token: string;
@@ -2016,7 +2017,7 @@ begin
         function(AF: string): string
         begin
           if not McpReadContent(AF, Result) then Result := '';
-        end, Problem) then
+        end, AArgs, Problem) then
       begin
         AExtra.Free;
         Exit(McpErr(Problem));
@@ -2029,7 +2030,7 @@ begin
       end;
     end
     else
-      Token := NewPreviewToken(ATool, [AFile], [AOld]);
+      Token := NewPreviewToken(ATool, [AFile], [AOld], AArgs);
   finally
     SL.Free;
   end;
@@ -2058,7 +2059,7 @@ end;
 // so a trailing empty element stays the file's final line break.
 function LinesResult(const AFile, AOld: string; const ANewLines: TArray<string>;
   const ATool: string; ADoApply: Boolean; const AToken: string;
-  AExtra: TJSONObject): string;
+  AExtra: TJSONObject; AArgs: TJSONObject = nil): string;
 var
   LB: string;
 begin
@@ -2066,7 +2067,7 @@ begin
   else if Pos(#10, AOld) > 0 then LB := #10
   else LB := sLineBreak;
   Result := ContentResult(AFile, AOld, string.Join(LB, ANewLines), ATool,
-    ADoApply, AToken, AExtra);
+    ADoApply, AToken, AExtra, AArgs);
 end;
 
 function ToolExtractVariable(AArgs: TJSONObject; AStop: THandle): string;
@@ -2154,7 +2155,7 @@ begin
   Extra.AddPair('declaredBeforeLine', TJSONNumber.Create(Plan.StatementLine + 1));
   Extra.AddPair('declaration', Trim(Plan.DeclText));
   Result := LinesResult(F, Content, Plan.NewLines, 'extract_variable', DoApply,
-    ArgStr(AArgs, 'token'), Extra);
+    ArgStr(AArgs, 'token'), Extra, AArgs);
 end;
 
 function ToolWrapTryFinally(AArgs: TJSONObject; AStop: THandle): string;
@@ -2217,7 +2218,7 @@ begin
     Extra.AddPair('cleanup', 'none - a TODO comment is inserted instead; pass ' +
       '"cleanup" with the statement that releases what the block acquires');
   Result := LinesResult(F, Content, NewLines, 'wrap_try_finally', DoApply,
-    ArgStr(AArgs, 'token'), Extra);
+    ArgStr(AArgs, 'token'), Extra, AArgs);
 end;
 
 // apply=false reports the plan only (user request 2026-09-29).
@@ -2265,11 +2266,11 @@ begin
         function(AFile: string): string
         begin
           if not McpReadContent(AFile, Result) then Result := '';
-        end, Msg) then Exit;
+        end, AArgs, Msg) then Exit;
       Ok := TLspMoveToUnit.ExecuteToExistingUnit(Ident, F, Target, not DoApply,
         Plan, Msg);
       if Ok and not DoApply then
-        Token := NewPreviewToken('move_to_unit', [F], [C]);
+        Token := NewPreviewToken('move_to_unit', [F], [C], AArgs);
     end, False, AStop, Err, 300000) then Exit(McpErr(Err));
   if not Ok then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
@@ -2438,7 +2439,7 @@ begin
     Exit(McpOk(Extra));
   end;
   Result := ContentResult(F, C, Content, 'cleanup_uses', DoApply,
-    ArgStr(AArgs, 'token'), Extra);
+    ArgStr(AArgs, 'token'), Extra, AArgs);
 end;
 
 
@@ -2489,7 +2490,7 @@ begin
         function(AFile: string): string
         begin
           if not McpReadContent(AFile, Result) then Result := '';
-        end, RunErr) then Exit;
+        end, AArgs, RunErr) then Exit;
       Ok := RunRemoveWithHeadless(All, F, L1, DoApply, Inline_, Results,
         Applied, Failed, SkippedNested, RunErr);
       if Ok and not DoApply then
@@ -2511,7 +2512,8 @@ begin
               Contents := Contents + [C];
             end;
           end;
-          if Length(Pin) > 0 then Token := NewPreviewToken('remove_with', Pin, Contents);
+          if Length(Pin) > 0 then
+            Token := NewPreviewToken('remove_with', Pin, Contents, AArgs);
         finally
           Seen.Free;
         end;

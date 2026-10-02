@@ -411,6 +411,11 @@ type
     [Test] procedure AWriteFromAWorkerThreadIsRecordedAndCanBeRefused;
     [Test] procedure AnImpossibleUnitNameIsReportedAsADefect;
     [Test] procedure AnArgumentTheToolDoesNotKnowIsReported;
+    /// <summary>Audit #36, H34: a preview token recorded only the tool
+    ///  name and the buffer hashes, so the token from a preview of
+    ///  "add_unit Foo" was accepted by "add_unit apply=true Bar" - the
+    ///  answer then described Bar while the user had reviewed Foo.</summary>
+    [Test] procedure APreviewTokenBelongsToItsArguments;
   end;
 
   /// <summary>Audit issue #41, the three High findings of "Remove with".
@@ -2868,6 +2873,57 @@ begin
   Assert.IsTrue(S <> '', 'one bad name is enough');
   Assert.Contains(S, 'Expert.BlameGutter{$ENDIF}', 'it quotes the name');
   Assert.Contains(S, 'report', 'and says it is a defect in the plugin');
+end;
+
+procedure TSelfProtectionTests.APreviewTokenBelongsToItsArguments;
+
+  function Args(const APairs: array of string): TJSONObject;
+  begin
+    Result := TJSONObject.Create;
+    var I := 0;
+    while I < Length(APairs) - 1 do
+    begin
+      Result.AddPair(APairs[I], APairs[I + 1]);
+      Inc(I, 2);
+    end;
+  end;
+
+var
+  Problem: string;
+begin
+  var Reader: TFunc<string, string> :=
+    function(AFile: string): string
+    begin
+      Result := 'unchanged content';   // the buffer never moves in this test
+    end;
+
+  // the fingerprint itself: order does not matter, apply/token/instance do
+  // not belong to it
+  var A1 := Args(['file', 'U.pas', 'unit', 'Foo']);
+  var A2 := Args(['unit', 'Foo', 'file', 'U.pas']);
+  var A3 := Args(['file', 'U.pas', 'unit', 'Foo', 'apply', 'true',
+    'token', 'x', 'instance', '4711']);
+  var A4 := Args(['file', 'U.pas', 'unit', 'Bar']);
+  try
+    Assert.AreEqual(PreviewArgsFingerprint(A1), PreviewArgsFingerprint(A2),
+      'the order the client sends the pairs in must not matter');
+    Assert.AreEqual(PreviewArgsFingerprint(A1), PreviewArgsFingerprint(A3),
+      'apply / token / instance say nothing about WHAT is changed');
+    Assert.AreNotEqual(PreviewArgsFingerprint(A1), PreviewArgsFingerprint(A4),
+      'another unit is another change');
+
+    // the token of a preview with A1 must not apply A4
+    var Token := NewPreviewToken('add_unit', ['U.pas'], ['unchanged content'], A1);
+    Assert.IsTrue(CheckPreviewToken(Token, 'add_unit', Reader, A1, Problem),
+      'the arguments it was previewed with: ' + Problem);
+    Assert.IsFalse(CheckPreviewToken(Token, 'add_unit', Reader, A4, Problem),
+      'OTHER arguments must be refused');
+    Assert.Contains(Problem, 'arguments', 'and the reason says why: ' + Problem);
+    // the old call shape (no arguments) still works
+    Assert.IsTrue(CheckPreviewToken(Token, 'add_unit', Reader, Problem));
+  finally
+    A1.Free; A2.Free; A3.Free; A4.Free;
+  end;
 end;
 
 procedure TSelfProtectionTests.AnArgumentTheToolDoesNotKnowIsReported;

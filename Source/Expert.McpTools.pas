@@ -80,10 +80,32 @@ function UnitNameSelfCheck(const ANames: TArray<string>): string;
 ///  "apply" with that token refuses when a buffer changed meanwhile - the
 ///  caller then sees a stale preview instead of an edit it never saw.
 ///  AReadContent answers '' for a file that cannot be read.</summary>
+/// <summary>A canonical fingerprint of a call's ARGUMENTS: every pair
+///  except 'apply', 'token' and 'instance' (which say nothing about WHAT
+///  is changed), keys sorted so the order a client sends them in does not
+///  matter. The preview token carries it, so an apply with the same token
+///  but OTHER arguments is refused (audit #36, H34) - a preview of
+///  "add_unit Foo" used to hand out a token that "add_unit apply=true
+///  Bar" accepted, and the answer then described Bar while the user had
+///  reviewed Foo.</summary>
+function PreviewArgsFingerprint(AArgs: TJSONObject): string;
+
 function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
-  const AContents: TArray<string>): string;
+  const AContents: TArray<string>): string; overload;
+/// <summary>With the call's ARGUMENTS, so the apply can be refused when
+///  they differ from what was previewed (audit #36, H34).</summary>
+function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
+  const AContents: TArray<string>; AArgs: TJSONObject): string; overload;
+/// <summary>Without AARGS: only the tool and the buffers are checked (the
+///  older call shape).</summary>
 function CheckPreviewToken(const AToken, ATool: string;
-  const AReadContent: TFunc<string, string>; out AProblem: string): Boolean;
+  const AReadContent: TFunc<string, string>;
+  out AProblem: string): Boolean; overload;
+/// <summary>With AARGS: the call's arguments must be the ones the preview
+///  described as well (audit #36, H34).</summary>
+function CheckPreviewToken(const AToken, ATool: string;
+  const AReadContent: TFunc<string, string>; AArgs: TJSONObject;
+  out AProblem: string): Boolean; overload;
 
 function DiagnosticsToJson(const AFile: string; AHash: Cardinal;
   const ADiags: TArray<TLspErrorDiag>; const ASources: TArray<string>;
@@ -104,7 +126,8 @@ function QuickFixesToJson(const AFile: string; AHash: Cardinal;
 implementation
 
 uses
-  System.TypInfo, System.StrUtils, Expert.UsesEditor, Expert.PascalScanner;
+  System.TypInfo, System.StrUtils, System.Classes,
+  Expert.UsesEditor, Expert.PascalScanner;
 
 function ImplausibleUnitName(const AName: string): Boolean;
 var
@@ -245,6 +268,7 @@ type
     Tool: string;
     Files: TArray<string>;
     Hashes: TArray<Cardinal>;
+    Args: string;          // PreviewArgsFingerprint of the preview call
     Stamp: TDateTime;
   end;
 
@@ -253,12 +277,49 @@ var
   GPreviewLock: TObject = nil;
   GPreviewCounter: Integer = 0;
 
+function PreviewArgsFingerprint(AArgs: TJSONObject): string;
+var
+  Pairs: TStringList;
+  Key, Val: string;
+  P: TJSONPair;
+begin
+  Result := '';
+  if AArgs = nil then Exit;
+  Pairs := TStringList.Create;
+  try
+    Pairs.Sorted := True;
+    Pairs.Duplicates := dupAccept;
+    for P in AArgs do
+    begin
+      Key := LowerCase(P.JsonString.Value);
+      // These three do not describe WHAT is changed: 'apply' is the
+      // difference between preview and apply, 'token' is this very
+      // mechanism, and 'instance' only picks the IDE.
+      if (Key = 'apply') or (Key = 'token') or (Key = 'instance') then Continue;
+      Val := '';
+      if P.JsonValue <> nil then Val := P.JsonValue.ToJSON;
+      Pairs.Add(Key + '=' + Val);
+    end;
+    for Key in Pairs do
+      Result := Result + Key + '&';
+  finally
+    Pairs.Free;
+  end;
+end;
+
 function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
-  const AContents: TArray<string>): string;
+  const AContents: TArray<string>): string; overload;
+begin
+  Result := NewPreviewToken(ATool, AFiles, AContents, nil);
+end;
+
+function NewPreviewToken(const ATool: string; const AFiles: TArray<string>;
+  const AContents: TArray<string>; AArgs: TJSONObject): string; overload;
 var
   E: TPreviewEntry;
 begin
   E.Tool := ATool;
+  E.Args := PreviewArgsFingerprint(AArgs);
   E.Files := AFiles;
   E.Hashes := nil;
   for var C in AContents do E.Hashes := E.Hashes + [PreviewContentHash(C)];
@@ -278,7 +339,15 @@ begin
 end;
 
 function CheckPreviewToken(const AToken, ATool: string;
-  const AReadContent: TFunc<string, string>; out AProblem: string): Boolean;
+  const AReadContent: TFunc<string, string>;
+  out AProblem: string): Boolean; overload;
+begin
+  Result := CheckPreviewToken(AToken, ATool, AReadContent, nil, AProblem);
+end;
+
+function CheckPreviewToken(const AToken, ATool: string;
+  const AReadContent: TFunc<string, string>; AArgs: TJSONObject;
+  out AProblem: string): Boolean; overload;
 var
   E: TPreviewEntry;
 begin
@@ -298,6 +367,17 @@ begin
   if not SameText(E.Tool, ATool) then
   begin
     AProblem := 'that token belongs to ' + E.Tool + ', not to ' + ATool;
+    Exit;
+  end;
+  // The ARGUMENTS have to be the ones that were previewed (audit #36,
+  // H34). Only checked when the caller passes them, so a call site that
+  // does not yet is unchanged.
+  if (AArgs <> nil) and (E.Args <> '')
+    and (PreviewArgsFingerprint(AArgs) <> E.Args) then
+  begin
+    AProblem := 'that token belongs to a preview with OTHER arguments - ' +
+      'preview again with the arguments you want to apply, and check the ' +
+      'changes it reports';
     Exit;
   end;
   for var I := 0 to High(E.Files) do

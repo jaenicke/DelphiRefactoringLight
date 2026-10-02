@@ -157,6 +157,23 @@ function FormTextMentions(const AText, AName: string): TArray<Integer>;
 ///  ' virtual; overload;' - test with a whole-word search.</summary>
 function HeaderDirectives(const ALines: TArray<string>; AStart, AHdrEnd: Integer): string;
 
+/// <summary>Does the member AMEMBER of type ATYPE, declared in ACONTENT,
+///  PROVE that it is a different symbol than the one being renamed?
+///  Evidence only, and only two kinds of it: 'reintroduce' (the member
+///  deliberately HIDES the inherited one, so it is a symbol of its own)
+///  and an 'overload' whose parameter count differs from ADECLPARAMS
+///  (-1 = unknown, then only reintroduce counts). Anything unclear
+///  answers False and stays part of the rename - one occurrence too many
+///  is visible in the preview, while skipping a real one does not
+///  compile (audit #40, M21b).</summary>
+function MemberIsOtherSymbol(const AContent, AType, AMember: string;
+  ADeclParams: Integer; out AReason: string): Boolean;
+
+/// <summary>The number of parameters of a routine declaration or header
+///  line (its parameter list may wrap over the following lines), -1 when
+///  the line has no parameter list at all.</summary>
+function DeclaredParamCount(const ALines: TArray<string>; ALine0: Integer): Integer;
+
 /// <summary>Human-readable kind ("method", "field", ...).</summary>
 function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 
@@ -164,7 +181,70 @@ implementation
 
 uses
   System.Classes, System.StrUtils, System.Math, System.Generics.Collections,
-  Expert.AutoImport, Expert.UnitIndex, Expert.PascalScanner;
+  Expert.AutoImport, Expert.UnitIndex, Expert.PascalScanner,
+  Expert.InterfaceLinks, Expert.SignatureEdit;
+
+function DeclaredParamCount(const ALines: TArray<string>; ALine0: Integer): Integer;
+var
+  Text_: string;
+begin
+  Result := -1;
+  if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
+  Text_ := JoinOpenParenLines(ALines, ALine0);
+  var Op := Pos('(', Text_);
+  if Op = 0 then Exit;
+  var Depth := 0;
+  var Cl := 0;
+  for var I := Op to Length(Text_) do
+  begin
+    if Text_[I] = '(' then Inc(Depth)
+    else if Text_[I] = ')' then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+      begin
+        Cl := I;
+        Break;
+      end;
+    end;
+  end;
+  if Cl = 0 then Exit;
+  Result := Length(ParseParamList(Copy(Text_, Op + 1, Cl - Op - 1)));
+end;
+
+function MemberIsOtherSymbol(const AContent, AType, AMember: string;
+  ADeclParams: Integer; out AReason: string): Boolean;
+var
+  Lines: TArray<string>;
+begin
+  Result := False;
+  AReason := '';
+  if (AType = '') or (AMember = '') then Exit;
+  var DeclLines := FindMemberDeclarationLines(AContent, AType, AMember);
+  // No declaration found, or several: the type has its own overload set
+  // and which one an implementation belongs to cannot be decided here.
+  if Length(DeclLines) <> 1 then Exit;
+  Lines := SplitContentLines(AContent);
+  var L := DeclLines[0];
+  if (L < 0) or (L > High(Lines)) then Exit;
+  var Dirs := LowerCase(HeaderDirectives(Lines, L, L));
+  if HasWholeWordCI(Dirs, 'reintroduce') then
+  begin
+    AReason := AType + '.' + AMember + ' is declared "reintroduce" - it ' +
+      'hides the inherited member and is a symbol of its own';
+    Exit(True);
+  end;
+  if (ADeclParams >= 0) and HasWholeWordCI(Dirs, 'overload') then
+  begin
+    var N := DeclaredParamCount(Lines, L);
+    if (N >= 0) and (N <> ADeclParams) then
+    begin
+      AReason := Format('%s.%s is an overload with %d parameter(s) while ' +
+        'the renamed declaration has %d', [AType, AMember, N, ADeclParams]);
+      Exit(True);
+    end;
+  end;
+end;
 
 function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 begin

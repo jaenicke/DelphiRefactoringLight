@@ -76,6 +76,9 @@ type
     // update to keep the menu openable (our items stay reachable).
     FRefactorAction: TBasicAction;
     FRefOldUpdate: TNotifyEvent;
+    // ... and a watcher that nils those two when the IDE frees the
+    // action (audit #40, L5h): it is an object we do not own.
+    FActionWatcher: TComponent;
     FHidden: TArray<TMenuItem>;   // IDE's own Refactor items we hid (to restore)
     FItemReq: TDictionary<TMenuItem, Integer>;   // main-menu item -> context requirement
     FLastStateTick: Cardinal;   // throttle for UpdateMainItemStates
@@ -271,6 +274,7 @@ const
 destructor TContextMenuInstaller.Destroy;
 begin
   Uninstall;
+  FreeAndNil(FActionWatcher);
   FreeAndNil(FActReq);
   FreeAndNil(FLocalReq);
   FreeAndNil(FItemReq);
@@ -295,6 +299,60 @@ begin
         Exit(TPopupMenu(Comp));
     end;
   end;
+end;
+
+{ TRefactorActionWatcher }
+
+// The IDE's Refactor action is not ours and the IDE may recreate it, so
+// FRefactorAction can be a pointer to a freed object by the time
+// Uninstall restores its OnUpdate - a write into released memory that the
+// try/except around it cannot catch. FreeNotification turns that into a
+// nil (audit #40, L5h).
+type
+  TRefactorActionWatcher = class(TComponent)
+  private
+    FTarget: TBasicAction;
+    FOnGone: TProc;
+  protected
+    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
+  public
+    destructor Destroy; override;
+    procedure Watch(AAction: TBasicAction; const AOnGone: TProc);
+    procedure Unwatch;
+  end;
+
+procedure TRefactorActionWatcher.Notification(AComponent: TComponent;
+  Operation: TOperation);
+begin
+  inherited;
+  if (Operation = opRemove) and (AComponent = FTarget) then
+  begin
+    FTarget := nil;
+    if Assigned(FOnGone) then FOnGone();
+  end;
+end;
+
+procedure TRefactorActionWatcher.Watch(AAction: TBasicAction;
+  const AOnGone: TProc);
+begin
+  Unwatch;
+  FTarget := AAction;
+  FOnGone := AOnGone;
+  if AAction <> nil then AAction.FreeNotification(Self);
+end;
+
+procedure TRefactorActionWatcher.Unwatch;
+begin
+  if FTarget <> nil then
+    try FTarget.RemoveFreeNotification(Self); except end;
+  FTarget := nil;
+  FOnGone := nil;
+end;
+
+destructor TRefactorActionWatcher.Destroy;
+begin
+  Unwatch;
+  inherited;
 end;
 
 { TMenuActionProxy }
@@ -341,17 +399,13 @@ end;
 procedure TContextMenuInstaller.RefreshShortcuts;
 var
   Item: TMenuItem;
-  Kind: TShortcutKind;
 begin
+  // FItems holds the separator and the SUBMENU of the legacy OnPopup
+  // path, so the entries that carry a kind are its CHILDREN - the flat
+  // loop here changed nothing and the popup kept advertising the old key
+  // until the IDE restarted (audit #40, L5g).
   for Item in FItems do
-  begin
-    if Item = nil then Continue;
-    if (Item.Tag >= 1) and (Item.Tag <= Ord(High(TShortcutKind)) + 1) then
-    begin
-      Kind := TShortcutKind(Item.Tag - 1);
-      Item.ShortCut := TExpertsShortCut.Shortcuts[Kind];
-    end;
-  end;
+    RefreshShortcutsIn(Item);
   // The main-menu copy is a separate tree - refresh it recursively.
   for Item in FMainMenuAdded do
     RefreshShortcutsIn(Item);
@@ -1048,6 +1102,15 @@ begin
   // A different action (first time, or the IDE recreated it): hook OnUpdate.
   FRefactorAction := Act;
   FRefOldUpdate := (Act as TContainedAction).OnUpdate;
+  // ... and let the action tell us when it goes away.
+  if FActionWatcher = nil then
+    FActionWatcher := TRefactorActionWatcher.Create(nil);
+  TRefactorActionWatcher(FActionWatcher).Watch(Act,
+    procedure
+    begin
+      FRefactorAction := nil;
+      FRefOldUpdate := nil;
+    end);
   (Act as TContainedAction).OnUpdate := DoRefactorActionUpdate;
   (Act as TContainedAction).Enabled := True;
 end;
@@ -1152,6 +1215,8 @@ begin
     // menu already torn down - the owner free below still cleans up
   end;
   FHidden := nil;
+  if FActionWatcher <> nil then
+    TRefactorActionWatcher(FActionWatcher).Unwatch;
   FRefactorAction := nil;
   FRefOldUpdate := nil;
   FMainMenuAdded := nil;

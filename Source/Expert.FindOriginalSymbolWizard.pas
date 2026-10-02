@@ -52,8 +52,8 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.Dialogs,
   Lsp.Protocol, Lsp.Uri, Expert.LspManager,   // Lsp.Client: interface uses
   Expert.EditorHelperIntf, Expert.DialogHelper, Expert.PascalScanner,
-  Expert.UnitIndex, Expert.FindUnitDialog, Expert.InterfaceLinks,
-  Expert.ScopeFiles;
+  Expert.UnitIndex, Expert.InterfaceLinks, Expert.ScopeFiles,
+  Expert.FindReferencesDialog, Delphi.FileEncoding;
 
 // 0-based column of AWord as a whole word in ALine (case-insensitive),
 // or -1. Word boundaries: identifier characters on either side disqualify.
@@ -368,6 +368,53 @@ begin
   if not Result and (ANote = '') and (MemberNote <> '') then ANote := MemberNote;
 end;
 
+// The ambiguous case: a read-only list of the declarations we resolved,
+// each at its own line. Double-click / Enter / "Go to" navigate; nothing
+// in this window changes code (audit #40, M20).
+procedure ShowOriginalSymbolHits(const AIdent: string;
+  const AHits: TArray<TOriginalSymbolHit>);
+var
+  Dlg: TFindReferencesDialog;
+  Items: TFindReferenceItems;
+  It: TFindReferenceItem;
+  Lines: TArray<string>;
+begin
+  Items := nil;
+  for var H in AHits do
+  begin
+    It := Default(TFindReferenceItem);
+    It.FilePath := H.FilePath;
+    It.Line := H.Line;
+    It.Col := H.Col;
+    It.Length := Length(AIdent);
+    It.Kind := 'Declaration';
+    It.Relation := H.Via;
+    if H.TypeName <> '' then It.Relation := H.Via + ' (' + H.TypeName + ')';
+    It.Preview := '';
+    try
+      Lines := ReadDelphiFileLines(H.FilePath);
+      if (H.Line >= 0) and (H.Line <= High(Lines)) then
+        It.Preview := Trim(Lines[H.Line]);
+    except
+      // the preview is a comfort, not the answer
+    end;
+    Items := Items + [It];
+  end;
+  Dlg := TFindReferencesDialog.CreateDialog(Application.MainForm, AIdent,
+    'Declarations');
+  PrepareDialog(Dlg, Application.MainForm);
+  Dlg.SetItems(Items);
+  Dlg.SetStatus(Format('%d unit(s) declare "%s" - double-click to go there. ' +
+    'Nothing here changes code.', [Length(Items), AIdent]));
+  Dlg.OnGotoLocation :=
+    procedure(AItem: TFindReferenceItem)
+    begin
+      Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+    end;
+  Dlg.SetClosable;
+  Dlg.Show;
+end;
+
 procedure FindOriginalSymbol;
 var
   Ctx: TEditorContext;
@@ -419,8 +466,13 @@ begin
 
   if Length(Hits) > 1 then
   begin
-    // Ambiguous - let the user pick in the dialog they know.
-    FindUnitForIdentifier;
+    // Several declaring units. This used to drop the resolved hits and
+    // open the Find-Unit dialog instead - whose DEFAULT button adds the
+    // unit to the interface uses, so pressing Enter to "go there"
+    // EDITED the uses clause, and its "Go to" opened the file at line 0
+    // (audit #40, M20). The hits are already resolved to a line, so they
+    // are shown in the navigation-only result window.
+    ShowOriginalSymbolHits(Ctx.WordAtCursor, Hits);
     Exit;
   end;
   if Length(Hits) = 1 then

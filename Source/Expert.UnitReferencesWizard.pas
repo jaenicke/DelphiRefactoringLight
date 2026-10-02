@@ -792,6 +792,8 @@ var
   UnverifiedCount: Integer;
   FinalItems: TList<TUnitRefItem>;
   FileList: TList<TUnitRefItem>;
+  PendingByFile: TDictionary<string, Integer>;   // open candidates per file
+  VerifyCancelled: Boolean;
 begin
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
@@ -881,6 +883,8 @@ begin
   ResultSeen := TDictionary<string, Boolean>.Create;
   LineCache := TDictionary<string, TArray<string>>.Create;
   FinalItems := TList<TUnitRefItem>.Create;
+  PendingByFile := TDictionary<string, Integer>.Create;
+  VerifyCancelled := False;
   try
     Progress(0, System.Length(ProjFiles));
     for I := 0 to High(ProjFiles) do
@@ -1125,6 +1129,10 @@ begin
         // not responding / internal errors / request removed).
         Progress(0, AllCandidates.Count);
         var DroppedNotResolving: Integer := 0;
+        // A cancel must not turn "we never looked" into "nothing is used
+        // here" (audit #40, L5o), so the open candidates are counted per
+        // file and the final list says "not checked" for a file that
+        // still has some.
 
         var LastRefreshedFile: string := '';
         // Positions inside {$I} include files are answered through the
@@ -1143,8 +1151,24 @@ begin
             EditorOrDiskReader()));
         for I := 0 to AllCandidates.Count - 1 do
         begin
-          if Cancelled then Break;
+          var PendKey := AnsiUpperCase(AllCandidates[I].FilePath);
+          var PendN := 0;
+          PendingByFile.TryGetValue(PendKey, PendN);
+          PendingByFile.AddOrSetValue(PendKey, PendN + 1);
+        end;
+        for I := 0 to AllCandidates.Count - 1 do
+        begin
+          if Cancelled then
+          begin
+            VerifyCancelled := True;
+            Break;
+          end;
           Item := AllCandidates[I];
+          // this one IS being checked now, whatever its verdict
+          var DoneKey := AnsiUpperCase(Item.FilePath);
+          var DoneN := 0;
+          if PendingByFile.TryGetValue(DoneKey, DoneN) and (DoneN > 0) then
+            PendingByFile.AddOrSetValue(DoneKey, DoneN - 1);
           Progress(I + 1, AllCandidates.Count);
           Status(Format('Verifying %d/%d (%s)...',
             [I + 1, AllCandidates.Count, Item.Identifier]));
@@ -1269,6 +1293,7 @@ begin
       end));
 
     var DeadCount: Integer := 0;
+    var NotCheckedCount: Integer := 0;
     for var UF in UsingFiles do
     begin
       UpKey := AnsiUpperCase(UF);
@@ -1286,31 +1311,48 @@ begin
       else
       begin
         Item := Default(TUnitRefItem);
-        Item.IsDead := True;
         Item.Identifier := '';
         Item.FilePath := UF;
         Item.Line := 0;
         Item.Col := 0;
         Item.Length := 0;
-        Item.Preview := Format(
-          '%s is listed in the uses clause but no symbols of it are used here.',
-          [TargetUnitName]);
+        var StillOpen := 0;
+        if VerifyCancelled then PendingByFile.TryGetValue(UpKey, StillOpen);
+        if StillOpen > 0 then
+        begin
+          Item.NotChecked := True;
+          Item.Preview := Format(
+            'not checked - the search was cancelled before %s was verified ' +
+            'here (%d occurrence(s) left).', [TargetUnitName, StillOpen]);
+          Inc(NotCheckedCount);
+        end
+        else
+        begin
+          Item.IsDead := True;
+          Item.Preview := Format(
+            '%s is listed in the uses clause but no symbols of it are used here.',
+            [TargetUnitName]);
+          Inc(DeadCount);
+        end;
         FinalItems.Add(Item);
-        Inc(DeadCount);
       end;
     end;
 
     FHeadlessItems := FinalItems.ToArray;
     if FDialog <> nil then FDialog.SetItems(FHeadlessItems);
 
-    var LiveCount: Integer := UsingFiles.Count - DeadCount;
+    var LiveCount: Integer := UsingFiles.Count - DeadCount - NotCheckedCount;
+    var CancelNote := '';
+    if NotCheckedCount > 0 then
+      CancelNote := Format(' %d not checked (cancelled).', [NotCheckedCount]);
     Status(Format(
-      '%d using unit(s): %d active, %d dead.  ' +
+      '%d using unit(s): %d active, %d dead.%s  ' +
       '[symbols=%d, raw matches=%d, verified-elsewhere=%d, not verified=%d]',
-      [UsingFiles.Count, LiveCount, DeadCount,
+      [UsingFiles.Count, LiveCount, DeadCount, CancelNote,
        Symbols.Count, RawHitTotal, DroppedNonProject, UnverifiedCount]));
   finally
     FinalItems.Free;
+    PendingByFile.Free;
     HitsByFile.Free;
     ResultSeen.Free;
     LineCache.Free;

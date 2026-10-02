@@ -37,6 +37,11 @@ type
     ///  symbols of it are actually referenced. Line/Col are not
     ///  meaningful in that case; goto opens the file at the top.</summary>
     IsDead: Boolean;
+    /// <summary>True when the verification never reached this file: the
+    ///  user cancelled first. Such a file is NOT dead - we simply do not
+    ///  know (audit #40, L5o). Carried next to IsDead so the row stays a
+    ///  file-level row with no position.</summary>
+    NotChecked: Boolean;
   end;
 
   TUnitRefItems = TArray<TUnitRefItem>;
@@ -270,7 +275,9 @@ begin
       Item := AItems[I];
       LI := FListView.Items.Add;
       LI.Data := Pointer(NativeInt(I)); // FItems index - rows may be re-sorted
-      if Item.IsDead then
+      if Item.NotChecked then
+        LI.Caption := '(not checked)'
+      else if Item.IsDead then
         LI.Caption := '(unused)'
       else
         LI.Caption := Item.Identifier;

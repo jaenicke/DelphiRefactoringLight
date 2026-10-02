@@ -20,6 +20,34 @@ uses
 type
   TUsesSection = (usInterface, usImplementation);
 
+  /// <summary>A span of a line in which a UNIT NAME may stand: a uses /
+  ///  contains / requires clause, or the unit header itself. Columns are
+  ///  1-based and inclusive.</summary>
+  TUnitRefRegion = record
+    Line: Integer;      // 0-based
+    StartCol: Integer;
+    EndCol: Integer;
+  end;
+
+/// <summary>Every span of AMASKED (a MaskCommentsAndStrings copy, so
+///  comments, directives and string literals are blanked) in which a unit
+///  name may appear: the name after the unit / program / library / package
+///  header keyword, and each uses / contains / requires clause up to its
+///  ';'. Used by the UNIT rename, which is a whole-word text replace with
+///  no LSP check - without this it also renamed every variable, property
+///  or method that happens to share the unit's name (audit #40, M13).</summary>
+function CollectUnitRefRegions(const AMasked: TArray<string>): TArray<TUnitRefRegion>;
+
+/// <summary>True when the occurrence of a unit name at (ALine0, ACol1,
+///  ALen) really refers to the UNIT: it stands in one of ARegions, or it
+///  is used as a qualifier ("OldUnit.Something"). A qualifier cannot be
+///  told from a variable of the same name by text alone, so it counts -
+///  a qualified unit reference that is NOT renamed does not compile,
+///  while an extra hit is visible in the preview.</summary>
+function UnitNameOccurrenceIsUnitReference(const AMasked: TArray<string>;
+  const ARegions: TArray<TUnitRefRegion>;
+  ALine0, ACol1, ALen: Integer): Boolean;
+
 /// <summary>True if AUnit already appears in any uses clause of AContent
 ///  (whole-token, case-insensitive; dotted names compared whole).</summary>
 function UnitInUsesText(const AContent, AUnit: string): Boolean;
@@ -108,6 +136,116 @@ begin
   finally
     SL.Free;
   end;
+end;
+
+// The words that open a span holding unit names. 'uses' is a reserved
+// word, so it can never be an identifier; 'contains' and 'requires' are
+// reserved in a package only and are perfectly good method names
+// elsewhere ("if List.Contains(X) then"), so they count only as the
+// first word of their line.
+function ClauseOpener(const AWord: string; AFirstOnLine: Boolean): Boolean;
+begin
+  if SameText(AWord, 'uses') then Exit(True);
+  Result := AFirstOnLine and
+    (SameText(AWord, 'contains') or SameText(AWord, 'requires'));
+end;
+
+function HeaderOpener(const AWord: string; AFirstOnLine: Boolean): Boolean;
+begin
+  Result := AFirstOnLine and (SameText(AWord, 'unit') or
+    SameText(AWord, 'program') or SameText(AWord, 'library') or
+    SameText(AWord, 'package'));
+end;
+
+function CollectUnitRefRegions(const AMasked: TArray<string>): TArray<TUnitRefRegion>;
+var
+  Regions: TArray<TUnitRefRegion>;
+  InClause: Boolean;
+  HeaderSeen: Boolean;
+
+  procedure Add(ALine, AFrom, ATo: Integer);
+  var
+    R: TUnitRefRegion;
+  begin
+    if ATo < AFrom then Exit;
+    R.Line := ALine;
+    R.StartCol := AFrom;
+    R.EndCol := ATo;
+    Regions := Regions + [R];
+  end;
+
+begin
+  Regions := nil;
+  InClause := False;
+  HeaderSeen := False;
+  for var L := 0 to High(AMasked) do
+  begin
+    var S := AMasked[L];
+    var P := 1;
+    var FirstWordOfLine := True;
+    while P <= Length(S) do
+    begin
+      if InClause then
+      begin
+        var E := P;
+        while (E <= Length(S)) and (S[E] <> ';') do Inc(E);
+        if E <= Length(S) then
+        begin
+          Add(L, P, E - 1);
+          InClause := False;
+          P := E + 1;
+          FirstWordOfLine := False;
+          Continue;
+        end;
+        Add(L, P, Length(S));
+        Break;
+      end;
+      if not IsIdentStart(S[P]) then
+      begin
+        if S[P] > ' ' then FirstWordOfLine := False;
+        Inc(P);
+        Continue;
+      end;
+      var Start := P;
+      while (P <= Length(S)) and IsIdentChar(S[P]) do Inc(P);
+      var W := Copy(S, Start, P - Start);
+      // a dotted name ('Vcl.Forms', 'List.Contains') is one token here
+      var Dotted := (Start > 1) and (S[Start - 1] = '.');
+      if not Dotted and ClauseOpener(W, FirstWordOfLine) then
+        InClause := True
+      else if not Dotted and not HeaderSeen and HeaderOpener(W, FirstWordOfLine) then
+      begin
+        HeaderSeen := True;
+        var E := P;
+        while (E <= Length(S)) and (S[E] <> ';') do Inc(E);
+        Add(L, P, Min(E - 1, Length(S)));
+      end;
+      FirstWordOfLine := False;
+    end;
+  end;
+  Result := Regions;
+end;
+
+function UnitNameOccurrenceIsUnitReference(const AMasked: TArray<string>;
+  const ARegions: TArray<TUnitRefRegion>;
+  ALine0, ACol1, ALen: Integer): Boolean;
+var
+  S: string;
+begin
+  for var R in ARegions do
+    if (R.Line = ALine0) and (ACol1 >= R.StartCol) and (ACol1 <= R.EndCol) then
+      Exit(True);
+  Result := False;
+  if (ALine0 < 0) or (ALine0 > High(AMasked)) then Exit;
+  S := AMasked[ALine0];
+  // 'Something.OldUnit' is a member, never the unit
+  var B := ACol1 - 1;
+  while (B >= 1) and (S[B] = ' ') do Dec(B);
+  if (B >= 1) and (S[B] = '.') then Exit;
+  // 'OldUnit.Something' is a qualified reference and must be renamed
+  var A := ACol1 + ALen;
+  while (A <= Length(S)) and (S[A] = ' ') do Inc(A);
+  Result := (A <= Length(S)) and (S[A] = '.');
 end;
 
 function IsUsesLine(const AMasked: string): Boolean;

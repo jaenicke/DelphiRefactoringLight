@@ -436,6 +436,20 @@ type
     [Test] procedure AnEditIsVerifiedAgainstTheCurrentText;
   end;
 
+  /// <summary>Audit issue #40, the three items of its remainder that are
+  ///  decided by pure code: the UNIT rename must only touch places where a
+  ///  unit NAME can stand (M13), the semantic-replace preview must show
+  ///  the occurrence the apply changes (L5a), and a descendant's
+  ///  reintroduced or differently-overloaded member is not the symbol
+  ///  being renamed (M21b).</summary>
+  [TestFixture]
+  TUnitRenameScopeTests = class
+  public
+    [Test] procedure OnlyUnitPlacesCountForAUnitRename;
+    [Test] procedure ThePreviewChangesTheOccurrenceTheApplyChanges;
+    [Test] procedure AReintroducedMemberIsAnotherSymbol;
+  end;
+
 implementation
 
 uses
@@ -447,7 +461,7 @@ uses
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
-  System.StrUtils;
+  Expert.SemanticReplace, System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -3049,6 +3063,179 @@ begin
     'an empty old text always matches');
 end;
 
+
+{ TUnitRenameScopeTests }
+
+procedure TUnitRenameScopeTests.OnlyUnitPlacesCountForAUnitRename;
+var
+  Lines, Masked: TArray<string>;
+  Regions: TArray<TUnitRefRegion>;
+
+  function IsUnitRef(ALine0: Integer): Boolean;
+  var
+    C: Integer;
+  begin
+    // the first occurrence of 'Settings' as a whole word on that line
+    C := Pos('Settings', Lines[ALine0]);
+    Assert.IsTrue(C > 0, 'the fixture line must mention Settings: ' +
+      Lines[ALine0]);
+    Result := UnitNameOccurrenceIsUnitReference(Masked, Regions, ALine0, C,
+      Length('Settings'));
+  end;
+
+begin
+  // The reported shape: a unit named Settings, and in another unit a
+  // variable of the same name. A unit rename is a whole-word text replace
+  // with no LSP check, so without a filter it renamed the variable too.
+  Lines := [
+    'unit Consumer;',                       // 0
+    '',                                     // 1
+    'interface',                            // 2
+    '',                                     // 3
+    'uses',                                 // 4
+    '  System.Classes, Settings;',          // 5
+    '',                                     // 6
+    'implementation',                       // 7
+    '',                                     // 8
+    'var',                                  // 9
+    '  Settings: TObject;',                 // 10
+    '',                                     // 11
+    'procedure Go;',                        // 12
+    'begin',                                // 13
+    '  Settings := TObject.Create;',        // 14
+    '  Settings.Free;',                     // 15
+    '  Settings.DoIt(Other.Settings);',     // 16
+    '  // Settings is the unit',            // 17
+    'end;',                                 // 18
+    '',                                     // 19
+    'end.'];                                // 20
+  Masked := MaskCommentsAndStrings(Lines);
+  Regions := CollectUnitRefRegions(Masked);
+
+  Assert.IsTrue(IsUnitRef(5), 'the uses-clause entry IS the unit');
+  Assert.IsFalse(IsUnitRef(10), 'a variable declaration is not the unit');
+  Assert.IsFalse(IsUnitRef(14), 'an assignment to a variable is not the unit');
+  // 'Settings.Free' cannot be told from a qualified unit reference by text,
+  // and a qualified unit reference that is NOT renamed does not compile -
+  // so this one counts, deliberately.
+  Assert.IsTrue(IsUnitRef(15), 'a qualifier counts (it may be the unit)');
+  // ... but the MEMBER half of 'Other.Settings' never does. The first
+  // occurrence on line 16 is the qualifier, so ask for the second one.
+  var P2 := Pos('Other.Settings', Lines[16]) + Length('Other.');
+  Assert.IsFalse(UnitNameOccurrenceIsUnitReference(Masked, Regions, 16, P2,
+    Length('Settings')), 'Other.Settings is a member, not the unit');
+
+  // And the header of the unit itself, in the renamed unit's own file.
+  Lines := ['unit Settings;', '', 'interface', '', 'implementation', '', 'end.'];
+  Masked := MaskCommentsAndStrings(Lines);
+  Regions := CollectUnitRefRegions(Masked);
+  Assert.IsTrue(UnitNameOccurrenceIsUnitReference(Masked, Regions, 0,
+    Pos('Settings', Lines[0]), Length('Settings')),
+    'the unit header names the unit');
+
+  // A .dpk: 'contains' / 'requires' open a clause too, but 'Contains' as
+  // a method call must not ("if List.Contains(Settings) then").
+  Lines := [
+    'package Demo;',                        // 0
+    'requires',                             // 1
+    '  rtl, Settings;',                     // 2
+    'contains',                             // 3
+    '  Settings in ''Settings.pas'';',      // 4
+    'end.'];                                // 5
+  Masked := MaskCommentsAndStrings(Lines);
+  Regions := CollectUnitRefRegions(Masked);
+  Assert.IsTrue(UnitNameOccurrenceIsUnitReference(Masked, Regions, 2,
+    Pos('Settings', Lines[2]), 8), 'a requires entry IS the unit');
+  Assert.IsTrue(UnitNameOccurrenceIsUnitReference(Masked, Regions, 4,
+    Pos('Settings', Lines[4]), 8), 'a contains entry IS the unit');
+
+  Lines := [
+    'unit U;',                              // 0
+    'implementation',                       // 1
+    'procedure P;',                         // 2
+    'begin',                                // 3
+    '  if List.Contains(Settings) then Settings := nil;',   // 4
+    'end;',                                 // 5
+    'end.'];                                // 6
+  Masked := MaskCommentsAndStrings(Lines);
+  Regions := CollectUnitRefRegions(Masked);
+  Assert.IsFalse(UnitNameOccurrenceIsUnitReference(Masked, Regions, 4,
+    Pos('Settings', Lines[4]), 8),
+    'a method named Contains does not open a uses clause');
+end;
+
+procedure TUnitRenameScopeTests.ThePreviewChangesTheOccurrenceTheApplyChanges;
+begin
+  // The preview used StringReplace, which rewrites the FIRST occurrence on
+  // the line - on "Foo('Foo', Foo);" it showed the wrong one changed.
+  var Line := '  Foo(''Foo'', Foo);';
+  var Col := Pos('Foo', Line);                       // the call itself
+  Assert.AreEqual('  Bar(''Foo'', Foo);',
+    PreviewReplacedLine(Line, 'Foo', 'Bar', Col), 'the call');
+  var Last := Pos('Foo);', Line);                    // the argument
+  Assert.IsTrue(Last > Col, 'the fixture has a later occurrence');
+  Assert.AreEqual('  Foo(''Foo'', Bar);',
+    PreviewReplacedLine(Line, 'Foo', 'Bar', Last), 'the argument');
+  // case-insensitive match: the line's own spelling is replaced
+  Assert.AreEqual('  Bar := 1;',
+    PreviewReplacedLine('  foo := 1;', 'Foo', 'Bar', 3), 'lower case');
+  // nothing to splice: the line is handed back unchanged rather than
+  // guessing a position
+  Assert.AreEqual('  Other := 1;',
+    PreviewReplacedLine('  Other := 1;', 'Foo', 'Bar', 3), 'no match there');
+  Assert.AreEqual('  Foo;', PreviewReplacedLine('  Foo;', 'Foo', 'Bar', 99),
+    'a column past the line');
+end;
+
+procedure TUnitRenameScopeTests.AReintroducedMemberIsAnotherSymbol;
+const
+  Src =
+    'unit U;' + NL +
+    'interface' + NL +
+    'type' + NL +
+    '  TBase = class' + NL +
+    '    procedure Init(A: Integer); virtual;' + NL +
+    '  end;' + NL +
+    '  TChild = class(TBase)' + NL +
+    '    procedure Init(A: Integer); reintroduce;' + NL +
+    '  end;' + NL +
+    '  TOther = class(TBase)' + NL +
+    '    procedure Init(A: Integer); override;' + NL +
+    '  end;' + NL +
+    '  TWide = class(TBase)' + NL +
+    '    procedure Init(A: Integer; B: string); overload;' + NL +
+    '  end;' + NL +
+    'implementation' + NL +
+    'end.';
+var
+  Why: string;
+begin
+  // The renamed declaration is TBase.Init(A: Integer) - one parameter.
+  var Lines := SplitContentLines(Src);
+  Assert.AreEqual(1, DeclaredParamCount(Lines, 4),
+    'the renamed declaration has one parameter');
+
+  Assert.IsTrue(MemberIsOtherSymbol(Src, 'TChild', 'Init', 1, Why),
+    'a reintroduced member hides the base one');
+  Assert.Contains(Why, 'reintroduce');
+
+  Why := '';
+  Assert.IsFalse(MemberIsOtherSymbol(Src, 'TOther', 'Init', 1, Why),
+    'an override IS the symbol');
+  Assert.AreEqual('', Why);
+
+  Assert.IsTrue(MemberIsOtherSymbol(Src, 'TWide', 'Init', 1, Why),
+    'an overload with another parameter count is another symbol');
+  Assert.Contains(Why, '2 parameter');
+
+  // Without a known parameter count only reintroduce counts - guessing
+  // would drop a real occurrence, which does not compile.
+  Assert.IsFalse(MemberIsOtherSymbol(Src, 'TWide', 'Init', -1, Why),
+    'an unknown signature decides nothing');
+  Assert.IsFalse(MemberIsOtherSymbol(Src, 'TNoSuchType', 'Init', 1, Why),
+    'an unknown type decides nothing');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -3076,5 +3263,6 @@ initialization
   TDUnitX.RegisterTestFixture(TUsesClauseParsingTests);
   TDUnitX.RegisterTestFixture(TSelfProtectionTests);
   TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
+  TDUnitX.RegisterTestFixture(TUnitRenameScopeTests);
 
 end.

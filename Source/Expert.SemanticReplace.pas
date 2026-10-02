@@ -149,6 +149,16 @@ type
       const ARules: TArray<TSemanticReplaceRule>): TArray<TSemanticReplaceMatch>;
   end;
 
+/// <summary>The "+" line of the preview: ALINE with the match AT ACOL
+///  (1-based, as OffsetToLineCol reports it) replaced. The preview used
+///  StringReplace, which rewrites the FIRST occurrence of the name on the
+///  line - on "Foo('Foo', Foo);" it showed the wrong one changed while
+///  the apply changes the right one (audit #40, L5a). The replaced span
+///  is taken from the line itself, so a case-insensitive match
+///  ('foo' for rule 'Foo') is spliced out correctly too.</summary>
+function PreviewReplacedLine(const ALine, AFind, AReplace: string;
+  ACol: Integer): string;
+
 implementation
 
 
@@ -290,6 +300,17 @@ begin
   finally
     Root.Free;
   end;
+end;
+
+function PreviewReplacedLine(const ALine, AFind, AReplace: string;
+  ACol: Integer): string;
+begin
+  // Out of the line, or the line does not hold the name there: leave it
+  // alone rather than splicing at a guessed place.
+  if (ACol < 1) or (ACol + Length(AFind) - 1 > Length(ALine)) then Exit(ALine);
+  if not SameText(Copy(ALine, ACol, Length(AFind)), AFind) then Exit(ALine);
+  Result := Copy(ALine, 1, ACol - 1) + AReplace +
+    Copy(ALine, ACol + Length(AFind), MaxInt);
 end;
 
 class procedure TSemanticReplaceEngine.OffsetToLineCol(const AText: string;

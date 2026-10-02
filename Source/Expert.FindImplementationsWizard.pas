@@ -210,7 +210,10 @@ begin
       end;
     end;
   except
-    // Tolerate LSP errors - fallback follows below
+    on E: EAbort do
+      raise;   // the user cancelled during the wait (audit #40, L5e)
+    else
+      // Tolerate LSP errors - fallback follows below
   end;
 
   // Fallback: if LSP could not deliver anything, try a text scan from
@@ -282,7 +285,18 @@ begin
   if (System.Length(Items) = 0) and (OwnerType <> '') then
   begin
     var Unverified := TImplementationFinder.FindByProjectScan(
-      ProjFiles, FContext.WordAtCursor, '', nil);
+      ProjFiles, FContext.WordAtCursor, '',
+      procedure(ACurrent, ATotal: Integer)
+      begin
+        if Aborted then Abort;
+        FDialog.SetProgress(ACurrent, ATotal);
+        if (ACurrent mod 5 = 0) or (ACurrent = ATotal) then
+        begin
+          FDialog.SetStatus(Format('Scanning project unfiltered (%d/%d)...',
+            [ACurrent, ATotal]));
+          Application.ProcessMessages;
+        end;
+      end);
     if System.Length(Unverified) > 0 then
     begin
       FDialog.SetItems(Unverified);

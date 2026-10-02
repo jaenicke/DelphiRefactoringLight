@@ -2669,15 +2669,19 @@ begin
   end;
   var Arr := TJSONArray.Create;
   var Dead := 0;
+  var Unchecked := 0;
   var Shown := 0;
   for var It in Items do
   begin
-    if It.IsDead then Inc(Dead);
+    if It.NotChecked then Inc(Unchecked)
+    else if It.IsDead then Inc(Dead);
     if (Max > 0) and (Shown >= Max) then Continue;
     Inc(Shown);
     var O := TJSONObject.Create;
     O.AddPair('file', It.FilePath);
-    if It.IsDead then
+    if It.NotChecked then
+      O.AddPair('notChecked', TJSONBool.Create(True))
+    else if It.IsDead then
       O.AddPair('unused', TJSONBool.Create(True))
     else
     begin
@@ -2692,6 +2696,8 @@ begin
   Res.AddPair('unit', ChangeFileExt(ExtractFileName(F), ''));
   Res.AddPair('total', TJSONNumber.Create(Length(Items)));
   Res.AddPair('unusedEntries', TJSONNumber.Create(Dead));
+  if Unchecked > 0 then
+    Res.AddPair('notCheckedEntries', TJSONNumber.Create(Unchecked));
   Res.AddPair('references', Arr);
   if Shown < Length(Items) then
     Res.AddPair('truncated', TJSONNumber.Create(Length(Items) - Shown));

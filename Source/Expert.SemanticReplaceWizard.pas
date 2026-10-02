@@ -502,7 +502,7 @@ begin
         TSemanticReplaceEngine.OffsetToLineCol(P.Original, M.Offset, Line, Col);
         Orig := TSemanticReplaceEngine.LineAtOffset(P.Original, M.Offset);
         var R := ARules[M.RuleIdx];
-        NewLine := StringReplace(Orig, R.Find, R.Replace, []);
+        NewLine := PreviewReplacedLine(Orig, R.Find, R.Replace, Col);
         SB.Append('    L').Append(Line);
         if Length(P.Verdicts) > 0 then
           SB.Append('  [').Append(SemanticVerdictText(P.Verdicts[I], P.Targets[I], R)).Append(']');

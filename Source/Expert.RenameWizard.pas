@@ -119,7 +119,8 @@ type
     function BuildEditFromCandidates(const ACandidates: TArray<TRenameCandidate>;
       const AOldName, ANewName: string): TLspWorkspaceEdit;
 
-    function FindCandidates(const AOldName: string; const AFiles: TArray<string>): TArray<TRenameCandidate>;
+    function FindCandidates(const AOldName: string; const AFiles: TArray<string>;
+      AUnitRefsOnly: Boolean = False): TArray<TRenameCandidate>;
     /// <summary>'' or a report of places where ANewName already exists
     ///  (files of the edit, a member of the owner type, a used unit).</summary>
     function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
@@ -834,8 +835,11 @@ begin
       'Text search (whole-word, skipping strings and comments)...' + sLineBreak;
 
     FHost.SetStatus(Format('Scanning %d project file(s)...', [Length(ProjFiles)]));
-    Candidates := FindCandidates(FContext.WordAtCursor, ProjFiles);
-    FDiagLog := FDiagLog + 'Text candidates: ' + IntToStr(Length(Candidates)) + sLineBreak;
+    Candidates := FindCandidates(FContext.WordAtCursor, ProjFiles, True);
+    FDiagLog := FDiagLog + 'Text candidates: ' + IntToStr(Length(Candidates)) +
+      ' (uses/contains/requires clauses, the unit header and ' +
+      FContext.WordAtCursor + '. qualifiers only - an identifier that ' +
+      'happens to share the unit''s name is not renamed)' + sLineBreak;
 
     if Length(Candidates) = 0 then
     begin
@@ -1417,6 +1421,16 @@ begin
       // overrides in descendants). A header of the OWNER type itself that is
       // not the symbol already is a sibling OVERLOAD - forum report: renaming
       // Init(const xBoolean: Boolean) also renamed the parameterless Init.
+      // How many parameters the renamed DECLARATION has - a descendant's
+      // same-named member with another count and 'overload' is a different
+      // symbol (audit #40, M21b).
+      var DeclParams := -1;
+      if (DefFilePath <> '') and (DefLine >= 0) then
+        try
+          DeclParams := DeclaredParamCount(ReadDelphiFileLines(DefFilePath), DefLine);
+        except
+          DeclParams := -1;
+        end;
       var ImplLinesOf := TDictionary<string, TArray<string>>.Create;
       try
         for var IC in ImplCandidates do
@@ -1438,6 +1452,26 @@ begin
             FDiagLog := FDiagLog + 'Sibling overload skipped: ' +
               ExtractFileName(IC.FilePath) + ':' + IntToStr(IC.Line + 1) + sLineBreak;
             Continue;
+          end;
+          // A member of ANOTHER type that is 'reintroduce', or an
+          // overload with a different parameter count, is not this
+          // symbol - renaming it renamed a member the user did not mean
+          // (audit #40, M21b). Evidence only: anything unclear stays.
+          var OtherOwner := '';
+          if (IC.Line >= 0) and (IC.Line <= High(ICLines)) then
+            OtherOwner := TImplementationFinder.OwnerTypeFromImplLine(ICLines[IC.Line]);
+          if (OtherOwner <> '') and not SameText(OtherOwner, OwnerType)
+            and not Targets.Contains(IC.FilePath, IC.Line) then
+          begin
+            var Why := '';
+            if MemberIsOtherSymbol(string.Join(#10, ICLines), OtherOwner,
+              FContext.WordAtCursor, DeclParams, Why) then
+            begin
+              FDiagLog := FDiagLog + 'Other symbol skipped: ' +
+                ExtractFileName(IC.FilePath) + ':' + IntToStr(IC.Line + 1) +
+                ' - ' + Why + sLineBreak;
+              Continue;
+            end;
           end;
           IncCtx.AddTargetWithPartner(Targets, IC.FilePath, IC.Line, IC.Col,
             FContext.WordAtCursor);
@@ -1644,11 +1678,13 @@ end;
 
 { Text search }
 
-function TLspRenameWizard.FindCandidates(const AOldName: string; const AFiles: TArray<string>): TArray<TRenameCandidate>;
+function TLspRenameWizard.FindCandidates(const AOldName: string; const AFiles: TArray<string>;
+  AUnitRefsOnly: Boolean = False): TArray<TRenameCandidate>;
 var
   CandidateList: TList<TRenameCandidate>;
   F, Line, RawContent: string;
   Lines, Masked: TArray<string>;
+  Regions: TArray<TUnitRefRegion>;
   UpperOldName: string;
   LineIdx, SearchPos, FoundPos, AfterPos: Integer;
   BeforeOk, AfterOk: Boolean;
@@ -1672,6 +1708,9 @@ begin
         Lines := ReadDelphiFileLines(F);
         // comment/string state carried ACROSS lines (multi-line { })
         Masked := MaskCommentsAndStrings(Lines);
+        // UNIT rename has no LSP check, so the places a unit name may
+        // stand are decided here (audit #40, M13).
+        if AUnitRefsOnly then Regions := CollectUnitRefRegions(Masked);
       except
         Continue;
       end;
@@ -1692,7 +1731,9 @@ begin
           AfterOk := (AfterPos > Length(Line)) or
             not CharInSet(Line[AfterPos], ['A'..'Z','a'..'z','0'..'9','_']);
 
-          if BeforeOk and AfterOk and (Masked[LineIdx][FoundPos] = Line[FoundPos]) then
+          if BeforeOk and AfterOk and (Masked[LineIdx][FoundPos] = Line[FoundPos])
+            and (not AUnitRefsOnly or UnitNameOccurrenceIsUnitReference(
+              Masked, Regions, LineIdx, FoundPos, Length(AOldName))) then
           begin
             Candidate.FilePath := F;
             Candidate.Line := LineIdx;

@@ -26,7 +26,7 @@ unit Expert.MethodEditWizard;
 interface
 
 uses
-  System.SysUtils, System.Classes, System.Types,
+  System.SysUtils, System.Classes, System.Types, Vcl.Forms,
   Expert.MethodEdit, Expert.SignatureEdit, Expert.SafeDelete;
 
 type
@@ -85,13 +85,19 @@ function ReadUnitForEdit(const AFile: string): string;
 /// <summary>Editor entry point (menu "Edit methods...").</summary>
 procedure EditMethodsAtCursor;
 
+/// <summary>Test seam: the dialog itself. Exported so its layout can be
+///  RENDERED headless (scratchpad methodedit\RenderEdit.dpr) instead of
+///  guessed - the same reason CreateCircularRefsDialog is exported. Nothing
+///  of the production path calls it.</summary>
+function CreateMethodEditDialog(AOwner: TComponent;
+  const AAn: TMethodEditAnalysis): TForm;
+
 implementation
 
 uses
   Winapi.Windows, System.Math, System.StrUtils, System.IOUtils, System.JSON,
   System.SyncObjs, System.Generics.Collections, System.Generics.Defaults,
-  System.UITypes,
-  Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.ComCtrls, Vcl.Grids,
+  System.UITypes, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.ComCtrls, Vcl.Grids,
   Vcl.Graphics, Vcl.Dialogs,
   Expert.EditorHelperIntf, Expert.PascalScanner, Expert.UnitIndex,
   Expert.AutoImport, Expert.ImplementationFinder, Expert.ReferenceKind,
@@ -578,7 +584,7 @@ type
     FKeepHere: TCheckBox;
     FGrid: TStringGrid;
     FSigFor: TLabel;
-    FSigAdd, FSigRemove, FSigUp, FSigDown, FSigChange: TButton;
+    FSigAdd, FSigRemove, FSigUp, FSigDown: TButton;
     FModBoxes: array[0..High(ModifierNames)] of TCheckBox;
     FWarn: TMemo;
     FCalls: TListView;
@@ -600,6 +606,7 @@ type
     procedure Replan;
     procedure Changed(Sender: TObject);
     procedure DoTimer(Sender: TObject);
+    procedure SyncSignatureTab;
     procedure DoMemberChange(Sender: TObject; AItem: TListItem;
       AChange: TItemChange);
     procedure DoUnitChange(Sender: TObject);
@@ -607,7 +614,6 @@ type
     procedure DoSigAdd(Sender: TObject);
     procedure DoSigRemove(Sender: TObject);
     procedure DoSigMove(Sender: TObject);
-    procedure DoSigChangeInstead(Sender: TObject);
     procedure DoCallDblClick(Sender: TObject);
     procedure DoSetEditText(Sender: TObject; ACol, ARow: Integer; const Value: string);
     procedure DoApply(Sender: TObject);
@@ -657,7 +663,7 @@ constructor TMethodEditDialog.CreateDialog(AOwner: TComponent;
   end;
 
 var
-  Left, Bottom, SigTop, SigSide, Mods: TPanel;
+  Left, Right, Bottom, SigTop, SigSide, Mods: TPanel;
   Col: TListColumn;
 begin
   inherited CreateNew(AOwner);
@@ -671,11 +677,32 @@ begin
   Constraints.MinHeight := 560;
 
   // ---- the member list, outside the tabs: it is what both tabs act on ----
+  Bottom := TPanel.Create(Self);
+  Bottom.Parent := Self;
+  Bottom.Align := alBottom;
+  Bottom.Height := 40;
+  Bottom.BevelOuter := bvNone;
+  FBtnClose := Btn(Bottom, '&Close', alRight, nil);
+  FBtnClose.Cancel := True;
+  FBtnClose.ModalResult := mrCancel;
+  FBtnApply := Btn(Bottom, 'A&pply', alRight, DoApply);
+
   Left := TPanel.Create(Self);
   Left.Parent := Self;
   Left.Align := alLeft;
-  Left.Width := 300;
+  Left.Width := 360;
   Left.BevelOuter := bvNone;
+
+  var Split := TSplitter.Create(Self);
+  Split.Parent := Self;
+  Split.Align := alLeft;
+  Split.Width := 5;
+  Split.MinSize := 200;
+
+  Right := TPanel.Create(Self);
+  Right.Parent := Self;
+  Right.Align := alClient;
+  Right.BevelOuter := bvNone;
 
   var Cap := TLabel.Create(Self);
   Cap.Parent := Left;
@@ -692,14 +719,18 @@ begin
   FMembers.RowSelect := True;
   FMembers.Checkboxes := True;
   FMembers.HideSelection := False;
-  Col := FMembers.Columns.Add; Col.Caption := 'Member'; Col.Width := 150;
+  Col := FMembers.Columns.Add; Col.Caption := 'Member'; Col.Width := 130;
   Col := FMembers.Columns.Add; Col.Caption := 'Kind'; Col.Width := 80;
-  Col := FMembers.Columns.Add; Col.Caption := 'Note'; Col.Width := 240;
+  // the reason a member cannot travel alone is the point of this column, so
+  // it gets what is left - and the full text goes into the box on the right
+  Col := FMembers.Columns.Add; Col.Caption := 'Cannot be moved because';
+  Col.Width := 420;   // longer than the panel on purpose: the splitter below
+                      // lets the reason be read without a second window
   FMembers.OnChange := DoMemberChange;
 
   // ---- the two tabs ------------------------------------------------------
   FTabs := TPageControl.Create(Self);
-  FTabs.Parent := Self;
+  FTabs.Parent := Right;
   FTabs.Align := alTop;
   FTabs.Height := 230;
   FTabs.AlignWithMargins := True;
@@ -742,8 +773,14 @@ begin
   FSectionCombo.ItemIndex := 0;
   FSectionCombo.OnChange := Changed;
 
-  Lbl(FTabTarget, 'The body travels along and is requalified. Fields and ' +
-    'methods it uses stay behind - the box below names them.', 12, 156);
+  var Hint := Lbl(FTabTarget, 'The body travels along and is requalified. ' +
+    'Fields and methods of the old class that it uses stay behind - the box ' +
+    'below the tabs names them, and so does everything else this will not do.',
+    12, 150);
+  Hint.AutoSize := False;
+  Hint.WordWrap := True;
+  Hint.Width := 600;
+  Hint.Height := 34;
 
   // Signature tab: the grid edits ONE member, the modifiers reach all of the
   // selected ones - which is what the user asked for ("Modifier wie virtual
@@ -762,14 +799,20 @@ begin
   Mods := TPanel.Create(Self);
   Mods.Parent := FTabSig;
   Mods.Align := alBottom;
-  Mods.Height := 30;
+  Mods.Height := 52;
   Mods.BevelOuter := bvNone;
+  var ModHint := TLabel.Create(Self);
+  ModHint.Parent := Mods;
+  ModHint.Left := 8;
+  ModHint.Top := 4;
+  ModHint.Caption := 'Directives of EVERY ticked member:  grey = leave as it ' +
+    'is,  ticked = add,  empty = remove';
   for var I := 0 to High(ModifierNames) do
   begin
     FModBoxes[I] := TCheckBox.Create(Self);
     FModBoxes[I].Parent := Mods;
     FModBoxes[I].Left := 8 + I * 118;
-    FModBoxes[I].Top := 6;
+    FModBoxes[I].Top := 26;
     FModBoxes[I].Width := 114;
     FModBoxes[I].Caption := ModifierNames[I];
     FModBoxes[I].AllowGrayed := True;
@@ -782,7 +825,6 @@ begin
   SigSide.Align := alRight;
   SigSide.Width := 150;
   SigSide.BevelOuter := bvNone;
-  FSigChange := Btn(SigSide, 'Change signature...', alBottom, DoSigChangeInstead);
   FSigDown := Btn(SigSide, 'Move &down', alTop, DoSigMove);
   FSigUp := Btn(SigSide, 'Move &up', alTop, DoSigMove);
   FSigRemove := Btn(SigSide, '&Remove', alTop, DoSigRemove);
@@ -810,7 +852,7 @@ begin
 
   // ---- what this will do, and what it will not ---------------------------
   FWarn := TMemo.Create(Self);
-  FWarn.Parent := Self;
+  FWarn.Parent := Right;
   FWarn.Align := alTop;
   FWarn.Top := 400;
   FWarn.Height := 110;
@@ -818,25 +860,15 @@ begin
   FWarn.ReadOnly := True;
   FWarn.ScrollBars := ssVertical;
 
-  Bottom := TPanel.Create(Self);
-  Bottom.Parent := Self;
-  Bottom.Align := alBottom;
-  Bottom.Height := 40;
-  Bottom.BevelOuter := bvNone;
-  FBtnClose := Btn(Bottom, '&Close', alRight, nil);
-  FBtnClose.Cancel := True;
-  FBtnClose.ModalResult := mrCancel;
-  FBtnApply := Btn(Bottom, 'A&pply', alRight, DoApply);
-
   FCallsLabel := TLabel.Create(Self);
-  FCallsLabel.Parent := Self;
+  FCallsLabel.Parent := Right;
   FCallsLabel.Align := alTop;
   FCallsLabel.Top := 520;
   FCallsLabel.AlignWithMargins := True;
   FCallsLabel.Caption := 'Occurrences';
 
   FCalls := TListView.Create(Self);
-  FCalls.Parent := Self;
+  FCalls.Parent := Right;
   FCalls.Align := alClient;
   FCalls.AlignWithMargins := True;
   FCalls.ViewStyle := vsReport;
@@ -857,6 +889,7 @@ begin
 
   FillMembers;
   FillUnits;
+  SyncSignatureTab;   // FillMembers ticks without raising OnChange
   Replan;
   EnableThemes(Self);
   PrepareDialog(Self, AOwner);
@@ -929,7 +962,17 @@ begin
       if not SameText(N, FAn.OwnerType) or
          not SameText(ExpandFileName(Path), ExpandFileName(FAn.SourceFile)) then
         FClassCombo.Items.Add(N);
-    if FClassCombo.Items.Count > 0 then FClassCombo.ItemIndex := 0;
+    if FClassCombo.Items.Count > 0 then
+    begin
+      FClassCombo.ItemIndex := 0;
+      for var K := 0 to FClassCombo.Items.Count - 1 do
+        if IsClassType(SplitContentLines(FTargetContent),
+          FClassCombo.Items[K]) then
+        begin
+          FClassCombo.ItemIndex := K;
+          Break;
+        end;
+    end;
   finally
     FFilling := False;
   end;
@@ -1017,7 +1060,7 @@ begin
       cbChecked: FReq.AddModifiers := FReq.AddModifiers + [ModifierNames[I]];
       cbUnchecked: FReq.RemoveModifiers := FReq.RemoveModifiers + [ModifierNames[I]];
     end;
-  if (FSigMember <> '') and (Length(FRows) >= 0) then
+  if FSigMember <> '' then
   begin
     ReadGrid;
     // Only when the list really differs - otherwise a rewrite of both
@@ -1041,7 +1084,12 @@ begin
   FBtnBrowse.Enabled := not FKeepHere.Checked;
   FRes := PlanMethodEdit(FAn.SourceFile, FAn.SourceContent, FAn.OwnerType,
     FReq, FTargetContent);
-  FWarn.Text := FRes.Summary;
+  // The analysis has things to say that no plan can know - above all the form
+  // designer binding a handler. They belong in the SAME box; a warning the
+  // dialog never shows is not a warning.
+  var Txt := '';
+  for var N in FAn.Notes do Txt := Txt + N + sLineBreak;
+  FWarn.Text := Txt + FRes.Summary;
   FBtnApply.Enabled := FRes.Ok;
   FillCalls;
 end;
@@ -1059,27 +1107,34 @@ begin
   Replan;
 end;
 
+// The parameter grid belongs to ONE member: the first ticked one.
+procedure TMethodEditDialog.SyncSignatureTab;
+begin
+  var Sel := SelectedMembers;
+  var Want := '';
+  if Length(Sel) > 0 then Want := Sel[0];
+  if SameText(Want, FSigMember) and (FGrid.RowCount = Max(2, Length(FRows) + 1)) then
+    Exit;
+  FSigMember := Want;
+  FRows := FAn.ParamsOf(FSigMember);
+  FSigResult := FAn.ResultTypeOf(FSigMember);
+  FillGrid;
+  if FSigMember = '' then
+    FSigFor.Caption := 'Parameters of: (tick a member on the left)'
+  else
+    FSigFor.Caption := Format('Parameters of %s.%s%s', [FAn.OwnerType,
+      FSigMember, IfThen(FSigResult <> '', ': ' + FSigResult, '')]);
+  FSigAdd.Enabled := FSigMember <> '';
+  FSigRemove.Enabled := FSigMember <> '';
+  FSigUp.Enabled := FSigMember <> '';
+  FSigDown.Enabled := FSigMember <> '';
+end;
+
 procedure TMethodEditDialog.DoMemberChange(Sender: TObject; AItem: TListItem;
   AChange: TItemChange);
 begin
   if FFilling then Exit;
-  // The parameter grid belongs to ONE member: the first selected one.
-  var Sel := SelectedMembers;
-  var Want := '';
-  if Length(Sel) > 0 then Want := Sel[0];
-  if not SameText(Want, FSigMember) then
-  begin
-    FSigMember := Want;
-    FRows := FAn.ParamsOf(FSigMember);
-    FSigResult := FAn.ResultTypeOf(FSigMember);
-    FillGrid;
-    if FSigMember = '' then
-      FSigFor.Caption := 'Parameters of: (nothing selected)'
-    else
-      FSigFor.Caption := Format('Parameters of %s.%s%s - the modifiers below ' +
-        'apply to every ticked member', [FAn.OwnerType, FSigMember,
-        IfThen(FSigResult <> '', ': ' + FSigResult, '')]);
-  end;
+  SyncSignatureTab;
   Changed(Sender);
 end;
 
@@ -1155,14 +1210,6 @@ begin
   Changed(Sender);
 end;
 
-procedure TMethodEditDialog.DoSigChangeInstead(Sender: TObject);
-begin
-  ShowThemedMessage('"Change signature..." verifies every call with DelphiLSP ' +
-    'and rewrites the argument lists - this dialog does not. Close this window ' +
-    'and run it from the Refactoring Light menu with the caret on ' +
-    IfThen(FSigMember <> '', FSigMember, 'the method') + '.');
-end;
-
 procedure TMethodEditDialog.DoCallDblClick(Sender: TObject);
 begin
   if (FCalls.Selected = nil) or (Editor = nil) then Exit;
@@ -1224,6 +1271,12 @@ begin
   Stop.Free;
   Lock.Free;
   inherited;
+end;
+
+function CreateMethodEditDialog(AOwner: TComponent;
+  const AAn: TMethodEditAnalysis): TForm;
+begin
+  Result := TMethodEditDialog.CreateDialog(AOwner, AAn);
 end;
 
 procedure EditMethodsAtCursor;

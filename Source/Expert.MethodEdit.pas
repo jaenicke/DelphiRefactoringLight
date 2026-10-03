@@ -141,6 +141,11 @@ function MethodEditIssue(AKind: TMethodEditIssueKind;
 ///  at top level - the candidates for a move target.</summary>
 function ClassNamesOf(const ALines: TArray<string>): TArray<string>;
 
+/// <summary>Is ATYPE declared with the 'class' keyword (not a record, not a
+///  plain object)? A record IS a legitimate target, so this only picks the
+///  default the dialog preselects.</summary>
+function IsClassType(const ALines: TArray<string>; const AType: string): Boolean;
+
 /// <summary>ALINES with AADD / AREMOVE applied to the declarations of
 ///  AMEMBERS inside ATYPE. Only those declaration lines change.</summary>
 function ApplyModifiersInClass(const ALines: TArray<string>; const AType: string;
@@ -861,6 +866,21 @@ begin
   end;
 end;
 
+function IsClassType(const ALines: TArray<string>; const AType: string): Boolean;
+var
+  First, Last, P: Integer;
+  T: string;
+begin
+  Result := False;
+  if not ClassBodyRange(ALines, AType, First, Last) then Exit;
+  T := Trim(StripLineComment(ALines[First]));
+  P := Pos('=', T);
+  if P <= 0 then Exit;
+  T := Trim(Copy(T, P + 1, MaxInt));
+  Result := SameText(Copy(T, 1, 5), 'class') or
+            SameText(Copy(T, 1, 9), 'interface');
+end;
+
 function ApplyModifiersInClass(const ALines: TArray<string>; const AType: string;
   const AMembers, AAdd, ARemove: TArray<string>): TArray<string>;
 var
@@ -1043,6 +1063,15 @@ begin
       'the call sites are NOT changed - use "Change signature..." for the ' +
       'verified rewrite')];
   end;
+
+  if Length(AReq.AddModifiers) > 0 then
+    Res.Issues := Res.Issues + [MethodEditIssue(meiNote, '',
+      Format('adds "%s" to %d declaration(s)',
+        [string.Join(' ', AReq.AddModifiers), Length(AReq.Members)]))];
+  if Length(AReq.RemoveModifiers) > 0 then
+    Res.Issues := Res.Issues + [MethodEditIssue(meiNote, '',
+      Format('takes "%s" out of %d declaration(s)',
+        [string.Join(' ', AReq.RemoveModifiers), Length(AReq.Members)]))];
 
   // 2. THE MOVE.
   if AReq.TargetClass = '' then

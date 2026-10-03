@@ -104,17 +104,41 @@ begin
   end;
 end;
 
-/// <summary>Extracts "['{...}']" from a line; returns '' if absent.</summary>
-function ExtractGuid(const ALine: string): string;
+/// <summary>Extracts "['{...}']" from a line; returns '' if absent.
+///  AMASKED is the same line from MaskCommentsAndStrings. The GUID IS a
+///  string literal, so the mask blanks it: reading it from the masked line
+///  found no GUID at all from 1.16.18 on - every interface was listed as
+///  "(no GUID)" and no duplicate could be reported any more. The text comes
+///  from ALINE; the mask only decides whether its '[' is code, so a GUID
+///  inside a comment still does not count (audit #37, L3d).
+///  Blanks inside the brackets are allowed: "[ '{...}' ]" compiles and IS
+///  the interface's GUID, but the exact text "['{" was looked for, so such
+///  an interface was listed as "(no GUID)".</summary>
+function ExtractGuid(const ALine, AMasked: string): string;
 var
-  P1, P2: Integer;
+  P, Q, R: Integer;
 begin
   Result := '';
-  P1 := Pos('[''{', ALine);
-  if P1 = 0 then Exit;
-  P2 := PosEx('}'']', ALine, P1);
-  if P2 = 0 then Exit;
-  Result := Copy(ALine, P1 + 2, P2 - P1 - 1);  // {....}
+  // A '[' of the CODE: the mask keeps every position and blanks comments
+  // and strings, so a hit in AMASKED is the same column in ALINE.
+  P := Pos('[', AMasked);
+  while P > 0 do
+  begin
+    Q := P + 1;
+    while (Q <= Length(ALine)) and CharInSet(ALine[Q], [' ', #9]) do Inc(Q);
+    if Copy(ALine, Q, 2) = '''{' then
+    begin
+      R := PosEx('}''', ALine, Q + 2);
+      if R > 0 then
+      begin
+        var C := R + 2;
+        while (C <= Length(ALine)) and CharInSet(ALine[C], [' ', #9]) do Inc(C);
+        if (C <= Length(ALine)) and (ALine[C] = ']') then
+          Exit(Copy(ALine, Q + 1, R - Q));  // {....}
+      end;
+    end;
+    P := PosEx('[', AMasked, P + 1);
+  end;
 end;
 
 function IsInterfaceDeclLine(const ALine: string; out AName: string;
@@ -200,7 +224,8 @@ begin
     // MASKED, not just '//'-stripped (audit #37, L3d): an interface inside
     // { } or (* *) was reported, which also made the REAL one a duplicate
     // of itself. Masking keeps the line length, so every position below
-    // still refers to the real line.
+    // still refers to the real line - which is where the GUID is READ from,
+    // because the mask blanks string literals and the GUID is one.
     var Masked := MaskCommentsAndStrings(Lines);
     for I := 0 to High(Lines) do
     begin
@@ -209,7 +234,7 @@ begin
       if not IsInterfaceDeclLine(L, Name, IsDisp) then Continue;
 
       // GUID on the same line or within the next 3 lines.
-      Guid := ExtractGuid(L);
+      Guid := ExtractGuid(Lines[I], L);
       J := I;
       while (Guid = '') and (J < High(Lines)) and (J < I + 3) do
       begin
@@ -224,7 +249,7 @@ begin
         var NextName: string;
         var NextDisp: Boolean;
         if IsInterfaceDeclLine(NextLine, NextName, NextDisp) then Break;
-        Guid := ExtractGuid(NextLine);
+        Guid := ExtractGuid(Lines[J], NextLine);
       end;
 
       E := Default(TInterfaceGuidEntry);

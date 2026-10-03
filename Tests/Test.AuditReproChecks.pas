@@ -47,6 +47,12 @@ type
     [Test] procedure L3d_InterfaceGuid_CommentedOutDeclarations_AreIgnored;
     /// <summary>L3d: "type IFoo = interface" declares IFoo, not "type IFoo".</summary>
     [Test] procedure L3d_InterfaceGuid_OneLineTypeDeclaration_NameIsTheInterface;
+    /// <summary>L3d, the follow-up: the GUID is a STRING LITERAL, and the
+    ///  mask that hides commented-out declarations blanks string literals
+    ///  too. From 1.16.18 on no GUID was found at all - every interface was
+    ///  "(no GUID)", and duplicates, the reason the check exists, were never
+    ///  reported. A GUID inside a comment still does not count.</summary>
+    [Test] procedure L3d_InterfaceGuid_TheGuidIsReadThroughTheMask;
     /// <summary>L4f: the column sort must be a total order - the same cells
     ///  must come out in the same order whatever order they went in.</summary>
     [Test] procedure L4f_ListViewSort_OrderDoesNotDependOnInputOrder;
@@ -410,6 +416,10 @@ begin
   Assert.AreEqual('IMarker', E[0].InterfaceName, False);
   Assert.IsFalse(E[0].HasGuid, 'M24: IMarker has no GUID of its own but was given ' + E[0].Guid);
   Assert.IsFalse(E[1].IsDuplicate, 'M24: IOther is reported as a duplicate of IMarker');
+  // Both asserts above also hold when NO GUID is found at all - which is
+  // how 1.16.18 to 1.16.32 passed this test. IOther keeps its own.
+  Assert.IsTrue(E[1].HasGuid, 'M24: IOther''s own GUID is not found');
+  Assert.AreEqual('{11111111-2222-3333-4444-555555555555}', E[1].Guid, 'M24: IOther''s GUID');
 end;
 
 procedure TAuditReproChecksTests.M25_AlignBlocker_ImplementationWaitsForItsClassDeclaration;
@@ -515,6 +525,33 @@ begin
   Assert.AreEqual(1, Integer(Length(E)),
     'L3d: interfaces inside { } and (* *) are reported as declarations');
   Assert.IsFalse(E[0].IsDuplicate, 'L3d: the commented-out copies make IReal a duplicate');
+  // "not a duplicate" alone also holds when no GUID is found at all
+  Assert.IsTrue(E[0].HasGuid, 'L3d: IReal''s own GUID is not found');
+end;
+
+procedure TAuditReproChecksTests.L3d_InterfaceGuid_TheGuidIsReadThroughTheMask;
+var
+  F: string;
+  E: TArray<TInterfaceGuidEntry>;
+begin
+  F := WriteFile('UGuid.pas',
+    'unit UGuid;' + NL + 'interface' + NL + 'type' + NL +
+    '  IFirst = interface' + NL +
+    '    [''{11111111-2222-3333-4444-555555555555}'']' + NL +
+    '  end;' + NL +
+    '  ICopy = interface(IInterface) [''{11111111-2222-3333-4444-555555555555}'']' + NL +
+    '  end;' + NL +
+    '  ICommented = interface // [''{99999999-2222-3333-4444-555555555555}'']' + NL +
+    '  end;' + NL +
+    'implementation' + NL + 'end.' + NL);
+  E := TInterfaceGuidChecker.Scan([F]);
+  Assert.AreEqual(3, Integer(Length(E)), 'L3d: three declarations');
+  Assert.IsTrue(E[0].HasGuid, 'L3d: the GUID on the line below the declaration is not found');
+  Assert.AreEqual('{11111111-2222-3333-4444-555555555555}', E[0].Guid, 'L3d: IFirst''s GUID');
+  Assert.IsTrue(E[1].HasGuid, 'L3d: the GUID on the declaration line is not found');
+  Assert.IsTrue(E[0].IsDuplicate and E[1].IsDuplicate,
+    'L3d: two interfaces with one GUID - the case this check exists for - are not reported');
+  Assert.IsFalse(E[2].HasGuid, 'L3d: a GUID in a comment is taken: ' + E[2].Guid);
 end;
 
 procedure TAuditReproChecksTests.L3d_InterfaceGuid_OneLineTypeDeclaration_NameIsTheInterface;

@@ -1358,7 +1358,6 @@ end;
 
 procedure EditMethodsAtCursor;
 var
-  Ctx: TEditorContext;
   Inp: TSafeDeleteInput;
   Err: string;
   Job: TMethodEditJob;
@@ -1366,23 +1365,23 @@ var
   Prog: TCheckProgressWindow;
 begin
   if Editor = nil then Exit;
-  Ctx := Editor.GetCurrentContext;
-  if Ctx.FileName = '' then
-  begin
-    ShowThemedMessage('Edit methods: no file at the cursor.');
-    Exit;
-  end;
-  // What is SELECTED, read here because ToolsAPI is main-thread only - the
-  // worker gets two line numbers. Only a selection in the file the caret is
-  // in can mean anything for this class's member list.
+  // WHAT IS SELECTED, FIRST - before anything else touches the editor.
+  // GetCurrentContext walks the caret with IOTAEditPosition.MoveRelative to
+  // find the word under it, and that DESTROYS the selection block (its
+  // Save/Restore puts the position back, not the block). Reported by the
+  // user: "leider verschwindet nach dem Klicken des Menueintrags vor der
+  // Anzeige des Fensters die Markierung" - the marks were gone and the
+  // dialog ticked the caret's member again. Extract method, extract
+  // variable and the property converter all read the selection as their
+  // first statement, which is exactly why they never had this bug.
+  // Main thread only, so the worker gets two plain line numbers.
   var SelFrom := -1;
   var SelTo := -1;
+  var SelFile := '';
   begin
     var SF, SC, EL, EC: Integer;
-    var SelFile, SelText: string;
-    if Editor.GetSelection(SelFile, SF, SC, EL, EC, SelText) and
-       (SelFile <> '') and SameText(ExpandFileName(SelFile),
-         ExpandFileName(Ctx.FileName)) then
+    var SelText: string;
+    if Editor.GetSelection(SelFile, SF, SC, EL, EC, SelText) then
     begin
       SelFrom := Max(0, SF - 1);
       SelTo := Max(0, EL - 1);
@@ -1391,9 +1390,34 @@ begin
     end;
   end;
 
+  // The caret through the CHEAP getters, never GetCurrentContext: that one
+  // walks the edit position to read the word under the cursor and collapses
+  // the selection on the way (Expert.EditorHelper says so where
+  // GetActiveFileName is implemented). This command needs a file and a
+  // caret, nothing else - the member at the caret is resolved from the
+  // CONTENT by IdentifierAtPos, which steps back by itself when the caret
+  // sits just behind the name.
+  var CaretFile := Editor.GetActiveFileName;
+  if CaretFile = '' then
+  begin
+    ShowThemedMessage('Edit methods: no file at the cursor.');
+    Exit;
+  end;
+  var CaretLine := 1;
+  var CaretCol := 1;
+  Editor.GetCaretLineCol(CaretLine, CaretCol);
+  // Only a selection in the file the caret is in can mean anything for this
+  // class's member list.
+  if (SelFile = '') or not SameText(ExpandFileName(SelFile),
+       ExpandFileName(CaretFile)) then
+  begin
+    SelFrom := -1;
+    SelTo := -1;
+  end;
+
   Editor.SaveAllFiles;   // the scan reads the other units from disk
-  if not GatherScanInput(Ctx.FileName, Max(0, Ctx.Line - 1),
-    Max(0, Ctx.Column - 1), Inp, Err) then
+  if not GatherScanInput(CaretFile, Max(0, CaretLine - 1),
+    Max(0, CaretCol - 1), Inp, Err) then
   begin
     ShowThemedMessage('Edit methods: ' + Err);
     Exit;
@@ -1402,7 +1426,7 @@ begin
   Job := TMethodEditJob.Create;
   JobRef := Job;
   Prog := CreateCheckProgress('Edit methods', Application.MainForm,
-    'Reading ' + ExtractFileName(Ctx.FileName) + '...');
+    'Reading ' + ExtractFileName(CaretFile) + '...');
   try
     var ThreadRef: IInterface := JobRef;
     var StopHandle := Job.Stop.Handle;

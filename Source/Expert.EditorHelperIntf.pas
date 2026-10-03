@@ -197,6 +197,14 @@ type
     ///  Used by Extract Method, which needs the literal selected text
     ///  to extract; other wizards work off the cursor position alone
     ///  (see GetCurrentContext).</summary>
+    ///
+    ///  CALL THIS BEFORE GetCurrentContext. The IDE implementation of
+    ///  GetCurrentContext walks the caret (IOTAEditPosition.MoveRelative) to
+    ///  read the word under it, and that DESTROYS the selection block - its
+    ///  Save/Restore returns the position, not the block. A command that
+    ///  asks for the context first and the selection afterwards therefore
+    ///  sees no selection, and the user watches their marks disappear when
+    ///  they click the menu entry (reported for "Edit methods", 1.18.6).
     function GetSelection(out AFilePath: string;
       out AStartLine, AStartCol, AEndLine, AEndCol: Integer;
       out AText: string): Boolean;

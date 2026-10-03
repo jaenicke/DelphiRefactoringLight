@@ -35,12 +35,24 @@ type
     ///  block had no terminator and ran straight into :mcp_failed.
     /// </summary>
     [Test] procedure InstallScripts_HaveNoLabelFallThrough;
+    /// <summary>
+    ///  GetCurrentContext walks the edit position to read the word under the
+    ///  cursor, and that COLLAPSES an active selection - the helper says so
+    ///  at GetActiveFileName and the context menu says it again. A routine
+    ///  that asks for the context FIRST and the selection afterwards
+    ///  therefore never sees one: "Edit methods" shipped that way in 1.18.5
+    ///  and the user watched their three marked methods disappear when they
+    ///  clicked the menu entry. So no routine may call GetCurrentContext
+    ///  above its own GetSelection.
+    /// </summary>
+    [Test] procedure NoRoutineReadsTheContextBeforeTheSelection;
   end;
 
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils, System.Types;
+  System.SysUtils, System.Classes, System.IOUtils, System.Types,
+  Expert.PascalScanner;
 
 const
   SourceDirs: array[0..5] of string = ('Source', 'Packages', 'Standalone', 'Tests', 'Mcp', 'dih');
@@ -210,6 +222,62 @@ begin
   Assert.IsTrue(Checked >= 10,
     Format('the check must really see label blocks (%d)', [Checked]));
   Assert.AreEqual('', Bad, Bad);
+end;
+
+procedure TRepoHygieneTests.NoRoutineReadsTheContextBeforeTheSelection;
+var
+  Offenders: TStringList;
+  Checked: Integer;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository root must be found');
+  var Dir := TPath.Combine(Root, 'Source');
+  Assert.IsTrue(TDirectory.Exists(Dir), 'Source must be there: ' + Dir);
+
+  Offenders := TStringList.Create;
+  try
+    Checked := 0;
+    for var F in TDirectory.GetFiles(Dir, '*.pas') do
+    begin
+      var Lines := TFile.ReadAllLines(F);
+      // A routine starts at column 1 (the style of every unit here); its
+      // own nested routines are indented, so they belong to it.
+      var Routine := '';
+      var SawContext := False;
+      for var I := 0 to High(Lines) do
+      begin
+        // CODE only: the comment above the fixed call names
+        // GetCurrentContext to say why it is not used, and a sweep that
+        // counts prose finds the fix instead of the defect.
+        var L := StripLineComment(Lines[I]);
+        var U := UpperCase(L);
+        if (L <> '') and (L[1] <> ' ') and
+           (U.StartsWith('PROCEDURE ') or U.StartsWith('FUNCTION ') or
+            U.StartsWith('CONSTRUCTOR ') or U.StartsWith('DESTRUCTOR ')) then
+        begin
+          Routine := Trim(Copy(L, Pos(' ', L) + 1, MaxInt));
+          SawContext := False;
+        end;
+        if Pos('GETCURRENTCONTEXT', U) > 0 then SawContext := True;
+        if Pos('.GETSELECTION(', U) > 0 then
+        begin
+          Inc(Checked);
+          if SawContext then
+            Offenders.Add(Format('%s: %s reads GetCurrentContext before ' +
+              'GetSelection (line %d)',
+              [ExtractFileName(F), Routine, I + 1]));
+        end;
+      end;
+    end;
+    // The sweep is only worth anything if it really looked at the call
+    // sites - a renamed method would otherwise make it pass vacuously.
+    Assert.IsTrue(Checked >= 4,
+      Format('the sweep must find the GetSelection call sites, found %d',
+        [Checked]));
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    Offenders.Free;
+  end;
 end;
 
 initialization

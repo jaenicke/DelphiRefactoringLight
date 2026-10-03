@@ -110,23 +110,34 @@ end;
 ///  found no GUID at all from 1.16.18 on - every interface was listed as
 ///  "(no GUID)" and no duplicate could be reported any more. The text comes
 ///  from ALINE; the mask only decides whether its '[' is code, so a GUID
-///  inside a comment still does not count (audit #37, L3d).</summary>
+///  inside a comment still does not count (audit #37, L3d).
+///  Blanks inside the brackets are allowed: "[ '{...}' ]" compiles and IS
+///  the interface's GUID, but the exact text "['{" was looked for, so such
+///  an interface was listed as "(no GUID)".</summary>
 function ExtractGuid(const ALine, AMasked: string): string;
 var
-  P1, P2: Integer;
+  P, Q, R: Integer;
 begin
   Result := '';
-  P1 := Pos('[''{', ALine);
-  while P1 > 0 do
+  // A '[' of the CODE: the mask keeps every position and blanks comments
+  // and strings, so a hit in AMASKED is the same column in ALINE.
+  P := Pos('[', AMasked);
+  while P > 0 do
   begin
-    // masking keeps every position, so P1 is the same column in both
-    if (P1 <= Length(AMasked)) and (AMasked[P1] = '[') then
+    Q := P + 1;
+    while (Q <= Length(ALine)) and CharInSet(ALine[Q], [' ', #9]) do Inc(Q);
+    if Copy(ALine, Q, 2) = '''{' then
     begin
-      P2 := PosEx('}'']', ALine, P1);
-      if P2 = 0 then Exit;
-      Exit(Copy(ALine, P1 + 2, P2 - P1 - 1));  // {....}
+      R := PosEx('}''', ALine, Q + 2);
+      if R > 0 then
+      begin
+        var C := R + 2;
+        while (C <= Length(ALine)) and CharInSet(ALine[C], [' ', #9]) do Inc(C);
+        if (C <= Length(ALine)) and (ALine[C] = ']') then
+          Exit(Copy(ALine, Q + 1, R - Q));  // {....}
+      end;
     end;
-    P1 := PosEx('[''{', ALine, P1 + 1);
+    P := PosEx('[', AMasked, P + 1);
   end;
 end;
 

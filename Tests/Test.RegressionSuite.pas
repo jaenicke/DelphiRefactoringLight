@@ -259,6 +259,12 @@ type
   public
     [Test] procedure RealDeclarations_AreRecognised;
     [Test] procedure AssignmentsAndAliases_AreNot;
+    /// <summary>Found the same way (2026-10-03): "[ '{...}']" - a blank
+    ///  after the bracket - compiles, and the compiler takes it as the
+    ///  interface's GUID (assigning the interface to a TGUID works, E2232
+    ///  otherwise). The scan looked for the exact text "['{" and listed
+    ///  the interface as "(no GUID)".</summary>
+    [Test] procedure BlanksInsideTheGuidBrackets_AreStillAGuid;
   end;
 
   /// <summary>Found on the user's real project (2026-09-30): the signature
@@ -1827,6 +1833,43 @@ begin
   Assert.IsFalse(IsInterfaceDeclLine('  TFoo = InterfaceHelper;', Name, Disp));
   // ... and the keyword still wins when it really is one
   Assert.IsTrue(IsInterfaceDeclLine('  IFoo=interface', Name, Disp), 'no spaces');
+end;
+
+procedure TInterfaceDeclLineTests.BlanksInsideTheGuidBrackets_AreStillAGuid;
+var
+  F: string;
+  E: TArray<TInterfaceGuidEntry>;
+begin
+  F := TPath.Combine(TPath.GetTempPath, 'RLGuidBlanks_' + TGUID.NewGuid.ToString + '.pas');
+  TFile.WriteAllText(F,
+    'unit UBlanks;' + NL + 'interface' + NL + 'type' + NL +
+    '  ILeft = interface' + NL +
+    '    [ ''{11111111-2222-3333-4444-000000000001}'']' + NL +
+    '  end;' + NL +
+    '  IBoth = interface' + NL +
+    '    [' + #9 + '''{11111111-2222-3333-4444-000000000002}'' ]' + NL +
+    '  end;' + NL +
+    '  IInline = interface(IInterface) [ ''{11111111-2222-3333-4444-000000000001}'' ]' + NL +
+    '  end;' + NL +
+    '  INotAGuid = interface' + NL +
+    '    procedure Foo(const A: array of string); // [ ''{11111111-2222-3333-4444-000000000003}'' ]' + NL +
+    '  end;' + NL +
+    'implementation' + NL + 'end.' + NL, TEncoding.UTF8);
+  try
+    E := TInterfaceGuidChecker.Scan([F]);
+  finally
+    TFile.Delete(F);
+  end;
+  Assert.AreEqual(4, Integer(Length(E)), 'four declarations');
+  Assert.AreEqual('{11111111-2222-3333-4444-000000000001}', E[0].Guid,
+    'a blank after the bracket');
+  Assert.AreEqual('{11111111-2222-3333-4444-000000000002}', E[1].Guid,
+    'a tab after the bracket, a blank before the closing one');
+  Assert.AreEqual('{11111111-2222-3333-4444-000000000001}', E[2].Guid,
+    'blanks on the declaration line');
+  Assert.IsTrue(E[0].IsDuplicate and E[2].IsDuplicate,
+    'the two with one GUID are duplicates whatever the blanks');
+  Assert.IsFalse(E[3].HasGuid, 'a GUID in a comment is still none: ' + E[3].Guid);
 end;
 
 { TSignatureQualifierTests }

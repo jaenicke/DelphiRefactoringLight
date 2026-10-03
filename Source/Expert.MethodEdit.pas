@@ -765,7 +765,13 @@ begin
     Plan.Error := 'the target class body could not be delimited';
     Exit(Plan);
   end;
-  Tgt := InsertLinesAt(Tgt, ImplIns, [''] + BodyBlock);
+  // One blank line separates the new body from the one above - but only
+  // when there is not already one there, or every move leaves a double
+  // blank behind (seen in the first live apply).
+  if (ImplIns > 0) and (ImplIns - 1 <= High(Tgt)) and (Trim(Tgt[ImplIns - 1]) = '') then
+    Tgt := InsertLinesAt(Tgt, ImplIns, BodyBlock)
+  else
+    Tgt := InsertLinesAt(Tgt, ImplIns, [''] + BodyBlock);
   DeclText := SplitContentLines(Text);
   while (Length(DeclText) > 0) and (DeclText[High(DeclText)] = '') do
     SetLength(DeclText, Length(DeclText) - 1);

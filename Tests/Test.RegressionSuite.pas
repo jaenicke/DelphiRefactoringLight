@@ -3817,6 +3817,10 @@ begin
     'the body came along verbatim');
   Assert.IsTrue(Pos('TNew.FormatRow', Tgt) > Pos('implementation', Tgt),
     'and sits in the implementation section');
+  // One blank line separates it, not two - the first live apply left a
+  // double blank behind every moved body.
+  Assert.IsFalse(ContainsText(Tgt, NL + NL + NL),
+    'no double blank line where the body landed');
 
   // And it SAYS what it did not do.
   Own := '';

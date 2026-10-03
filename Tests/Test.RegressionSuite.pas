@@ -547,6 +547,11 @@ type
     ///  dialog has, it offers apply, and it needs no preview token because
     ///  every call re-runs its own analysis.</summary>
     [Test] procedure TheToolDeclaresWhatItTakes;
+    /// <summary>User, 2026-10-03: "Wenn ich drei Methoden markiere und den
+    ///  Dialog aufrufe, sind diese nicht markiert." A SELECTION names the
+    ///  members the dialog ticks - the declarations it covers, and the
+    ///  bodies, because either is what a user marks.</summary>
+    [Test] procedure ASelectionNamesEveryMemberItCovers;
     /// <summary>A preview must not report a line as changed that did not
     ///  change. Found live: the first edit_method call answered 45 changed
     ///  lines for a move that touches eight, with pairs like
@@ -4143,6 +4148,69 @@ begin
   for var I in Res.Issues do
     if ContainsText(I.Text, 'Change signature') then Said := True;
   Assert.IsTrue(Said, 'the call sites are named as the user''s job');
+end;
+
+procedure TMethodEditTests.ASelectionNamesEveryMemberItCovers;
+var
+  L: TArray<string>;
+begin
+  L := SourceUnit;
+
+  // Three DECLARATIONS marked (lines 10..12) - the reported case.
+  Assert.AreEqual('Create,FormatRow,Paint',
+    string.Join(',', MembersInLineRange(L, ClassMembersOf(L, 'TOld'), 'TOld', 10, 12)),
+    'three marked declarations are three members, in declaration order');
+
+  // The two ends may arrive in either order (a selection dragged upwards).
+  Assert.AreEqual('Create,FormatRow,Paint',
+    string.Join(',', MembersInLineRange(L, ClassMembersOf(L, 'TOld'), 'TOld', 12, 10)),
+    'the ends may arrive the other way round');
+
+  // BODIES marked instead (Recalc 22..24, FormatRow 26..30): the same
+  // question, so the same answer - and FormatRow is named ONCE although the
+  // range covers five of its lines.
+  Assert.AreEqual('Recalc,FormatRow',
+    string.Join(',', MembersInLineRange(L, ClassMembersOf(L, 'TOld'), 'TOld', 22, 30)),
+    'marked implementations name their members, each one once');
+
+  // One line inside one body is that member, nothing else.
+  Assert.AreEqual('FormatRow',
+    string.Join(',', MembersInLineRange(L, ClassMembersOf(L, 'TOld'), 'TOld', 28, 28)),
+    'a caret-sized range inside a body');
+
+  // A range that covers no member at all answers nothing - the wizard then
+  // falls back to the caret instead of opening an empty dialog.
+  Assert.AreEqual('',
+    string.Join(',', MembersInLineRange(L, ClassMembersOf(L, 'TOld'), 'TOld', 2, 4)),
+    'interface / type lines name no member');
+
+  // A SIBLING CLASS's body in the same unit must not count, however much
+  // its member is called like ours - that is what the owner-type test of the
+  // implementation header is for.
+  var S: TArray<string> := [
+    'unit Two;',                        // 0
+    'interface',
+    'type',
+    '  TOne = class',
+    '    procedure Run;',               // 4
+    '  end;',
+    '  TTwo = class',
+    '    procedure Run;',               // 7
+    '  end;',
+    'implementation',
+    'procedure TOne.Run;',              // 10
+    'begin',
+    'end;',
+    'procedure TTwo.Run;',              // 13
+    'begin',
+    'end;',
+    'end.'];
+  Assert.AreEqual('Run',
+    string.Join(',', MembersInLineRange(S, ClassMembersOf(S, 'TOne'), 'TOne', 10, 12)),
+    'TOne.Run''s own body');
+  Assert.AreEqual('',
+    string.Join(',', MembersInLineRange(S, ClassMembersOf(S, 'TOne'), 'TOne', 13, 15)),
+    'the same-named member of the SIBLING class is not ours');
 end;
 
 procedure TMethodEditTests.TheToolDeclaresWhatItTakes;

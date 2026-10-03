@@ -56,7 +56,12 @@ type
     SourceFile: string;
     SourceContent: string;   // the state everything below was derived from
     OwnerType: string;
-    CaretMember: string;     // preselected in the dialog, '' when none
+    CaretMember: string;     // the member at the caret, '' when none
+    /// <summary>What the dialog ticks when it opens: the members the
+    ///  SELECTION covers, or the caret's member when nothing is selected.
+    ///  A selection of three methods must arrive as three ticks - that is
+    ///  what the user marked.</summary>
+    Preselected: TArray<string>;
     Members: TArray<TClassMemberInfo>;
     UnitFiles: TArray<string>;   // candidate target units, source unit first
     Calls: TArray<TMethodEditCall>;
@@ -79,9 +84,13 @@ type
 
 /// <summary>Worker thread: the class at the caret, its members, the target
 ///  candidates and every text occurrence of the members in the project
-///  scope. AStop (an event handle) cancels.</summary>
+///  scope. AStop (an event handle) cancels.
+///  ASelFrom / ASelTo (0-based, inclusive) are the lines the editor
+///  SELECTION covers; -1 means nothing is selected and the caret
+///  decides.</summary>
 function AnalyzeMethodEdit(const AIn: TSafeDeleteInput; AStop: THandle;
-  const AProgress: TProc<Integer, Integer, string>): TMethodEditAnalysis;
+  const AProgress: TProc<Integer, Integer, string>;
+  ASelFrom: Integer = -1; ASelTo: Integer = -1): TMethodEditAnalysis;
 
 /// <summary>Main thread: re-reads both units, refuses when the source
 ///  changed since the analysis, re-plans on the fresh text and writes.</summary>
@@ -330,7 +339,8 @@ begin
 end;
 
 function AnalyzeMethodEdit(const AIn: TSafeDeleteInput; AStop: THandle;
-  const AProgress: TProc<Integer, Integer, string>): TMethodEditAnalysis;
+  const AProgress: TProc<Integer, Integer, string>;
+  ASelFrom: Integer = -1; ASelTo: Integer = -1): TMethodEditAnalysis;
 var
   Res: TMethodEditAnalysis;
   Src: TEditContentSource;
@@ -404,6 +414,17 @@ begin
       end;
     end;
   end;
+
+  // A SELECTION wins over the caret: marking three methods and opening the
+  // dialog must tick those three (reported by the user - only the caret's
+  // member was ticked). The caret is the fallback for "nothing selected",
+  // and it stays the answer when the selection covers no member of this
+  // class at all, so a stray selection cannot leave the dialog empty.
+  if ASelFrom >= 0 then
+    Res.Preselected := MembersInLineRange(Lines, Res.Members, Res.OwnerType,
+      ASelFrom, ASelTo);
+  if (Length(Res.Preselected) = 0) and (Res.CaretMember <> '') then
+    Res.Preselected := [Res.CaretMember];
 
   // The target candidates: this unit first (a class in the same unit is the
   // most ordinary target of all), then the project scope.
@@ -957,7 +978,13 @@ begin
         It.SubItems.Add(M.Kind);
         if M.Movable then It.SubItems.Add('') else It.SubItems.Add(M.Why);
         It.Data := Pointer(NativeInt(I));
-        It.Checked := SameText(M.Name, FAn.CaretMember);
+        It.Checked := False;
+        for var P in FAn.Preselected do
+          if SameText(M.Name, P) then
+          begin
+            It.Checked := True;
+            Break;
+          end;
         if It.Checked then It.Selected := True;
       end;
     finally
@@ -1345,6 +1372,25 @@ begin
     ShowThemedMessage('Edit methods: no file at the cursor.');
     Exit;
   end;
+  // What is SELECTED, read here because ToolsAPI is main-thread only - the
+  // worker gets two line numbers. Only a selection in the file the caret is
+  // in can mean anything for this class's member list.
+  var SelFrom := -1;
+  var SelTo := -1;
+  begin
+    var SF, SC, EL, EC: Integer;
+    var SelFile, SelText: string;
+    if Editor.GetSelection(SelFile, SF, SC, EL, EC, SelText) and
+       (SelFile <> '') and SameText(ExpandFileName(SelFile),
+         ExpandFileName(Ctx.FileName)) then
+    begin
+      SelFrom := Max(0, SF - 1);
+      SelTo := Max(0, EL - 1);
+      // A selection that ends in column 1 does not reach that line's text.
+      if (EC <= 1) and (SelTo > SelFrom) then Dec(SelTo);
+    end;
+  end;
+
   Editor.SaveAllFiles;   // the scan reads the other units from disk
   if not GatherScanInput(Ctx.FileName, Max(0, Ctx.Line - 1),
     Max(0, Ctx.Column - 1), Inp, Err) then
@@ -1375,7 +1421,7 @@ begin
               finally
                 Job.Lock.Leave;
               end;
-            end);
+            end, SelFrom, SelTo);
         except
           on E: Exception do
           begin

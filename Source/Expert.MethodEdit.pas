@@ -110,6 +110,19 @@ function PlanMethodEdit(const ASourceFile, ASourceContent, AOwnerType: string;
 function ClassMembersOf(const ALines: TArray<string>;
   const AType: string): TArray<TClassMemberInfo>;
 
+/// <summary>Which of AMembers the line range AFrom..ATo (0-based, inclusive)
+///  covers - what a SELECTION in the editor means for the member list. Two
+///  shapes count, because the user may have marked either: a member whose
+///  DECLARATION stands in the range, and a member whose IMPLEMENTATION the
+///  range reaches (selecting three bodies names the same three members as
+///  selecting their three declarations). The answer keeps the declaration
+///  order of AMembers, and a member is named once however often the range
+///  touches it. The two ends may arrive in either order; a range that covers
+///  no member of AOwnerType answers nothing.</summary>
+function MembersInLineRange(const ALines: TArray<string>;
+  const AMembers: TArray<TClassMemberInfo>; const AOwnerType: string;
+  AFrom, ATo: Integer): TArray<string>;
+
 /// <summary>Moves AMembers of AOwnerType into ATargetClass of the target
 ///  unit: declarations into ASection, bodies to the end of the target's
 ///  implementation, their headers requalified. Both files come back
@@ -164,11 +177,70 @@ function ApplySignatureInClass(const ALines: TArray<string>;
 implementation
 
 uses
-  System.Classes, System.StrUtils,
+  System.Classes, System.StrUtils, System.Math,
   Expert.PascalScanner, Expert.UnitIndex, Expert.AutoImport,
   Expert.SafeDeletePlan, Expert.SignatureCheck, Expert.UsesEditor;
 
 { ---- Edit methods: a member moves into another class ---------------------- }
+
+function MembersInLineRange(const ALines: TArray<string>;
+  const AMembers: TArray<TClassMemberInfo>; const AOwnerType: string;
+  AFrom, ATo: Integer): TArray<string>;
+var
+  Impl: TArray<string>;   // member names whose BODY the range reaches
+begin
+  Result := nil;
+  if (Length(AMembers) = 0) or (Length(ALines) = 0) then Exit;
+  if AFrom > ATo then
+  begin
+    var Tmp := AFrom; AFrom := ATo; ATo := Tmp;
+  end;
+  if AFrom < 0 then AFrom := 0;
+  if ATo > High(ALines) then ATo := High(ALines);
+  if AFrom > ATo then Exit;
+
+  // The bodies the range touches, collected in ONE pass: a routine found at
+  // line L covers up to its own last line, so the walk continues behind it
+  // instead of asking the same routine again for every line it spans.
+  var L := AFrom;
+  while L <= ATo do
+  begin
+    var HF, HL: Integer;
+    if not FindEnclosingRoutineRangeIn(ALines, L, HF, HL) then
+    begin
+      Inc(L);
+      Continue;
+    end;
+    if SameText(OwnerTypeOfImplHeader(ALines[HF]), AOwnerType) then
+    begin
+      var Kind, Qual, Params, Ret: string;
+      var IsCM: Boolean;
+      var HdrEnd: Integer;
+      var Hdr := CollectHeader(ALines, HF, HdrEnd);
+      if (Hdr <> '') and IsHeaderLine(Trim(Hdr), Kind, IsCM) and
+         ParseHeader(Hdr, Kind, Qual, Params, Ret) then
+      begin
+        var D := LastDelimiter('.', Qual);
+        if D > 0 then Qual := Copy(Qual, D + 1, MaxInt);
+        if Qual <> '' then Impl := Impl + [Qual];
+      end;
+    end;
+    L := Max(HL, L) + 1;
+  end;
+
+  for var M in AMembers do
+  begin
+    var Hit := (M.DeclLine >= AFrom) and (M.DeclLine <= ATo);
+    if not Hit then
+      for var N in Impl do
+        if SameText(N, M.Name) then
+        begin
+          Hit := True;
+          Break;
+        end;
+    if Hit then Result := Result + [M.Name];
+  end;
+end;
 
 // The class body of AType: its header line and its own 'end'. Nested
 // class / record declarations are counted, so an inner body cannot end the

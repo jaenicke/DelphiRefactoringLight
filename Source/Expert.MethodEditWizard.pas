@@ -27,7 +27,8 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Types, Vcl.Forms,
-  Expert.MethodEdit, Expert.SignatureEdit, Expert.SafeDelete;
+  Expert.MethodEdit, Expert.SignatureEdit, Expert.SafeDelete,
+  Expert.FindReferencesDialog;
 
 type
   /// <summary>One occurrence of a member's name in the project scope. These
@@ -48,6 +49,15 @@ type
     Member: string;
     Total: Integer;
     Listed: Integer;
+  end;
+
+  /// <summary>An occurrence DelphiLSP confirmed, carrying the RAW line it
+  ///  stood on - that line is the anchor that finds it again after the edit
+  ///  shifted the file (RelocateFixLine compares the whole line).</summary>
+  TVerifiedRef = record
+    Item: TFindReferenceItem;
+    Anchor: string;
+    Member: string;
   end;
 
   TMethodEditAnalysis = record
@@ -86,11 +96,16 @@ type
 ///  candidates and every text occurrence of the members in the project
 ///  scope. AStop (an event handle) cancels.
 ///  ASelFrom / ASelTo (0-based, inclusive) are the lines the editor
-///  SELECTION covers; -1 means nothing is selected and the caret
-///  decides.</summary>
+///  SELECTION covers; -1 means nothing is selected and the caret decides.
+///  ACollectOccurrences = False skips the project-wide text scan: the
+///  DIALOG no longer shows an occurrence list (it was unverified, and what
+///  matters is the VERIFIED list after the write - user, 2026-10-04), so
+///  the menu path opens without scanning every unit. The MCP tool keeps
+///  it: its answer reports the counts.</summary>
 function AnalyzeMethodEdit(const AIn: TSafeDeleteInput; AStop: THandle;
   const AProgress: TProc<Integer, Integer, string>;
-  ASelFrom: Integer = -1; ASelTo: Integer = -1): TMethodEditAnalysis;
+  ASelFrom: Integer = -1; ASelTo: Integer = -1;
+  ACollectOccurrences: Boolean = True): TMethodEditAnalysis;
 
 /// <summary>Main thread: re-reads both units, refuses when the source
 ///  changed since the analysis, re-plans on the fresh text and writes.</summary>
@@ -100,6 +115,20 @@ function ApplyMethodEdit(const A: TMethodEditAnalysis;
 /// <summary>Main thread: the content of a unit - its editor buffer when it
 ///  is open, the file on disk otherwise.</summary>
 function ReadUnitForEdit(const AFile: string): string;
+
+/// <summary>The occurrences of AMEMBERS as DelphiLSP sees them, asked
+///  BEFORE anything is written - which is the only state in which the
+///  answer is worth having: after the edit those call sites are exactly the
+///  ones that no longer compile, and the server then answers nothing or
+///  points at the old symbol (user, 2026-10-04). Runs the SAME search the
+///  "Find references" window runs (SearchHeadless), behind a progress
+///  window with a working cancel, and leaves out what the edit itself
+///  produces - the member's own declaration and body. ANote says what
+///  happened; an empty result with a note means "not verified", never
+///  "nothing found".</summary>
+function VerifyMembersBeforeEdit(const AAn: TMethodEditAnalysis;
+  const AMembers: TArray<string>; out ANote: string;
+  out ARan: Boolean): TArray<TVerifiedRef>;
 
 /// <summary>Editor entry point (menu "Edit methods...").</summary>
 procedure EditMethodsAtCursor;
@@ -122,7 +151,7 @@ uses
   Expert.AutoImport, Expert.ImplementationFinder, Expert.ReferenceKind,
   Expert.SafeDeletePlan, Expert.DiagStore, Expert.DialogHelper, Expert.IdeThemes,
   Expert.WorkerLatch, Expert.ListViewSort, Expert.McpServer, Expert.McpTools,
-  Expert.UsesEditor, Expert.FindReferencesDialog, Delphi.FileEncoding;
+  Expert.UsesEditor, Expert.FindReferencesWizard, Delphi.FileEncoding;
 
 const
   MaxCalls = 800;
@@ -156,7 +185,9 @@ begin
   var Total := 0;
   for var O in Occurrences do Total := Total + O.Total;
   Result := Format('%s: %d member(s), %d of them can be moved on their own.',
-    [OwnerType, Length(Members), Movable]) + sLineBreak +
+    [OwnerType, Length(Members), Movable]);
+  if FilesScanned = 0 then Exit;   // the scan was skipped - say nothing about it
+  Result := Result + sLineBreak +
     // The number FOUND, not the number kept - the budget is per member, so
     // a common name (a constructor) is listed in part while the others are
     // complete, and saying only the kept count hides both facts.
@@ -288,7 +319,8 @@ end;
 
 function AnalyzeMethodEdit(const AIn: TSafeDeleteInput; AStop: THandle;
   const AProgress: TProc<Integer, Integer, string>;
-  ASelFrom: Integer = -1; ASelTo: Integer = -1): TMethodEditAnalysis;
+  ASelFrom: Integer = -1; ASelTo: Integer = -1;
+  ACollectOccurrences: Boolean = True): TMethodEditAnalysis;
 var
   Res: TMethodEditAnalysis;
   Src: TEditContentSource;
@@ -407,6 +439,11 @@ begin
   end;
 
   // ---- the occurrences --------------------------------------------------
+  if not ACollectOccurrences then
+  begin
+    Res.Ok := True;
+    Exit(Res);
+  end;
   Names := nil;
   Kinds := nil;
   for var M in Res.Members do
@@ -612,8 +649,6 @@ type
     FSigAdd, FSigRemove, FSigUp, FSigDown: TButton;
     FModBoxes: array[0..High(ModifierNames)] of TCheckBox;
     FWarn: TMemo;
-    FCalls: TListView;
-    FCallsLabel: TLabel;
     FBtnApply, FBtnClose: TButton;
     FRows: TArray<TSigParam>;
     FSigResult: string;
@@ -625,7 +660,6 @@ type
     procedure FillClasses;
     procedure FillGrid;
     procedure ReadGrid;
-    procedure FillCalls;
     function SelectedMembers: TArray<string>;
     procedure BuildRequest;
     procedure Replan;
@@ -639,15 +673,27 @@ type
     procedure DoSigAdd(Sender: TObject);
     procedure DoSigRemove(Sender: TObject);
     procedure DoSigMove(Sender: TObject);
-    procedure DoCallDblClick(Sender: TObject);
     procedure DoSetEditText(Sender: TObject; ACol, ARow: Integer; const Value: string);
     procedure DoApply(Sender: TObject);
+  private
+    /// <summary>Set while the verification runs. It pumps messages (it waits
+    ///  for DelphiLSP), so without this the user could re-tick members or
+    ///  click Apply again and the edit would be written for a plan nobody
+    ///  verified.</summary>
+    FBusy: Boolean;
   public
     Applied: Boolean;
     /// <summary>What was applied, and which members really moved - the
     ///  caller needs both to list the occurrences afterwards.</summary>
     AppliedRequest: TMethodEditRequest;
     AppliedMembers: TArray<string>;
+    /// <summary>What DelphiLSP confirmed BEFORE the write, the target's
+    ///  text as it was then (the follow-up window needs it to bring the
+    ///  line numbers forward), and whether the verification ran at all.</summary>
+    AppliedRefs: TArray<TVerifiedRef>;
+    AppliedPreTarget: string;
+    AppliedVerified: Boolean;
+    AppliedNote: string;
     constructor CreateDialog(AOwner: TComponent; const AAn: TMethodEditAnalysis);
   end;
 
@@ -699,11 +745,14 @@ begin
   FAn := AAn;
   Caption := 'Edit methods of ' + AAn.OwnerType;
   Width := 1080;
-  Height := 720;
+  // Lower than it was: the occurrence list left (it was unverified and the
+  // verified one comes AFTER the edit), so the window no longer needs that
+  // height - a half-empty warning box is not a reason to keep it.
+  Height := 560;
   Position := poScreenCenter;
   BorderStyle := bsSizeable;
   Constraints.MinWidth := 820;
-  Constraints.MinHeight := 560;
+  Constraints.MinHeight := 440;
 
   // ---- the member list, outside the tabs: it is what both tabs act on ----
   Bottom := TPanel.Create(Self);
@@ -882,34 +931,12 @@ begin
   // ---- what this will do, and what it will not ---------------------------
   FWarn := TMemo.Create(Self);
   FWarn.Parent := Right;
-  FWarn.Align := alTop;
-  FWarn.Top := 400;
-  FWarn.Height := 110;
+  // alClient since the occurrence list left: something has to fill the
+  // panel, or the right-hand side ends under the tabs.
+  FWarn.Align := alClient;
   FWarn.AlignWithMargins := True;
   FWarn.ReadOnly := True;
   FWarn.ScrollBars := ssVertical;
-
-  FCallsLabel := TLabel.Create(Self);
-  FCallsLabel.Parent := Right;
-  FCallsLabel.Align := alTop;
-  FCallsLabel.Top := 520;
-  FCallsLabel.AlignWithMargins := True;
-  FCallsLabel.Caption := 'Occurrences';
-
-  FCalls := TListView.Create(Self);
-  FCalls.Parent := Right;
-  FCalls.Align := alClient;
-  FCalls.AlignWithMargins := True;
-  FCalls.ViewStyle := vsReport;
-  FCalls.ReadOnly := True;
-  FCalls.RowSelect := True;
-  Col := FCalls.Columns.Add; Col.Caption := 'Member'; Col.Width := 130;
-  Col := FCalls.Columns.Add; Col.Caption := 'Kind'; Col.Width := 120;
-  Col := FCalls.Columns.Add; Col.Caption := 'File'; Col.Width := 180;
-  Col := FCalls.Columns.Add; Col.Caption := 'Line'; Col.Width := 60;
-  Col := FCalls.Columns.Add; Col.Caption := 'Code'; Col.Width := 420;
-  FCalls.OnDblClick := DoCallDblClick;
-  EnableListViewSorting(FCalls);
 
   FTimer := TTimer.Create(Self);
   FTimer.Enabled := False;
@@ -1042,37 +1069,6 @@ begin
   end;
 end;
 
-procedure TMethodEditDialog.FillCalls;
-var
-  Calls: TArray<TMethodEditCall>;
-begin
-  Calls := FAn.CallsOf(SelectedMembers);
-  FCalls.Items.BeginUpdate;
-  try
-    FCalls.Items.Clear;
-    for var I := 0 to High(Calls) do
-    begin
-      var C := Calls[I];
-      var It := FCalls.Items.Add;
-      It.Caption := C.Member;
-      It.SubItems.Add(C.Kind);
-      It.SubItems.Add(ExtractFileName(C.FilePath));
-      It.SubItems.Add(IntToStr(C.Line + 1));
-      It.SubItems.Add(C.Text);
-      It.Data := Pointer(NativeInt(I));
-    end;
-  finally
-    FCalls.Items.EndUpdate;
-  end;
-  var Total := 0;
-  for var N in SelectedMembers do Total := Total + FAn.OccurrenceOf(N).Total;
-  FCallsLabel.Caption := Format('%s of the selected member(s) - text matches, ' +
-    'NOT verified by DelphiLSP and NOT changed by Apply. Double-click to go ' +
-    'there.', [IfThen(Total > Length(Calls),
-    Format('%d of %d occurrence(s)', [Length(Calls), Total]),
-    Format('%d occurrence(s)', [Length(Calls)]))]);
-end;
-
 function TMethodEditDialog.SelectedMembers: TArray<string>;
 begin
   Result := nil;
@@ -1130,12 +1126,11 @@ begin
   for var N in FAn.Notes do Txt := Txt + N + sLineBreak;
   FWarn.Text := Txt + FRes.Summary;
   FBtnApply.Enabled := FRes.Ok;
-  FillCalls;
 end;
 
 procedure TMethodEditDialog.Changed(Sender: TObject);
 begin
-  if FFilling then Exit;
+  if FFilling or FBusy then Exit;
   FTimer.Enabled := False;
   FTimer.Enabled := True;
 end;
@@ -1249,16 +1244,6 @@ begin
   Changed(Sender);
 end;
 
-procedure TMethodEditDialog.DoCallDblClick(Sender: TObject);
-begin
-  if (FCalls.Selected = nil) or (Editor = nil) then Exit;
-  var Calls := FAn.CallsOf(SelectedMembers);
-  var I := NativeInt(FCalls.Selected.Data);
-  if (I < 0) or (I > High(Calls)) then Exit;
-  Editor.GotoLocation(Calls[I].FilePath, Calls[I].Line, Calls[I].Col,
-    Length(Calls[I].Member));
-end;
-
 procedure TMethodEditDialog.DoSetEditText(Sender: TObject; ACol, ARow: Integer;
   const Value: string);
 begin
@@ -1270,8 +1255,32 @@ procedure TMethodEditDialog.DoApply(Sender: TObject);
 var
   Err: string;
 begin
+  if FBusy then Exit;
   Replan;
   if not FRes.Ok then Exit;
+
+  // VERIFY FIRST, on the state that is still intact - the user's own design
+  // (2026-10-04): "Es reicht, die echte Verifizierung durchzufuehren, bevor
+  // das Apply die Aenderungen anwendet." Afterwards the call sites are the
+  // ones that no longer compile, and DelphiLSP's answer about them is worth
+  // nothing. A cancelled verification does NOT stop the edit - it was asked
+  // for; the window then says what it could and could not confirm.
+  var Refs: TArray<TVerifiedRef>;
+  var Note: string;
+  var Ran: Boolean;
+  FBusy := True;
+  FBtnApply.Enabled := False;
+  FMembers.Enabled := False;
+  FTabs.Enabled := False;
+  try
+    Refs := VerifyMembersBeforeEdit(FAn, FReq.Members, Note, Ran);
+  finally
+    FBusy := False;
+    FBtnApply.Enabled := True;
+    FMembers.Enabled := True;
+    FTabs.Enabled := True;
+  end;
+
   if not ApplyMethodEdit(FAn, FReq, Err) then
   begin
     ShowThemedMessage('Edit methods: ' + Err);
@@ -1281,7 +1290,125 @@ begin
   AppliedRequest := FReq;
   AppliedMembers := FRes.Moved;
   if Length(AppliedMembers) = 0 then AppliedMembers := FReq.Members;
+  AppliedRefs := Refs;
+  AppliedPreTarget := FTargetContent;
+  AppliedVerified := Ran;
+  AppliedNote := Note;
   ModalResult := mrOk;
+end;
+
+function VerifyMembersBeforeEdit(const AAn: TMethodEditAnalysis;
+  const AMembers: TArray<string>; out ANote: string;
+  out ARan: Boolean): TArray<TVerifiedRef>;
+var
+  Prog: TCheckProgressWindow;
+  Lines: TArray<string>;
+  Done, Skipped: Integer;
+  Cache: TDictionary<string, TArray<string>>;
+
+  // The file's lines, buffer first and read ONCE - the anchor of every row
+  // of that file comes from here.
+  function LinesOf(const AFile: string): TArray<string>;
+  begin
+    var Key := LowerCase(ExpandFileName(AFile));
+    if Cache.TryGetValue(Key, Result) then Exit;
+    Result := SplitContentLines(ReadUnitForEdit(AFile));
+    Cache.Add(Key, Result);
+  end;
+
+begin
+  Result := nil;
+  ANote := '';
+  // ARan separates "verified, and there is nothing" from "not verified" -
+  // the first is an answer, the second is not.
+  ARan := False;
+  if (Length(AMembers) = 0) or (Editor = nil) then Exit;
+  if FindReferencesInstance = nil then
+  begin
+    ANote := 'Find references is not available in this build, so nothing was ' +
+      'verified.';
+    Exit;
+  end;
+  Lines := SplitContentLines(AAn.SourceContent);
+  Done := 0;
+  Skipped := 0;
+
+  Cache := TDictionary<string, TArray<string>>.Create;
+  Prog := CreateCheckProgress('Edit methods - verifying with DelphiLSP',
+    Application.MainForm, 'Asking DelphiLSP about the selected member(s)...');
+  try
+    for var M in AMembers do
+    begin
+      if not Prog.Visible then
+      begin
+        ANote := 'The verification was cancelled, so the list below is not ' +
+          'complete.';
+        Break;
+      end;
+      // The member's own DECLARATION is where the search starts; the column
+      // must be the NAME's (a query at column 0 answers nothing - 1.10.1).
+      var DeclLine := -1;
+      for var Mi in AAn.Members do
+        if SameText(Mi.Name, M) then DeclLine := Mi.DeclLine;
+      if (DeclLine < 0) or (DeclLine > High(Lines)) then
+      begin
+        Inc(Skipped);
+        Continue;
+      end;
+      var Ctx := Default(TEditorContext);
+      Ctx.FileName := AAn.SourceFile;
+      Ctx.Line := DeclLine + 1;
+      Ctx.Column := NameColumnOnLine(Lines[DeclLine], M, 0) + 1;
+      Ctx.WordAtCursor := M;
+      Ctx.ProjectFile := Editor.GetCurrentProjectDproj;
+      Ctx.ProjectRoot := Editor.GetProjectRoot;
+      Ctx.IsValid := True;
+
+      var Items: TFindReferenceItems;
+      var Status: string;
+      var MemberName := M;
+      Prog.Step(Done, Length(AMembers), 'Verifying ' + M + '...');
+      var Ok := FindReferencesInstance.SearchHeadless(Ctx,
+        procedure(AText: string)
+        begin
+          Prog.Step(Done, Length(AMembers), MemberName + ': ' + AText);
+        end,
+        function: Boolean
+        begin
+          Application.ProcessMessages;
+          Result := not Prog.Visible;
+        end, Items, Status);
+      Inc(Done);
+      if not Ok then
+      begin
+        Inc(Skipped);
+        Continue;
+      end;
+      ARan := True;
+      for var It in Items do
+      begin
+        // What the edit itself produces is nothing to adjust: the member's
+        // own declaration and its body.
+        if (SameText(It.Kind, 'Declaration') or SameText(It.Kind, 'Implementation'))
+           and SameText(ExpandFileName(It.FilePath), ExpandFileName(AAn.SourceFile)) then
+          Continue;
+        var V := Default(TVerifiedRef);
+        V.Item := It;
+        V.Member := M;
+        if V.Item.Relation = '' then V.Item.Relation := M;
+        // The RAW line, so the row can be found again after the shift.
+        var FL := LinesOf(It.FilePath);
+        if (It.Line >= 0) and (It.Line <= High(FL)) then V.Anchor := FL[It.Line];
+        Result := Result + [V];
+      end;
+    end;
+  finally
+    Prog.Free;
+    Cache.Free;
+  end;
+  if Skipped > 0 then
+    ANote := Trim(ANote + Format(' %d of %d member(s) could not be verified.',
+      [Skipped, Length(AMembers)]));
 end;
 
 // After a successful edit: the occurrences of the members that moved, in a
@@ -1294,7 +1421,9 @@ end;
 // lines of both edited units, so the rows the dialog listed before it would
 // send the user to the wrong code.
 procedure ShowMovedMemberReferences(const AAn: TMethodEditAnalysis;
-  const AReq: TMethodEditRequest; const AMembers: TArray<string>);
+  const AReq: TMethodEditRequest; const AMembers: TArray<string>;
+  const AVerified: TArray<TVerifiedRef>; const APreTargetContent: string;
+  AWasVerified: Boolean; const ANote: string);
 var
   Files, Names: TArray<string>;
   Items: TFindReferenceItems;
@@ -1308,9 +1437,93 @@ var
     Files := Files + [AFile];
   end;
 
+  // Where the line of AREF is NOW: the edit shifted the two units it
+  // touched, so a verified row from before it has to be found again. The
+  // anchor is the RAW line, which RelocateFixLine compares whole.
+  function Relocated(const ARef: TVerifiedRef; out ALine: Integer): Boolean;
+  begin
+    ALine := ARef.Item.Line;
+    Result := True;
+    var Touched := SameText(ExpandFileName(ARef.Item.FilePath),
+        ExpandFileName(AAn.SourceFile)) or
+      ((AReq.TargetFile <> '') and SameText(ExpandFileName(ARef.Item.FilePath),
+        ExpandFileName(AReq.TargetFile)));
+    if not Touched or (ARef.Anchor = '') then Exit;
+    var Cur := ReadUnitForEdit(ARef.Item.FilePath);
+    if Cur = '' then Exit;
+    var NowLines := SplitContentLines(Cur);
+    var Before: TArray<string>;
+    if SameText(ExpandFileName(ARef.Item.FilePath), ExpandFileName(AAn.SourceFile)) then
+      Before := SplitContentLines(AAn.SourceContent)
+    else
+      Before := SplitContentLines(APreTargetContent);
+    var Delta := 0;
+    if Length(Before) > 0 then Delta := Length(NowLines) - Length(Before);
+    var L := RelocateFixLine(NowLines, ARef.Anchor, ARef.Item.Line, Delta);
+    if L < 0 then Exit(False);
+    ALine := L;
+  end;
+
 begin
   Names := AMembers;
   if (Length(Names) = 0) or (Editor = nil) then Exit;
+
+  // THE VERIFIED PATH: the rows DelphiLSP confirmed before the edit, with
+  // their positions brought forward. That is the whole point of asking
+  // beforehand - afterwards these call sites are the broken ones and the
+  // server cannot judge them.
+  if AWasVerified then
+  begin
+    var Stale := 0;
+    for var V in AVerified do
+    begin
+      var It := V.Item;
+      var L: Integer;
+      if Relocated(V, L) then
+        It.Line := L
+      else
+      begin
+        Inc(Stale);
+        It.Note := Trim(It.Note + ' (the line moved - check the position)');
+      end;
+      It.Preview := '';
+      var C := ReadUnitForEdit(It.FilePath);
+      if C <> '' then
+      begin
+        var CL := SplitContentLines(C);
+        if (It.Line >= 0) and (It.Line <= High(CL)) then It.Preview := Trim(CL[It.Line]);
+      end;
+      Items := Items + [It];
+    end;
+
+    var Cap := string.Join(', ', Names);
+    var Dlg2 := TFindReferencesDialog.CreateDialog(Application.MainForm, Cap,
+      'After the ' + IfThen(AReq.TargetClass <> '', 'move', 'edit'));
+    PrepareDialog(Dlg2, Application.MainForm);
+    Dlg2.SetItems(Items);
+    var S := '';
+    if Length(Items) = 0 then
+      S := Format('%s: verified with DelphiLSP before the edit - no other ' +
+        'occurrence refers to it, so there is nothing to adjust.', [Cap])
+    else
+      S := Format('%s: %d occurrence(s), VERIFIED with DelphiLSP before the ' +
+        'edit and brought forward to their current lines - double-click to go ' +
+        'there and adjust them. The edit changed none of them; nothing in ' +
+        'this window changes code.', [Cap, Length(Items)]);
+    if Stale > 0 then
+      S := S + Format(' %d row(s) could not be found again after the edit - ' +
+        'their position may be stale.', [Stale]);
+    if ANote <> '' then S := S + ' ' + ANote;
+    Dlg2.SetStatus(S);
+    Dlg2.OnGotoLocation :=
+      procedure(AItem: TFindReferenceItem)
+      begin
+        Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+      end;
+    Dlg2.SetClosable;
+    Dlg2.Show;
+    Exit;
+  end;
 
   // The files that HAD an occurrence, plus the two the move touched - a
   // member can be called in its new unit as well.
@@ -1363,16 +1576,19 @@ begin
     'After the ' + IfThen(AReq.TargetClass <> '', 'move', 'edit'));
   PrepareDialog(Dlg, Application.MainForm);
   Dlg.SetItems(Items);
+  var Why := ' (DelphiLSP could not verify them';
+  if ANote <> '' then Why := Why + ': ' + ANote;
+  Why := Why + ')';
   if Total = 0 then
     Dlg.SetStatus(Format('%s: %s done. No other occurrence of the name(s) ' +
-      'was found - there is nothing to adjust.', [Caption, What]))
+      'was found - there is nothing to adjust.%s', [Caption, What, Why]))
   else
     Dlg.SetStatus(Format('%s: %d occurrence(s) left to look at after the %s%s' +
       ' - double-click to go there. These are TEXT matches, not verified by ' +
       'DelphiLSP, and the %s changed none of them; nothing in this window ' +
       'changes code either.',
       [Caption, Total, What,
-       IfThen(Capped, Format(', %d listed', [Length(Items)]), ''), What]));
+       IfThen(Capped, Format(', %d listed', [Length(Items)]), ''), What]) + Why);
   Dlg.OnGotoLocation :=
     procedure(AItem: TFindReferenceItem)
     begin
@@ -1558,11 +1774,18 @@ begin
   var Applied: Boolean;
   var AppliedReq: TMethodEditRequest;
   var AppliedMembers: TArray<string>;
+  var AppliedRefs: TArray<TVerifiedRef>;
+  var AppliedPreTarget, AppliedNote: string;
+  var AppliedVerified: Boolean;
   try
     Dlg.ShowModal;
     Applied := Dlg.Applied;
     AppliedReq := Dlg.AppliedRequest;
     AppliedMembers := Dlg.AppliedMembers;
+    AppliedRefs := Dlg.AppliedRefs;
+    AppliedPreTarget := Dlg.AppliedPreTarget;
+    AppliedVerified := Dlg.AppliedVerified;
+    AppliedNote := Dlg.AppliedNote;
   finally
     Dlg.Free;
   end;
@@ -1570,7 +1793,8 @@ begin
   // that list is what still needs hand work. Opened AFTER the free, because
   // the window is non-modal and outlives this call.
   if Applied then
-    ShowMovedMemberReferences(Job.Res, AppliedReq, AppliedMembers);
+    ShowMovedMemberReferences(Job.Res, AppliedReq, AppliedMembers, AppliedRefs,
+      AppliedPreTarget, AppliedVerified, AppliedNote);
 end;
 
 // ---------------------------------------------------------------------------

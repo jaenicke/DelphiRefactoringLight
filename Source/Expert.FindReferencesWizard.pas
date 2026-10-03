@@ -23,6 +23,19 @@ type
     // Execute-Calls speichern den Vorgaengerwert auf dem Stack und
     // restaurieren ihn am Ende.
     FDialog: TFindReferencesDialog;
+    /// <summary>A run WITHOUT a window: "Edit methods" verifies the
+    ///  occurrences of the members it is about to move BEFORE it writes,
+    ///  because afterwards those call sites are exactly the ones that no
+    ///  longer compile and DelphiLSP cannot be trusted about them (user,
+    ///  2026-10-04). Saved and restored per run like FDialog, so a nested
+    ///  search cannot leave the outer one headless.</summary>
+    FHeadless: Boolean;
+    FOnStatus: TProc<string>;
+    FOnAbort: TFunc<Boolean>;
+    /// <summary>The result, kept whichever way the run was started - the
+    ///  window path ignores it, the headless one reads it.</summary>
+    FOutItems: TFindReferenceItems;
+    FOutStatus: string;
     FContext: TEditorContext;
     // candidates decided from the sources, without a DelphiLSP request
     FPreSkipped: Integer;
@@ -41,6 +54,14 @@ type
     FNoAnchor: Boolean;
     procedure Trace(const AText: string);
     procedure DoGotoLocation(AItem: TFindReferenceItem);
+    /// <summary>The three ways the search talks to its result: the window
+    ///  when there is one, the callback / the stored result otherwise.
+    ///  Deliberately NOT named like what they forward to - PR #23 was a
+    ///  "Status" that called itself and overflowed the stack on the first
+    ///  status line, which in a BPL kills the IDE.</summary>
+    procedure Status(const AText: string);
+    procedure Progress(ACurrent, ATotal: Integer);
+    procedure PublishItems(const AItems: TFindReferenceItems);
 
     function FindCandidatesByText(const AOldName: string; const AFiles: TArray<string>): TFindReferenceItems;
     function VerifyWithLsp(const ACandidates: TFindReferenceItems; const AOldName: string;
@@ -56,6 +77,15 @@ type
 
     procedure SearchAndShow;
   public
+    /// <summary>Runs the SAME search without a window and hands the result
+    ///  back. AOnAbort is polled where the window's close would be - the
+    ///  caller must be able to stop a scan that asks DelphiLSP once per
+    ///  candidate. False = the search could not run at all (AStatus says
+    ///  why).</summary>
+    function SearchHeadless(const ACtx: TEditorContext;
+      const AOnStatus: TProc<string>; const AOnAbort: TFunc<Boolean>;
+      out AItems: TFindReferenceItems; out AStatus: string): Boolean;
+
     {$IFNDEF STANDALONE_BUILD}
 
     // IOTAWizard / IOTAMenuWizard / IOTANotifier - IDE plugin only.
@@ -156,10 +186,18 @@ begin
   var PrevSecondPassNote := FSecondPassNote;
   var PrevLspErrors := FLspErrors;
   var PrevNoAnchor := FNoAnchor;
+  var PrevHeadless := FHeadless;
+  // EXPLICIT types: the inference of an inline var CALLS a parameterless
+  // function reference, so "var P := FOnAbort" made P a Boolean.
+  var PrevOnStatus: TProc<string> := FOnStatus;
+  var PrevOnAbort: TFunc<Boolean> := FOnAbort;
   FTrace := TStringList.Create;
   FTraceT0 := GetTickCount64;
   try
     FContext := Ctx;
+    FHeadless := False;
+    FOnStatus := nil;
+    FOnAbort := nil;
     FDialog := TFindReferencesDialog.CreateDialog(Application.MainForm, Ctx.WordAtCursor);
     FDialog.OnGotoLocation := DoGotoLocation;
     // No OnDialogClose: each dialog manages its own free via
@@ -195,6 +233,9 @@ begin
     FSecondPassNote := PrevSecondPassNote;
     FLspErrors := PrevLspErrors;
     FNoAnchor := PrevNoAnchor;
+    FHeadless := PrevHeadless;
+    FOnStatus := PrevOnStatus;
+    FOnAbort := PrevOnAbort;
   end;
 end;
 
@@ -204,9 +245,98 @@ begin
     FTrace.Add(Format('%7d ms  %s', [GetTickCount64 - FTraceT0, AText]));
 end;
 
+procedure TLspFindReferencesWizard.Status(const AText: string);
+begin
+  if FDialog <> nil then
+    FDialog.SetStatus(AText);
+  FOutStatus := AText;
+  if Assigned(FOnStatus) then FOnStatus(AText);
+end;
+
+procedure TLspFindReferencesWizard.Progress(ACurrent, ATotal: Integer);
+begin
+  if FDialog <> nil then FDialog.SetProgress(ACurrent, ATotal);
+end;
+
+procedure TLspFindReferencesWizard.PublishItems(const AItems: TFindReferenceItems);
+begin
+  if FDialog <> nil then FDialog.SetItems(AItems);
+  FOutItems := AItems;
+end;
+
 function TLspFindReferencesWizard.Aborted: Boolean;
 begin
-  Result := (FDialog = nil) or FDialog.CloseRequested or Application.Terminated;
+  // WITHOUT a window there is no window to close - the old test
+  // ("FDialog = nil" means gone) would make a headless run abort before its
+  // first candidate, silently and with an empty result.
+  if FHeadless then
+    Result := Application.Terminated or
+      (Assigned(FOnAbort) and FOnAbort())
+  else
+    Result := (FDialog = nil) or FDialog.CloseRequested or Application.Terminated;
+end;
+
+function TLspFindReferencesWizard.SearchHeadless(const ACtx: TEditorContext;
+  const AOnStatus: TProc<string>; const AOnAbort: TFunc<Boolean>;
+  out AItems: TFindReferenceItems; out AStatus: string): Boolean;
+begin
+  AItems := nil;
+  AStatus := '';
+  // The same save / restore Execute does, for the same reason (audit #40,
+  // M10): this can be called from a message pump of another search.
+  var PrevDialog := FDialog;
+  var PrevContext := FContext;
+  var PrevTrace := FTrace;
+  var PrevT0 := FTraceT0;
+  var PrevPreSkipped := FPreSkipped;
+  var PrevSecondPassNote := FSecondPassNote;
+  var PrevLspErrors := FLspErrors;
+  var PrevNoAnchor := FNoAnchor;
+  var PrevHeadless := FHeadless;
+  // EXPLICIT types: the inference of an inline var CALLS a parameterless
+  // function reference, so "var P := FOnAbort" made P a Boolean.
+  var PrevOnStatus: TProc<string> := FOnStatus;
+  var PrevOnAbort: TFunc<Boolean> := FOnAbort;
+  var PrevOutItems := FOutItems;
+  var PrevOutStatus := FOutStatus;
+  FTrace := TStringList.Create;
+  FTraceT0 := GetTickCount64;
+  try
+    FDialog := nil;
+    FHeadless := True;
+    FOnStatus := AOnStatus;
+    FOnAbort := AOnAbort;
+    FOutItems := nil;
+    FOutStatus := '';
+    FContext := ACtx;
+    Result := True;
+    try
+      SearchAndShow;
+    except
+      on E: Exception do
+      begin
+        FOutStatus := 'Error: ' + E.Message;
+        Result := False;
+      end;
+    end;
+    AItems := FOutItems;
+    AStatus := FOutStatus;
+  finally
+    FTrace.Free;
+    FTrace := PrevTrace;
+    FTraceT0 := PrevT0;
+    FDialog := PrevDialog;
+    FContext := PrevContext;
+    FPreSkipped := PrevPreSkipped;
+    FSecondPassNote := PrevSecondPassNote;
+    FLspErrors := PrevLspErrors;
+    FNoAnchor := PrevNoAnchor;
+    FHeadless := PrevHeadless;
+    FOnStatus := PrevOnStatus;
+    FOnAbort := PrevOnAbort;
+    FOutItems := PrevOutItems;
+    FOutStatus := PrevOutStatus;
+  end;
 end;
 
 procedure TLspFindReferencesWizard.DoGotoLocation(AItem: TFindReferenceItem);
@@ -237,7 +367,7 @@ begin
   DelphiLspJson := Editor.FindDelphiLspJson;
   if DelphiLspJson = '' then
   begin
-    FDialog.SetStatus(LspConfigMissingHint);
+    Status(LspConfigMissingHint);
     Exit;
   end;
 
@@ -246,15 +376,15 @@ begin
     RootPath := ExtractFilePath(FContext.FileName);
 
   // Save all editor changes
-  FDialog.SetStatus('Saving all files...');
+  Status('Saving all files...');
   Editor.SaveAllFiles;
 
   // Start LSP
   var WasRunning := TLspManager.Instance.IsAlive;
   if WasRunning then
-    FDialog.SetStatus('LSP already running. Opening file...')
+    Status('LSP already running. Opening file...')
   else
-    FDialog.SetStatus('Starting LSP server (one-time)...');
+    Status('Starting LSP server (one-time)...');
 
   Client := TLspManager.Instance.GetClient(
     RootPath, FContext.ProjectFile, DelphiLspJson);
@@ -270,12 +400,12 @@ begin
   // end" is the honest readiness signal (issue #13).
   if Client.BusyWith <> '' then
   begin
-    FDialog.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+    Status('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
     Trace('waiting for the server to go idle (' + Client.BusyWith + ')');
     Client.WaitServerIdle(180000,
       function: Boolean
       begin
-        FDialog.SetStatus('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
+        Status('DelphiLSP is busy (' + Client.BusyWith + ') - waiting for it...');
         Application.ProcessMessages;
         Result := not Aborted;
       end);
@@ -306,7 +436,7 @@ begin
         function: Boolean
         begin
           if not Aborted then
-            FDialog.SetStatus('Waiting for DelphiLSP to analyse ' +
+            Status('Waiting for DelphiLSP to analyse ' +
               ExtractFileName(FContext.FileName) + '...');
           Application.ProcessMessages;
           Result := not Aborted;
@@ -322,7 +452,7 @@ begin
   // diagnostics: the server can only answer it once it has parsed the unit.
   if Client.GetFileDiagnosticsVersion(FContext.FileName) = 0 then
   begin
-    FDialog.SetStatus('DelphiLSP has not analysed ' +
+    Status('DelphiLSP has not analysed ' +
       ExtractFileName(FContext.FileName) + ' yet - waiting for it...');
     if Client.WaitUnitParsed(FContext.FileName,
          LspReadinessBudgetMs(Length(ProjFiles)),
@@ -348,7 +478,7 @@ begin
     for var Retry := 1 to 30 do
     begin
       if Aborted then Exit;
-      FDialog.SetStatus(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
+      Status(Format('Waiting for LSP indexing... (%d/30)', [Retry]));
       Application.ProcessMessages;
       Trace(Format('cold start: readiness probe %d', [Retry]));
       try
@@ -370,14 +500,14 @@ begin
   if Client.SupportsReferences then
   begin
     Prefix := 'Fallback: ';
-    FDialog.SetStatus('Querying LSP server for references...');
+    Status('Querying LSP server for references...');
     try
       LspLocations := Client.FindReferences(FContext.FileName,
         LspLine, LspCol, True);
     except
       on E: Exception do
       begin
-        FDialog.SetStatus('LSP error on references: ' + E.Message
+        Status('LSP error on references: ' + E.Message
           + ' - switching to fallback...');
         SetLength(LspLocations, 0);
       end;
@@ -387,14 +517,14 @@ begin
     begin
       Items := ConvertLspLocations(LspLocations, FContext.WordAtCursor);
       AssignReferenceKinds(Items, FContext.WordAtCursor, '', -1, EditorOrDiskContent());
-      FDialog.SetItems(Items);
-      FDialog.SetStatus(Format('LSP: %d reference(s) found.', [Length(Items)]));
+      PublishItems(Items);
+      Status(Format('LSP: %d reference(s) found.', [Length(Items)]));
       Exit;
     end;
   end;
 
   // Strategy 2: text search + GotoDefinition verification
-  FDialog.SetStatus(Prefix + 'Text search in project...');
+  Status(Prefix + 'Text search in project...');
 
   // Project + the caret's unit + the extras from the settings (see
   // Expert.ScopeFiles).
@@ -407,8 +537,8 @@ begin
 
   if Length(TextCandidates) = 0 then
   begin
-    FDialog.SetItems(nil);
-    FDialog.SetStatus('No occurrences found in the project.');
+    PublishItems(nil);
+    Status('No occurrences found in the project.');
     Exit;
   end;
 
@@ -459,7 +589,7 @@ begin
     var Probe: TArray<TLspLocation> := nil;
     var UsedMain := False;
     repeat
-      FDialog.SetStatus(Format('Waiting for DelphiLSP to resolve the declaration ' +
+      Status(Format('Waiting for DelphiLSP to resolve the declaration ' +
         '(up to %d s - close this window to stop)...', [Budget div 1000]));
       Application.ProcessMessages;
       try Probe := VClient.GotoDefinition(FContext.FileName, LspLine, LspCol);
@@ -503,7 +633,7 @@ begin
     IncCtx.RegisterFiles(ProjFiles);
 
     // Resolve the declaration (for verification comparison)
-    FDialog.SetStatus('Finding declaration...');
+    Status('Finding declaration...');
     var DefLocs := IncCtx.Definition(FContext.FileName, LspLine, LspCol);
     // a caret ON a declaration: an answer in another file is a same-named
     // symbol elsewhere (see DeclarationAnswerIsForeign)
@@ -541,7 +671,7 @@ begin
       begin
         // one more try - a session that is still analysing often answers a
         // few seconds later, and this single answer decides the whole result
-        FDialog.SetStatus('Waiting for DelphiLSP to resolve the declaration...');
+        Status('Waiting for DelphiLSP to resolve the declaration...');
         var Dl := GetTickCount64 + 20000;
         while (Length(DefLocs) = 0) and (GetTickCount64 < Dl) and not Aborted do
         begin
@@ -622,7 +752,7 @@ begin
 
         // Verify each candidate via GotoDefinition
         if FNoAnchor then
-          FDialog.SetStatus('DelphiLSP did not resolve the declaration - NOTHING ' +
+          Status('DelphiLSP did not resolve the declaration - NOTHING ' +
             'is filtered out, every occurrence is listed and marked...');
         Items := VerifyWithLsp(TextCandidates, FContext.WordAtCursor, Targets, Linked,
           VClient, IncCtx, Graph, Owner);
@@ -664,7 +794,7 @@ begin
   var Unverified := 0;
   for var It in Items do
     if It.Note <> '' then Inc(Unverified);
-  FDialog.SetItems(Items);
+  PublishItems(Items);
   Trace(Format('done: %d row(s), %d unverified, %d decided from the sources, ' +
     '%d aborted request(s), diagnostics pushed so far: %d', [Length(Items), Unverified,
     FPreSkipped, FLspErrors, Client.GetDiagnosticsCount]));
@@ -684,11 +814,11 @@ begin
     FromSource := FromSource + Format(' %d request(s) were aborted by DelphiLSP ' +
       '(it was busy - those occurrences are marked, not dropped).', [FLspErrors]);
   if Unverified > 0 then
-    FDialog.SetStatus(Prefix + Format('%d of %d candidate(s) verified, %d shown UNVERIFIED ' +
+    Status(Prefix + Format('%d of %d candidate(s) verified, %d shown UNVERIFIED ' +
       '(see the Note column).%s%s', [Length(Items) - Unverified, Length(TextCandidates),
       Unverified, FromSource, NotAnalysed]))
   else
-    FDialog.SetStatus(Prefix + Format('%d of %d candidate(s) verified.%s',
+    Status(Prefix + Format('%d of %d candidate(s) verified.%s',
       [Length(Items), Length(TextCandidates), FromSource]));
 end;
 
@@ -749,7 +879,7 @@ begin
   UpperOldName := UpperCase(AOldName);
   CandidateList := TList<TFindReferenceItem>.Create;
   try
-    FDialog.SetProgress(0, System.Length(AFiles));
+    Progress(0, System.Length(AFiles));
     // the bar alone says "something happens"; the text says how far, how
     // many hits so far, and which unit - a big project has thousands of
     // files (user request, 2026-09-21). Throttled: repainting the label for
@@ -760,11 +890,11 @@ begin
       F := AFiles[FileIdx];
       if (FileIdx mod 5 = 0) then
       begin
-        FDialog.SetProgress(FileIdx + 1, System.Length(AFiles));
+        Progress(FileIdx + 1, System.Length(AFiles));
         if GetTickCount64 - LastText >= 150 then
         begin
           LastText := GetTickCount64;
-          FDialog.SetStatus(Format('Text search: %d of %d file(s), %d candidate(s) so far - %s',
+          Status(Format('Text search: %d of %d file(s), %d candidate(s) so far - %s',
             [FileIdx + 1, System.Length(AFiles), CandidateList.Count, ExtractFileName(F)]));
         end;
         Application.ProcessMessages;
@@ -810,7 +940,7 @@ begin
         end;
       end;
     end;
-    FDialog.SetProgress(System.Length(AFiles), System.Length(AFiles));
+    Progress(System.Length(AFiles), System.Length(AFiles));
     Result := CandidateList.ToArray;
   finally
     CandidateList.Free;
@@ -866,7 +996,7 @@ begin
   Contents := TDictionary<string, string>.Create;
   Reader := EditorOrDiskReader();
   try
-    FDialog.SetProgress(0, System.Length(ACandidates));
+    Progress(0, System.Length(ACandidates));
 
     for I := 0 to High(ACandidates) do
     begin
@@ -874,10 +1004,10 @@ begin
       if Aborted then Break;
       var Where := Format('%s:%d:%d', [ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
       var How := '';
-      FDialog.SetProgress(I + 1, System.Length(ACandidates));
+      Progress(I + 1, System.Length(ACandidates));
       if (I mod 3 = 0) then
       begin
-        FDialog.SetStatus(Format('Verifying %d/%d...',
+        Status(Format('Verifying %d/%d...',
           [I + 1, System.Length(ACandidates)]));
         Application.ProcessMessages;
       end;
@@ -940,7 +1070,7 @@ begin
                 function: Boolean
                 begin
                   if not Aborted then
-                    FDialog.SetStatus('Waiting for DelphiLSP to analyse ' + Name + '...');
+                    Status('Waiting for DelphiLSP to analyse ' + Name + '...');
                   Application.ProcessMessages;
                   Result := not Aborted;   // a closed window waits for nothing
                 end);
@@ -971,7 +1101,7 @@ begin
             ErrText := E.Message;
             Inc(FLspErrors);
             if (Attempt = 3) or Aborted then raise;
-            FDialog.SetStatus(Format('DelphiLSP aborted a request (%d/3), retrying...',
+            Status(Format('DelphiLSP aborted a request (%d/3), retrying...',
               [Attempt]));
             var Until_ := GetTickCount64 + 700;
             while (GetTickCount64 < Until_) and not Aborted do
@@ -1251,7 +1381,7 @@ begin
         Trace(Format('derived anchor: %d row(s) verified against it, %d dropped ' +
           '(the answer names another symbol), %d kept and marked (degraded ' +
           'session)', [Cleared, DerivedDropped, Elsewhere2]));
-        FDialog.SetStatus(Format('DelphiLSP did not answer the declaration query - ' +
+        Status(Format('DelphiLSP did not answer the declaration query - ' +
           'it was derived from %d agreeing answers (%s:%d): %d verified, %d ' +
           'dropped, %d lead elsewhere.', [Agree, ExtractFileName(DerFile),
           DerLine + 1, Cleared, DerivedDropped, Elsewhere2]));
@@ -1266,7 +1396,7 @@ begin
         for var R := 0 to Retry.Count - 1 do
         begin
           if Aborted then Break;
-          FDialog.SetStatus(Format('Second attempt for unverified occurrences (%d/%d)...',
+          Status(Format('Second attempt for unverified occurrences (%d/%d)...',
             [R + 1, Retry.Count]));
           Application.ProcessMessages;
           var VIdx := Retry[R].Key;
@@ -1355,7 +1485,7 @@ begin
       end;
     end;
 
-    FDialog.SetProgress(System.Length(ACandidates), System.Length(ACandidates));
+    Progress(System.Length(ACandidates), System.Length(ACandidates));
     Result := Verified.ToArray;
   finally
     Contents.Free;

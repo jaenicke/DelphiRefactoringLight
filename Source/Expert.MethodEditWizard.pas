@@ -144,11 +144,16 @@ begin
   Movable := 0;
   for var M in Members do
     if M.Movable then Inc(Movable);
+  var Total := 0;
+  for var O in Occurrences do Total := Total + O.Total;
   Result := Format('%s: %d member(s), %d of them can be moved on their own.',
     [OwnerType, Length(Members), Movable]) + sLineBreak +
+    // The number FOUND, not the number kept - the budget is per member, so
+    // a common name (a constructor) is listed in part while the others are
+    // complete, and saying only the kept count hides both facts.
     Format('%d occurrence(s) of their names in %d file(s)%s - text matches, ' +
-    'not verified by DelphiLSP.', [Length(Calls), FilesScanned,
-    IfThen(Truncated, ' (list truncated)', '')]);
+    'not verified by DelphiLSP.', [Total, FilesScanned,
+    IfThen(Length(Calls) < Total, Format(', %d listed', [Length(Calls)]), '')]);
   for var N in Notes do
     Result := Result + sLineBreak + N;
 end;

@@ -4194,7 +4194,21 @@ begin
     'the move is one deletion and one insertion, not the whole span');
   Assert.AreEqual(2, Integer(Length(Changes)));
 
+  // With BLANK lines around the moved block the LCS has a choice, and it
+  // used to pair a deleted blank with an inserted one - a "change" from
+  // nothing to nothing, which the live preview really showed.
+  Old := 'unit U;' + NL + 'A' + NL + '' + NL + 'MOVED' + NL + '' + NL +
+    'B' + NL + 'end.';
+  New := 'unit U;' + NL + 'A' + NL + '' + NL + 'B' + NL + '' + NL +
+    'MOVED' + NL + 'end.';
+  Changes := DiffToChanges('U.pas', Old, New, 200, Total);
+  for var C in Changes do
+    Assert.AreNotEqual(C.Before, C.After, 'nothing to nothing is no change');
+  Assert.AreEqual(2, Total, 'still one deletion and one insertion');
+
   // ... and a real edit is still reported, with its line.
+  Old := 'unit U;' + NL + 'A' + NL + 'MOVED' + NL + 'B' + NL + 'C' + NL +
+    'D' + NL + 'end.';
   New := StringReplace(Old, 'C', 'C2', [rfReplaceAll]);
   Changes := DiffToChanges('U.pas', Old, New, 200, Total);
   Assert.AreEqual(1, Total, 'one line really changed');

@@ -226,6 +226,12 @@ var
 
   procedure Add(ALine: Integer; const ABefore, AAfter: string);
   begin
+    // A BLANK line on both sides cannot be told apart from "nothing
+    // changed" in this shape - '' means "no line here" for a deletion and
+    // for an insertion alike - so it is not reported, and not counted
+    // either. The live move preview showed three such rows, and they read
+    // as a defect.
+    if (ABefore = '') and (AAfter = '') then Exit;
     Inc(ATotal);
     if (AMax > 0) and (Length(Result) >= AMax) then Exit;
     var C: TPreviewChange;
@@ -247,7 +253,10 @@ var
     K := 0;
     while (K <= High(Dels)) and (K <= High(Inss)) do
     begin
-      Add(Dels[K] + 1, O[Dels[K]], N[Inss[K]]);
+      // ... unless the two sides are the same text, which happens when the
+      // LCS had a choice (blank lines) - a pair of identical lines is no
+      // change, here as little as in the fallback below.
+      if O[Dels[K]] <> N[Inss[K]] then Add(Dels[K] + 1, O[Dels[K]], N[Inss[K]]);
       Inc(K);
     end;
     for var D := K to High(Dels) do Add(Dels[D] + 1, O[Dels[D]], '');

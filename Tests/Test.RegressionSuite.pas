@@ -506,6 +506,22 @@ type
     [Test] procedure AnotherNameForTheSameTypeIsANoteNotAMismatch;
   end;
 
+  /// <summary>"Edit methods" (user, 2026-10-03): the pure planner behind
+    ///  the dialog - which members may travel alone, what a move writes into
+    ///  both units, what it refuses, and what it NAMES instead of doing.
+    ///  </summary>
+  [TestFixture]
+  TMethodEditTests = class
+  private
+    function SourceUnit: TArray<string>;
+    function TargetUnit: TArray<string>;
+  public
+    [Test] procedure TheListSaysWhatCanTravelAlone;
+    [Test] procedure AMethodMovesWithItsBodyAndIsRequalified;
+    [Test] procedure AMemberThatCannotTravelAloneIsRefused;
+    [Test] procedure ModifiersAreEditedOnTheDeclaration;
+  end;
+
   [TestFixture]
   TCheckScopeTests = class
   public
@@ -560,7 +576,7 @@ uses
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
   Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
-  System.StrUtils;
+  Expert.SignatureEdit, System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -3645,6 +3661,183 @@ begin
     'nothing to go by at all');
 end;
 
+{ TMethodEditTests }
+
+function TMethodEditTests.SourceUnit: TArray<string>;
+begin
+  Result := [
+    'unit Old;',                          // 0
+    '',
+    'interface',
+    '',
+    'type',
+    '  TOld = class',                     // 5
+    '  private',
+    '    FColumns: Integer;',
+    '    procedure Recalc;',
+    '  public',
+    '    constructor Create;',            // 10
+    '    function FormatRow(const ARow: string): string;',
+    '    procedure Paint; virtual;',
+    '  end;',
+    '',
+    'implementation',                     // 15
+    '',
+    'constructor TOld.Create;',
+    'begin',
+    '  FColumns := 1;',
+    'end;',                               // 20
+    '',
+    'procedure TOld.Recalc;',
+    'begin',
+    'end;',
+    '',                                   // 25
+    'function TOld.FormatRow(const ARow: string): string;',
+    'begin',
+    '  Recalc;',
+    '  Result := ARow + IntToStr(FColumns);',
+    'end;',                               // 30
+    '',
+    'procedure TOld.Paint;',
+    'begin',
+    'end;',
+    '',
+    'end.'];
+end;
+
+function TMethodEditTests.TargetUnit: TArray<string>;
+begin
+  Result := [
+    'unit New;',
+    '',
+    'interface',
+    '',
+    'type',
+    '  TNew = class',
+    '  private',
+    '    FKept: Integer;',
+    '  public',
+    '    procedure Go;',
+    '  end;',
+    '',
+    'implementation',
+    '',
+    'procedure TNew.Go;',
+    'begin',
+    'end;',
+    '',
+    'end.'];
+end;
+
+procedure TMethodEditTests.TheListSaysWhatCanTravelAlone;
+var
+  Members: TArray<TClassMemberInfo>;
+  Names: string;
+  Paint: TClassMemberInfo;
+begin
+  Members := ClassMembersOf(SourceUnit, 'TOld');
+  Names := '';
+  Paint := Default(TClassMemberInfo);
+  for var M in Members do
+  begin
+    if Names <> '' then Names := Names + ', ';
+    Names := Names + M.Name;
+    if SameText(M.Name, 'Paint') then Paint := M;
+  end;
+  // Declaration order, methods only - fields and properties are not rows.
+  Assert.AreEqual('Recalc, Create, FormatRow, Paint', Names,
+    'the methods of TOld, in the order they are declared');
+  Assert.AreEqual('Paint', Paint.Name, 'the virtual one is in the list');
+  Assert.IsFalse(Paint.Movable, 'but it cannot travel alone');
+  Assert.IsTrue(ContainsText(Paint.Why, 'virtual'),
+    'and the row says why: ' + Paint.Why);
+  for var M in Members do
+    if SameText(M.Name, 'FormatRow') then
+      Assert.IsTrue(M.Movable, 'a plain method can be moved');
+end;
+
+procedure TMethodEditTests.AMethodMovesWithItsBodyAndIsRequalified;
+var
+  Plan: TMethodMovePlan;
+  Src, Tgt: string;
+  Own: string;
+begin
+  Plan := PlanMethodMove(SourceUnit, TargetUnit, 'TOld', ['FormatRow'],
+    'TNew', 'private');
+  Assert.IsTrue(Plan.Ok, 'the move is planned: ' + Plan.Error);
+  Src := string.Join(NL, Plan.SourceLines);
+  Tgt := string.Join(NL, Plan.TargetLines);
+
+  // Gone from the old class, declaration AND body.
+  Assert.IsFalse(ContainsText(Src, 'function FormatRow'),
+    'the declaration left TOld');
+  Assert.IsFalse(ContainsText(Src, 'TOld.FormatRow'),
+    'and so did the body');
+  Assert.IsTrue(ContainsText(Src, 'procedure TOld.Recalc;'),
+    'everything else stays untouched');
+
+  // Arrived in the new one, under the section that was asked for.
+  Assert.IsTrue(ContainsText(Tgt, 'function FormatRow(const ARow: string): string;'),
+    'the declaration arrived');
+  Assert.IsTrue(Pos('FormatRow', Tgt) > Pos('private', Tgt),
+    'in the private section');
+  Assert.IsTrue(Pos('FormatRow', Tgt) < Pos('public', Tgt),
+    'and not below the public one');
+  Assert.IsTrue(ContainsText(Tgt, 'function TNew.FormatRow(const ARow: string): string;'),
+    'the implementation header is requalified');
+  Assert.IsTrue(ContainsText(Tgt, 'Result := ARow + IntToStr(FColumns);'),
+    'the body came along verbatim');
+  Assert.IsTrue(Pos('TNew.FormatRow', Tgt) > Pos('implementation', Tgt),
+    'and sits in the implementation section');
+
+  // And it SAYS what it did not do.
+  Own := '';
+  for var Iss in Plan.Issues do
+    if Iss.Kind = meiOwnMember then Own := Iss.Text;
+  Assert.IsTrue(ContainsText(Own, 'FColumns'), 'the field stays behind: ' + Own);
+  Assert.IsTrue(ContainsText(Own, 'Recalc'), 'and so does the method it calls');
+end;
+
+procedure TMethodEditTests.AMemberThatCannotTravelAloneIsRefused;
+var
+  Plan: TMethodMovePlan;
+  Veto: string;
+begin
+  Plan := PlanMethodMove(SourceUnit, TargetUnit, 'TOld', ['Paint'],
+    'TNew', 'public');
+  Assert.IsFalse(Plan.Ok, 'a virtual method is not moved');
+  Assert.AreEqual(0, Integer(Length(Plan.Moved)), 'nothing moved');
+  Veto := '';
+  for var Iss in Plan.Issues do
+    if Iss.Kind = meiVeto then Veto := Iss.Text;
+  Assert.IsTrue(ContainsText(Veto, 'virtual'), 'and the reason is named: ' + Veto);
+  // An unknown target class is an error, not a silent no-op.
+  Plan := PlanMethodMove(SourceUnit, TargetUnit, 'TOld', ['FormatRow'],
+    'TNowhere', 'private');
+  Assert.IsTrue(ContainsText(Plan.Error, 'TNowhere'), Plan.Error);
+end;
+
+procedure TMethodEditTests.ModifiersAreEditedOnTheDeclaration;
+begin
+  // A ';' inside the parameter list is not the end of the signature.
+  Assert.AreEqual('    procedure Go(A: Integer; B: string); virtual;',
+    ApplyModifiersToDecl('    procedure Go(A: Integer; B: string);',
+      ['virtual'], []),
+    'added, indentation kept');
+  Assert.AreEqual('    procedure Go; virtual;',
+    ApplyModifiersToDecl('    procedure Go; virtual;', ['virtual'], []),
+    'never twice');
+  Assert.AreEqual('    procedure Go; virtual;',
+    ApplyModifiersToDecl('    procedure Go; overload; virtual;', [], ['overload']),
+    'removed, the others keep their order');
+  Assert.AreEqual('    class procedure Go; static; inline;',
+    ApplyModifiersToDecl('    class procedure Go; static;', ['inline'], []),
+    'a class method keeps its prefix');
+  Assert.AreEqual('  FCount: Integer',
+    ApplyModifiersToDecl('  FCount: Integer', ['virtual'], []),
+    'a line without a ";" is left alone');
+end;
+
 { TCheckScopeTests }
 
 procedure TCheckScopeTests.ADuplicateUnitNameIsReportedAsSkipped;
@@ -3978,6 +4171,7 @@ initialization
   TDUnitX.RegisterTestFixture(TDesignerManagedUsesTests);
   TDUnitX.RegisterTestFixture(TUsesClauseParsingTests);
   TDUnitX.RegisterTestFixture(TSelfProtectionTests);
+  TDUnitX.RegisterTestFixture(TMethodEditTests);
   TDUnitX.RegisterTestFixture(TLspConfigHintTests);
   TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
   TDUnitX.RegisterTestFixture(TUnitRenameScopeTests);

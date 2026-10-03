@@ -374,6 +374,17 @@ function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0:
   const ADecls: TArray<string>; out AInsLine: Integer; out AText: string;
   out AFirstDeclLine: Integer): Boolean;
 
+/// <summary>The same, into the visibility section ASECTION ('private',
+///  'strict private', 'protected', 'public', 'published'): the end of its
+///  last such section, or a new one before the class's 'end;'. An exact
+///  match of the section line wins over a looser one, so "private" does not
+///  land inside a "strict private" block when a plain one exists. Written
+///  for "Edit methods", where the user picks the section (2026-10-03);
+///  PlanInterfaceMethodInsertion is this with 'public'.</summary>
+function PlanMemberInsertion(const ALines: TArray<string>; AClassLine0: Integer;
+  const ASection: string; const ADecls: TArray<string>; out AInsLine: Integer;
+  out AText: string; out AFirstDeclLine: Integer): Boolean;
+
 // ---- shared Pascal line helpers (also used by Expert.SafeDeletePlan) -------
 
 /// <summary>AContent split into lines (CRLF / LF).</summary>
@@ -3026,6 +3037,14 @@ end;
 function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0: Integer;
   const ADecls: TArray<string>; out AInsLine: Integer; out AText: string;
   out AFirstDeclLine: Integer): Boolean;
+begin
+  Result := PlanMemberInsertion(ALines, AClassLine0, 'public', ADecls, AInsLine,
+    AText, AFirstDeclLine);
+end;
+
+function PlanMemberInsertion(const ALines: TArray<string>; AClassLine0: Integer;
+  const ASection: string; const ADecls: TArray<string>; out AInsLine: Integer;
+  out AText: string; out AFirstDeclLine: Integer): Boolean;
 
   function Indent(const S: string): string;
   var
@@ -3048,10 +3067,12 @@ function PlanInterfaceMethodInsertion(const ALines: TArray<string>; AClassLine0:
   end;
 
 var
-  Depth, EndLine, LastPublic, NextVis, L: Integer;
-  T, VisIndent, MemberIndent: string;
+  Depth, EndLine, LastExact, LastLoose, LastPublic, NextVis, L: Integer;
+  T, Sect, VisIndent, MemberIndent: string;
 begin
   Result := False;
+  Sect := Trim(LowerCase(ASection));
+  if Sect = '' then Sect := 'public';
   AInsLine := -1;
   AText := '';
   AFirstDeclLine := -1;
@@ -3060,7 +3081,8 @@ begin
   // the class body: up to ITS 'end;' (nested classes/records counted)
   Depth := 1;
   EndLine := -1;
-  LastPublic := -1;
+  LastExact := -1;
+  LastLoose := -1;
   VisIndent := '';
   for L := AClassLine0 + 1 to High(ALines) do
   begin
@@ -3080,10 +3102,14 @@ begin
     else if (Depth = 1) and (VisibilityWord(T) <> '') then
     begin
       if VisIndent = '' then VisIndent := Indent(ALines[L]);
-      if VisibilityWord(T) = 'public' then LastPublic := L;
+      // 'private' must not land inside 'strict private' while a plain one
+      // exists, so an exact match of the line wins over the keyword alone.
+      if SameText(Trim(StripLineComment(ALines[L])), Sect) then LastExact := L
+      else if VisibilityWord(T) = VisibilityWord(Sect) then LastLoose := L;
     end;
   end;
   if EndLine < 0 then Exit;
+  if LastExact >= 0 then LastPublic := LastExact else LastPublic := LastLoose;
   if VisIndent = '' then VisIndent := Indent(ALines[AClassLine0]) + '  ';
   MemberIndent := VisIndent + '  ';
   if LastPublic >= 0 then
@@ -3109,7 +3135,7 @@ begin
   else
   begin
     AInsLine := EndLine;
-    AText := VisIndent + 'public' + sLineBreak;
+    AText := VisIndent + Trim(ASection) + sLineBreak;
     AFirstDeclLine := EndLine + 1;
   end;
   for var Dcl in ADecls do

@@ -542,6 +542,12 @@ type
     ///  dialog has, it offers apply, and it needs no preview token because
     ///  every call re-runs its own analysis.</summary>
     [Test] procedure TheToolDeclaresWhatItTakes;
+    /// <summary>A preview must not report a line as changed that did not
+    ///  change. Found live: the first edit_method call answered 45 changed
+    ///  lines for a move that touches eight, with pairs like
+    ///  "implementation" -> "implementation" in them - the shared diff
+    ///  pairs the shifted region line by line and emitted every pair.</summary>
+    [Test] procedure APreviewReportsOnlyRealChanges;
   end;
 
   [TestFixture]
@@ -4161,6 +4167,36 @@ begin
     'it points at the verified path for a parameter list');
   Assert.Contains(Def, 'not rewritten',
     'and says that the call sites are not touched');
+end;
+
+procedure TMethodEditTests.APreviewReportsOnlyRealChanges;
+var
+  Old, New: string;
+  Total: Integer;
+  Changes: TArray<TPreviewChange>;
+begin
+  // A member MOVES down: everything between the two places shifts by one, so
+  // a line-by-line pairing sees a "change" on every line of it.
+  Old := 'unit U;' + NL + 'A' + NL + 'MOVED' + NL + 'B' + NL + 'C' + NL +
+    'D' + NL + 'end.';
+  New := 'unit U;' + NL + 'A' + NL + 'B' + NL + 'C' + NL + 'D' + NL +
+    'MOVED' + NL + 'end.';
+
+  Changes := DiffToChanges('U.pas', Old, New, 200, Total);
+  for var C in Changes do
+    Assert.AreNotEqual(C.Before, C.After,
+      'a line that did not change is not a change: "' + C.Before + '"');
+  Assert.AreEqual(2, Total,
+    'the move is one deletion and one insertion, not the whole span');
+  Assert.AreEqual(2, Integer(Length(Changes)));
+
+  // ... and a real edit is still reported, with its line.
+  New := StringReplace(Old, 'C', 'C2', [rfReplaceAll]);
+  Changes := DiffToChanges('U.pas', Old, New, 200, Total);
+  Assert.AreEqual(1, Total, 'one line really changed');
+  Assert.AreEqual('C', Changes[0].Before);
+  Assert.AreEqual('C2', Changes[0].After);
+  Assert.AreEqual(5, Changes[0].Line, '1-based, the line that changed');
 end;
 
 { TCheckScopeTests }

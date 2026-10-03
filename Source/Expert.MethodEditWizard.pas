@@ -42,6 +42,14 @@ type
     Kind: string;            // 'call', 'method reference', 'form file', ...
   end;
 
+  /// <summary>How often a member's name occurs in the scope, and how many of
+  ///  those occurrences the list really holds.</summary>
+  TMethodEditOcc = record
+    Member: string;
+    Total: Integer;
+    Listed: Integer;
+  end;
+
   TMethodEditAnalysis = record
     Ok: Boolean;
     Error: string;
@@ -52,11 +60,13 @@ type
     Members: TArray<TClassMemberInfo>;
     UnitFiles: TArray<string>;   // candidate target units, source unit first
     Calls: TArray<TMethodEditCall>;
+    Occurrences: TArray<TMethodEditOcc>;
     Notes: TArray<string>;
     Truncated: Boolean;
     FilesScanned: Integer;
     function Summary: string;
     function CallsOf(const AMembers: TArray<string>): TArray<TMethodEditCall>;
+    function OccurrenceOf(const AName: string): TMethodEditOcc;
     function MovableNames: TArray<string>;
     /// <summary>The parameter list and the result type of a member, read
     ///  from the declaration the analysis saw.</summary>
@@ -107,6 +117,16 @@ uses
 
 const
   MaxCalls = 800;
+  // PER MEMBER, and that is the point: a run-wide cap alone lets ONE common
+  // name eat it. Measured on this repository - a class with a 'Create' got
+  // 767 of its 800 rows from that constructor, so the occurrences of every
+  // other ticked member were truncated away before they were collected.
+  MaxCallsPerMember = 60;
+  // What the TOOL may put in one answer. The dialog shows a list someone
+  // scrolls; an answer is read by a model, and the first live call returned
+  // 194 KB for a class with a 'Create'. The counts say what there is, the
+  // rows are for the members the caller actually named.
+  MaxToolOccurrences = 40;
   SectionNames: array[0..3] of string = ('private', 'protected', 'public',
     'published');
   // The directives a declaration can carry that this dialog offers. Each one
@@ -143,6 +163,14 @@ begin
         Result := Result + [C];
         Break;
       end;
+end;
+
+function TMethodEditAnalysis.OccurrenceOf(const AName: string): TMethodEditOcc;
+begin
+  Result := Default(TMethodEditOcc);
+  Result.Member := AName;
+  for var O in Occurrences do
+    if SameText(O.Member, AName) then Exit(O);
 end;
 
 function TMethodEditAnalysis.MovableNames: TArray<string>;
@@ -304,6 +332,7 @@ var
   Lines, Masked: TArray<string>;
   Names: TArray<string>;
   Kinds: TArray<TRefSymbolKind>;
+  Found, Kept: TArray<Integer>;
   Calls: TList<TMethodEditCall>;
   Content: string;
 
@@ -417,6 +446,8 @@ begin
     end;
 
   Calls := TList<TMethodEditCall>.Create;
+  SetLength(Found, Length(Names));
+  SetLength(Kept, Length(Names));
   Src := TEditContentSource.Create(AIn);
   try
     var Files := Res.UnitFiles;
@@ -442,9 +473,10 @@ begin
           if Which[H] = N then Pos0 := Pos0 + [Hits[H]];
         if Length(Pos0) = 0 then Continue;
         var RK := ClassifyReferences(Content, Pos0, Length(Names[N]), Kinds[N]);
+        Inc(Found[N], Length(Pos0));
         for var H := 0 to High(Pos0) do
         begin
-          if Calls.Count >= MaxCalls then
+          if (Calls.Count >= MaxCalls) or (Kept[N] >= MaxCallsPerMember) then
           begin
             Res.Truncated := True;
             Break;
@@ -457,10 +489,19 @@ begin
           if C.Line <= High(FLines) then C.Text := Trim(FLines[C.Line]);
           if H <= High(RK) then C.Kind := RefKindText(RK[H]) else C.Kind := 'use';
           Calls.Add(C);
+          Inc(Kept[N]);
         end;
       end;
     end;
     Res.Calls := Calls.ToArray;
+    for var N := 0 to High(Names) do
+    begin
+      var O := Default(TMethodEditOcc);
+      O.Member := Names[N];
+      O.Total := Found[N];
+      O.Listed := Kept[N];
+      Res.Occurrences := Res.Occurrences + [O];
+    end;
   finally
     Src.Free;
     Calls.Free;
@@ -1029,9 +1070,13 @@ begin
   finally
     FCalls.Items.EndUpdate;
   end;
-  FCallsLabel.Caption := Format('%d occurrence(s) of the selected member(s) - ' +
-    'text matches, NOT verified by DelphiLSP and NOT changed by Apply. ' +
-    'Double-click to go there.', [Length(Calls)]);
+  var Total := 0;
+  for var N in SelectedMembers do Total := Total + FAn.OccurrenceOf(N).Total;
+  FCallsLabel.Caption := Format('%s of the selected member(s) - text matches, ' +
+    'NOT verified by DelphiLSP and NOT changed by Apply. Double-click to go ' +
+    'there.', [IfThen(Total > Length(Calls),
+    Format('%d of %d occurrence(s)', [Length(Calls), Total]),
+    Format('%d occurrence(s)', [Length(Calls)]))]);
 end;
 
 function TMethodEditDialog.SelectedMembers: TArray<string>;
@@ -1464,25 +1509,29 @@ begin
 
   // Nothing asked for = the list above IS the answer: which members exist,
   // which of them can travel alone, and what the form file says.
+  // How often each name occurs - cheap, and it is what tells you whether
+  // looking at the list is worth it. The ROWS come below, and only for the
+  // members the caller named.
+  var OC := TJSONArray.Create;
+  for var Occ in An.Occurrences do
+  begin
+    var O := TJSONObject.Create;
+    O.AddPair('member', Occ.Member);
+    O.AddPair('occurrences', TJSONNumber.Create(Occ.Total));
+    if Occ.Listed < Occ.Total then
+      O.AddPair('listed', TJSONNumber.Create(Occ.Listed));
+    OC.Add(O);
+  end;
+  J.AddPair('occurrenceCounts', OC);
+
   if (Length(Req.Members) = 0) and not Req.WantsSomething then
   begin
     J.AddPair('hint', 'pass "members" plus "target_class" (and "target_unit" ' +
       'when the class lives elsewhere) or "add_modifiers" / ' +
       '"remove_modifiers"; a parameter list is changed by change_signature, ' +
-      'which verifies and rewrites the call sites');
-    var CA := TJSONArray.Create;
-    for var C in An.Calls do
-    begin
-      var O := TJSONObject.Create;
-      O.AddPair('member', C.Member);
-      O.AddPair('kind', C.Kind);
-      O.AddPair('file', C.FilePath);
-      O.AddPair('line', TJSONNumber.Create(C.Line + 1));
-      O.AddPair('text', C.Text);
-      CA.Add(O);
-    end;
-    J.AddPair('occurrences', CA);
-    if An.Truncated then J.AddPair('occurrences_truncated', TJSONBool.Create(True));
+      'which verifies and rewrites the call sites. The occurrences of the ' +
+      'members you name come with that call - they are text matches, not ' +
+      'verified, and never rewritten');
     Exit(McpOk(J));
   end;
 
@@ -1525,6 +1574,27 @@ begin
       Exit(McpOk(J));
     end;
   end;
+
+  var Sel := An.CallsOf(Req.Members);
+  var CA := TJSONArray.Create;
+  for var I := 0 to High(Sel) do
+  begin
+    if I >= MaxToolOccurrences then
+    begin
+      J.AddPair('occurrencesShown', TJSONNumber.Create(MaxToolOccurrences));
+      Break;
+    end;
+    var O := TJSONObject.Create;
+    O.AddPair('member', Sel[I].Member);
+    O.AddPair('kind', Sel[I].Kind);
+    O.AddPair('file', Sel[I].FilePath);
+    O.AddPair('line', TJSONNumber.Create(Sel[I].Line + 1));
+    O.AddPair('text', Sel[I].Text);
+    CA.Add(O);
+  end;
+  J.AddPair('occurrences', CA);
+  J.AddPair('occurrencesNote', 'text matches of the selected member(s), NOT ' +
+    'verified by DelphiLSP and NOT changed by this tool');
 
   Res := PlanMethodEdit(An.SourceFile, An.SourceContent, An.OwnerType, Req,
     TgtContent);

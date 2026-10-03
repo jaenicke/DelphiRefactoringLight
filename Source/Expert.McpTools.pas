@@ -211,11 +211,18 @@ begin
   Result := AText.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
 end;
 
+// A region larger than this keeps the cheap positional pairing: the LCS is
+// O(n*m), and a rewritten file has no diff anyone reads line by line.
+const
+  MaxDiffLcsLines = 400;
+
 function DiffToChanges(const AFile, AOld, ANew: string; AMax: Integer;
   out ATotal: Integer): TArray<TPreviewChange>;
 var
   O, N: TArray<string>;
-  P, SO, SN: Integer;
+  P, SO, SN, LenO, LenN, I, J: Integer;
+  L: TArray<TArray<Integer>>;
+  Dels, Inss: TArray<Integer>;
 
   procedure Add(ALine: Integer; const ABefore, AAfter: string);
   begin
@@ -227,6 +234,28 @@ var
     C.Before := ABefore;
     C.After := AAfter;
     Result := Result + [C];
+  end;
+
+  // A deletion directly followed by an insertion is ONE edited line, and
+  // that reads better than a delete plus an insert - the before/after pair
+  // exists for exactly that. What is left over is a real deletion or a real
+  // insertion.
+  procedure Flush;
+  var
+    K: Integer;
+  begin
+    K := 0;
+    while (K <= High(Dels)) and (K <= High(Inss)) do
+    begin
+      Add(Dels[K] + 1, O[Dels[K]], N[Inss[K]]);
+      Inc(K);
+    end;
+    for var D := K to High(Dels) do Add(Dels[D] + 1, O[Dels[D]], '');
+    for var S := K to High(Inss) do
+      if Length(Dels) > 0 then Add(Dels[High(Dels)] + 2, '', N[Inss[S]])
+      else Add(Inss[S] + 1, '', N[Inss[S]]);
+    Dels := nil;
+    Inss := nil;
   end;
 
 begin
@@ -245,29 +274,83 @@ begin
     Dec(SO);
     Dec(SN);
   end;
-  var I := P;
-  var J := P;
+
+  // WHAT CHANGED, not what moved. The first version paired the region
+  // between prefix and suffix line by line, so a MOVED block reported the
+  // whole span: the first live edit_method call answered 45 changed lines
+  // for a move that touches eight, with pairs like
+  // "implementation" -> "implementation" among them.
+  LenO := SO - P + 1;
+  LenN := SN - P + 1;
+  if (LenO <= 0) and (LenN <= 0) then Exit;
+  Dels := nil;
+  Inss := nil;
+
+  if (LenO <= MaxDiffLcsLines) and (LenN <= MaxDiffLcsLines) then
+  begin
+    SetLength(L, LenO + 1, LenN + 1);
+    for var A := LenO - 1 downto 0 do
+      for var B := LenN - 1 downto 0 do
+        if O[P + A] = N[P + B] then L[A][B] := L[A + 1][B + 1] + 1
+        else if L[A + 1][B] >= L[A][B + 1] then L[A][B] := L[A + 1][B]
+        else L[A][B] := L[A][B + 1];
+    I := 0;
+    J := 0;
+    while (I < LenO) and (J < LenN) do
+      if O[P + I] = N[P + J] then
+      begin
+        Flush;                        // a kept line ends the current hunk
+        Inc(I);
+        Inc(J);
+      end
+      else if L[I + 1][J] >= L[I][J + 1] then
+      begin
+        Dels := Dels + [P + I];
+        Inc(I);
+      end
+      else
+      begin
+        Inss := Inss + [P + J];
+        Inc(J);
+      end;
+    while I < LenO do
+    begin
+      Dels := Dels + [P + I];
+      Inc(I);
+    end;
+    while J < LenN do
+    begin
+      Inss := Inss + [P + J];
+      Inc(J);
+    end;
+    Flush;
+    Exit;
+  end;
+
+  // fallback: too big to diff properly, and an identical pair is still no
+  // change
+  I := P;
+  J := P;
   while (I <= SO) or (J <= SN) do
   begin
     if (I <= SO) and (J <= SN) then
     begin
-      Add(I + 1, O[I], N[J]);
+      if O[I] <> N[J] then Add(I + 1, O[I], N[J]);
       Inc(I);
       Inc(J);
     end
     else if I <= SO then
     begin
-      Add(I + 1, O[I], '');      // deleted
+      Add(I + 1, O[I], '');
       Inc(I);
     end
     else
     begin
-      Add(I + 1, '', N[J]);      // inserted before this line
+      Add(I + 1, '', N[J]);
       Inc(J);
     end;
   end;
 end;
-
 function ChangesToJson(const AChanges: TArray<TPreviewChange>): TJSONArray;
 begin
   Result := TJSONArray.Create;

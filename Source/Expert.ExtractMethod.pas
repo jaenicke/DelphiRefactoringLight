@@ -72,6 +72,9 @@ type
     ///  it).</summary>
     ReturnVarName: string;
     ReturnVarType: string;
+    /// <summary>Set when the analysis found something it must not carry
+    ///  over silently - the block is NOT extracted and this says why.</summary>
+    Blocker: string;
   end;
 
   /// <summary>An identifier of the selected block and the place DelphiLSP
@@ -159,6 +162,20 @@ function ExtractBlockTokens(const ASelectedText: string;
 ///  "Total := Total + Extra" became "Result := Result + AExtra". Such a
 ///  variable stays a var parameter.</summary>
 function CanReturnViaResult(const ABlockText, AIdent: string): Boolean;
+
+/// <summary>The result type of the routine whose header is at AHEADERLINE0
+///  (0-based); '' for a procedure, a constructor or a header that cannot be
+///  parsed. INSIDE A FUNCTION 'Result' IS NOT A VARIABLE but that type, so a
+///  block assigning it has to become a FUNCTION - the first version made a
+///  procedure with a local named Result of the right type, which compiles
+///  and silently throws the value away (forum 2026-10-04).</summary>
+function EnclosingResultType(const ALines: TArray<string>;
+  AHeaderLine0: Integer): string;
+
+/// <summary>Does the block name Result as CODE - whole word, comments and
+///  strings masked, and not as the member of something ("X.Result") or an
+///  escaped identifier?</summary>
+function BlockMentionsResult(const ABlockText: string): Boolean;
 
 /// <summary>The line edits that take ANames out of the var section(s) of
 ///  the routine whose header is on the 1-based line AHeaderLine - only that
@@ -1168,6 +1185,22 @@ begin
     if FDialog<>nil then FDialog.SetStatus('Classifying...');
     var FileLines := TDelphiFileEncoding.ReadLines(AInfo.FileName);
     var MethodEnd := TExtractMethodHelper.FindMethodEnd(FileLines, AInfo.InsertLine + 1); // start after the method header
+    // What 'Result' means here: the enclosing FUNCTION's return value, or
+    // (in a procedure) an ordinary identifier the user may have declared.
+    var EnclosingResult := EnclosingResultType(FileLines, AInfo.InsertLine - 1);
+    // Everything declared ON THE HEADER (a wrapped parameter list included)
+    // is a PARAMETER of the enclosing routine - never a local that may be
+    // moved into the new one. The skParameter short-circuit below relies on
+    // the hover saying "parameter"; when it does not (a unit DelphiLSP
+    // cannot resolve), the parameter was moved as an uninitialised local
+    // and the caller's value was lost - measured on a function whose
+    // parameter came out as "var AName: string;" inside the new routine.
+    var HeaderEndLine := AInfo.InsertLine;
+    begin
+      var HdrEnd0: Integer;
+      if CollectHeader(FileLines, AInfo.InsertLine - 1, HdrEnd0) <> '' then
+        HeaderEndLine := HdrEnd0 + 1;
+    end;
     AInfo.DiagLog := AInfo.DiagLog + Format('Method: line %d-%d, block: line %d-%d',
       [AInfo.InsertLine, MethodEnd, AInfo.StartLine, AInfo.EndLine]) + sLineBreak;
 
@@ -1177,6 +1210,16 @@ begin
       if TI.HoverText='' then
       begin
         AInfo.DiagLog := AInfo.DiagLog + Format('  %s: no hover',[TI.Ident])+sLineBreak;
+        Continue;
+      end;
+      // 'Result' is decided centrally below - never as a variable, or it
+      // ends up moved into the new routine as a local of the right type
+      // while the function it belongs to is never assigned.
+      if SameText(TI.Ident, 'Result') and (EnclosingResult <> '') then
+      begin
+        AInfo.DiagLog := AInfo.DiagLog +
+          '  Result: the enclosing function''s return value (' +
+          EnclosingResult + ')' + sLineBreak;
         Continue;
       end;
       var K := TExtractMethodHelper.ClassifyHover(TI.HoverText);
@@ -1221,6 +1264,19 @@ begin
       end;
       if DSF and (TI.DefLine>=AInfo.StartLine) and (TI.DefLine<=AInfo.EndLine) then
         begin AInfo.DiagLog:=AInfo.DiagLog+'    -> local'+sLineBreak; Continue; end;
+      if DSF and (TI.DefLine >= AInfo.InsertLine) and (TI.DefLine <= HeaderEndLine)
+        and (TI.DefLine < AInfo.StartLine) then
+      begin
+        // Declared on the header: a parameter, whatever the hover called it.
+        var HP: TExtractedParam; HP.Name := TI.Ident; HP.TypeName := TN;
+        HP.IsForwardedEnclosingParam := True;
+        HP.Mode := TExtractMethodHelper.GetEnclosingParamMode(
+          FileLines, AInfo.InsertLine, TI.Ident);
+        AInfo.DiagLog := AInfo.DiagLog +
+          '    -> parameter (declared on the enclosing header)' + sLineBreak;
+        PL.Add(HP);
+        Continue;
+      end;
       if DSF and (TI.DefLine>=AInfo.InsertLine) and (TI.DefLine<AInfo.StartLine) then
       begin
         // Local var of the method: is it used OUTSIDE the block?
@@ -1289,8 +1345,35 @@ begin
     // the value the variable had before it (CanReturnViaResult).
     AInfo.ReturnVarName := '';
     AInfo.ReturnVarType := '';
+
+    // THE FUNCTION'S OWN Result comes first: when the block assigns it, the
+    // extracted routine IS that function, the body keeps writing Result and
+    // the call site becomes "Result := Extracted(...)". Anything else the
+    // block does with Result cannot be carried over - reading it means the
+    // old value flows in, and a conditional assignment means the value the
+    // function already had must survive - so it is refused instead of
+    // silently changed.
+    if (EnclosingResult <> '') and BlockMentionsResult(AInfo.SelectedText) then
+    begin
+      if not CanReturnViaResult(AInfo.SelectedText, 'Result') then
+      begin
+        AInfo.Blocker := 'the block uses the Result of the function it is in, ' +
+          'and not as a plain assignment: it reads Result, or assigns it only ' +
+          'inside an if / loop / case. Extracting that would lose the value ' +
+          'the function already has. Select a block whose FIRST statement ' +
+          'assigns Result unconditionally, or extract it by hand.';
+        AInfo.DiagLog := AInfo.DiagLog + '  -> REFUSED: ' + AInfo.Blocker + sLineBreak;
+        Exit(False);
+      end;
+      AInfo.ReturnVarName := 'Result';
+      AInfo.ReturnVarType := EnclosingResult;
+      AInfo.DiagLog := AInfo.DiagLog +
+        '  -> Return value: the function''s own Result (' + EnclosingResult +
+        ')' + sLineBreak;
+    end;
+
     for var RI := 0 to High(AInfo.Params) do
-      if (AInfo.Params[RI].Mode = pmVar)
+      if (AInfo.ReturnVarName = '') and (AInfo.Params[RI].Mode = pmVar)
         and not AInfo.Params[RI].IsForwardedEnclosingParam
         and CanReturnViaResult(AInfo.SelectedText, AInfo.Params[RI].Name) then
       begin
@@ -1665,6 +1748,36 @@ begin
   end;
 end;
 
+function EnclosingResultType(const ALines: TArray<string>;
+  AHeaderLine0: Integer): string;
+var
+  Kind, Qual, Params, Ret, Hdr: string;
+  IsClassMethod: Boolean;
+  HdrEnd: Integer;
+begin
+  Result := '';
+  if (AHeaderLine0 < 0) or (AHeaderLine0 > High(ALines)) then Exit;
+  if not IsHeaderLine(Trim(StripLineComment(ALines[AHeaderLine0])), Kind,
+    IsClassMethod) then Exit;
+  // Only a function has a Result of its own; a constructor's Result is the
+  // instance and must never be handed to another routine.
+  if not SameText(Kind, 'function') then Exit;
+  Hdr := CollectHeader(ALines, AHeaderLine0, HdrEnd);
+  if Hdr = '' then Exit;
+  if not ParseHeader(Hdr, Kind, Qual, Params, Ret) then Exit;
+  Result := Trim(Ret);
+end;
+
+function BlockMentionsResult(const ABlockText: string): Boolean;
+var
+  Masked: TArray<string>;
+begin
+  Result := False;
+  Masked := MaskCommentsAndStrings(ABlockText.Replace(#13, '').Split([#10]));
+  for var L in Masked do
+    if TRegEx.IsMatch(L, '(?<![\w.&])Result\b', [roIgnoreCase]) then Exit(True);
+end;
+
 function PlanLocalVarRemoval(const AFileLines: TArray<string>; AHeaderLine: Integer;
   const ANames: TArray<string>): TArray<TPair<Integer, string>>;
 var
@@ -2025,7 +2138,23 @@ begin
 
     if AInfo.EnclosingClass<>'' then Status('Class: '+AInfo.EnclosingClass+'. Analyzing...')
     else Status('Analyzing...');
-    AnalyzeVariables(AInfo, Client);
+    if not AnalyzeVariables(AInfo, Client) then
+    begin
+      // A refusal is a RESULT, not an exception: it says what the selection
+      // does that this refactoring cannot carry over.
+      if AInfo.Blocker = '' then
+        AInfo.Blocker := 'the selection cannot be extracted.';
+      FHeadlessError := AInfo.Blocker;
+      FInfoReady := False;
+      if FDialog <> nil then
+      begin
+        FDialog.SetPreviewText('This selection cannot be extracted:' +
+          sLineBreak + sLineBreak + AInfo.Blocker);
+        FDialog.SetStatus('Not possible here.');
+        FDialog.EnableExtract(False);
+      end;
+      Exit;
+    end;
     Status('Generating code...');
     // Store results for later live updates
     FCurrentInfo := AInfo;

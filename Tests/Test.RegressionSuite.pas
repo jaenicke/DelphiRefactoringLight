@@ -486,6 +486,11 @@ type
     ///  starts at the first statement carries no leading whitespace, and
     ///  the call went in at column 1.</summary>
     [Test] procedure TheCallKeepsTheCodesOwnIndentation;
+    /// <summary>Forum 2026-10-04: a block that assigns the enclosing
+    ///  FUNCTION's Result was extracted into a PROCEDURE with a local
+    ///  variable named Result - of the right type, so it compiles, and the
+    ///  function's own result is never assigned.</summary>
+    [Test] procedure ResultIsTheFunctionsReturnValueNotAVariable;
   end;
 
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
@@ -4215,6 +4220,66 @@ begin
   Assert.AreEqual('C', Changes[0].Before);
   Assert.AreEqual('C2', Changes[0].After);
   Assert.AreEqual(5, Changes[0].Line, '1-based, the line that changed');
+end;
+
+procedure TExtractAndCompletionTests.ResultIsTheFunctionsReturnValueNotAVariable;
+var
+  Lines: TArray<string>;
+begin
+  // WHICH routine the block sits in decides what Result means.
+  Lines := [
+    'function TFoo.Describe(const ARow: TRow): string;',          // 0
+    'begin',
+    'end;',
+    '',
+    'procedure TFoo.Paint;',                                      // 4
+    'begin',
+    'end;',
+    '',
+    'constructor TFoo.Create;',                                   // 8
+    'begin',
+    'end;',
+    '',
+    'function TFoo.Items(const AKey: string;',                    // 12
+    '  AFlag: Boolean): TList<Integer>;',
+    'begin',
+    'end;'];
+  Assert.AreEqual('string', EnclosingResultType(Lines, 0),
+    'the function''s own result type');
+  Assert.AreEqual('', EnclosingResultType(Lines, 4),
+    'a procedure has no Result - there a local named Result is legal');
+  Assert.AreEqual('', EnclosingResultType(Lines, 8),
+    'a constructor''s Result is the instance and is never handed on');
+  Assert.AreEqual('TList<Integer>', EnclosingResultType(Lines, 12),
+    'a wrapped header, read to its own end');
+  Assert.AreEqual('', EnclosingResultType(Lines, 1), 'not a header at all');
+
+  // Is Result mentioned as CODE?
+  Assert.IsTrue(BlockMentionsResult('  Result := ARow.Value;'));
+  Assert.IsTrue(BlockMentionsResult('  if X then Result := ''a'';'));
+  Assert.IsFalse(BlockMentionsResult('  Query.Result := 1;'),
+    'a member called Result belongs to something else');
+  Assert.IsFalse(BlockMentionsResult('  // Result is set below'),
+    'a comment is no code');
+  Assert.IsFalse(BlockMentionsResult('  Log(''Result'');'),
+    'and neither is a string');
+  Assert.IsFalse(BlockMentionsResult('  X := 1;'));
+
+  // The reported shape: a plain assignment CAN become the function's result.
+  Assert.IsTrue(CanReturnViaResult(
+    '  Result := ARow.Value + IntToStr(FColumns);', 'Result'),
+    'the forum case: the block assigns Result, so the extracted routine ' +
+    'is a function of that type');
+
+  // What must be refused instead of carried over wrongly.
+  Assert.IsFalse(CanReturnViaResult('  Result := Result + ''x'';', 'Result'),
+    'it reads the value the function already has');
+  Assert.IsFalse(CanReturnViaResult(
+    '  if AFlag then' + NL + '    Result := ''a'';', 'Result'),
+    'a conditional assignment leaves the old value in place on one path');
+  Assert.IsFalse(CanReturnViaResult(
+    '  Writeln(Result);' + NL + '  Result := ''b'';', 'Result'),
+    'the first mention reads it');
 end;
 
 { TCheckScopeTests }

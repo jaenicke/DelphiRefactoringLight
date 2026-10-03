@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.18.3** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.18.4** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -194,6 +194,7 @@ Nested includes are expanded too, a trailing `//` comment in an include cannot s
   - **Parameters** of the new method (locals from the surrounding method that are read inside the block).
   - **Local variables** of the new method (declarations from the block itself).
   - **Return value** if a single trailing identifier is written-then-read.
+  - **The enclosing function's `Result`** when the block assigns it: the new routine becomes a `function` of that type and the call reads `Result := NewMethod(...)`. `Result` is not a variable, so it is never moved into the new routine as a local - that compiled and silently threw the value away. A block that *reads* `Result`, or assigns it only inside an `if` / loop / `case`, is refused with the reason: the value the function already has would be lost. (In a `procedure` a local named `Result` is ordinary and nothing changes.)
 - Parameters are prefixed with `A` in the new method signature and body (Delphi convention, e.g. `ACertFilename` instead of `CertFilename`); the call site keeps the original variable names.
 - Generates the new method (class-qualified if applicable), replaces the selected block with the call, and removes the now-unused `var` entries in the original method.
 - Refreshes the form and class structure in the IDE (`Module.Refresh(False)`, `FormEditor.MarkModified`).

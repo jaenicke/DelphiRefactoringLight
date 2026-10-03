@@ -2856,9 +2856,12 @@ begin
     var Arr := TJSONArray.Create;
     var Missing := 0;
     var Mismatch := 0;
+    var AliasOnly := 0;
     for var Iss in Issues do
     begin
-      if Iss.Kind = eikMissingHandler then Inc(Missing) else Inc(Mismatch);
+      if Iss.Kind = eikMissingHandler then Inc(Missing)
+      else if Iss.AliasOnly then Inc(AliasOnly)
+      else Inc(Mismatch);
       var O := TJSONObject.Create;
       var Id := DfmIssueId(Iss);
       O.AddPair('id', Id);
@@ -2876,6 +2879,13 @@ begin
       if Iss.Actual <> '' then O.AddPair('actual', Iss.Actual);
       O.AddPair('fixable', TJSONBool.Create(
         (Iss.Kind = eikMissingHandler) or (Iss.ExpectedRawParams <> '')));
+      // the same types under another name: the handler is correct, a fix
+      // would only align the names
+      if Iss.AliasOnly then
+      begin
+        O.AddPair('aliasOnly', TJSONBool.Create(True));
+        O.AddPair('aliasNote', Iss.AliasNote);
+      end;
       var R: string;
       if Applied.TryGetValue(UpperCase(Id), R) then O.AddPair('result', R);
       Arr.Add(O);
@@ -2884,6 +2894,7 @@ begin
     Res.AddPair('applied', TJSONBool.Create(DoApply));
     Res.AddPair('missingHandlers', TJSONNumber.Create(Missing));
     Res.AddPair('signatureMismatches', TJSONNumber.Create(Mismatch));
+    Res.AddPair('aliasOnlyDifferences', TJSONNumber.Create(AliasOnly));
     Res.AddPair('issues', Arr);
     if DoApply then
       Res.AddPair('note', 'Fixed handlers are in the IDE buffers (not saved). ' +

@@ -955,7 +955,9 @@ const
     'does not match the event type (the cause of hard-to-find stack corruption). Each ' +
     'issue carries an id; apply=true with \"fix_ids\" generates the missing handlers / ' +
     'corrects the parameter lists. Nothing is fixed without naming ids - a generated ' +
-    'empty handler shadows an inherited one.","inputSchema":{"type":"object",' +
+    'empty handler shadows an inherited one. An issue with aliasOnly=true differs only ' +
+    'in the NAME of a type (an alias, e.g. TcxImageIndex = TImageIndex): the handler is ' +
+    'correct and needs no fix.","inputSchema":{"type":"object",' +
     '"properties":{"fix_ids":{"type":"array","items":{"type":"string"},' +
     '"description":"Ids from a previous call."},' + ApplyProp + ',' + InstanceProp +
     '}}}' +

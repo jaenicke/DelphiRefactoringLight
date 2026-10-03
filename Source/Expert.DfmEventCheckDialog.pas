@@ -12,8 +12,10 @@ unit Expert.DfmEventCheckDialog;
 // signature deviates from the expected event type (stack corruption
 // when the event fires). Signature mismatches highlight the differing
 // parameter types in bold in the Details column; auto-fixable rows are
-// flagged in the "Fix" column and pre-ticked. Double-click / "Go to"
-// jumps to the .pas declaration (mismatch) or the .dfm line (missing).
+// flagged in the "Fix" column and pre-ticked - except "Alias only" rows,
+// whose types differ only by name (TcxImageIndex = TImageIndex) and are
+// therefore no mismatch. Double-click / "Go to" jumps to the .pas
+// declaration (mismatch) or the .dfm line (missing).
 
 interface
 
@@ -163,7 +165,7 @@ constructor TDfmEventCheckDialog.CreateDialog(AOwner: TComponent;
   const AIssues: TArray<TDfmEventIssue>);
 var
   Col: TListColumn;
-  MissCount, SigCount, N: Integer;
+  MissCount, SigCount, AliasCount, N: Integer;
   Panel: TPanel;
 begin
   inherited CreateNew(AOwner);
@@ -190,9 +192,11 @@ begin
     // Signature mismatches are corrected in place and PRE-TICKED; missing
     // handlers are fixable but NOT pre-ticked - on inherited forms the
     // "missing" handler may exist in the (out-of-project) ancestor unit,
-    // and generating an empty override would silently disable it.
+    // and generating an empty override would silently disable it. An
+    // alias-only row is not pre-ticked either: the handler is correct, the
+    // fix would only swap one name of the type for the other.
     FChecked[N] := (FIssues[N].Kind = eikSignatureMismatch)
-      and (FIssues[N].ExpectedRawParams <> '');
+      and (FIssues[N].ExpectedRawParams <> '') and not FIssues[N].AliasOnly;
   end;
 
   FLblSummary := TLabel.Create(Self);
@@ -301,13 +305,18 @@ begin
   FillRows;
   EnableListViewSorting(FListView);
 
-  MissCount := 0; SigCount := 0;
+  MissCount := 0; SigCount := 0; AliasCount := 0;
   for N := 0 to High(FIssues) do
     if FIssues[N].Kind = eikMissingHandler then Inc(MissCount)
+    else if FIssues[N].AliasOnly then Inc(AliasCount)
     else Inc(SigCount);
   FLblSummary.Caption := Format(
     '%d issue(s): %d missing handler(s), %d signature mismatch(es).',
     [Length(FIssues), MissCount, SigCount]);
+  if AliasCount > 0 then
+    FLblSummary.Caption := FLblSummary.Caption + Format(
+      ' %d alias-only difference(s) - the same types under another name, ' +
+      'not ticked.', [AliasCount]);
 
   EnableThemes(Self);
   PrepareDialog(Self, AOwner);
@@ -335,7 +344,8 @@ var
       or (Pos(Filter, UpperCase(AIssue.EventName)) > 0)
       or (Pos(Filter, UpperCase(AIssue.HandlerName)) > 0)
       or (Pos(Filter, UpperCase(AIssue.Expected)) > 0)
-      or (Pos(Filter, UpperCase(AIssue.Actual)) > 0);
+      or (Pos(Filter, UpperCase(AIssue.Actual)) > 0)
+      or (Pos(Filter, UpperCase(AIssue.AliasNote)) > 0);
   end;
 
 begin
@@ -390,7 +400,11 @@ begin
           Item.GroupID := GroupIds[GroupKeyOf(Issue)];
           case Issue.Kind of
             eikMissingHandler:    Item.Caption := 'Missing handler';
-            eikSignatureMismatch: Item.Caption := 'Signature mismatch';
+            eikSignatureMismatch:
+              if Issue.AliasOnly then
+                Item.Caption := 'Alias only'
+              else
+                Item.Caption := 'Signature mismatch';
           end;
           // Fix column: check-mark for auto-fixable rows.
           if Issue.ExpectedRawParams <> '' then
@@ -402,7 +416,10 @@ begin
           Item.SubItems.Add(Issue.ComponentName + ': ' + Issue.ComponentType);
           Item.SubItems.Add(Issue.EventName);
           Item.SubItems.Add(Issue.HandlerName);
-          if Issue.Kind = eikSignatureMismatch then
+          if Issue.AliasOnly then
+            Item.SubItems.Add('same type: ' + Issue.AliasNote + ' - expected ' +
+              Issue.Expected + ', found ' + Issue.Actual)
+          else if Issue.Kind = eikSignatureMismatch then
             Item.SubItems.Add('expected ' + Issue.Expected + ', found ' + Issue.Actual)
           else if Issue.ExpectedRawParams <> '' then
             Item.SubItems.Add('crashes with "Method not found" at form load - ' +
@@ -543,18 +560,25 @@ begin
     Top := R.Top + (R.Bottom - R.Top - Cv.TextHeight('Wg')) div 2;
 
     // Fold integer aliases while "Ignore Integer/LongInt differences" is on.
+    // An alias-only row has no differing TYPE at all - nothing in bold; the
+    // names that differ come FIRST, where a long signature cannot cut
+    // them off.
     Fold := FChkAliasDiff.Checked;
+    if Issue.AliasOnly then
+      DrawSeg(Cv, X, Top, 'same type: ' + Issue.AliasNote + '  -  ', False);
     DrawSeg(Cv, X, Top, 'expected (', False);
     for I := 0 to High(Exp) do
     begin
-      Diff := (I > High(Act)) or not TypesMatch(Exp[I], Act[I], Fold);
+      Diff := not Issue.AliasOnly
+        and ((I > High(Act)) or not TypesMatch(Exp[I], Act[I], Fold));
       DrawSeg(Cv, X, Top, Exp[I], Diff);
       if I < High(Exp) then DrawSeg(Cv, X, Top, '; ', False);
     end;
     DrawSeg(Cv, X, Top, '), found (', False);
     for I := 0 to High(Act) do
     begin
-      Diff := (I > High(Exp)) or not TypesMatch(Exp[I], Act[I], Fold);
+      Diff := not Issue.AliasOnly
+        and ((I > High(Exp)) or not TypesMatch(Exp[I], Act[I], Fold));
       DrawSeg(Cv, X, Top, Act[I], Diff);
       if I < High(Act) then DrawSeg(Cv, X, Top, '; ', False);
     end;

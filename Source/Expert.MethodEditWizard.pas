@@ -122,7 +122,7 @@ uses
   Expert.AutoImport, Expert.ImplementationFinder, Expert.ReferenceKind,
   Expert.SafeDeletePlan, Expert.DiagStore, Expert.DialogHelper, Expert.IdeThemes,
   Expert.WorkerLatch, Expert.ListViewSort, Expert.McpServer, Expert.McpTools,
-  Expert.UsesEditor, Delphi.FileEncoding;
+  Expert.UsesEditor, Expert.FindReferencesDialog, Delphi.FileEncoding;
 
 const
   MaxCalls = 800;
@@ -283,58 +283,6 @@ begin
     Result := True;
   except
     Result := False;
-  end;
-end;
-
-// Every whole-word occurrence of ANAMES in AMASKED - one pass over the file
-// for all of them, which is what makes a class with thirty methods
-// affordable. AOut[i] belongs to ANames[AWhich[i]].
-procedure CollectNameHits(const AMasked: TArray<string>;
-  const ANames: TArray<string>; out AOut: TArray<TPoint>;
-  out AWhich: TArray<Integer>);
-var
-  Hits: TList<TPoint>;
-  Which: TList<Integer>;
-  L, P, N: Integer;
-  Line, Up: string;
-  Ups: TArray<string>;
-begin
-  AOut := nil;
-  AWhich := nil;
-  if Length(ANames) = 0 then Exit;
-  SetLength(Ups, Length(ANames));
-  for N := 0 to High(ANames) do Ups[N] := UpperCase(ANames[N]);
-  Hits := TList<TPoint>.Create;
-  Which := TList<Integer>.Create;
-  try
-    for L := 0 to High(AMasked) do
-    begin
-      Line := AMasked[L];
-      if Line = '' then Continue;
-      Up := UpperCase(Line);
-      for N := 0 to High(Ups) do
-      begin
-        P := 1;
-        while True do
-        begin
-          P := PosEx(Ups[N], Up, P);
-          if P = 0 then Break;
-          if ((P = 1) or not IsIdentChar(Line[P - 1])) and
-             ((P + Length(Ups[N]) > Length(Line)) or
-              not IsIdentChar(Line[P + Length(Ups[N])])) then
-          begin
-            Hits.Add(Point(P - 1, L));
-            Which.Add(N);
-          end;
-          Inc(P, Length(Ups[N]));
-        end;
-      end;
-    end;
-    AOut := Hits.ToArray;
-    AWhich := Which.ToArray;
-  finally
-    Which.Free;
-    Hits.Free;
   end;
 end;
 
@@ -696,6 +644,10 @@ type
     procedure DoApply(Sender: TObject);
   public
     Applied: Boolean;
+    /// <summary>What was applied, and which members really moved - the
+    ///  caller needs both to list the occurrences afterwards.</summary>
+    AppliedRequest: TMethodEditRequest;
+    AppliedMembers: TArray<string>;
     constructor CreateDialog(AOwner: TComponent; const AAn: TMethodEditAnalysis);
   end;
 
@@ -1326,7 +1278,108 @@ begin
     Exit;
   end;
   Applied := True;
+  AppliedRequest := FReq;
+  AppliedMembers := FRes.Moved;
+  if Length(AppliedMembers) = 0 then AppliedMembers := FReq.Members;
   ModalResult := mrOk;
+end;
+
+// After a successful edit: the occurrences of the members that moved, in a
+// NON-MODAL navigation window - the list the user now has to work through,
+// while the dialog that showed it before the apply is gone (user,
+// 2026-10-04: "man muesste danach noch einen nicht-modalen Dialog haben, der
+// die Referenzen auf die alte Position zum Durchklicken anzeigt, damit man
+// diese anpassen kann").
+// THE POSITIONS ARE RE-READ, which is the whole point: the move shifted the
+// lines of both edited units, so the rows the dialog listed before it would
+// send the user to the wrong code.
+procedure ShowMovedMemberReferences(const AAn: TMethodEditAnalysis;
+  const AReq: TMethodEditRequest; const AMembers: TArray<string>);
+var
+  Files, Names: TArray<string>;
+  Items: TFindReferenceItems;
+  TargetContent: string;
+
+  procedure AddFile(const AFile: string);
+  begin
+    if AFile = '' then Exit;
+    for var F in Files do
+      if SameText(ExpandFileName(F), ExpandFileName(AFile)) then Exit;
+    Files := Files + [AFile];
+  end;
+
+begin
+  Names := AMembers;
+  if (Length(Names) = 0) or (Editor = nil) then Exit;
+
+  // The files that HAD an occurrence, plus the two the move touched - a
+  // member can be called in its new unit as well.
+  Files := nil;
+  AddFile(AAn.SourceFile);
+  AddFile(AReq.TargetFile);
+  for var C in AAn.Calls do
+    for var N in Names do
+      if SameText(C.Member, N) then
+      begin
+        AddFile(C.FilePath);
+        Break;
+      end;
+
+  TargetContent := '';
+  if AReq.TargetFile <> '' then TargetContent := ReadUnitForEdit(AReq.TargetFile);
+  if TargetContent = '' then TargetContent := ReadUnitForEdit(AAn.SourceFile);
+
+  // The contents as they are NOW - the edit shifted the lines of the two
+  // units it touched, so the rows the dialog listed before it would send the
+  // user to the wrong code. Reading is main-thread work, the rule itself is
+  // pure (CollectPostEditRefs, tested).
+  var Contents: TArray<string> := nil;
+  for var F in Files do Contents := Contents + [ReadUnitForEdit(F)];
+  var Total: Integer;
+  var Capped: Boolean;
+  var Refs := CollectPostEditRefs(Files, Contents, Names, AReq.TargetFile,
+    AReq.TargetClass, TargetContent, MaxCallsPerMember, MaxCalls, Total, Capped);
+
+  for var R in Refs do
+  begin
+    var It := Default(TFindReferenceItem);
+    It.FilePath := R.FilePath;
+    It.Line := R.Line;
+    It.Col := R.Col;
+    It.Length := Length(R.Member);
+    It.Kind := R.Kind;
+    It.Relation := R.Member;
+    It.Note := 'text match, not verified by DelphiLSP';
+    It.Preview := R.Text;
+    Items := Items + [It];
+  end;
+
+  var Caption := string.Join(', ', Names);
+  // "the move" only when there was one - the same dialog also changes just a
+  // signature or a modifier, and then the call sites need the same look.
+  var What := 'edit';
+  if AReq.TargetClass <> '' then What := 'move to ' + AReq.TargetClass;
+  var Dlg := TFindReferencesDialog.CreateDialog(Application.MainForm, Caption,
+    'After the ' + IfThen(AReq.TargetClass <> '', 'move', 'edit'));
+  PrepareDialog(Dlg, Application.MainForm);
+  Dlg.SetItems(Items);
+  if Total = 0 then
+    Dlg.SetStatus(Format('%s: %s done. No other occurrence of the name(s) ' +
+      'was found - there is nothing to adjust.', [Caption, What]))
+  else
+    Dlg.SetStatus(Format('%s: %d occurrence(s) left to look at after the %s%s' +
+      ' - double-click to go there. These are TEXT matches, not verified by ' +
+      'DelphiLSP, and the %s changed none of them; nothing in this window ' +
+      'changes code either.',
+      [Caption, Total, What,
+       IfThen(Capped, Format(', %d listed', [Length(Items)]), ''), What]));
+  Dlg.OnGotoLocation :=
+    procedure(AItem: TFindReferenceItem)
+    begin
+      Editor.GotoLocation(AItem.FilePath, AItem.Line, AItem.Col, AItem.Length);
+    end;
+  Dlg.SetClosable;
+  Dlg.Show;
 end;
 
 // ---------------------------------------------------------------------------
@@ -1502,11 +1555,22 @@ begin
     Exit;
   end;
   var Dlg := TMethodEditDialog.CreateDialog(Application.MainForm, Job.Res);
+  var Applied: Boolean;
+  var AppliedReq: TMethodEditRequest;
+  var AppliedMembers: TArray<string>;
   try
     Dlg.ShowModal;
+    Applied := Dlg.Applied;
+    AppliedReq := Dlg.AppliedRequest;
+    AppliedMembers := Dlg.AppliedMembers;
   finally
     Dlg.Free;
   end;
+  // The modal dialog is gone, so the list it showed is gone with it - and
+  // that list is what still needs hand work. Opened AFTER the free, because
+  // the window is non-modal and outlives this call.
+  if Applied then
+    ShowMovedMemberReferences(Job.Res, AppliedReq, AppliedMembers);
 end;
 
 // ---------------------------------------------------------------------------

@@ -134,6 +134,40 @@ function MembersInLineRange(const ALines: TArray<string>;
 function JoinPlannedLines(const ALines: TArray<string>;
   const AOldContent: string): string;
 
+/// <summary>Every whole-word occurrence of ANAMES in AMASKED (the masked
+///  lines of one file) - ONE pass for all of them, which is what makes a
+///  class with thirty methods affordable. AOut[i] belongs to
+///  ANames[AWhich[i]]; X is the 0-based column, Y the 0-based line.</summary>
+procedure CollectNameHits(const AMasked: TArray<string>;
+  const ANames: TArray<string>; out AOut: TArray<TPoint>;
+  out AWhich: TArray<Integer>);
+
+type
+  /// <summary>One occurrence a user still has to look at after an edit.</summary>
+  TPostEditRef = record
+    FilePath: string;
+    Line: Integer;      // 0-based
+    Col: Integer;       // 0-based
+    Member: string;
+    Kind: string;       // from Expert.ReferenceKind: Call / Write / ...
+    Text: string;       // the source line, trimmed
+  end;
+
+/// <summary>What still needs hand work after "Edit methods" wrote: every
+///  code occurrence of AMEMBERS in the files AFILES (AContents[i] is the
+///  text of AFiles[i], as it is NOW - the edit shifted the lines of the two
+///  units it touched), EXCEPT the declaration and the implementation header
+///  in the TARGET, which are the edit's own result and nothing to adjust.
+///  Sorted by file and line, the order someone works through them in. The
+///  budget is the dialog's: at most AMaxPerMember rows per member and
+///  AMaxTotal in all, and ATotal says how many there really are - a window
+///  that silently renames "found" into "listed" is the answer this project
+///  does not give.</summary>
+function CollectPostEditRefs(const AFiles, AContents, AMembers: TArray<string>;
+  const ATargetFile, ATargetClass, ATargetContent: string;
+  AMaxPerMember, AMaxTotal: Integer; out ATotal: Integer;
+  out ACapped: Boolean): TArray<TPostEditRef>;
+
 /// <summary>Moves AMembers of AOwnerType into ATargetClass of the target
 ///  unit: declarations into ASection, bodies to the end of the target's
 ///  implementation, their headers requalified. Both files come back
@@ -188,11 +222,159 @@ function ApplySignatureInClass(const ALines: TArray<string>;
 implementation
 
 uses
-  System.Classes, System.StrUtils, System.Math,
+  System.Classes, System.StrUtils, System.Math, System.Generics.Collections,
+  Expert.ReferenceKind,
   Expert.PascalScanner, Expert.UnitIndex, Expert.AutoImport,
   Expert.SafeDeletePlan, Expert.SignatureCheck, Expert.UsesEditor;
 
 { ---- Edit methods: a member moves into another class ---------------------- }
+
+// Every whole-word occurrence of ANAMES in AMASKED - one pass over the file
+// for all of them, which is what makes a class with thirty methods
+// affordable. AOut[i] belongs to ANames[AWhich[i]].
+procedure CollectNameHits(const AMasked: TArray<string>;
+  const ANames: TArray<string>; out AOut: TArray<TPoint>;
+  out AWhich: TArray<Integer>);
+var
+  Hits: TList<TPoint>;
+  Which: TList<Integer>;
+  L, P, N: Integer;
+  Line, Up: string;
+  Ups: TArray<string>;
+begin
+  AOut := nil;
+  AWhich := nil;
+  if Length(ANames) = 0 then Exit;
+  SetLength(Ups, Length(ANames));
+  for N := 0 to High(ANames) do Ups[N] := UpperCase(ANames[N]);
+  Hits := TList<TPoint>.Create;
+  Which := TList<Integer>.Create;
+  try
+    for L := 0 to High(AMasked) do
+    begin
+      Line := AMasked[L];
+      if Line = '' then Continue;
+      Up := UpperCase(Line);
+      for N := 0 to High(Ups) do
+      begin
+        P := 1;
+        while True do
+        begin
+          P := PosEx(Ups[N], Up, P);
+          if P = 0 then Break;
+          if ((P = 1) or not IsIdentChar(Line[P - 1])) and
+             ((P + Length(Ups[N]) > Length(Line)) or
+              not IsIdentChar(Line[P + Length(Ups[N])])) then
+          begin
+            Hits.Add(Point(P - 1, L));
+            Which.Add(N);
+          end;
+          Inc(P, Length(Ups[N]));
+        end;
+      end;
+    end;
+    AOut := Hits.ToArray;
+    AWhich := Which.ToArray;
+  finally
+    Which.Free;
+    Hits.Free;
+  end;
+end;
+
+function CollectPostEditRefs(const AFiles, AContents, AMembers: TArray<string>;
+  const ATargetFile, ATargetClass, ATargetContent: string;
+  AMaxPerMember, AMaxTotal: Integer; out ATotal: Integer;
+  out ACapped: Boolean): TArray<TPostEditRef>;
+var
+  Found, Kept: TArray<Integer>;
+  TargetLines: TArray<string>;
+begin
+  Result := nil;
+  ATotal := 0;
+  ACapped := False;
+  if (Length(AMembers) = 0) or (Length(AFiles) = 0) then Exit;
+  SetLength(Found, Length(AMembers));
+  SetLength(Kept, Length(AMembers));
+  TargetLines := SplitContentLines(ATargetContent);
+
+  for var FI := 0 to High(AFiles) do
+  begin
+    if FI > High(AContents) then Break;
+    if AContents[FI] = '' then Continue;
+    var FLines := SplitContentLines(AContents[FI]);
+    var Masked := MaskCommentsAndStrings(FLines);
+    var Hits: TArray<TPoint>;
+    var Which: TArray<Integer>;
+    CollectNameHits(Masked, AMembers, Hits, Which);
+    if Length(Hits) = 0 then Continue;
+    var IsTarget := (ATargetFile <> '') and
+      SameText(ExpandFileName(AFiles[FI]), ExpandFileName(ATargetFile));
+    // One classification pass per NAME, so the kinds belong to the symbol
+    // whose declaration decided them.
+    for var N := 0 to High(AMembers) do
+    begin
+      var Pos0: TArray<TPoint> := nil;
+      for var H := 0 to High(Hits) do
+        if Which[H] = N then Pos0 := Pos0 + [Hits[H]];
+      if Length(Pos0) = 0 then Continue;
+      // The symbol's kind comes from where the member lives NOW.
+      var SK := rsUnknown;
+      if ATargetClass <> '' then
+      begin
+        var DL := FindMemberDeclarationLine(ATargetContent, ATargetClass,
+          AMembers[N]);
+        if (DL >= 0) and (DL <= High(TargetLines)) then
+          SK := SymbolKindFromDeclLine(TargetLines[DL], AMembers[N]);
+      end;
+      var RK := ClassifyReferences(AContents[FI], Pos0, Length(AMembers[N]), SK);
+      for var H := 0 to High(Pos0) do
+      begin
+        var KindText := 'use';
+        if H <= High(RK) then KindText := RefKindText(RK[H]);
+        // The new declaration and the new body are the edit's own result.
+        if IsTarget and (SameText(KindText, 'Declaration') or
+           SameText(KindText, 'Implementation')) then
+          Continue;
+        Inc(Found[N]);
+        Inc(ATotal);
+        if ((AMaxTotal > 0) and (Length(Result) >= AMaxTotal)) or
+           ((AMaxPerMember > 0) and (Kept[N] >= AMaxPerMember)) then
+        begin
+          ACapped := True;
+          Continue;
+        end;
+        Inc(Kept[N]);
+        var R := Default(TPostEditRef);
+        R.FilePath := AFiles[FI];
+        R.Line := Pos0[H].Y;
+        R.Col := Pos0[H].X;
+        R.Member := AMembers[N];
+        R.Kind := KindText;
+        if Pos0[H].Y <= High(FLines) then R.Text := Trim(FLines[Pos0[H].Y]);
+        Result := Result + [R];
+      end;
+    end;
+  end;
+
+  // By file, then by line - the order someone works through them in. An
+  // insertion sort: this is a handful of members' occurrences, bounded by
+  // the budget above.
+  for var I := 1 to High(Result) do
+  begin
+    var Cur := Result[I];
+    var J := I - 1;
+    while J >= 0 do
+    begin
+      var Cmp := CompareText(Result[J].FilePath, Cur.FilePath);
+      if Cmp = 0 then Cmp := Result[J].Line - Cur.Line;
+      if Cmp = 0 then Cmp := Result[J].Col - Cur.Col;
+      if Cmp <= 0 then Break;
+      Result[J + 1] := Result[J];
+      Dec(J);
+    end;
+    Result[J + 1] := Cur;
+  end;
+end;
 
 function JoinPlannedLines(const ALines: TArray<string>;
   const AOldContent: string): string;

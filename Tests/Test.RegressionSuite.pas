@@ -563,6 +563,13 @@ type
     ///  assigned to TStringList.Text - adding them one by one lets the
     ///  list's own break turn that element into a new line.</summary>
     [Test] procedure AnUnchangedPlanIsByteIdentical;
+    /// <summary>User, 2026-10-04: after the apply the dialog closes and its
+    ///  occurrence list goes with it - "man muesste danach noch einen
+    ///  nicht-modalen Dialog haben, der die Referenzen auf die alte Position
+    ///  zum Durchklicken anzeigt". What that window may show is this rule:
+    ///  every occurrence EXCEPT the edit's own result, with an honest total.
+    /// </summary>
+    [Test] procedure WhatStillNeedsHandWorkAfterTheEdit;
     /// <summary>A preview must not report a line as changed that did not
     ///  change. Found live: the first edit_method call answered 45 changed
     ///  lines for a move that touches eight, with pairs like
@@ -4339,6 +4346,74 @@ begin
   finally
     SL.Free;
   end;
+end;
+
+procedure TMethodEditTests.WhatStillNeedsHandWorkAfterTheEdit;
+var
+  Plan: TMethodMovePlan;
+  Refs: TArray<TPostEditRef>;
+  Total: Integer;
+  Capped: Boolean;
+
+  function KindOf(const AFile: string; ALine: Integer): string;
+  begin
+    Result := '';
+    for var R in Refs do
+      if SameText(R.FilePath, AFile) and (R.Line = ALine) then Exit(R.Kind);
+  end;
+
+begin
+  Plan := PlanMethodMove(SourceUnit, TargetUnit, 'TOld', ['FormatRow'],
+    'TNew', 'private');
+  Assert.IsTrue(Plan.Ok, 'the move is planned: ' + Plan.Error);
+  var TgtText := string.Join(NL, Plan.TargetLines);
+
+  // A third unit that CALLS the moved member - the rows that matter.
+  var CallerText := string.Join(NL, [
+    'unit Caller;',                               // 0
+    'interface',
+    'implementation',
+    'uses New;',
+    'procedure Go(O: TNew);',                     // 4
+    'begin',
+    '  WriteLn(O.FormatRow(''a''));',             // 6
+    '  WriteLn(O.FormatRow(''b''));',             // 7
+    'end;',
+    'end.']);
+
+  Refs := CollectPostEditRefs(['C:\p\New.pas', 'C:\p\Caller.pas'],
+    [TgtText, CallerText], ['FormatRow'],
+    'C:\p\New.pas', 'TNew', TgtText, 0, 0, Total, Capped);
+
+  // The new declaration and the new body are the edit's own result.
+  for var R in Refs do
+    Assert.IsFalse(SameText(R.FilePath, 'C:\p\New.pas'),
+      'the target''s own declaration and body are not rows, but ' +
+      R.Kind + ' was listed');
+
+  Assert.AreEqual(2, Total, 'the two calls in the third unit');
+  Assert.AreEqual(2, Integer(Length(Refs)), 'and both are listed');
+  Assert.IsFalse(Capped, 'nothing was capped');
+  Assert.AreEqual('Call', KindOf('C:\p\Caller.pas', 6), 'a call is a call');
+  Assert.AreEqual('FormatRow', Refs[0].Member, 'the row names its member');
+  Assert.AreEqual('WriteLn(O.FormatRow(''a''));', Refs[0].Text,
+    'and carries the line to look at');
+
+  // Sorted by file and line - the order someone works through them in.
+  for var I := 1 to High(Refs) do
+    Assert.IsTrue((CompareText(Refs[I - 1].FilePath, Refs[I].FilePath) < 0) or
+      ((SameText(Refs[I - 1].FilePath, Refs[I].FilePath)) and
+       (Refs[I - 1].Line <= Refs[I].Line)), 'rows are sorted');
+
+  // THE BUDGET, and the honest total beside it: a member called Create
+  // occurs 1685 times in this repository, which is no window content - but
+  // "2 found, 1 listed" must not read as "1 found".
+  Refs := CollectPostEditRefs(['C:\p\New.pas', 'C:\p\Caller.pas'],
+    [TgtText, CallerText], ['FormatRow'],
+    'C:\p\New.pas', 'TNew', TgtText, 1, 0, Total, Capped);
+  Assert.AreEqual(1, Integer(Length(Refs)), 'one row per member at most');
+  Assert.AreEqual(2, Total, 'while the total still says what there is');
+  Assert.IsTrue(Capped, 'and it says that it capped');
 end;
 
 procedure TMethodEditTests.TheToolDeclaresWhatItTakes;

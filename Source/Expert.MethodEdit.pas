@@ -123,6 +123,17 @@ function MembersInLineRange(const ALines: TArray<string>;
   const AMembers: TArray<TClassMemberInfo>; const AOwnerType: string;
   AFrom, ATo: Integer): TArray<string>;
 
+/// <summary>The TEXT of a planned file: ALINES joined with the line break
+///  AOLDCONTENT uses. This is the exact inverse of SplitContentLines, which
+///  keeps a file's final break as a TRAILING EMPTY ELEMENT - so an unchanged
+///  plan comes back byte for byte. The result must be assigned to
+///  TStringList.Text (whose setter drops that element again) and never added
+///  element by element: TStringList.Text appends a break of its own, so the
+///  trailing element turned into a new blank line and every apply grew both
+///  units by one (reported by the user after a five-member move).</summary>
+function JoinPlannedLines(const ALines: TArray<string>;
+  const AOldContent: string): string;
+
 /// <summary>Moves AMembers of AOwnerType into ATargetClass of the target
 ///  unit: declarations into ASection, bodies to the end of the target's
 ///  implementation, their headers requalified. Both files come back
@@ -182,6 +193,17 @@ uses
   Expert.SafeDeletePlan, Expert.SignatureCheck, Expert.UsesEditor;
 
 { ---- Edit methods: a member moves into another class ---------------------- }
+
+function JoinPlannedLines(const ALines: TArray<string>;
+  const AOldContent: string): string;
+var
+  LB: string;
+begin
+  if Pos(#13#10, AOldContent) > 0 then LB := #13#10
+  else if Pos(#10, AOldContent) > 0 then LB := #10
+  else LB := sLineBreak;
+  Result := string.Join(LB, ALines);
+end;
 
 function MembersInLineRange(const ALines: TArray<string>;
   const AMembers: TArray<TClassMemberInfo>; const AOwnerType: string;
@@ -774,12 +796,23 @@ begin
       Continue;
     end;
     for L := DF to DL do Decls := Decls + [Trim(ASourceLines[L])];
-    if Length(BodyBlock) > 0 then BodyBlock := BodyBlock + [''];
+    // ONE blank line between the bodies. The body's delete range INCLUDES
+    // the blank line that follows it (safe delete takes it so the source
+    // does not keep a double blank), so a copied block already ends with
+    // one - adding a separator on top of that is what gave the user TWO
+    // blank lines between five moved methods. So: trim what the range
+    // brought and put exactly one blank between blocks; the blank the
+    // insertion point needs is added there.
+    var Blk: TArray<string> := nil;
     for L := IF_ to IL do
       if L = IF_ then
-        BodyBlock := BodyBlock + [RequalifyHeader(ASourceLines[L], AOwnerType, ATargetClass)]
+        Blk := Blk + [RequalifyHeader(ASourceLines[L], AOwnerType, ATargetClass)]
       else
-        BodyBlock := BodyBlock + [ASourceLines[L]];
+        Blk := Blk + [ASourceLines[L]];
+    while (Length(Blk) > 0) and (Trim(Blk[High(Blk)]) = '') do
+      SetLength(Blk, Length(Blk) - 1);
+    if Length(BodyBlock) > 0 then BodyBlock := BodyBlock + [''];
+    BodyBlock := BodyBlock + Blk;
     // WHAT STAYS BEHIND - the honest half of this feature.
     Own := OwnMembersUsedBy(ASourceLines, IF_, IL, AOwnerType);
     if Length(Own) > 0 then
@@ -837,6 +870,12 @@ begin
     Plan.Error := 'the target class body could not be delimited';
     Exit(Plan);
   end;
+  // The insertion point is the line of the final 'end.' (or of whatever
+  // follows the implementation), so the last body needs a blank line under
+  // it - the per-member loop above deliberately trimmed the one the delete
+  // range brought along.
+  if (Length(BodyBlock) > 0) and (Trim(BodyBlock[High(BodyBlock)]) <> '') then
+    BodyBlock := BodyBlock + [''];
   // One blank line separates the new body from the one above - but only
   // when there is not already one there, or every move leaves a double
   // blank behind (seen in the first live apply).

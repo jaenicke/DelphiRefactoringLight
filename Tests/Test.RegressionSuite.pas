@@ -552,6 +552,17 @@ type
     ///  members the dialog ticks - the declarations it covers, and the
     ///  bodies, because either is what a user marks.</summary>
     [Test] procedure ASelectionNamesEveryMemberItCovers;
+    /// <summary>User, 2026-10-03, after moving five methods into another
+    ///  unit: "Im Ziel sind ploetzlich zwei Zeilen zwischen den Methoden."
+    ///  A body's delete range already carries the blank line that followed
+    ///  it, so the separator was added on top of one that was there.</summary>
+    [Test] procedure MovedBodiesAreSeparatedByExactlyOneBlankLine;
+    /// <summary>Same report, second half: BOTH units had grown a blank line
+    ///  at the END. SplitContentLines keeps the final break as a trailing
+    ///  empty element, so the lines of a planned file must be joined and
+    ///  assigned to TStringList.Text - adding them one by one lets the
+    ///  list's own break turn that element into a new line.</summary>
+    [Test] procedure AnUnchangedPlanIsByteIdentical;
     /// <summary>A preview must not report a line as changed that did not
     ///  change. Found live: the first edit_method call answered 45 changed
     ///  lines for a move that touches eight, with pairs like
@@ -4211,6 +4222,123 @@ begin
   Assert.AreEqual('',
     string.Join(',', MembersInLineRange(S, ClassMembersOf(S, 'TOne'), 'TOne', 13, 15)),
     'the same-named member of the SIBLING class is not ours');
+end;
+
+procedure TMethodEditTests.MovedBodiesAreSeparatedByExactlyOneBlankLine;
+var
+  Plan: TMethodMovePlan;
+
+  // The blank lines between ALINES[AFrom] and the next non-blank line.
+  function BlanksAfter(const ALines: TArray<string>; AFrom: Integer): Integer;
+  begin
+    Result := 0;
+    var I := AFrom + 1;
+    while (I <= High(ALines)) and (Trim(ALines[I]) = '') do
+    begin
+      Inc(Result);
+      Inc(I);
+    end;
+  end;
+
+  function LineOf(const ALines: TArray<string>; const AText: string): Integer;
+  begin
+    for var I := 0 to High(ALines) do
+      if ContainsText(ALines[I], AText) then Exit(I);
+    Result := -1;
+  end;
+
+begin
+  // TWO members at once - the reported case needs more than one body.
+  Plan := PlanMethodMove(SourceUnit, TargetUnit, 'TOld', ['Recalc', 'FormatRow'],
+    'TNew', 'private');
+  Assert.IsTrue(Plan.Ok, 'the move is planned: ' + Plan.Error);
+
+  var Tgt := Plan.TargetLines;
+  var First := LineOf(Tgt, 'TNew.Recalc');
+  var Second := LineOf(Tgt, 'TNew.FormatRow');
+  Assert.IsTrue(First >= 0, 'the first body arrived');
+  Assert.IsTrue(Second >= 0, 'the second body arrived');
+
+  // Between the END of the first body and the second header: exactly one.
+  var EndOfFirst := -1;
+  for var I := First to Second do
+    if SameText(Trim(Tgt[I]), 'end;') then EndOfFirst := I;
+  Assert.IsTrue(EndOfFirst >= 0, 'the first body ends before the second');
+  Assert.AreEqual(1, BlanksAfter(Tgt, EndOfFirst),
+    'exactly ONE blank line between two moved bodies');
+
+  // And one under the last body, so the final "end." does not sit on it.
+  var Final := LineOf(Tgt, 'end.');
+  Assert.IsTrue(Final > Second, 'the unit still ends after the bodies');
+  var EndOfLast := -1;
+  for var I := Second to Final do
+    if SameText(Trim(Tgt[I]), 'end;') then EndOfLast := I;
+  Assert.AreEqual(1, BlanksAfter(Tgt, EndOfLast),
+    'one blank line between the last moved body and what follows');
+
+  // No double blank anywhere in either file - the shape the user saw.
+  Assert.IsFalse(ContainsText(string.Join(NL, Tgt), NL + NL + NL),
+    'no double blank line in the target');
+  Assert.IsFalse(ContainsText(string.Join(NL, Plan.SourceLines), NL + NL + NL),
+    'and none left behind in the source');
+end;
+
+procedure TMethodEditTests.AnUnchangedPlanIsByteIdentical;
+var
+  SL: TStringList;
+
+  procedure RoundTrip(const AContent, AWhat: string);
+  begin
+    var L := SplitContentLines(AContent);
+    Assert.AreEqual(AContent, JoinPlannedLines(L, AContent),
+      'split and join are inverse: ' + AWhat);
+    // ...and the way the apply hands those lines to ApplyLinesMinimal must
+    // not add a line of its own.
+    SL.Text := JoinPlannedLines(L, AContent);
+    var ViaAdd := TStringList.Create;
+    try
+      for var S in L do ViaAdd.Add(S);
+      Assert.AreEqual(SL.Count + 1, ViaAdd.Count,
+        'adding the elements one by one is what produced the extra line: ' + AWhat);
+    finally
+      ViaAdd.Free;
+    end;
+  end;
+
+begin
+  SL := TStringList.Create;
+  try
+    RoundTrip('unit U;' + #13#10 + 'implementation' + #13#10 + 'end.' + #13#10,
+      'CRLF with a final break');
+    RoundTrip('unit U;'#10'implementation'#10'end.'#10, 'LF only');
+    // No final break: there is no trailing element, so nothing can grow -
+    // the join must still return the text unchanged.
+    var NoBreak := 'unit U;' + #13#10 + 'end.';
+    Assert.AreEqual(NoBreak,
+      JoinPlannedLines(SplitContentLines(NoBreak), NoBreak),
+      'a file without a final break keeps it that way');
+
+    // The real plan, in the shape the apply has it: the lines come from
+    // SplitContentLines, so they carry the file's final break as their
+    // trailing empty element - and moving a member must not change that.
+    var SrcText := string.Join(#13#10, SourceUnit) + #13#10;
+    var TgtText := string.Join(#13#10, TargetUnit) + #13#10;
+    var Plan := PlanMethodMove(SplitContentLines(SrcText),
+      SplitContentLines(TgtText), 'TOld', ['FormatRow'], 'TNew', 'private');
+    Assert.IsTrue(Plan.Ok, 'the move is planned: ' + Plan.Error);
+    var Written := JoinPlannedLines(Plan.SourceLines, SrcText);
+    Assert.IsTrue(Written.EndsWith('end.' + #13#10),
+      'the source still ends with exactly one break after "end."');
+    Assert.IsFalse(Written.EndsWith('end.' + #13#10 + #13#10),
+      'and not with a blank line the move added');
+    var TgtWritten := JoinPlannedLines(Plan.TargetLines, TgtText);
+    Assert.IsTrue(TgtWritten.EndsWith('end.' + #13#10),
+      'and so does the target');
+    Assert.IsFalse(TgtWritten.EndsWith('end.' + #13#10 + #13#10),
+      'the target grew no blank line either - both files did');
+  finally
+    SL.Free;
+  end;
 end;
 
 procedure TMethodEditTests.TheToolDeclaresWhatItTakes;

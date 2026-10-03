@@ -556,6 +556,18 @@ begin
     end;
 end;
 
+// The lines of a planned file in the shape ApplyLinesMinimal wants. The rule
+// itself is JoinPlannedLines (pure, tested): assigning .Text drops the
+// trailing empty element SplitContentLines keeps for the file's final break,
+// while adding the elements one by one grew both units by a blank line on
+// every apply. Same shape as LinesResult / ContentResult in
+// Expert.McpMoreTools.
+procedure FillPlannedLines(ASL: TStringList; const ALines: TArray<string>;
+  const AOldContent: string);
+begin
+  ASL.Text := JoinPlannedLines(ALines, AOldContent);
+end;
+
 function ApplyMethodEdit(const A: TMethodEditAnalysis;
   const AReq: TMethodEditRequest; out AError: string): Boolean;
 var
@@ -607,8 +619,7 @@ begin
     // leave it nowhere.
     if (Res.TargetFile <> '') and (Length(Res.TargetLines) > 0) then
     begin
-      SL.Clear;
-      for var L in Res.TargetLines do SL.Add(L);
+      FillPlannedLines(SL, Res.TargetLines, TgtContent);
       if not ApplyLinesMinimal(Res.TargetFile, SL, TgtContent) then
       begin
         AError := 'nothing was written: ' + ExtractFileName(Res.TargetFile) +
@@ -616,8 +627,7 @@ begin
         Exit(False);
       end;
     end;
-    SL.Clear;
-    for var L in Res.SourceLines do SL.Add(L);
+    FillPlannedLines(SL, Res.SourceLines, Cur);
     if not ApplyLinesMinimal(A.SourceFile, SL, Cur) then
     begin
       AError := Format('%s was changed, but %s could not be written - the ' +

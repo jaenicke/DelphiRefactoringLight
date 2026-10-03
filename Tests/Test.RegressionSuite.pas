@@ -481,6 +481,11 @@ type
     [Test] procedure AMethodNameMustBeAnIdentifier;
     [Test] procedure TheExpressionIsMatchedAsCode;
     [Test] procedure LinesAreSplitOnEveryLineBreakStyle;
+    /// <summary>Forum 2026-10-03: the generated CALL must stand where the
+    ///  extracted code stood. The selection cannot say that - a drag that
+    ///  starts at the first statement carries no leading whitespace, and
+    ///  the call went in at column 1.</summary>
+    [Test] procedure TheCallKeepsTheCodesOwnIndentation;
   end;
 
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
@@ -554,7 +559,8 @@ uses
   Winapi.Windows, Mcp.PipeServer, Mcp.Protocol, Mcp.Bridge, System.JSON, Lsp.Protocol,
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
-  Expert.SemanticReplace, Expert.SelectionValidator, System.StrUtils;
+  Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
+  System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -3611,6 +3617,32 @@ begin
       Assert.AreEqual('', Iss.AliasNote);
     end;
   end;
+end;
+
+procedure TExtractAndCompletionTests.TheCallKeepsTheCodesOwnIndentation;
+var
+  Block: TArray<string>;
+begin
+  Block := ['    N := 0;', '    Inc(N);'];
+  // The two ways a user selects the same block must give the same call.
+  Assert.AreEqual('    ', CallIndentFor(Block, '    N := 0;'#10'    Inc(N);'#10),
+    'dragged from the left margin');
+  Assert.AreEqual('    ', CallIndentFor(Block, 'N := 0;'#10'    Inc(N);'#10),
+    'dragged from the first statement - the reported case');
+
+  // A tab stays a tab: re-indenting someone''s file is not our business.
+  Assert.AreEqual(#9#9, CallIndentFor([#9#9'DoIt;'], 'DoIt;'#10),
+    'tabs are kept verbatim');
+
+  // A blank line carries no indentation, so the first REAL line decides.
+  Assert.AreEqual('  ', CallIndentFor(['', '  DoIt;'], 'DoIt;'#10),
+    'a blank first line is skipped');
+
+  // Without file lines (the buffer could not be read) the old rule stands.
+  Assert.AreEqual('  ', CallIndentFor(nil, '  N := 0;'#10'    Inc(N);'#10),
+    'fallback: the smallest indentation of the selected text');
+  Assert.AreEqual('', CallIndentFor(nil, ''),
+    'nothing to go by at all');
 end;
 
 { TCheckScopeTests }

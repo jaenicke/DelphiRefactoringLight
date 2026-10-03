@@ -166,6 +166,18 @@ function CanReturnViaResult(const ABlockText, AIdent: string): Boolean;
 ///  section that loses every declaration loses its keyword line too.
 ///  Result: (1-based line, new text) in ascending order; #0 deletes the
 ///  line.</summary>
+/// <summary>The indentation the generated CALL gets - the leading
+///  whitespace of the FIRST non-blank line of the extracted block, read
+///  from the FILE and kept verbatim (a tab stays a tab). The call then
+///  stands exactly where the code stood, whatever columns the selection
+///  had: dragging from the left margin and dragging from the first
+///  statement must produce the same result (forum 2026-10-03 - a drag
+///  that starts at the statement carries no leading whitespace at all,
+///  and the call landed in column 1). ABlockLines empty or all blank ->
+///  the smallest indentation inside ASelectedText, the old behaviour.</summary>
+function CallIndentFor(const ABlockLines: TArray<string>;
+  const ASelectedText: string): string;
+
 function PlanLocalVarRemoval(const AFileLines: TArray<string>; AHeaderLine: Integer;
   const ANames: TArray<string>): TArray<TPair<Integer, string>>;
 
@@ -832,6 +844,41 @@ end;
 // whitespace before AStartCol and after AEndCol), else what stands
 // outside it. The apply works on whole lines, so anything else would be
 // lost (audit #39, M37a).
+// The leading blanks/tabs of a line, verbatim.
+function LeadingWhitespace(const S: string): string;
+var
+  C: Integer;
+begin
+  C := 0;
+  while (C < Length(S)) and CharInSet(S[C + 1], [' ', #9]) do Inc(C);
+  Result := Copy(S, 1, C);
+end;
+
+function CallIndentFor(const ABlockLines: TArray<string>;
+  const ASelectedText: string): string;
+var
+  MinI, C: Integer;
+begin
+  // THE FILE decides, not the selection: the call replaces whole lines, so
+  // it belongs where the code stood.
+  for var L in ABlockLines do
+    if Trim(L) <> '' then Exit(LeadingWhitespace(L));
+  // Only when the buffer could not be read: the smallest indentation INSIDE
+  // the selected text - exact for a drag that started at the left margin,
+  // and zero for one that started at the statement, which is what this
+  // function exists to stop.
+  MinI := MaxInt;
+  for var L in ASelectedText.Split([#10]) do
+  begin
+    var S := L.TrimRight([#13, #10]);
+    if Trim(S) = '' then Continue;
+    C := Length(LeadingWhitespace(S));
+    if C < MinI then MinI := C;
+  end;
+  if MinI = MaxInt then MinI := 0;
+  Result := StringOfChar(' ', MinI);
+end;
+
 function BoundaryCodeOutsideSelection(const AFile: string;
   AStartLine, AStartCol, AEndLine, AEndCol: Integer): string;
 var
@@ -883,13 +930,19 @@ begin
       'the last).', mtWarning, [mbOK], 0);
     Exit;
   end;
-  var Lines := AInfo.SelectedText.Split([#10]);
-  var MinI := MaxInt;
-  for var L in Lines do begin var S := L.TrimRight([#13,#10]); if Trim(S)='' then Continue;
-    var C := 0; while (C<Length(S)) and CharInSet(S[C+1],[' ',#9]) do Inc(C);
-    if C<MinI then MinI:=C; end;
-  if MinI=MaxInt then MinI:=0;
-  AInfo.Indent := StringOfChar(' ', MinI);
+  // THE CALL KEEPS THE CODE'S OWN INDENTATION (forum 2026-10-03). It is read
+  // from the FILE, because the SELECTION does not carry it: a drag that
+  // starts at the first statement begins after the leading blanks, and the
+  // call then went in at column 1.
+  var BlockLines: TArray<string> := nil;
+  var FileText := '';
+  if (Editor <> nil) and Editor.ReadEditorContent(AInfo.FileName, FileText) then
+  begin
+    var FL := FileText.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+    for var I := AInfo.StartLine to AInfo.EndLine do
+      if (I >= 1) and (I <= Length(FL)) then BlockLines := BlockLines + [FL[I - 1]];
+  end;
+  AInfo.Indent := CallIndentFor(BlockLines, AInfo.SelectedText);
   AInfo.MethodName := 'ExtractedMethod';
   Result := True;
 end;
@@ -1849,7 +1902,12 @@ begin
     Exit;
   end;
   Info.SelectedText := Sel;
-  Info.Indent := StringOfChar(' ', MinIndent);
+  // Whole lines here, so the file lines ARE the block - the call keeps the
+  // indentation the first of them has (forum 2026-10-03).
+  var BlockLines: TArray<string> := nil;
+  for var I := AFromLine1 - 1 to AToLine1 - 1 do
+    if (I >= 0) and (I < Length(Lines)) then BlockLines := BlockLines + [Lines[I]];
+  Info.Indent := CallIndentFor(BlockLines, Sel);
   W := TLspExtractMethodWizard.Create;
   try
     W.FDialog := nil;

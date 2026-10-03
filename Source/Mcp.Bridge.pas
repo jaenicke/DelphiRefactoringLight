@@ -184,7 +184,8 @@ begin
      (AName = 'interface_guids') or (AName = 'signature_check') or
      (AName = 'extract_interface') or (AName = 'extract_method') or
      (AName = 'add_iinterface') or (AName = 'get_quick_fixes') or
-     (AName = 'convert_properties') or (AName = 'expand_includes') then
+     (AName = 'convert_properties') or (AName = 'expand_includes') or
+     (AName = 'edit_method') then
     Exit(twLong);
 
   // Reads, single-buffer edits and single LSP requests - the IDE answers

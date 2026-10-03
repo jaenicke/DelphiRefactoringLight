@@ -520,6 +520,28 @@ type
     [Test] procedure AMethodMovesWithItsBodyAndIsRequalified;
     [Test] procedure AMemberThatCannotTravelAloneIsRefused;
     [Test] procedure ModifiersAreEditedOnTheDeclaration;
+    /// <summary>Both uses clauses have to follow a move, and the one
+    ///  direction that can close a circle (a moved DECLARATION naming a type
+    ///  of the old unit) is named instead of risked.</summary>
+    [Test] procedure TheUsesClausesFollowAndTheCircleIsNamed;
+    /// <summary>The ordinary case: the target class lives in the SAME unit.
+    ///  Two independent rewrites of one file would lose half the work, so the
+    ///  removal and the insertion happen in one text - and the insertion
+    ///  points have to be located again in the already shortened one.</summary>
+    [Test] procedure AClassInTheSameUnitIsOneRewrite;
+    /// <summary>A signature is changed at BOTH headers or at neither - a
+    ///  declaration whose implementation was not rewritten is a unit that
+    ///  does not compile. The modifiers reach every selected member.</summary>
+    [Test] procedure ASignatureChangeReachesBothHeaders;
+    /// <summary>The order the request is carried out in: the signature is
+    ///  rewritten BEFORE the move, so a member travels with the list it is
+    ///  supposed to have - and a request that asks for nothing says so
+    ///  instead of writing an unchanged file.</summary>
+    [Test] procedure TheRequestIsCarriedOutInOneOrder;
+    /// <summary>The MCP tool's own contract: it takes the arguments the
+    ///  dialog has, it offers apply, and it needs no preview token because
+    ///  every call re-runs its own analysis.</summary>
+    [Test] procedure TheToolDeclaresWhatItTakes;
   end;
 
   [TestFixture]
@@ -576,7 +598,7 @@ uses
   System.Win.Registry, Expert.PluginSettings, Expert.UsesGraph,
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
   Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
-  Expert.SignatureEdit, System.StrUtils;
+  Expert.SignatureEdit, Expert.MethodEdit, System.StrUtils;
 
 const
   NL = sLineBreak;
@@ -3836,6 +3858,309 @@ begin
   Assert.AreEqual('  FCount: Integer',
     ApplyModifiersToDecl('  FCount: Integer', ['virtual'], []),
     'a line without a ";" is left alone');
+end;
+
+procedure TMethodEditTests.TheUsesClausesFollowAndTheCircleIsNamed;
+var
+  Src, Tgt: TArray<string>;
+  Plan: TMethodMovePlan;
+  T, Note: string;
+begin
+  // The declaration names a type of the SOURCE unit, and the source keeps
+  // calling what moves - both uses clauses have to react.
+  Src := [
+    'unit Old;',
+    '',
+    'interface',
+    '',
+    'uses System.SysUtils;',
+    '',
+    'type',
+    '  TRowData = record',
+    '    Value: string;',
+    '  end;',
+    '',
+    '  TOld = class',
+    '  public',
+    '    function FormatRow(const ARow: TRowData): string;',
+    '    procedure Dump;',
+    '  end;',
+    '',
+    'implementation',
+    '',
+    'function TOld.FormatRow(const ARow: TRowData): string;',
+    'begin',
+    '  Result := ARow.Value;',
+    'end;',
+    '',
+    'procedure TOld.Dump;',
+    'begin',
+    '  Writeln(FormatRow(Default(TRowData)));',
+    'end;',
+    '',
+    'end.'];
+  Tgt := [
+    'unit New;',
+    '',
+    'interface',
+    '',
+    'uses System.Classes;',
+    '',
+    'type',
+    '  TNew = class',
+    '  public',
+    '    procedure Go;',
+    '  end;',
+    '',
+    'implementation',
+    '',
+    'procedure TNew.Go;',
+    'begin',
+    'end;',
+    '',
+    'end.'];
+
+  Plan := PlanMethodMove(Src, Tgt, 'TOld', ['FormatRow'], 'TNew', 'public');
+  Assert.IsTrue(Plan.Ok, 'planned: ' + Plan.Error);
+
+  // The target needs the source - and in the INTERFACE, because the moved
+  // DECLARATION names TRowData.
+  Assert.AreEqual('Old', Plan.TargetUsesAdded, 'the target gained the source unit');
+  Assert.IsTrue(Plan.TargetUsesInInterface, 'in its interface uses');
+  T := string.Join(NL, Plan.TargetLines);
+  Assert.IsTrue(Pos('Old', T) < Pos('implementation', T),
+    'the entry stands above the implementation keyword');
+
+  // ... and exactly that direction can close a circle, so it is said.
+  Note := '';
+  for var Iss in Plan.Issues do
+    if Iss.Kind = meiNote then Note := Iss.Text;
+  Assert.IsTrue(ContainsText(Note, 'circle'), 'the risk is named: ' + Note);
+
+  // The source still calls FormatRow, so it needs the target unit - in the
+  // implementation, where no circle can form.
+  Assert.AreEqual('New', Plan.SourceUsesAdded, 'the source gained the target unit');
+  Assert.IsTrue(Pos('New', string.Join(NL, Plan.SourceLines)) >
+    Pos('implementation', string.Join(NL, Plan.SourceLines)),
+    'and that one went into the implementation uses');
+end;
+
+procedure TMethodEditTests.AClassInTheSameUnitIsOneRewrite;
+var
+  Lines: TArray<string>;
+  Plan: TMethodMovePlan;
+  Txt: string;
+
+  // How often does a line with that text exist? Counting the result is the
+  // only way to see a doubled insertion - a second copy still "contains" it.
+  function Occurrences(const AText: string): Integer;
+  begin
+    Result := 0;
+    for var L in Plan.TargetLines do
+      if ContainsText(L, AText) then Inc(Result);
+  end;
+
+begin
+  Lines := [
+    'unit Two;',
+    '',
+    'interface',
+    '',
+    'type',
+    '  TFirst = class',
+    '  public',
+    '    function Describe: string;',
+    '    procedure Keep;',
+    '  end;',
+    '',
+    '  TSecond = class',
+    '  private',
+    '    FTag: Integer;',
+    '  end;',
+    '',
+    'implementation',
+    '',
+    'function TFirst.Describe: string;',
+    'begin',
+    '  Result := ''first'';',
+    'end;',
+    '',
+    'procedure TFirst.Keep;',
+    'begin',
+    'end;',
+    '',
+    'end.'];
+
+  Plan := PlanMethodMove(Lines, Lines, 'TFirst', ['Describe'], 'TSecond',
+    'private');
+  Assert.IsTrue(Plan.Ok, 'planned: ' + Plan.Error);
+
+  // ONE result, not two halves: both arrays are the same finished text.
+  Assert.AreEqual(string.Join(NL, Plan.SourceLines),
+    string.Join(NL, Plan.TargetLines), 'one file, one result');
+  Txt := string.Join(NL, Plan.TargetLines);
+
+  // The removal happened ONCE, and the insertion found the shifted places.
+  Assert.AreEqual(1, Occurrences('function Describe: string;'),
+    'the declaration exists exactly once');
+  Assert.AreEqual(1, Occurrences('Result := ''first'';'),
+    'and so does the body');
+  Assert.IsTrue(ContainsText(Txt, 'function TSecond.Describe: string;'),
+    'requalified to the new owner');
+  Assert.IsFalse(ContainsText(Txt, 'TFirst.Describe'),
+    'the old header is gone');
+  Assert.IsTrue(ContainsText(Txt, 'procedure TFirst.Keep;'),
+    'the sibling is untouched');
+  Assert.IsTrue(Pos('Describe', Txt) > Pos('TSecond', Txt),
+    'the declaration moved into the second class');
+
+  // No uses clause can be involved in a move inside one unit.
+  Assert.AreEqual('', Plan.SourceUsesAdded, 'no uses entry for the source');
+  Assert.AreEqual('', Plan.TargetUsesAdded, 'none for the target either');
+
+  // And the same class is no target at all.
+  Plan := PlanMethodMove(Lines, Lines, 'TFirst', ['Describe'], 'TFirst',
+    'private');
+  Assert.IsFalse(Plan.Ok, 'moving into its own class is refused');
+  Assert.IsTrue(ContainsText(Plan.Error, 'same'), Plan.Error);
+end;
+
+procedure TMethodEditTests.ASignatureChangeReachesBothHeaders;
+var
+  Lines, Res: TArray<string>;
+  Err, Txt: string;
+  Params: TArray<TSigParam>;
+begin
+  Lines := SourceUnit;
+
+  // The parameter list of FormatRow gains a second parameter.
+  SetLength(Params, 2);
+  Params[0].Modifier := 'const';
+  Params[0].Name := 'ARow';
+  Params[0].TypeText := 'string';
+  Params[1].Name := 'AWidth';
+  Params[1].TypeText := 'Integer';
+  Params[1].DefaultText := '0';
+  Res := ApplySignatureInClass(Lines, 'TOld', 'FormatRow', Params, 'string', Err);
+  Assert.AreEqual('', Err, 'rewritten without a complaint');
+  Txt := string.Join(NL, Res);
+  Assert.IsTrue(ContainsText(Txt,
+    'function FormatRow(const ARow: string; AWidth: Integer = 0): string;'),
+    'the declaration carries the new list - with the default value');
+  Assert.IsTrue(ContainsText(Txt,
+    'function TOld.FormatRow(const ARow: string; AWidth: Integer): string;'),
+    'and so does the implementation header - WITHOUT the default');
+  Assert.IsTrue(ContainsText(Txt, '  Result := ARow + IntToStr(FColumns);'),
+    'the body is untouched');
+
+  // A member without an implementation says so instead of changing one half.
+  Res := ApplySignatureInClass(Lines, 'TOld', 'Nothing', Params, 'string', Err);
+  Assert.IsTrue(ContainsText(Err, 'not found'), Err);
+  Assert.AreEqual(string.Join(NL, Lines), string.Join(NL, Res),
+    'and nothing was written');
+
+  // The modifiers reach EVERY selected member, and only those.
+  Res := ApplyModifiersInClass(Lines, 'TOld', ['Recalc', 'FormatRow'],
+    ['virtual'], []);
+  Txt := string.Join(NL, Res);
+  Assert.IsTrue(ContainsText(Txt, 'procedure Recalc; virtual;'), 'the first one');
+  Assert.IsTrue(ContainsText(Txt,
+    'function FormatRow(const ARow: string): string; virtual;'), 'the second one');
+  Assert.IsTrue(ContainsText(Txt, 'constructor Create;' + NL),
+    'the one nobody selected keeps its line');
+
+  // The target classes a move can offer: top level only.
+  var Names := string.Join(', ', ClassNamesOf(SourceUnit));
+  Assert.AreEqual('TOld', Names, 'the only class of the unit');
+end;
+
+procedure TMethodEditTests.TheRequestIsCarriedOutInOneOrder;
+var
+  Req: TMethodEditRequest;
+  Res: TMethodEditResult;
+  Params: TArray<TSigParam>;
+  Txt: string;
+begin
+  // Nothing asked for is not "write the file unchanged".
+  Req := Default(TMethodEditRequest);
+  Req.Members := ['FormatRow'];
+  Res := PlanMethodEdit('Old.pas', string.Join(NL, SourceUnit), 'TOld', Req, '');
+  Assert.IsFalse(Res.Ok, 'a request without an action is refused');
+  Assert.IsTrue(ContainsText(Res.Error, 'nothing is changed'), Res.Error);
+
+  // No member selected is its own answer.
+  Req.Members := nil;
+  Req.AddModifiers := ['inline'];
+  Res := PlanMethodEdit('Old.pas', string.Join(NL, SourceUnit), 'TOld', Req, '');
+  Assert.IsFalse(Res.Ok, 'and so is an empty selection');
+
+  // Signature AND move AND modifier in one request: the member arrives in
+  // the new class with the NEW list and the added directive.
+  SetLength(Params, 1);
+  Params[0].Modifier := 'const';
+  Params[0].Name := 'ARow';
+  Params[0].TypeText := 'TRowText';
+  Req := Default(TMethodEditRequest);
+  Req.Members := ['FormatRow'];
+  Req.TargetFile := 'New.pas';
+  Req.TargetClass := 'TNew';
+  Req.Section := 'public';
+  Req.AddModifiers := ['inline'];
+  Req.SigMember := 'FormatRow';
+  Req.SigParams := Params;
+  Req.SigResultType := 'string';
+  Res := PlanMethodEdit('Old.pas', string.Join(NL, SourceUnit), 'TOld', Req,
+    string.Join(NL, TargetUnit));
+  Assert.IsTrue(Res.Ok, 'planned: ' + Res.Error);
+  Txt := string.Join(NL, Res.TargetLines);
+  Assert.IsTrue(ContainsText(Txt,
+    'function FormatRow(const ARow: TRowText): string; inline;'),
+    'the new list and the new directive are both there: ' + Txt);
+  Assert.IsTrue(ContainsText(Txt,
+    'function TNew.FormatRow(const ARow: TRowText): string;'),
+    'and the implementation header carries the new list too');
+  Assert.IsFalse(ContainsText(string.Join(NL, Res.SourceLines), 'FormatRow'),
+    'nothing of it stayed behind');
+
+  // The signature change is the one thing that reaches further than this
+  // dialog, so it has to SAY so.
+  var Said := False;
+  for var I in Res.Issues do
+    if ContainsText(I.Text, 'Change signature') then Said := True;
+  Assert.IsTrue(Said, 'the call sites are named as the user''s job');
+end;
+
+procedure TMethodEditTests.TheToolDeclaresWhatItTakes;
+var
+  Known: TArray<string>;
+  Def: string;
+begin
+  Known := KnownToolArguments('edit_method');
+  Assert.IsTrue(Length(Known) > 0, 'edit_method is in the shipped tool list');
+  for var N in ['file', 'line', 'members', 'target_class', 'target_unit',
+    'section', 'add_modifiers', 'remove_modifiers', 'apply', 'instance'] do
+    Assert.IsTrue(MatchText(N, Known), N + ' is an argument of edit_method');
+  // No token: every call re-runs its own analysis, so there is no window
+  // between a preview and an apply that a token would have to cover.
+  Assert.IsFalse(MatchText('token', Known),
+    'edit_method pins no buffer revision, so it must not pretend to');
+
+  // The definition's text is what the model reads - it has to name the
+  // limit, not only the feature.
+  var Arr := McpToolDefinitions;
+  try
+    for var E in Arr do
+      if (E is TJSONObject) and
+         (TJSONObject(E).GetValue<string>('name', '') = 'edit_method') then
+        Def := TJSONObject(E).GetValue<string>('description', '');
+  finally
+    Arr.Free;
+  end;
+  Assert.IsTrue(Def <> '', 'the tool has a description');
+  Assert.Contains(Def, 'change_signature',
+    'it points at the verified path for a parameter list');
+  Assert.Contains(Def, 'not rewritten',
+    'and says that the call sites are not touched');
 end;
 
 { TCheckScopeTests }

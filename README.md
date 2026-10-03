@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.17.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.18.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -153,6 +153,15 @@ Put the caret on a method or routine - its declaration, implementation or any ca
 - **Renamed parameters** are followed into the method bodies (not after a `.`, not in comments or strings); a parameter that has a different name in another implementing class keeps it there.
 - **Refused**, with the place: overloaded and `message` methods, event handlers bound in a form file, a method used as a method reference (`OnClick := Foo`, `@Foo`) or as a property accessor when the change is more than a rename, a removed parameter still used in a body, a new name that already means something in a body, a parameter list that contains a comment or directive, headers whose parameter counts already differ, declarations in the RTL / VCL. The result type is not changed.
 - **Apply** re-checks that none of the touched files changed since the analysis, then writes all of them (open units in the editor, undoable, not saved; closed units on disk). The MCP tool `change_signature` does the same for Claude Code: without `params` it reports parameters, family and calls, with `params` the plan, `apply=true` writes it.
+
+### Edit methods
+Put the caret in a class - on a member, inside one of its method bodies, anywhere in its declaration - and choose **Edit methods...**. The dialog lists every member of that class with a checkbox, and what you tick is what the two tabs act on. This is the deliberate counterpart to a full "move method" refactoring: the plugin does the **mechanical** half and **names everything it does not do**, so the division of labour is visible instead of implied.
+- **Target tab**: pick the class the members move into - in this unit or, by choosing the unit first (combo or **Browse...**), in another one - and the section (`private` / `protected` / `public` / `published`) the declaration lands in. The declaration leaves the old class, the body travels along and its implementation header is requalified to the new owner. A move inside one unit is one rewrite of one file.
+- **The uses clauses follow**: if the source still calls what moved, it gains the target unit in its *implementation* uses; if a moved **declaration** names a type of the old unit, the target needs the source in its *interface* uses - and because exactly that direction can close a unit cycle, it is reported in the box below rather than risked silently.
+- **Signature tab**: the parameter grid edits the first ticked member - modifier, name, type, default value, **Add** / **Remove** / **up** / **down** - and is written to the declaration **and** its implementation header, never to one of the two. The modifier checkboxes below are tri-state and apply to **every** ticked member at once: grey = leave alone, ticked = add (`virtual`, `override`, `overload`, `inline`, `static`, `reintroduce`), unticked = remove.
+- **What it refuses**, with the reason in the member's own row: an overload, a `virtual` / `dynamic` / `override` / `abstract` / `message` member, a `published` one, anything whose declaration or body cannot be delimited - the same rules Safe delete uses, so there is no second set of them. Moving a member into its own class is refused too.
+- **What it tells you instead of doing it**: the fields and methods of the old class that the moved body still uses (they stay behind), a member the form designer binds as an event handler (the `.dfm` would lose its handler), and - for a signature change - that the **call sites are not rewritten**. Every occurrence of the ticked members is listed below with its kind (call, method reference, write, read, ...); double-click goes there. Those are text matches, not DelphiLSP-verified, and **Apply** does not touch them. For a parameter list whose calls must change with it, use **Change signature** (`Ctrl+Alt+Shift+S`), which verifies and rewrites every call.
+- **Apply** re-reads both units, refuses when the source changed since the analysis, re-plans on the fresh text and writes the target first - so a failed write can never leave the member nowhere. Edits go through the editor (undoable) and are not saved. The MCP tool `edit_method` does the same for Claude Code: without `members` / `target_class` it reports the class, its members with their movability and the occurrences; with them the plan and the edits, `apply=true` writes it.
 
 ### Safe delete (`Ctrl+Alt+Shift+D`)
 Put the caret on a symbol - its declaration or any use - and choose **Safe delete...**. The plugin deletes the declaration (and the implementation of a method or routine) only after proving that **nothing uses it**:
@@ -581,6 +590,8 @@ DelphiRefactoringLight/
 |   |-- Expert.SafeDelete.pas                # Safe delete: usage check via DelphiLSP, dialog, MCP tool
 |   |-- Expert.SignatureEdit.pas             # Change signature: parameter / argument lists, call classification, the plan (pure)
 |   |-- Expert.ChangeSignature.pas           # Change signature: family, verified calls, dialog, MCP tool
+|   |-- Expert.MethodEdit.pas                # Edit methods: members, move plan, modifier / signature edits (pure)
+|   |-- Expert.MethodEditWizard.pas          # Edit methods: analysis, occurrences, dialog, MCP tool
 |   |-- Expert.SignatureCheck.pas            # Signature collection / normalization
 |   |-- Expert.SignatureCheckDialog.pas      # Align-signature dialog
 |   |-- Expert.SignatureCheckWizard.pas      # Align-signature wizard

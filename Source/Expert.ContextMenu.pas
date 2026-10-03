@@ -141,6 +141,7 @@ type
     procedure OnExpandIncludesChoose(Sender: TObject);
     procedure OnSemanticReplaceChoose(Sender: TObject);
     procedure OnChangeSignature(Sender: TObject);
+    procedure OnEditMethods(Sender: TObject);
     procedure OnConvertProperties(Sender: TObject);
     procedure OnCompletion(Sender: TObject);
     procedure OnShowStatus(Sender: TObject);
@@ -231,7 +232,7 @@ uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete, Expert.IncludeExpander,
-  Expert.PropertyConvertWizard, Expert.ChangeSignature, Expert.ScopeChooser;
+  Expert.PropertyConvertWizard, Expert.ChangeSignature, Expert.MethodEditWizard, Expert.ScopeChooser;
 
 const
   /// <summary>Maximum retry attempts when the editor popup is not yet
@@ -480,6 +481,7 @@ begin
   Leaf(Root, 'Wrap in try..finally',      OnWrapTryFinally,       skWrapTryFinally,  REQ_EDITOR);
   Leaf(Root, 'Align method signature...', OnSignatureCheck,       skAlign,      REQ_EDITOR);
   Leaf(Root, 'Change signature...',       OnChangeSignature,      skChangeSignature, REQ_EDITOR);
+  Plain(Root, 'Edit methods...',           OnEditMethods,          REQ_EDITOR);
   Leaf(Root, 'Move to unit...',           OnMoveToUnit,           skMoveToUnit, REQ_EDITOR);
   Plain(Root, 'Move to new unit...',      OnMoveToNewUnit,        REQ_EDITOR);
   Leaf(Root, 'Safe delete...',            OnSafeDelete,           skSafeDelete,      REQ_EDITOR);
@@ -1606,6 +1608,11 @@ end;
 procedure TContextMenuInstaller.OnChangeSignature(Sender: TObject);
 begin
   ChangeSignatureAtCursor;
+end;
+
+procedure TContextMenuInstaller.OnEditMethods(Sender: TObject);
+begin
+  EditMethodsAtCursor;
 end;
 
 procedure TContextMenuInstaller.OnConvertProperties(Sender: TObject);

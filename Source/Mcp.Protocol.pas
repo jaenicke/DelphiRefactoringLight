@@ -1068,6 +1068,33 @@ const
     'itted - the IDE is chosen automatically (see ide_instances)."}},"required":["file","line",' +
     '"column"]}}' +
     ',' +
+    '{"name":"edit_method","description":"Edit the methods of the class at a position: move mem' +
+    'bers into ANOTHER CLASS (in this unit or in another one) and change their modifiers. The d' +
+    'eclaration leaves the old class and enters the chosen section of the new one, the body tra' +
+    'vels along and its header is requalified, the uses clauses of both units follow (the direc' +
+    'tion that could close an interface cycle is reported, not risked). What the tool deliberat' +
+    'ely does NOT do is reported instead: fields and methods the moved body uses stay in the ol' +
+    'd class, and the CALL SITES are not rewritten - they are listed. A member that cannot trav' +
+    'el alone (an overload, a virtual / override / abstract / message member, a published one) ' +
+    'is refused with the reason. Without members/target_class it only reports the class, its me' +
+    'mbers with movability and the occurrences. A parameter list is changed by change_signature' +
+    ', which verifies and rewrites every call.","inputSchema":{"type":"object","properties":{"f' +
+    'ile":{"type":"string","description":"Absolute path of the unit."},"line":{"type":"integer"' +
+    ',"description":"1-based line inside the class, or on one of its members or method bodies."' +
+    '},"column":{"type":"integer","description":"1-based column (optional; it only preselects t' +
+    'he member at that position)."},"members":{"type":"array","items":{"type":"string"},"descri' +
+    'ption":"Names of the members to edit."},"target_class":{"type":"string","description":"The' +
+    ' class the members move into. Omit to leave them where they are."},"target_unit":{"type":"' +
+    'string","description":"Unit name or path of target_class when it is not in this unit."},"s' +
+    'ection":{"type":"string","description":"private / protected / public / published - where t' +
+    'he declaration lands (default private)."},"add_modifiers":{"type":"array","items":{"type":' +
+    '"string"},"description":"Directives to add to every selected declaration (virtual, overloa' +
+    'd, inline, static, reintroduce, override)."},"remove_modifiers":{"type":"array","items":{"' +
+    'type":"string"},"description":"Directives to take out of every selected declaration."},"ap' +
+    'ply":{"type":"boolean","description":"Write the plan (default false)."},"instance":{"type"' +
+    ':"integer","description":"Process id of the IDE to use. Normally omitted - the IDE is chos' +
+    'en automatically (see ide_instances)."}},"required":["file","line"]}}' +
+    ',' +
     '{"name":"semantic_replace","description":"Semantic replace with the rules of <project root' +
     '>\\semantic-replace.json (find/replace of dotted identifier paths, comment- and string-awa' +
     're, uses units added, optional local-var hoisting). Every match is VERIFIED through Delphi' +

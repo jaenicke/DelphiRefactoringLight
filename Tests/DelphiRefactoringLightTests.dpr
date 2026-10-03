@@ -55,6 +55,7 @@ uses
   Expert.InterfaceLinks in '..\Source\Expert.InterfaceLinks.pas',
   Expert.PropertyConvert in '..\Source\Expert.PropertyConvert.pas',
   Expert.SignatureEdit in '..\Source\Expert.SignatureEdit.pas',
+  Expert.MethodEdit in '..\Source\Expert.MethodEdit.pas',
   Expert.ReferenceKind in '..\Source\Expert.ReferenceKind.pas',
   Expert.SemanticReplace in '..\Source\Expert.SemanticReplace.pas',
   Mcp.Protocol in '..\Source\Mcp.Protocol.pas',

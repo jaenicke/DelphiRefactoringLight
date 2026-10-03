@@ -88,6 +88,14 @@ type
     ///  types, for token-by-token diff highlighting in the dialog.</summary>
     ExpectedNorm: string;
     ActualNorm: string;
+    /// <summary>The parameter types differ only by NAME: every type that
+    ///  differs is a plain alias of the other ("TcxImageIndex =
+    ///  System.UITypes.TImageIndex;"), so the compiler sees one signature
+    ///  and the handler is not wrong. Still listed - the auto-fix can align
+    ///  the names - but as a note: never pre-ticked. AliasNote says which
+    ///  names ("TcxImageIndex = TImageIndex").</summary>
+    AliasOnly: Boolean;
+    AliasNote: string;
   end;
 
   /// <summary>One event handler wired in a DFM, with the handler's
@@ -148,6 +156,12 @@ type
     FProcRawFile: TDictionary<string, string>;
     FProcLocFile: TDictionary<string, string>;
     FAliasFile: TDictionary<string, string>;
+    /// <summary>UPPER(name) -> aliased type, for EVERY plain alias "TFoo =
+    ///  TBar;" - the unit-qualified ones as well, which FClassAlias leaves
+    ///  out ("TcxImageIndex = System.UITypes.TImageIndex;" -> TImageIndex).
+    ///  Only for comparing parameter types (SameParamTypes); never used to
+    ///  resolve a class chain or an event type.</summary>
+    FTypeAlias: TDictionary<string, string>;
     /// <summary>UPPER(classname) -> declaring file. Built in one pass
     ///  over all project sources; makes ancestor lookup O(1) instead
     ///  of a scan over every file. Classes NOT in the index (TForm,
@@ -199,6 +213,13 @@ type
     ///  False when not resolvable from indexed source.</summary>
     function TryResolveEventSignature(const ACompType, AEventName: string;
       out ASignature, ATypeName, ARawParams, ALocation: string): Boolean;
+    /// <summary>AACTUAL and AEXPECTED (normalized, '|'-separated) name the
+    ///  same parameters: as many, with the same modifiers, and every type
+    ///  the same - as text, or after following FTypeAlias on both sides.
+    ///  ANOTE lists the pairs that only the aliases make equal
+    ///  ("TcxImageIndex = TImageIndex"), '' when the texts are equal.</summary>
+    function SameParamTypes(const AActual, AExpected: string;
+      out ANote: string): Boolean;
     class function NormalizeParams(const AParamList: string): string;
     class function ExpectedSignature(const AEventName: string;
       out ASignature: string): Boolean;
@@ -246,6 +267,24 @@ function MergeParamNames(const ACurrent, AExpected: string): string;
 ///  two keywords the old line-start scan did - procedure and function,
 ///  'class' prefix allowed - so only the POSITION is new.</summary>
 function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
+
+/// <summary>The directories of ALIBRARYDIRS the signature index may read:
+///  all of them except the Studio's own source tree below ABDSROOT (RTL,
+///  VCL, FMX, ...). Ever since it reads the library paths, the check left
+///  that tree out on purpose ("the built-in RTL/VCL/FMX source is huge and
+///  already covered by the signature table") - but the exclusion lived in
+///  its private copy of the library-path walk, and the shared walk that
+///  replaced it (audit #37, L3c) keeps the tree. FMX
+///  declares TForm, TControl, TEdit, TMemo, TSplitter, TKeyEvent and
+///  TMouseWheelEvent under the VCL's names, its files sort first, and the
+///  fallback tables are first-wins by name: from 1.16.31 on (when the walk
+///  found the library paths again) the OnKeyDown of a VCL form, TEdit or
+///  TMemo was "expected (TObject; var Word; var WideChar; TShiftState)",
+///  and a splitter's OnCanResize the four parameters of Vcl.Controls - all
+///  of them ticked for the auto-fix. An empty ABDSROOT leaves the list as
+///  it is.</summary>
+function SignatureLibraryDirs(const ALibraryDirs: TArray<string>;
+  const ABdsRoot: string): TArray<string>;
 
 implementation
 
@@ -724,6 +763,22 @@ begin
   end;
 end;
 
+function SignatureLibraryDirs(const ALibraryDirs: TArray<string>;
+  const ABdsRoot: string): TArray<string>;
+var
+  RootPref: string;
+begin
+  if Trim(ABdsRoot) = '' then Exit(ALibraryDirs);
+  RootPref := IncludeTrailingPathDelimiter(Trim(ABdsRoot));
+  Result := nil;
+  for var D in ALibraryDirs do
+    // The delimiter on BOTH sides: '...\37.0' itself is below the root,
+    // '...\37.0x' is not. ExpandIdeVars turns $(BDS)\source\vcl into
+    // '...\37.0\\source\vcl' (RootDir ends in a backslash) - still a match.
+    if not StartsText(RootPref, IncludeTrailingPathDelimiter(D)) then
+      Result := Result + [D];
+end;
+
 function MergeParamNames(const ACurrent, AExpected: string): string;
 var
   Cur, Exp: TArray<TParamSpec>;
@@ -1118,6 +1173,7 @@ begin
   FProcRawFile := TDictionary<string, string>.Create;
   FProcLocFile := TDictionary<string, string>.Create;
   FAliasFile := TDictionary<string, string>.Create;
+  FTypeAlias := TDictionary<string, string>.Create;
   FLibClassFile := TDictionary<string, string>.Create;
   FItemClassCache := TDictionary<string, string>.Create;
 end;
@@ -1126,6 +1182,7 @@ destructor TDfmEventChecker.Destroy;
 begin
   FItemClassCache.Free;
   FLibClassFile.Free;
+  FTypeAlias.Free;
   FAliasFile.Free;
   FProcLocFile.Free;
   FProcRawFile.Free;
@@ -1657,6 +1714,11 @@ begin
                     Issue.ExpectedNorm := ResolvedSig;
                     Issue.ActualNorm := MethodInfo.Value;
                     Issue.ExpectedRawParams := RawParams;   // enables auto-fix
+                    // Another NAME for the same type ("TcxImageIndex =
+                    // System.UITypes.TImageIndex;") is no mismatch the
+                    // compiler would see - listed as a note, not pre-ticked.
+                    Issue.AliasOnly := SameParamTypes(MethodInfo.Value,
+                      ResolvedSig, Issue.AliasNote);
                     Issue.FormClass := FormClass;
                     Issue.EventTypeName := TypeName;
                     if TypeLoc <> '' then
@@ -1927,6 +1989,18 @@ begin
               if not FClassAlias.ContainsKey(UpperCase(Lhs)) then
                 FClassAlias.Add(UpperCase(Lhs), Rhs);
             end;
+            // For the PARAMETER comparison only, the unit-qualified form
+            // as well - "TcxImageIndex = System.UITypes.TImageIndex;". The
+            // tables above keep their single-identifier rule.
+            if IsIdentifier(Lhs) and (Rhs <> '') then
+            begin
+              var Qualified := True;
+              for var Part in Rhs.Split(['.']) do
+                if not IsIdentifier(Part) then Qualified := False;
+              if Qualified and not FTypeAlias.ContainsKey(UpperCase(Lhs)) then
+                FTypeAlias.Add(UpperCase(Lhs),
+                  Copy(Rhs, LastDelimiter('.', Rhs) + 1, MaxInt));
+            end;
           end;
         end;
       end
@@ -2062,6 +2136,56 @@ begin
     else
       Break;
   end;
+end;
+
+function TDfmEventChecker.SameParamTypes(const AActual, AExpected: string;
+  out ANote: string): Boolean;
+
+  // "var TcxImageIndex" -> "TImageIndex" (AModifier "var "): the type
+  // follows the aliases. Bounded, and an alias of ITSELF ends the walk -
+  // Vcl.ImgList has "TImageIndex = System.UITypes.TImageIndex;".
+  function Resolved(const AEntry: string; out AModifier, AType: string): string;
+  var
+    Next: string;
+  begin
+    AModifier := '';
+    AType := Trim(AEntry);
+    if StartsText('var ', AType) or StartsText('out ', AType) then
+    begin
+      AModifier := LowerCase(Copy(AType, 1, 4));
+      AType := Trim(Copy(AType, 5, MaxInt));
+    end;
+    Result := AType;
+    for var Hop := 1 to 8 do
+      if FTypeAlias.TryGetValue(UpperCase(Result), Next) and not SameText(Next, Result) then
+        Result := Next
+      else
+        Break;
+  end;
+
+var
+  Act, Exp: TArray<string>;
+  ActMod, ActType, ExpMod, ExpType: string;
+begin
+  ANote := '';
+  if SameText(AActual, AExpected) then Exit(True);
+  Act := AActual.Split(['|']);
+  Exp := AExpected.Split(['|']);
+  if Length(Act) <> Length(Exp) then Exit(False);
+  for var I := 0 to High(Act) do
+  begin
+    if SameText(Act[I], Exp[I]) then Continue;
+    var ActFinal := Resolved(Act[I], ActMod, ActType);
+    var ExpFinal := Resolved(Exp[I], ExpMod, ExpType);
+    if not SameText(ActMod, ExpMod) or not SameText(ActFinal, ExpFinal) then
+    begin
+      ANote := '';
+      Exit(False);
+    end;
+    if ANote <> '' then ANote := ANote + ', ';
+    ANote := ANote + ExpType + ' = ' + ActType;
+  end;
+  Result := True;
 end;
 
 function TDfmEventChecker.ConsistencyIssues: TArray<TDfmEventIssue>;

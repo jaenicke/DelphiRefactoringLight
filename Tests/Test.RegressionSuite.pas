@@ -483,6 +483,24 @@ type
     [Test] procedure LinesAreSplitOnEveryLineBreakStyle;
   end;
 
+  /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
+  ///  own event types - and compared their parameter types as text. cxTL's
+  ///  OnGetNodeImageIndex says "var AIndex: TcxImageIndex", the handler the
+  ///  IDE wrote says TImageIndex, and cxGraphics declares "TcxImageIndex =
+  ///  System.UITypes.TImageIndex;": the same type, yet listed as a
+  ///  signature mismatch and pre-ticked for the auto-fix (user report on
+  ///  1.16.32).</summary>
+  [TestFixture]
+  TDfmAliasOnlyTests = class
+  private
+    FDir: string;
+    function WriteFile(const AName, AText: string): string;
+  public
+    [Setup] procedure Setup;
+    [TearDown] procedure TearDown;
+    [Test] procedure AnotherNameForTheSameTypeIsANoteNotAMismatch;
+  end;
+
   [TestFixture]
   TCheckScopeTests = class
   public
@@ -496,6 +514,14 @@ type
     ///  to 1.16.30 (measured: 0 units), so every RTL / VCL / third-party
     ///  identifier was unknown.</summary>
     [Test] procedure TheIdeVersionKeyIsFoundByEvidence;
+    /// <summary>The other follow-up of L3c: the DFM check's signature index
+    ///  gets the shared library walk now, and its private copy had left the
+    ///  Studio's source tree out. With FMX indexed ahead of the VCL, the
+    ///  first-wins tables checked VCL handlers against FMX event types -
+    ///  measured with 1.16.32 on a VCL/DevExpress form whose handlers the
+    ///  compiler accepts: eight signature mismatches, every one of them
+    ///  ticked for the auto-fix.</summary>
+    [Test] procedure TheDfmSignatureScopeLeavesTheStudioSourcesOut;
   end;
 
   [TestFixture]
@@ -3484,6 +3510,109 @@ begin
     'symbol, first: %s', [Wrong, WrongWhere]));
 end;
 
+{ TDfmAliasOnlyTests }
+
+procedure TDfmAliasOnlyTests.Setup;
+begin
+  FDir := TPath.Combine(TPath.GetTempPath, 'RLDfmAlias_' + TGUID.NewGuid.ToString);
+  TDirectory.CreateDirectory(FDir);
+end;
+
+procedure TDfmAliasOnlyTests.TearDown;
+begin
+  if (FDir <> '') and TDirectory.Exists(FDir) then
+    try
+      TDirectory.Delete(FDir, True);
+    except
+    end;
+end;
+
+function TDfmAliasOnlyTests.WriteFile(const AName, AText: string): string;
+begin
+  Result := TPath.Combine(FDir, AName);
+  TFile.WriteAllText(Result, AText, TEncoding.UTF8);
+end;
+
+procedure TDfmAliasOnlyTests.AnotherNameForTheSameTypeIsANoteNotAMismatch;
+var
+  Lib, Tree, Pas: string;
+  Issues: TArray<TDfmEventIssue>;
+begin
+  // the shape of cxGraphics / cxTL: a unit-qualified alias, and a plain one
+  Lib := WriteFile('ULibGraphics.pas',
+    'unit ULibGraphics;' + NL + 'interface' + NL + 'uses System.UITypes;' + NL +
+    'type' + NL +
+    '  TLibImageIndex = System.UITypes.TImageIndex;' + NL +
+    '  TLibCount = Integer;' + NL +
+    'implementation' + NL + 'end.' + NL);
+  Tree := WriteFile('ULibTree.pas',
+    'unit ULibTree;' + NL + 'interface' + NL +
+    'uses System.Classes, ULibGraphics;' + NL +
+    'type' + NL +
+    '  TLibGetImageIndexEvent = procedure(Sender: TObject;' + NL +
+    '    var AIndex: TLibImageIndex) of object;' + NL +
+    '  TLibCountEvent = procedure(Sender: TObject; ACount: TLibCount) of object;' + NL +
+    '  TLibTree = class(TComponent)' + NL +
+    '  private' + NL +
+    '    FOnGetImageIndex: TLibGetImageIndexEvent;' + NL +
+    '    FOnCount: TLibCountEvent;' + NL +
+    '  published' + NL +
+    '    property OnGetImageIndex: TLibGetImageIndexEvent read FOnGetImageIndex write FOnGetImageIndex;' + NL +
+    '    property OnCount: TLibCountEvent read FOnCount write FOnCount;' + NL +
+    '  end;' + NL +
+    'implementation' + NL + 'end.' + NL);
+  Pas := WriteFile('UAliasForm.pas',
+    'unit UAliasForm;' + NL + 'interface' + NL +
+    'uses System.Classes, System.UITypes, Vcl.Forms, ULibTree;' + NL +
+    'type' + NL +
+    '  TForm1 = class(TForm)' + NL +
+    '    Tree1: TLibTree;' + NL +
+    '    Tree2: TLibTree;' + NL +
+    '    procedure Tree1GetImageIndex(Sender: TObject; var AIndex: TImageIndex);' + NL +
+    '    procedure Tree1Count(Sender: TObject; ACount: Integer);' + NL +
+    '    procedure Tree2GetImageIndex(Sender: TObject; var AIndex: Word);' + NL +
+    '  end;' + NL +
+    'implementation' + NL + 'end.' + NL);
+  WriteFile('UAliasForm.dfm',
+    'object Form1: TForm1' + NL +
+    '  object Tree1: TLibTree' + NL +
+    '    OnGetImageIndex = Tree1GetImageIndex' + NL +
+    '    OnCount = Tree1Count' + NL +
+    '  end' + NL +
+    '  object Tree2: TLibTree' + NL +
+    '    OnGetImageIndex = Tree2GetImageIndex' + NL +
+    '  end' + NL +
+    'end' + NL);
+
+  Issues := TDfmEventChecker.CheckProject([Pas], nil, [Lib, Tree]);
+  Assert.AreEqual(3, Integer(Length(Issues)),
+    'two handlers that only name their types differently, one that is wrong');
+  for var Iss in Issues do
+  begin
+    Assert.AreEqual(Ord(eikSignatureMismatch), Ord(Iss.Kind), Iss.HandlerName);
+    if SameText(Iss.HandlerName, 'Tree1GetImageIndex') then
+    begin
+      Assert.IsTrue(Iss.AliasOnly,
+        'TLibImageIndex = System.UITypes.TImageIndex is TImageIndex');
+      Assert.AreEqual('TLibImageIndex = TImageIndex', Iss.AliasNote);
+      Assert.IsTrue(Iss.ExpectedRawParams <> '',
+        'the names can still be aligned when the user ticks the row');
+    end
+    else if SameText(Iss.HandlerName, 'Tree1Count') then
+    begin
+      Assert.IsTrue(Iss.AliasOnly, 'TLibCount = Integer is Integer');
+      Assert.AreEqual('TLibCount = Integer', Iss.AliasNote);
+    end
+    else
+    begin
+      Assert.AreEqual('Tree2GetImageIndex', Iss.HandlerName);
+      Assert.IsFalse(Iss.AliasOnly,
+        'Word is no other name for TImageIndex - that one IS a mismatch');
+      Assert.AreEqual('', Iss.AliasNote);
+    end;
+  end;
+end;
+
 { TCheckScopeTests }
 
 procedure TCheckScopeTests.ADuplicateUnitNameIsReportedAsSkipped;
@@ -3588,6 +3717,35 @@ begin
   NoProbe := nil;
   Assert.AreEqual('', TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0', NoProbe),
     'without a probe there is no evidence, so no key');
+end;
+
+procedure TCheckScopeTests.TheDfmSignatureScopeLeavesTheStudioSourcesOut;
+const
+  Root = 'C:\Studio\37.0\';   // RootDir as the registry holds it
+var
+  Dirs: TArray<string>;
+begin
+  Dirs := SignatureLibraryDirs([
+    'C:\Studio\37.0\\source\fmx',        // what ExpandIdeVars makes of $(BDS)\source\fmx
+    'C:\Studio\37.0\SOURCE\VCL',
+    'C:\Studio\37.0\lib\Win64\release',
+    'C:\Studio\37.0',
+    'C:\DevExpress\VCL\ExpressEditors Library\Sources',
+    'C:\Studio\37.0x\Sources',           // next to the root, not below it
+    'C:\Users\Public\Documents\Embarcadero\Studio\37.0\Dcp'], Root);
+  Assert.AreEqual(3, Integer(Length(Dirs)),
+    'only the three outside the Studio tree: ' + string.Join('; ', Dirs));
+  Assert.AreEqual('C:\DevExpress\VCL\ExpressEditors Library\Sources', Dirs[0],
+    'a third-party directory is kept');
+  Assert.AreEqual('C:\Studio\37.0x\Sources', Dirs[1], 'a sibling of the root is kept');
+  Assert.AreEqual('C:\Users\Public\Documents\Embarcadero\Studio\37.0\Dcp', Dirs[2],
+    'the public documents are not the Studio tree');
+  // the same root without its trailing backslash
+  Assert.AreEqual(3, Integer(Length(SignatureLibraryDirs(
+    ['C:\Studio\37.0\source\rtl\common', 'C:\a', 'C:\b', 'C:\c'], 'C:\Studio\37.0'))),
+    'RootDir without a trailing backslash');
+  Assert.AreEqual(2, Integer(Length(SignatureLibraryDirs(['C:\a', 'C:\b'], ''))),
+    'no root, nothing to leave out');
 end;
 
 { TUnitRenameScopeTests }
@@ -3791,6 +3949,7 @@ initialization
   TDUnitX.RegisterTestFixture(TLspConfigHintTests);
   TDUnitX.RegisterTestFixture(TRemoveWithSafetyTests);
   TDUnitX.RegisterTestFixture(TUnitRenameScopeTests);
+  TDUnitX.RegisterTestFixture(TDfmAliasOnlyTests);
   TDUnitX.RegisterTestFixture(TCheckScopeTests);
   TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
 

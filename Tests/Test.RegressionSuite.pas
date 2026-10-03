@@ -490,6 +490,14 @@ type
     ///  to 1.16.30 (measured: 0 units), so every RTL / VCL / third-party
     ///  identifier was unknown.</summary>
     [Test] procedure TheIdeVersionKeyIsFoundByEvidence;
+    /// <summary>The other follow-up of L3c: the DFM check's signature index
+    ///  gets the shared library walk now, and its private copy had left the
+    ///  Studio's source tree out. With FMX indexed ahead of the VCL, the
+    ///  first-wins tables checked VCL handlers against FMX event types -
+    ///  measured with 1.16.32 on a VCL/DevExpress form whose handlers the
+    ///  compiler accepts: eight signature mismatches, every one of them
+    ///  ticked for the auto-fix.</summary>
+    [Test] procedure TheDfmSignatureScopeLeavesTheStudioSourcesOut;
   end;
 
   [TestFixture]
@@ -3545,6 +3553,35 @@ begin
   NoProbe := nil;
   Assert.AreEqual('', TrimToIdeVersionKey('Software\Embarcadero\BDS\37.0', NoProbe),
     'without a probe there is no evidence, so no key');
+end;
+
+procedure TCheckScopeTests.TheDfmSignatureScopeLeavesTheStudioSourcesOut;
+const
+  Root = 'C:\Studio\37.0\';   // RootDir as the registry holds it
+var
+  Dirs: TArray<string>;
+begin
+  Dirs := SignatureLibraryDirs([
+    'C:\Studio\37.0\\source\fmx',        // what ExpandIdeVars makes of $(BDS)\source\fmx
+    'C:\Studio\37.0\SOURCE\VCL',
+    'C:\Studio\37.0\lib\Win64\release',
+    'C:\Studio\37.0',
+    'C:\DevExpress\VCL\ExpressEditors Library\Sources',
+    'C:\Studio\37.0x\Sources',           // next to the root, not below it
+    'C:\Users\Public\Documents\Embarcadero\Studio\37.0\Dcp'], Root);
+  Assert.AreEqual(3, Integer(Length(Dirs)),
+    'only the three outside the Studio tree: ' + string.Join('; ', Dirs));
+  Assert.AreEqual('C:\DevExpress\VCL\ExpressEditors Library\Sources', Dirs[0],
+    'a third-party directory is kept');
+  Assert.AreEqual('C:\Studio\37.0x\Sources', Dirs[1], 'a sibling of the root is kept');
+  Assert.AreEqual('C:\Users\Public\Documents\Embarcadero\Studio\37.0\Dcp', Dirs[2],
+    'the public documents are not the Studio tree');
+  // the same root without its trailing backslash
+  Assert.AreEqual(3, Integer(Length(SignatureLibraryDirs(
+    ['C:\Studio\37.0\source\rtl\common', 'C:\a', 'C:\b', 'C:\c'], 'C:\Studio\37.0'))),
+    'RootDir without a trailing backslash');
+  Assert.AreEqual(2, Integer(Length(SignatureLibraryDirs(['C:\a', 'C:\b'], ''))),
+    'no root, nothing to leave out');
 end;
 
 { TUnitRenameScopeTests }

@@ -899,7 +899,10 @@ begin
     // exhaust the 32-bit IDE process.
     AddDirs(Editor.GetProjectSearchPaths.Split([';'], TStringSplitOptions.ExcludeEmpty));
     BdsRoot := FindBdsRoot;
-    AddDirs(GatherGlobalLibraryDirs(BdsRoot));
+    // The shared walk (audit #37, L3c) WITHOUT the Studio's own source
+    // tree, which this check has always left out - with FMX in the index,
+    // VCL handlers were checked against FMX event types.
+    AddDirs(SignatureLibraryDirs(GatherGlobalLibraryDirs(BdsRoot), BdsRoot));
 
     Files.Duplicates := dupIgnore;
     Files.Sorted := True;

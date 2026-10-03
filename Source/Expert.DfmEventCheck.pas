@@ -247,6 +247,24 @@ function MergeParamNames(const ACurrent, AExpected: string): string;
 ///  'class' prefix allowed - so only the POSITION is new.</summary>
 function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
 
+/// <summary>The directories of ALIBRARYDIRS the signature index may read:
+///  all of them except the Studio's own source tree below ABDSROOT (RTL,
+///  VCL, FMX, ...). Ever since it reads the library paths, the check left
+///  that tree out on purpose ("the built-in RTL/VCL/FMX source is huge and
+///  already covered by the signature table") - but the exclusion lived in
+///  its private copy of the library-path walk, and the shared walk that
+///  replaced it (audit #37, L3c) keeps the tree. FMX
+///  declares TForm, TControl, TEdit, TMemo, TSplitter, TKeyEvent and
+///  TMouseWheelEvent under the VCL's names, its files sort first, and the
+///  fallback tables are first-wins by name: from 1.16.31 on (when the walk
+///  found the library paths again) the OnKeyDown of a VCL form, TEdit or
+///  TMemo was "expected (TObject; var Word; var WideChar; TShiftState)",
+///  and a splitter's OnCanResize the four parameters of Vcl.Controls - all
+///  of them ticked for the auto-fix. An empty ABDSROOT leaves the list as
+///  it is.</summary>
+function SignatureLibraryDirs(const ALibraryDirs: TArray<string>;
+  const ABdsRoot: string): TArray<string>;
+
 implementation
 
 uses
@@ -722,6 +740,22 @@ begin
     end;
     Inc(I);
   end;
+end;
+
+function SignatureLibraryDirs(const ALibraryDirs: TArray<string>;
+  const ABdsRoot: string): TArray<string>;
+var
+  RootPref: string;
+begin
+  if Trim(ABdsRoot) = '' then Exit(ALibraryDirs);
+  RootPref := IncludeTrailingPathDelimiter(Trim(ABdsRoot));
+  Result := nil;
+  for var D in ALibraryDirs do
+    // The delimiter on BOTH sides: '...\37.0' itself is below the root,
+    // '...\37.0x' is not. ExpandIdeVars turns $(BDS)\source\vcl into
+    // '...\37.0\\source\vcl' (RootDir ends in a backslash) - still a match.
+    if not StartsText(RootPref, IncludeTrailingPathDelimiter(D)) then
+      Result := Result + [D];
 end;
 
 function MergeParamNames(const ACurrent, AExpected: string): string;

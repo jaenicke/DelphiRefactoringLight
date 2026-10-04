@@ -576,6 +576,10 @@ type
     ///  named when the SOURCE's own uses clause has it: the moved code
     ///  compiled there, so that is where its types come from.</summary>
     [Test] procedure TheTargetGetsTheUnitsTheMovedCodeNeeds;
+    /// <summary>User, 2026-10-04: "Wenn ich die erste bearbeite und dabei
+    ///  eine Zeile loesche, passen die Fundstellen danach nicht mehr." A row
+    ///  remembers the TEXT it stood on, so its line is found again.</summary>
+    [Test] procedure AFindingFollowsItsLineThroughAnEdit;
     /// <summary>A preview must not report a line as changed that did not
     ///  change. Found live: the first edit_method call answered 45 changed
     ///  lines for a move that touches eight, with pairs like
@@ -4528,6 +4532,89 @@ begin
     if StartsText('uses', TrimLeft(L)) then NoUses := NoUses + L + NL;
   Assert.IsFalse(ContainsText(NoUses, 'ToolsAPI'),
     'and says nothing it cannot know: ' + NoUses);
+end;
+
+procedure TMethodEditTests.AFindingFollowsItsLineThroughAnEdit;
+begin
+  var Lines: TArray<string> := [
+    'procedure Go;',
+    'begin',
+    '  DoFirst;',
+    '  DoSecond;',
+    '  DoThird;',
+    'end;'];
+
+  // Nothing changed: the row stays exactly where it was.
+  var R := RelocateLine(Lines, 'DoSecond;', 3);
+  Assert.AreEqual(3, R.Line, 'unchanged file, unchanged line');
+  Assert.IsFalse(R.Moved or R.Stale, 'and nothing to report');
+
+  // The reported case: editing the FIRST finding deletes a line above.
+  var Shorter: TArray<string> := [
+    'procedure Go;',
+    'begin',
+    '  DoSecond;',
+    '  DoThird;',
+    'end;'];
+  R := RelocateLine(Shorter, 'DoSecond;', 3);
+  Assert.AreEqual(2, R.Line, 'the line moved up by one');
+  Assert.IsTrue(R.Moved, 'and the window says so');
+  Assert.IsFalse(R.Stale, 'it was found, so it is not stale');
+
+  // Inserting far above moves it by more than any fixed window.
+  var Grown: TArray<string> := [];
+  for var I := 1 to 400 do Grown := Grown + ['  Filler;'];
+  Grown := Grown + Lines;
+  R := RelocateLine(Grown, 'DoSecond;', 3);
+  Assert.AreEqual(403, R.Line, 'found 400 lines further down');
+  Assert.IsTrue(R.Moved, 'moved');
+
+  // The row's own line was rewritten: nothing can be said, so the row keeps
+  // its old position and is MARKED - never moved to a guess.
+  var Edited: TArray<string> := [
+    'procedure Go;',
+    'begin',
+    '  DoFirst;',
+    '  DoSecondRenamed;',
+    '  DoThird;',
+    'end;'];
+  R := RelocateLine(Edited, 'DoSecond;', 3);
+  Assert.IsTrue(R.Stale, 'the text is gone - that is reported');
+  Assert.AreEqual(3, R.Line, 'and the old line is kept, not a guess');
+
+  // Indentation is not part of the anchor: the rows carry a TRIMMED
+  // preview, and re-indenting a block must not lose every row.
+  var Indented: TArray<string> := [
+    'procedure Go;',
+    'begin',
+    '    DoFirst;',
+    '    DoSecond;',
+    '    DoThird;',
+    'end;'];
+  R := RelocateLine(Indented, 'DoSecond;', 3);
+  Assert.IsFalse(R.Stale, 'a re-indented line is the same line');
+  Assert.AreEqual(3, R.Line, 'and it is still line 3');
+
+  // Two identical lines: the NEAREST one wins - an edit moves code, it
+  // rarely duplicates it.
+  var Twice: TArray<string> := [
+    '  DoSecond;',
+    'procedure Go;',
+    'begin',
+    '  DoFirst;',
+    '  DoSecond;',
+    'end;'];
+  R := RelocateLine(Twice, 'DoSecond;', 3);
+  Assert.AreEqual(4, R.Line, 'the nearest occurrence, not the first');
+
+  // Nothing remembered -> the old behaviour, and no empty anchor may ever
+  // match a blank line.
+  R := RelocateLine(Lines, '', 3);
+  Assert.AreEqual(3, R.Line, 'no anchor, no change');
+  Assert.IsFalse(R.Moved or R.Stale, 'and nothing claimed');
+  R := RelocateLine(Lines, '   ', 99);
+  Assert.AreEqual(99, R.Line, 'a blank anchor is no anchor');
+  Assert.IsFalse(R.Stale, 'and it is not reported as lost');
 end;
 
 procedure TMethodEditTests.TheToolDeclaresWhatItTakes;

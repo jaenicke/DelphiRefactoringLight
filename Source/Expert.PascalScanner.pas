@@ -120,6 +120,33 @@ function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 ///  (audit #39, L7p).</summary>
 function SplitEditorLines(const AContent: string): TArray<string>;
 
+type
+  /// <summary>Where a remembered line is NOW.</summary>
+  TLineRelocation = record
+    /// <summary>The current 0-based line. On AStale it is the old one - a
+    ///  guessed position would send the user somewhere unrelated.</summary>
+    Line: Integer;
+    /// <summary>The line is somewhere else than it was.</summary>
+    Moved: Boolean;
+    /// <summary>Its text is gone, so nothing can be said about it. Such a
+    ///  row must be MARKED, never silently moved - the same polarity rule
+    ///  the verification follows: an uncertain answer is reported.</summary>
+    Stale: Boolean;
+  end;
+
+/// <summary>Finds a remembered line again after the file was edited: the
+///  line's own TEXT is the anchor, compared WITHOUT its indentation (the
+///  result rows carry a trimmed preview, and re-indenting a block must not
+///  lose a row). Still at its old place -> that place;
+///  somewhere else -> the occurrence NEAREST to the old line (an edit moves
+///  code, it rarely duplicates it); nowhere -> Stale, and Line stays what it
+///  was. An empty anchor answers "unchanged", which is what a caller that
+///  remembered nothing got before. Pure. (User, 2026-10-04: "wenn ich die
+///  erste bearbeite und dabei eine Zeile loesche, passen die Fundstellen
+///  danach nicht mehr".)</summary>
+function RelocateLine(const ALines: TArray<string>; const AAnchor: string;
+  AOldLine: Integer): TLineRelocation;
+
 /// <summary>Quote count of a Delphi 12 multi-line string opener at AIndex
 ///  (an odd run of >= 3 apostrophes followed only by blanks up to the line
 ///  end), else 0.</summary>
@@ -524,6 +551,47 @@ end;
 function SplitEditorLines(const AContent: string): TArray<string>;
 begin
   Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+end;
+
+function RelocateLine(const ALines: TArray<string>; const AAnchor: string;
+  AOldLine: Integer): TLineRelocation;
+var
+  Want: string;
+
+  function Matches(AIdx: Integer): Boolean;
+  begin
+    Result := (AIdx >= 0) and (AIdx <= High(ALines)) and
+      (Trim(ALines[AIdx]) = Want);
+  end;
+
+begin
+  Result := Default(TLineRelocation);
+  Result.Line := AOldLine;
+  Want := Trim(AAnchor);
+  if (Want = '') or (Length(ALines) = 0) then Exit;
+  if Matches(AOldLine) then Exit;
+
+  // The nearest line that still carries this text. Walking outwards from the
+  // old position is what makes "nearest" exact and cheap at once.
+  for var D := 1 to Length(ALines) do
+  begin
+    var Up := AOldLine - D;
+    var Down := AOldLine + D;
+    if Matches(Up) then
+    begin
+      Result.Line := Up;
+      Result.Moved := True;
+      Exit;
+    end;
+    if Matches(Down) then
+    begin
+      Result.Line := Down;
+      Result.Moved := True;
+      Exit;
+    end;
+    if (Up < 0) and (Down > High(ALines)) then Break;
+  end;
+  Result.Stale := True;
 end;
 
 function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;

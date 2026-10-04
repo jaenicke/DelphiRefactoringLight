@@ -1532,8 +1532,9 @@ begin
     else
       S := Format('%s: %d occurrence(s), VERIFIED with DelphiLSP before the ' +
         'edit and brought forward to their current lines - double-click to go ' +
-        'there and adjust them. The edit changed none of them; nothing in ' +
-        'this window changes code.', [Cap, Length(Items)]);
+        'there and adjust them, the lines follow what you change. The edit ' +
+        'changed none of them; nothing in this window changes code.',
+        [Cap, Length(Items)]);
     if Stale > 0 then
       S := S + Format(' %d row(s) could not be found again after the edit - ' +
         'their position may be stale.', [Stale]);

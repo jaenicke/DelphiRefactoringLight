@@ -31,6 +31,10 @@ type
     ///  "Declaration", "Implementation", "Type use", ... (see
     ///  Expert.ReferenceKind); '' when not classified.</summary>
     Kind: string;
+    /// <summary>Set by the dialog when the row's line could not be found
+    ///  again after an edit (its text is gone). The row is kept and marked -
+    ///  a guessed line would send the user somewhere unrelated.</summary>
+    Stale: Boolean;
   end;
 
   TFindReferenceItems = TArray<TFindReferenceItem>;
@@ -62,6 +66,9 @@ type
     FOnDialogClose: TNotifyEvent;
     FAllowFree: Boolean;
     FCloseRequested: Boolean;
+    FBaseStatus: string;
+    FPosNote: string;
+    FRefreshing: Boolean;
 
     procedure CreateControls;
     procedure DoListDblClick(Sender: TObject);
@@ -73,12 +80,22 @@ type
     procedure DoListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     function CommonPathPrefix(const AItems: TFindReferenceItems): string;
     procedure GotoSelected;
+    procedure DoFormActivate(Sender: TObject);
+    procedure RenderStatus;
   public
     constructor CreateDialog(AOwner: TComponent; const AIdentifier: string;
       const ATitlePrefix: string = 'References'); reintroduce;
 
     /// <summary>Sets the matches and fills the ListView. Replaced previous items.</summary>
     procedure SetItems(const AItems: TFindReferenceItems);
+
+    /// <summary>Brings every row's line up to date: the row remembers the
+    ///  TEXT it stood on (its preview), so after the user edited a file the
+    ///  line is found again - and a row whose text is gone is marked instead
+    ///  of pointing somewhere unrelated. Runs when the window is activated
+    ///  (the user comes back to it after an edit) and before every jump.
+    ///  Reads the editor buffer, so unsaved edits count.</summary>
+    procedure RefreshPositions;
 
     procedure SetStatus(const AText: string);
     procedure SetProgress(ACurrent, ATotal: Integer);
@@ -107,8 +124,10 @@ type
 implementation
 
 uses
-  System.IOUtils, System.Types, Vcl.Clipbrd, Expert.IdeThemes, Expert.DialogHelper,
-  Expert.ListViewSort, Expert.ReferenceKind;
+  System.IOUtils, System.Types, Vcl.Clipbrd,
+  Expert.IdeThemes, Expert.DialogHelper, Expert.ListViewSort,
+  Expert.ReferenceKind, Expert.PascalScanner, Expert.EditorHelperIntf,
+  Delphi.FileEncoding;
 
 procedure AssignReferenceKinds(var AItems: TFindReferenceItems; const AName,
   ADeclFile: string; ADeclLine: Integer; const AReadContent: TFunc<string, string>);
@@ -189,6 +208,7 @@ begin
   KeyPreview := True;
   OnKeyDown := DoFormKeyDown;
   OnClose := DoFormClose;
+  OnActivate := DoFormActivate;
 
   CreateControls;
   EnableListViewSorting(FListView);
@@ -346,7 +366,10 @@ begin
       if (Prefix <> '') and DisplayPath.StartsWith(Prefix, True) then
         DisplayPath := Copy(DisplayPath, Length(Prefix) + 1, MaxInt);
       LI.Caption := DisplayPath;
-      LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
+      if AItems[I].Stale then
+        LI.SubItems.Add(IntToStr(AItems[I].Line + 1) + ' ?')
+      else
+        LI.SubItems.Add(IntToStr(AItems[I].Line + 1));
       LI.SubItems.Add(IntToStr(AItems[I].Col + 1));
       LI.SubItems.Add(AItems[I].Kind);
       LI.SubItems.Add(AItems[I].Preview);
@@ -369,7 +392,106 @@ end;
 
 procedure TFindReferencesDialog.SetStatus(const AText: string);
 begin
-  FStatusLabel.Caption := AText;
+  FBaseStatus := AText;
+  RenderStatus;
+end;
+
+procedure TFindReferencesDialog.RenderStatus;
+begin
+  // The search summary stays; what a refresh found is appended, so a second
+  // refresh replaces its own sentence instead of stacking them up.
+  if FPosNote = '' then
+    FStatusLabel.Caption := FBaseStatus
+  else if FBaseStatus = '' then
+    FStatusLabel.Caption := FPosNote
+  else
+    FStatusLabel.Caption := FBaseStatus + '  |  ' + FPosNote;
+end;
+
+procedure TFindReferencesDialog.DoFormActivate(Sender: TObject);
+begin
+  RefreshPositions;
+end;
+
+procedure TFindReferencesDialog.RefreshPositions;
+var
+  Cache: TDictionary<string, TArray<string>>;
+
+  function LinesOf(const AFile: string): TArray<string>;
+  var
+    C: string;
+  begin
+    var Key := LowerCase(AFile);
+    if Cache.TryGetValue(Key, Result) then Exit;
+    C := '';
+    if not ((Editor <> nil) and Editor.ReadEditorContent(AFile, C)) then
+      try
+        if TFile.Exists(AFile) then C := TDelphiFileEncoding.ReadAll(AFile);
+      except
+        C := '';
+      end;
+    Result := SplitEditorLines(C);
+    Cache.Add(Key, Result);
+  end;
+
+begin
+  // The refresh reads files and writes cells; re-entering it from the
+  // activation that a message pump may deliver would do both twice. And
+  // while the SEARCH is still running (FAllowFree = False, i.e. before
+  // SetClosable) the rows are not final yet and the scan pumps messages -
+  // a refresh there would read every file for a result nobody has.
+  if FRefreshing or not FAllowFree or (Length(FItems) = 0) then Exit;
+  FRefreshing := True;
+  Cache := TDictionary<string, TArray<string>>.Create;
+  try
+    var Moved := 0;
+    var Lost := 0;
+    for var I := 0 to High(FItems) do
+    begin
+      if FItems[I].FilePath = '' then Continue;
+      var R := RelocateLine(LinesOf(FItems[I].FilePath), FItems[I].Preview,
+        FItems[I].Line);
+      if R.Moved then Inc(Moved);
+      if R.Stale then Inc(Lost);
+      FItems[I].Line := R.Line;
+      FItems[I].Stale := R.Stale;
+    end;
+
+    // Only cells whose text really changed are written - in the steady state
+    // not a single assignment happens, so nothing repaints and the selection
+    // survives (the status window's rule).
+    FListView.Items.BeginUpdate;
+    try
+      for var K := 0 to FListView.Items.Count - 1 do
+      begin
+        var LI := FListView.Items[K];
+        var Idx := NativeInt(LI.Data);
+        if (Idx < 0) or (Idx > High(FItems)) or (LI.SubItems.Count < 1) then Continue;
+        var Txt := IntToStr(FItems[Idx].Line + 1);
+        if FItems[Idx].Stale then Txt := Txt + ' ?';
+        if LI.SubItems[0] <> Txt then LI.SubItems[0] := Txt;
+      end;
+    finally
+      FListView.Items.EndUpdate;
+    end;
+
+    FPosNote := '';
+    if (Moved > 0) or (Lost > 0) then
+    begin
+      if Moved > 0 then
+        FPosNote := Format('%d line(s) moved since the search', [Moved]);
+      if Lost > 0 then
+      begin
+        if FPosNote <> '' then FPosNote := FPosNote + ', ';
+        FPosNote := FPosNote + Format('%d marked "?" - that line changed, so ' +
+          'its position is the old one', [Lost]);
+      end;
+    end;
+    RenderStatus;
+  finally
+    Cache.Free;
+    FRefreshing := False;
+  end;
 end;
 
 procedure TFindReferencesDialog.SetReport(const AText: string);
@@ -417,6 +539,8 @@ begin
   if not Assigned(FListView.Selected) then Exit;
   Idx := NativeInt(FListView.Selected.Data);
   if (Idx < 0) or (Idx > High(FItems)) then Exit;
+  // The user may have edited since the search - jump to where the line IS.
+  RefreshPositions;
   if Assigned(FOnGotoLocation) then
     FOnGotoLocation(FItems[Idx]);
 end;

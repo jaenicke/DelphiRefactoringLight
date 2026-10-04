@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 1.21.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 1.22.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -72,6 +72,7 @@ In the last three weeks I tested with big projects and used it myself in real li
   This is also the answer to a Delphi 13.1 bug ([RSS-5463](https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5463)): when a class declares a method as a `private` / `public` **overload pair**, DelphiLSP answers nothing at all for it from another unit &mdash; no definition, no completion. *Find original symbol* uses the same resolution and jumps to the declaration anyway.
 - **Interfaces**: for a class method that implements an interface method, the declaration in the interface counts as a use &mdash; also when the interface is never called &mdash; and calls through the interface are found ("declared in interface IFoo", "call via interface IFoo"). Interface inheritance is followed (`IFoo = interface(IBase)`). For an interface method it works the other way round: the implementing classes' methods and the calls on them ("implemented by TFoo", "call via class TFoo").
 - **Closing the window stops the search.** The scan runs on the IDE's main thread, so it polls after every file and every verified occurrence: once the window is gone (or the IDE is shutting down) it ends at the next step instead of keeping the IDE busy. The same applies to *Find Implementations* and *Find Unit References*.
+- **The rows follow your edits.** A result window is a worklist: you fix the first occurrence, delete a line, and every line number below it would be wrong. Each row remembers the **text** of the line it was found on, so when you come back to the window the lines are looked up again (editor buffer first, so unsaved edits count) and brought up to date; the status line says how many moved. A row whose line was itself rewritten cannot be located any more &mdash; it is marked with `?` and keeps its old position rather than pointing you somewhere unrelated. This applies to every window that uses this dialog: *Find References*, *Find Implementations*, *Find original symbol* and the "After the move/edit" list of *Edit methods*.
 - **Double-click** or **Enter** jumps to the location.
 
 ### Find Unit References (`Ctrl+Alt+Shift+F`)

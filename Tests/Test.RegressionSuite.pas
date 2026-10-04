@@ -272,6 +272,12 @@ type
     ///  otherwise). The scan looked for the exact text "['{" and listed
     ///  the interface as "(no GUID)".</summary>
     [Test] procedure BlanksInsideTheGuidBrackets_AreStillAGuid;
+    /// <summary>The fix the check never had (user request, 2026-10-04): a
+    ///  declaration gets a FRESH GUID. What it must never do is pick which
+    ///  of several declarations on one GUID keeps it - the caller names the
+    ///  ones to change - and what it must never write is a GUID that is not
+    ///  one, or a line the check did not report.</summary>
+    [Test] procedure AFreshGuidGoesWhereTheCheckFoundTheOldOne;
   end;
 
   /// <summary>Found on the user's real project (2026-09-30): the signature
@@ -503,6 +509,11 @@ type
     ///  variable named Result - of the right type, so it compiles, and the
     ///  function's own result is never assigned.</summary>
     [Test] procedure ResultIsTheFunctionsReturnValueNotAVariable;
+    /// <summary>Measured live on 2026-10-04 with dcc32: extracting a block
+    ///  whose local is the utterly ordinary "S" produced the parameter "AS"
+    ///  - 'as' is an OPERATOR, so the unit did not compile (E2029 four
+    ///  times). A generated name must never be a reserved word.</summary>
+    [Test] procedure AGeneratedParameterNameIsNoReservedWord;
   end;
 
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
@@ -2063,6 +2074,121 @@ begin
   Assert.IsFalse(E[3].HasGuid, 'a GUID in a comment is still none: ' + E[3].Guid);
 end;
 
+procedure TInterfaceDeclLineTests.AFreshGuidGoesWhereTheCheckFoundTheOldOne;
+const
+  G1 = '{11111111-2222-3333-4444-000000000001}';
+  NewG = '{AABBCCDD-1122-3344-5566-778899AABBCC}';
+var
+  Lines: TArray<string>;
+  Plan: TGuidEditPlan;
+begin
+  // Only the text of a GUID may ever reach a source file.
+  Assert.IsTrue(IsGuidText(G1), 'the shape Delphi accepts');
+  Assert.IsTrue(IsGuidText('{aabbccdd-1122-3344-5566-778899aabbcc}'), 'lower case');
+  Assert.IsFalse(IsGuidText(''), 'nothing');
+  Assert.IsFalse(IsGuidText('11111111-2222-3333-4444-000000000001'), 'no braces');
+  Assert.IsFalse(IsGuidText('{11111111-2222-3333-4444-00000000000G}'), 'no hex');
+  Assert.IsFalse(IsGuidText('{1111111-22222-3333-4444-000000000001}'), 'group widths');
+
+  // 1) The GUID sits on a line of its OWN below the declaration, which is
+  //    where the check's three-line look-ahead finds it - so that is the
+  //    line the fix must rewrite, and nothing else may move.
+  Lines := SplitContentLines(
+    'unit UFix;'#13#10 + 'interface'#13#10 + 'type'#13#10 +
+    '  ICopy = interface'#13#10 +
+    '    [''' + G1 + ''']'#13#10 +
+    '    procedure Foo;'#13#10 +
+    '  end;'#13#10 + 'implementation'#13#10 + 'end.'#13#10);
+  Plan := PlanInterfaceGuidEdit(Lines, 3, NewG);
+  Assert.IsTrue(Plan.Ok, 'the declaration is at line 4: ' + Plan.Problem);
+  Assert.AreEqual(4, Plan.Line, 'the GUID line, not the declaration');
+  Assert.IsFalse(Plan.Inserted, 'it had one - it is replaced');
+  Assert.AreEqual(G1, Plan.OldGuid, 'what it replaced is reported');
+  Assert.AreEqual('    [''' + NewG + ''']', Plan.Lines[4],
+    'the brackets, quotes and indentation stay as the author wrote them');
+  Assert.AreEqual(Lines[3], Plan.Lines[3], 'the declaration is untouched');
+  Assert.AreEqual(Integer(Length(Lines)), Integer(Length(Plan.Lines)),
+    'replacing adds no line');
+
+  // 2) No GUID: a line is INSERTED below the declaration - which is also
+  //    right for a parent list, where appending to the declaration line
+  //    would have to know where the brackets end.
+  Lines := SplitContentLines(
+    'unit UFix;'#13#10 + 'interface'#13#10 + 'type'#13#10 +
+    '  INone = interface(IInterface)'#13#10 +
+    '    procedure Foo;'#13#10 +
+    '  end;'#13#10 + 'implementation'#13#10 + 'end.'#13#10);
+  Plan := PlanInterfaceGuidEdit(Lines, 3, NewG);
+  Assert.IsTrue(Plan.Ok, Plan.Problem);
+  Assert.IsTrue(Plan.Inserted, 'there was none');
+  Assert.AreEqual('', Plan.OldGuid, 'nothing was replaced');
+  Assert.AreEqual(4, Plan.Line);
+  Assert.AreEqual('    [''' + NewG + ''']', Plan.Lines[4],
+    'indented like the member below it');
+  Assert.AreEqual('  INone = interface(IInterface)', Plan.Lines[3],
+    'the parent list is untouched');
+  Assert.AreEqual('    procedure Foo;', Plan.Lines[5], 'and nothing is lost');
+
+  // 3) The shapes a human has to decide: nothing is written and the reason
+  //    says which one it is.
+  Lines := SplitContentLines(
+    'unit UFix;'#13#10 + 'interface'#13#10 + 'type'#13#10 +
+    '  IOneLine = interface end;'#13#10 +
+    '  IReal = interface'#13#10 + '  end;'#13#10 +
+    'implementation'#13#10 + 'end.'#13#10);
+  Plan := PlanInterfaceGuidEdit(Lines, 3, NewG);
+  Assert.IsFalse(Plan.Ok, 'opened and closed on one line');
+  Assert.IsTrue(Plan.Problem.Contains('one line'), Plan.Problem);
+  Plan := PlanInterfaceGuidEdit(Lines, 2, NewG);
+  Assert.IsFalse(Plan.Ok, '"type" declares no interface');
+  Assert.IsTrue(Plan.Problem.Contains('does not declare'), Plan.Problem);
+  Plan := PlanInterfaceGuidEdit(Lines, 4, 'not-a-guid');
+  Assert.IsFalse(Plan.Ok, 'and a GUID that is none is never written');
+
+  // 4) By NAME in the current text, because any edit since the check moves
+  //    the line - and TWO answers mean a conditional declaration, where the
+  //    caller must refuse instead of picking one.
+  Lines := SplitContentLines(
+    'unit UFix;'#13#10 + 'interface'#13#10 + 'type'#13#10 +
+    '  IPlain = interface'#13#10 + '  end;'#13#10 +
+    '{$IFDEF A}'#13#10 +
+    '  ITwice = interface'#13#10 + '  end;'#13#10 +
+    '{$ELSE}'#13#10 +
+    '  ITwice = interface'#13#10 + '  end;'#13#10 +
+    '{$ENDIF}'#13#10 + 'implementation'#13#10 + 'end.'#13#10);
+  Assert.AreEqual(1, Integer(Length(InterfaceDeclLines(Lines, 'IPlain'))),
+    'one declaration');
+  Assert.AreEqual(3, InterfaceDeclLines(Lines, 'IPlain')[0], 'at its line');
+  Assert.AreEqual(2, Integer(Length(InterfaceDeclLines(Lines, 'ITwice'))),
+    'a conditional declaration is TWO - the caller refuses');
+  Assert.AreEqual(0, Integer(Length(InterfaceDeclLines(Lines, 'INothing'))),
+    'and a name that is not declared is none');
+
+  // The tool reads "apply" and "fix_ids", so its SCHEMA has to list them:
+  // an argument a tool does not declare is dropped silently (1.16.11), and
+  // "apply without fix_ids" would then look like "apply everything".
+  var Known := KnownToolArguments('interface_guids');
+  Assert.IsTrue(Length(Known) > 0, 'interface_guids is in the shipped list');
+  for var N in ['only_problems', 'fix_ids', 'apply', 'instance'] do
+    Assert.IsTrue(MatchText(N, Known), N + ' is an argument of interface_guids');
+  Assert.IsFalse(MatchText('token', Known),
+    'the analysis re-runs inside the apply, so there is no revision to pin');
+  var Def := '';
+  var Arr := McpToolDefinitions;
+  try
+    for var E in Arr do
+      if (E is TJSONObject) and
+         (TJSONObject(E).GetValue<string>('name', '') = 'interface_guids') then
+        Def := TJSONObject(E).GetValue<string>('description', '');
+  finally
+    Arr.Free;
+  end;
+  Assert.IsFalse(Def.Contains('Read-only'),
+    'it writes now - a description that still says read-only is a lie');
+  Assert.IsTrue(Def.Contains('leave out'),
+    'and it has to say which declaration keeps the GUID');
+end;
+
 { TSignatureQualifierTests }
 
 procedure TSignatureQualifierTests.ImplementationAndDeclaration_NormalizeEqual;
@@ -3525,6 +3651,28 @@ begin
   Assert.IsFalse(Has('Hidden'), 'a // comment');
   Assert.IsFalse(Has('Quoted'), 'a string literal');
   Assert.IsFalse(Has('Blocked'), 'a block comment');
+end;
+
+procedure TExtractAndCompletionTests.AGeneratedParameterNameIsNoReservedWord;
+begin
+  // The reported case: a string variable called S.
+  Assert.AreEqual('AS1', ExtractedParameterName('S'),
+    'A + S is "as", the operator');
+  // The same shape with the other words that start with A.
+  Assert.AreEqual('And1', ExtractedParameterName('nd'));
+  Assert.AreEqual('Array1', ExtractedParameterName('rray'));
+  Assert.AreEqual('Asm1', ExtractedParameterName('sm'));
+  // A variable ALREADY named AS takes the keep-branch, so the check has to
+  // sit after both branches - not inside the prefixing one.
+  Assert.AreEqual('AS1', ExtractedParameterName('AS'),
+    'already prefixed, and still a reserved word');
+  // Everything else keeps the plain convention.
+  Assert.AreEqual('ACount', ExtractedParameterName('Count'));
+  Assert.AreEqual('AList', ExtractedParameterName('List'));
+  Assert.AreEqual('AValue', ExtractedParameterName('AValue'),
+    'an A-prefixed name is kept');
+  Assert.AreEqual('Aindex', ExtractedParameterName('index'),
+    'lower case after the A is not the keep-branch');
 end;
 
 procedure TExtractAndCompletionTests.AMethodNameMustBeAnIdentifier;

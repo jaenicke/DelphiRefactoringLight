@@ -1065,9 +1065,14 @@ const
     'project with its GUID, flagging DUPLICATE GUIDs (which make Supports / ' +
     'QueryInterface return the wrong object) and interfaces without one. An interface ' +
     'paired with a dispinterface on the same GUID is a type-library import and not ' +
-    'flagged. Read-only.","inputSchema":{"type":"object","properties":' +
+    'flagged. Every declaration carries an id: apply=true with fix_ids gives exactly ' +
+    'those a FRESH GUID, so for a duplicate the declaration you leave out is the one ' +
+    'that keeps it - which of them owns the GUID is a decision the tool must not make ' +
+    'for you.","inputSchema":{"type":"object","properties":' +
     '{"only_problems":{"type":"boolean","description":"Default true."},' +
-    InstanceProp + '}}}' +
+    '"fix_ids":{"type":"array","items":{"type":"string"},"description":"Ids from a ' +
+    'previous call - the declarations that get a new GUID. Required for apply."},' +
+    ApplyProp + ',' + InstanceProp + '}}}' +
     ',' +
     '{"name":"add_unit","description":"Adds a unit to the uses clause of a file (interface or i' +
     'mplementation), minimal edit, IDE buffer when the file is open. Refuses units only on the ' +

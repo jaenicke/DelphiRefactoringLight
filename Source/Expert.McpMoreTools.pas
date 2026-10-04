@@ -1752,9 +1752,14 @@ begin
   if Msg <> '' then Exit(McpErr(Msg));
   var Res := TJSONObject.Create;
   Res.AddPair('outcome', Outcome);
-  Res.AddPair('note', 'Applied through the IDE editor (undoable with Ctrl+Z in ' +
-    'each file); the files are NOT saved. Form files open in the designer were ' +
-    'renamed through the designer.');
+  // A rename touches many files, and only the ones the IDE already had open
+  // keep their edit in a buffer: a file this call had to open is saved to
+  // disk and closed again by the dispatcher's sweep, which names it in
+  // "modules". Promising Ctrl+Z for all of them was wrong (2026-10-04).
+  Res.AddPair('note', 'Files the IDE already had open are changed in their ' +
+    'buffer (undoable with Ctrl+Z there) and are NOT saved; every file this ' +
+    'call had to open itself is named in "modules" and was written to disk. ' +
+    'Form files open in the designer were renamed through the designer.');
   Result := McpOk(Res);
 end;
 
@@ -2745,13 +2750,110 @@ end;
 //  Project checks: interface GUIDs, DFM event handlers
 // ---------------------------------------------------------------------------
 
+// One id per declaration, bound to the PLACE (file + name) and not to an
+// index, so it survives a re-check as long as the declaration does - the
+// same rule DfmIssueId follows.
+function GuidEntryId(const AEntry: TInterfaceGuidEntry): string;
+begin
+  Result := IntToHex(PreviewContentHash(LowerCase(AEntry.FileName) + '|' +
+    UpperCase(AEntry.InterfaceName)), 8);
+end;
+
+// Assigns a FRESH GUID to one declaration, in the text as it is now (buffer
+// when the IDE has the file open, else disk). Returns what happened, for the
+// "result" field of that entry.
+function AssignFreshGuid(const AEntry: TInterfaceGuidEntry;
+  AStop: THandle; out ANewGuid: string): string;
+var
+  Old: string;
+  Lines: TArray<string>;
+  At: TArray<Integer>;
+  Plan: TGuidEditPlan;
+  SL: TStringList;
+  Written: Boolean;
+  RunErr, LB: string;
+begin
+  ANewGuid := '';
+  if not McpReadContent(AEntry.FileName, Old) then
+    Exit('NOT changed: the file could not be read');
+  Lines := SplitEditorLines(Old);
+  // By NAME, in the current text: the line the check reported may have
+  // moved, and a second declaration of the same name is a conditional one.
+  At := InterfaceDeclLines(Lines, AEntry.InterfaceName);
+  if Length(At) = 0 then
+    Exit('NOT changed: ' + AEntry.InterfaceName + ' is no longer declared in ' +
+      'this file - run the check again');
+  if Length(At) > 1 then
+    Exit('NOT changed: ' + AEntry.InterfaceName + ' is declared ' +
+      IntToStr(Length(At)) + ' times in this file (a conditional ' +
+      'declaration) - assign the GUID by hand');
+  ANewGuid := UpperCase(GUIDToString(TGUID.NewGuid));
+  Plan := PlanInterfaceGuidEdit(Lines, At[0], ANewGuid);
+  if not Plan.Ok then
+  begin
+    ANewGuid := '';
+    Exit('NOT changed: ' + Plan.Problem);
+  end;
+  if Pos(#13#10, Old) > 0 then LB := #13#10
+  else if Pos(#10, Old) > 0 then LB := #10
+  else LB := sLineBreak;
+  Written := False;
+  SL := TStringList.Create;
+  try
+    // The trailing empty element the split keeps IS the file's final line
+    // break, and TStringList.Text appends one of its own - so the text is
+    // joined here and assigned, never Add-ed line by line (1.18.7).
+    SL.Text := string.Join(LB, Plan.Lines);
+    // THE WRITE BELONGS ON THE MAIN THREAD (Ian's audit, critical 1).
+    // ApplyLinesMinimal also compares the live buffer against Old, so a
+    // buffer that changed since it was read is refused, not overwritten.
+    if not McpRunOnMain(
+      procedure
+      begin
+        Written := ApplyLinesMinimal(AEntry.FileName, SL, Old);
+      end, False, AStop, RunErr) then
+    begin
+      ANewGuid := '';
+      Exit('NOT changed: ' + RunErr);
+    end;
+  finally
+    SL.Free;
+  end;
+  if not Written then
+  begin
+    ANewGuid := '';
+    Exit('NOT changed: the buffer changed since it was read - run the check ' +
+      'again and retry');
+  end;
+  if Plan.Inserted then
+    Result := 'GUID ' + ANewGuid + ' inserted on line ' + IntToStr(Plan.Line + 1)
+  else
+    Result := 'GUID changed from ' + Plan.OldGuid + ' to ' + ANewGuid +
+      ' on line ' + IntToStr(Plan.Line + 1);
+end;
+
 function ToolInterfaceGuids(AArgs: TJSONObject; AStop: THandle): string;
 var
   Entries: TArray<TInterfaceGuidEntry>;
   Err: string;
-  Files: TArray<string>;
+  Files, WantIds: TArray<string>;
+  DoApply: Boolean;
 begin
   var OnlyProblems := ArgBool(AArgs, 'only_problems', True);
+  DoApply := ArgBool(AArgs, 'apply');
+  WantIds := nil;
+  var IdArr := AArgs.GetValue<TJSONArray>('fix_ids', nil);
+  if IdArr <> nil then
+    for var V in IdArr do WantIds := WantIds + [UpperCase(Trim(V.Value))];
+  // NOTHING IS FIXED WITHOUT IDS, and that is the whole design: which of
+  // several declarations on one GUID keeps it is the only real decision
+  // here, and it is not ours (on the user's own project in 2026-09 it was
+  // decided by age, read with blame - a tool cannot know that).
+  if DoApply and (Length(WantIds) = 0) then
+    Exit(McpErr('apply needs "fix_ids" - list the declarations first and name ' +
+      'the ones that get a NEW GUID. For a duplicate that means: the one you ' +
+      'do NOT name keeps the GUID it has, so decide which declaration owns ' +
+      'it (the oldest one, say) before you call this.'));
   Files := nil;
   if not McpRunOnMain(
     procedure
@@ -2760,35 +2862,68 @@ begin
     end, True, AStop, Err) then Exit(McpErr(Err));
   if Length(Files) = 0 then Exit(McpErr('no project loaded / no source files'));
   Entries := TInterfaceGuidChecker.Scan(Files);
-  var Arr := TJSONArray.Create;
-  var Dupes := 0;
-  var Missing := 0;
-  for var E in Entries do
-  begin
-    if E.IsDuplicate then Inc(Dupes);
-    if not E.HasGuid then Inc(Missing);
-    if OnlyProblems and not E.IsDuplicate and E.HasGuid then Continue;
-    var O := TJSONObject.Create;
-    O.AddPair('interface', E.InterfaceName);
-    O.AddPair('file', E.FileName);
-    O.AddPair('line', TJSONNumber.Create(E.Line));
-    if E.HasGuid then O.AddPair('guid', E.Guid)
-    else O.AddPair('guid', TJSONNull.Create);
-    if E.IsDuplicate then O.AddPair('duplicate', TJSONBool.Create(True));
-    if E.IsDispInterface then O.AddPair('dispinterface', TJSONBool.Create(True));
-    Arr.Add(O);
+
+  var Applied := TDictionary<string, string>.Create;
+  try
+    if DoApply then
+      for var E in Entries do
+      begin
+        var Id := GuidEntryId(E);
+        var Wanted := False;
+        for var W in WantIds do
+          if W = UpperCase(Id) then Wanted := True;
+        if not Wanted then Continue;
+        var NewGuid := '';
+        Applied.AddOrSetValue(UpperCase(Id), AssignFreshGuid(E, AStop, NewGuid));
+      end;
+
+    var Arr := TJSONArray.Create;
+    var Dupes := 0;
+    var Missing := 0;
+    for var E in Entries do
+    begin
+      if E.IsDuplicate then Inc(Dupes);
+      if not E.HasGuid then Inc(Missing);
+      var Outcome := '';
+      var HasOutcome := Applied.TryGetValue(UpperCase(GuidEntryId(E)), Outcome);
+      if OnlyProblems and not E.IsDuplicate and E.HasGuid and
+         not HasOutcome then Continue;
+      var O := TJSONObject.Create;
+      O.AddPair('id', GuidEntryId(E));
+      O.AddPair('interface', E.InterfaceName);
+      O.AddPair('file', E.FileName);
+      O.AddPair('line', TJSONNumber.Create(E.Line));
+      if E.HasGuid then O.AddPair('guid', E.Guid)
+      else O.AddPair('guid', TJSONNull.Create);
+      if E.IsDuplicate then O.AddPair('duplicate', TJSONBool.Create(True));
+      if E.IsDispInterface then O.AddPair('dispinterface', TJSONBool.Create(True));
+      if HasOutcome then O.AddPair('result', Outcome);
+      Arr.Add(O);
+    end;
+    var Res := TJSONObject.Create;
+    Res.AddPair('applied', TJSONBool.Create(DoApply));
+    Res.AddPair('interfaces', TJSONNumber.Create(Length(Entries)));
+    Res.AddPair('duplicateGuids', TJSONNumber.Create(Dupes));
+    Res.AddPair('withoutGuid', TJSONNumber.Create(Missing));
+    Res.AddPair('entries', Arr);
+    if DoApply then
+      Res.AddPair('note', 'The declarations you named carry a fresh GUID now, ' +
+        'in the IDE buffer when the file was open (not saved) and on disk ' +
+        'otherwise; "result" says per entry what happened. The counts above ' +
+        'are from the scan BEFORE the change - run the check again to see ' +
+        'the state after it.')
+    else
+      Res.AddPair('note', 'A duplicate GUID makes Supports/QueryInterface ' +
+        'return the WRONG object. An interface paired with a dispinterface ' +
+        'on the same GUID is a type-library import and not counted. Nothing ' +
+        'was changed: pass apply=true with "fix_ids" to give those ' +
+        'declarations a fresh GUID - the one you leave out keeps the GUID it ' +
+        'has.' + IfThen(OnlyProblems, ' Only problems are listed - pass ' +
+        'only_problems=false for every interface.', ''));
+    Result := McpOk(Res);
+  finally
+    Applied.Free;
   end;
-  var Res := TJSONObject.Create;
-  Res.AddPair('interfaces', TJSONNumber.Create(Length(Entries)));
-  Res.AddPair('duplicateGuids', TJSONNumber.Create(Dupes));
-  Res.AddPair('withoutGuid', TJSONNumber.Create(Missing));
-  Res.AddPair('entries', Arr);
-  Res.AddPair('note', 'A duplicate GUID makes Supports/QueryInterface return the ' +
-    'WRONG object. An interface paired with a dispinterface on the same GUID is ' +
-    'a type-library import and not counted. Read-only.' +
-    IfThen(OnlyProblems, ' Only problems are listed - pass only_problems=false ' +
-    'for every interface.', ''));
-  Result := McpOk(Res);
 end;
 
 // One id per issue so apply can name them; bound to the place, not to an
@@ -3119,9 +3254,14 @@ begin
   DoApply := ArgBool(AArgs, 'apply');
   Ok := False;
   RunErr := '';
+  // BEFORE the write: a file the IDE does not have open is saved to disk and
+  // closed again by the dispatcher's sweep, so the "undoable with Ctrl+Z"
+  // half of the note below would be a promise nobody can keep.
+  var WasLoaded := False;
   if not McpRunOnMain(
     procedure
     begin
+      WasLoaded := McpModuleIsLoaded(F);
       Ok := ExtractMethodHeadless(F, From1, To1, Name, DoApply, Prev, RunErr);
     end, False, AStop, Err, 300000) then Exit(McpErr(Err));
   if not Ok then Exit(McpErr(RunErr));
@@ -3140,10 +3280,15 @@ begin
   Res.AddPair('insertAtLine', TJSONNumber.Create(Prev.InsertLine));
   if Prev.ClassDeclLine > 0 then
     Res.AddPair('declarationAtLine', TJSONNumber.Create(Prev.ClassDeclLine));
-  if DoApply then
+  if DoApply and WasLoaded then
     Res.AddPair('note', 'Changed in the IDE buffer (not saved, undoable with ' +
       'Ctrl+Z). The variables that moved into the new routine were removed ' +
       'from the old one''s var section.')
+  else if DoApply then
+    Res.AddPair('note', 'The IDE did not have this file open, so the change ' +
+      'was written to DISK and the buffer closed again ("modules" says so) - ' +
+      'Ctrl+Z cannot reach it. The variables that moved into the new routine ' +
+      'were removed from the old one''s var section.')
   else
     Res.AddPair('note', 'Nothing was written. "method" is the routine that ' +
       'would be inserted, "call" what replaces the block, "declaration" the ' +

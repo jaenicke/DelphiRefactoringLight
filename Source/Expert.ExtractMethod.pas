@@ -195,6 +195,16 @@ function BlockMentionsResult(const ABlockText: string): Boolean;
 function CallIndentFor(const ABlockLines: TArray<string>;
   const ASelectedText: string): string;
 
+/// <summary>The name a local of the extracted block gets as a PARAMETER of
+///  the new routine: 'A' + the name (the Delphi convention), kept as it is
+///  when it already starts with 'A' plus an upper-case letter - and never a
+///  RESERVED WORD, which gets a digit until it is none.
+///  MEASURED 2026-10-04 with dcc32: a local called S - the most ordinary
+///  name a string has - became "AS", and 'as' is an operator, so the
+///  extracted unit did not compile (E2029 at the declaration, at the header
+///  and at both assignments). 'nd' / 'rray' / 'sm' have the same shape.</summary>
+function ExtractedParameterName(const ALocalName: string): string;
+
 function PlanLocalVarRemoval(const AFileLines: TArray<string>; AHeaderLine: Integer;
   const ANames: TArray<string>): TArray<TPair<Integer, string>>;
 
@@ -250,16 +260,22 @@ type
     class function MakeHoverParams(const AFileName: string; ALine, ACol: Integer): TJSONObject; static;
   end;
 
-/// <summary>Prefixes the parameter name with 'A' (Delphi convention for
-///  method parameters). If the name already starts with 'A' followed by an
-///  uppercase letter, it is kept unchanged.</summary>
+function ExtractedParameterName(const ALocalName: string): string;
+begin
+  if (Length(ALocalName) >= 2) and (ALocalName[1] = 'A') and
+     CharInSet(ALocalName[2], ['A'..'Z']) then
+    Result := ALocalName
+  else
+    Result := 'A' + ALocalName;
+  // A reserved word gets a digit until it is none. The check sits after BOTH
+  // branches on purpose: a variable already named "AS" takes the keep-branch.
+  while TExtractMethodHelper.IsPascalKeyword(UpperCase(Result)) do
+    Result := Result + '1';
+end;
+
 class function TExtractMethodHelper.ParamPrefix(const AName: string): string;
 begin
-  if (Length(AName) >= 2) and (AName[1] = 'A') and
-     CharInSet(AName[2], ['A'..'Z']) then
-    Result := AName
-  else
-    Result := 'A' + AName;
+  Result := ExtractedParameterName(AName);
 end;
 
 /// <summary>Replaces every whole-word occurrence of AIdent with ANew in

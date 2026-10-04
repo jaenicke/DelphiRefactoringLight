@@ -23,7 +23,11 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.InterfaceGuidCheck, Expert.DialogHelper,
-  Expert.IdeThemes, Expert.ListViewSort, Delphi.FileEncoding;
+  Expert.IdeThemes, Expert.ListViewSort, Delphi.FileEncoding,
+  // SplitEditorLines (whose trailing empty element IS the file's final line
+  // break) and ApplyLinesMinimal - the "Assign new GUID" button writes
+  // through the same two as every other edit of this plugin.
+  Expert.PascalScanner, Expert.UsesEditor;
 
 // Small helper: bottom-aligned button panel. Kept local to avoid
 // pulling a whole layout framework into this dialog.
@@ -46,6 +50,7 @@ type
     FLblSummary: TLabel;
     FBtnClose: TButton;
     FBtnGoto: TButton;
+    FBtnNewGuid: TButton;
     FEntries: TArray<TInterfaceGuidEntry>;
     /// <summary>Live-refresh state. The dialog is non-modal; while it
     ///  is open a timer watches the ACTIVE editor unit. When its
@@ -75,6 +80,7 @@ type
     procedure DoData(Sender: TObject; Item: TListItem);
     procedure DoDblClick(Sender: TObject);
     procedure DoGotoClick(Sender: TObject);
+    procedure DoNewGuidClick(Sender: TObject);
     procedure DoCloseClick(Sender: TObject);
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure GotoSelected;
@@ -156,6 +162,15 @@ begin
   Col := FListView.Columns.Add; Col.Caption := 'Line';      Col.Width := 60;
 
   var Panel := CreateButtonRow(Self);
+  // Writes code, so it is never the Default button (audit #41, M40e) and it
+  // asks first - WHICH declaration keeps the GUID is the decision here.
+  FBtnNewGuid := TButton.Create(Self);
+  FBtnNewGuid.Parent := Panel;
+  FBtnNewGuid.Caption := 'Assign &new GUID';
+  FBtnNewGuid.Width := 130;
+  FBtnNewGuid.Align := alLeft;
+  FBtnNewGuid.AlignWithMargins := True;
+  FBtnNewGuid.OnClick := DoNewGuidClick;
   FBtnGoto := TButton.Create(Self);
   FBtnGoto.Parent := Panel;
   FBtnGoto.Caption := '&Go to';
@@ -416,6 +431,99 @@ end;
 procedure TInterfaceGuidDialog.DoGotoClick(Sender: TObject);
 begin
   GotoSelected;
+end;
+
+// The selected declaration gets a FRESH GUID. Only the selected one: for a
+// duplicate, the declaration that is NOT touched keeps the GUID - and which
+// of them owns it (the oldest, the one a registry entry names, ...) is
+// exactly the decision this dialog leaves to the user.
+procedure TInterfaceGuidDialog.DoNewGuidClick(Sender: TObject);
+var
+  Idx: Integer;
+  Old, Content, Msg, NewGuid: string;
+  Lines: TArray<string>;
+  At: TArray<Integer>;
+  Plan: TGuidEditPlan;
+  SL: TStringList;
+begin
+  if FListView.Selected = nil then
+  begin
+    ShowThemedMessage('Select the declaration that should get a new GUID.');
+    Exit;
+  end;
+  Idx := FListView.Selected.Index;
+  if (Idx < 0) or (Idx >= Length(FEntries)) then Exit;
+  var E := FEntries[Idx];
+
+  // Buffer first, disk otherwise - the same reader the live watcher uses.
+  if not ReadEffectiveContent(E.FileName, Content) or (Content = '') then
+  begin
+    ShowThemedMessage('The unit ' + E.FileName + ' could not be read.');
+    Exit;
+  end;
+  Lines := SplitEditorLines(Content);
+  // By NAME in the CURRENT text - the line this list shows can have moved.
+  At := InterfaceDeclLines(Lines, E.InterfaceName);
+  if Length(At) = 0 then
+  begin
+    ShowThemedMessage(E.InterfaceName + ' is no longer declared in ' +
+      ExtractFileName(E.FileName) + ' - run the check again.');
+    Exit;
+  end;
+  if Length(At) > 1 then
+  begin
+    ShowThemedMessage(E.InterfaceName + ' is declared ' + IntToStr(Length(At)) +
+      ' times in ' + ExtractFileName(E.FileName) + ' (a conditional ' +
+      'declaration). Assign the GUID by hand - which branch you mean is not ' +
+      'decidable here.');
+    Exit;
+  end;
+
+  if E.HasGuid then
+    Msg := E.InterfaceName + ' carries ' + E.Guid + '.' + sLineBreak +
+      'Give THIS declaration a new GUID?' + sLineBreak + sLineBreak +
+      'Another declaration on the same GUID keeps it - so do this on the ' +
+      'copy, not on the original.'
+  else
+    Msg := E.InterfaceName + ' has no GUID.' + sLineBreak +
+      'Insert a fresh one below its declaration?';
+  if not AskThemedConfirm(Msg, 'Assign new GUID') then Exit;
+
+  NewGuid := UpperCase(GUIDToString(TGUID.NewGuid));
+  Plan := PlanInterfaceGuidEdit(Lines, At[0], NewGuid);
+  if not Plan.Ok then
+  begin
+    ShowThemedMessage('Not changed: ' + Plan.Problem);
+    Exit;
+  end;
+  Old := Content;
+  var LB := #13#10;
+  if (Pos(#13#10, Old) = 0) and (Pos(#10, Old) > 0) then LB := #10;
+  SL := TStringList.Create;
+  try
+    // Joined, not Add-ed: the trailing empty element of the split IS the
+    // file's final line break and TStringList.Text appends one (1.18.7).
+    SL.Text := string.Join(LB, Plan.Lines);
+    if not ApplyLinesMinimal(E.FileName, SL, Old) then
+    begin
+      ShowThemedMessage('The unit changed while the dialog was open - nothing ' +
+        'was written. Run the check again.');
+      Exit;
+    end;
+  finally
+    SL.Free;
+  end;
+
+  // The list must show what the file now says, and the duplicate flags are
+  // computed over the whole set - so refresh that file's entries.
+  RefreshFileEntries(E.FileName);
+  if Plan.Inserted then
+    ShowThemedMessage(E.InterfaceName + ' now carries ' + NewGuid +
+      ' (inserted on line ' + IntToStr(Plan.Line + 1) + '). The unit is ' +
+      'changed in the editor and not saved - Ctrl+Z undoes it.')
+  else
+    ShowThemedMessage(E.InterfaceName + ': ' + Plan.OldGuid + ' -> ' + NewGuid +
+      '. The unit is changed in the editor and not saved - Ctrl+Z undoes it.');
 end;
 
 procedure TInterfaceGuidDialog.DoCloseClick(Sender: TObject);

@@ -49,6 +49,17 @@ function McpRunOnMain(const AProc: TProc; AAllowModal: Boolean; AStop: THandle;
 function McpOk(AResult: TJSONValue): string;
 function McpErr(const AMsg: string): string;
 /// <summary>Editor buffer if loaded, else the file on disk. MAIN THREAD.</summary>
+/// <summary>True when the IDE has this file loaded as a module - with or
+///  without a visible tab. MAIN THREAD only.
+///  A tool whose answer promises "changed in the IDE buffer, not saved,
+///  undoable with Ctrl+Z" has to ask this BEFORE it writes: for a file the
+///  IDE did not have open, the dispatcher's sweep saves it to disk and
+///  closes the module again (1.22.2) - and then neither half of that
+///  sentence is true. Measured 2026-10-04: extract_method said exactly that
+///  while its own answer also reported "written to disk and closed
+///  again".</summary>
+function McpModuleIsLoaded(const AFile: string): Boolean;
+
 function McpReadContent(const AFile: string; out AContent: string): Boolean;
 
 procedure StartMcpServer;
@@ -424,6 +435,16 @@ begin
     var M := MS.Modules[I];
     if M <> nil then Result := Result + [UpperCase(M.FileName)];
   end;
+end;
+
+function McpModuleIsLoaded(const AFile: string): Boolean;
+var
+  Up: string;
+begin
+  Result := False;
+  Up := UpperCase(ExpandFileName(AFile));
+  for var F in LoadedModuleFiles do
+    if F = Up then Exit(True);
 end;
 
 function AvailabilityName(const AUnit: string): string;

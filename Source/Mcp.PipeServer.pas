@@ -27,7 +27,8 @@ unit Mcp.PipeServer;
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, System.Classes;
+  Winapi.Windows, System.SysUtils, System.Classes,
+  Mcp.Protocol;   // TBridgeExeAge - the rule that reads it lives there
 
 type
   /// <summary>One request line in, one response line out. Runs on a
@@ -95,10 +96,19 @@ type
 ///  array. For the test suites and for diagnostics.</summary>
 function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
 
+/// <summary>Is the exe APID runs from NEWER on disk than that process is? It
+///  answers which of two opposite things a version skew means: the install
+///  did not replace the file (beaAsOld), or it did and only this session
+///  still runs the old image (beaReplaced). Anything Windows refuses to tell
+///  us - a process that ended, no rights - answers beaUnknown, because a
+///  guess here would send the user the wrong way. Called from the status
+///  path only (once per read), never per request.</summary>
+function BridgeExeAgeOf(APid: Cardinal): TBridgeExeAge;
+
 implementation
 
 uses
-  System.SyncObjs, System.JSON, Mcp.Protocol,
+  System.SyncObjs, System.JSON,
   Expert.WorkerLatch;   // RTL only as well: handler threads are joined at unload
 
 const
@@ -210,6 +220,46 @@ begin
   CloseHandle(FStopEvent);
   FLock.Free;
   inherited;
+end;
+
+const
+  // Not in this RTL's Winapi.Windows; the LIMITED right is what a process of
+  // another integrity level still grants, which is what we need here.
+  PROCESS_QUERY_LIMITED_INFO = $1000;
+
+function QueryFullProcessImageNameW(hProcess: THandle; dwFlags: DWORD;
+  lpExeName: PWideChar; var lpdwSize: DWORD): BOOL; stdcall;
+  external kernel32 name 'QueryFullProcessImageNameW';
+
+function BridgeExeAgeOf(APid: Cardinal): TBridgeExeAge;
+var
+  H: THandle;
+  Buf: array[0..MAX_PATH] of Char;
+  Len: DWORD;
+  Created, Exited, Kernel, User: TFileTime;
+  Path: string;
+  Attr: TWin32FileAttributeData;
+begin
+  Result := beaUnknown;
+  if APid = 0 then Exit;
+  H := OpenProcess(PROCESS_QUERY_LIMITED_INFO, False, APid);
+  if H = 0 then Exit;
+  try
+    Len := Length(Buf);
+    if not QueryFullProcessImageNameW(H, 0, @Buf[0], Len) then Exit;
+    Path := string(PChar(@Buf[0]));
+    if not GetProcessTimes(H, Created, Exited, Kernel, User) then Exit;
+  finally
+    CloseHandle(H);
+  end;
+  if (Path = '') or not GetFileAttributesEx(PChar(Path), GetFileExInfoStandard,
+    @Attr) then Exit;
+  // Both are UTC FILETIMEs, so they compare directly. A file written in the
+  // same second as the start is NOT evidence of a replacement.
+  if CompareFileTime(Attr.ftLastWriteTime, Created) > 0 then
+    Result := beaReplaced
+  else
+    Result := beaAsOld;
 end;
 
 procedure TMcpPipeServer.SetLastError(const S: string);

@@ -8,7 +8,16 @@ setlocal
 ::
 :: A running Claude Code session keeps the exe open. Windows lets a running
 :: exe be RENAMED, though, so the old one is moved aside first and the new
-:: one copied in; the old file is removed by the next install.
+:: one copied in.
+::
+:: THE ASIDE NAME IS UNIQUE (2026-10-04). It used to be one fixed
+:: "<exe>.old", deleted before the move - and a bridge process started FROM
+:: that .old holds it, so the delete failed, the move had nowhere to go and
+:: the copy could not overwrite the live exe. Then NOTHING was installed
+:: although the build succeeded, which is how the user's bridge stayed four
+:: versions behind. With a unique name the move always has a free
+:: destination, so an install works WHILE Claude Code sessions are running -
+:: which is the normal case, because install.cmd is run from one.
 :: ============================================================================
 
 set BDSVER=%~1
@@ -48,10 +57,12 @@ if not exist "%BUILT%" (
 )
 
 if not exist "%TARGETDIR%" mkdir "%TARGETDIR%"
-if exist "%TARGET%.old" del /f /q "%TARGET%.old" >nul 2>&1
-if exist "%TARGET%" (
-    move /y "%TARGET%" "%TARGET%.old" >nul 2>&1
-)
+:: Best effort only: an .old a bridge still runs from cannot be deleted, and
+:: that must never stop the install (it used to).
+del /f /q "%TARGETDIR%\*.old" >nul 2>&1
+:: One line on purpose: %RANDOM% is expanded where it stands, so no delayed
+:: expansion is needed (plain "setlocal" above does not have it).
+if exist "%TARGET%" move /y "%TARGET%" "%TARGET%.%RANDOM%%RANDOM%.old" >nul 2>&1
 copy /y "%BUILT%" "%TARGET%" >nul
 if %ERRORLEVEL% NEQ 0 goto :notinstalled
 
@@ -83,7 +94,8 @@ echo  built    : %BUILTVER%  %BUILT%
 if defined TARGETVER echo  installed: %TARGETVER%  %TARGET%
 if not defined TARGETVER echo  installed: the exe there did not answer --version
 echo.
-echo  The file could not be replaced. Almost always a RUNNING Claude Code
-echo  session (or a "claude" in a terminal) still holds it.
-echo  Close every one of them, then run install.cmd again.
+echo  The file could not be replaced - and a running Claude Code session is
+echo  NOT a reason any more (the exe is moved aside under a unique name).
+echo  Check that %TARGETDIR%
+echo  is writable, then run install.cmd again.
 exit /b 1

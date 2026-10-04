@@ -107,7 +107,8 @@ echo  behave like the build that exe came from - wrong timeouts, missing
 echo  tools - and nothing inside the IDE can tell you. The reason is in
 echo  the lines above.
 echo.
-echo  Close EVERY Claude Code session, then run install.cmd again.
+echo  A running Claude Code session is NOT the reason (since 1.22.1 the
+echo  old exe is moved aside under a unique name), so read the lines above.
 echo  To see what is installed at any time:
 echo.
 echo       "%MCPEXE%" --version

@@ -1143,6 +1143,28 @@ begin
   Assert.IsTrue(S.Contains('install.cmd'), 'and what to do about it: ' + S);
   Assert.IsTrue(BridgeVersionProblem('', '1.15.2').Contains('1.15.2'),
     'a bridge too old to report its version is still reported');
+
+  // User, 2026-10-04: "version mismatch trotz install.cmd und Claude Code
+  // Neustart". Measured: the exe on disk was the NEW one and only his running
+  // bridge was old - so the message must not send him to install.cmd again.
+  // The two cases need OPPOSITE actions, which is why the age decides.
+  var Replaced := BridgeVersionProblem('1.16.29', '1.22.0', beaReplaced);
+  Assert.IsTrue(Replaced.Contains('1.16.29') and Replaced.Contains('1.22.0'),
+    'both numbers, whatever the age: ' + Replaced);
+  Assert.IsTrue(Replaced.Contains('new Claude Code session'),
+    'the exe is already right, so a new session is the whole fix: ' + Replaced);
+  Assert.IsFalse(Replaced.Contains('install.cmd'),
+    'and running the install again would be the WRONG advice: ' + Replaced);
+
+  var AsOld := BridgeVersionProblem('1.16.29', '1.22.0', beaAsOld);
+  Assert.IsTrue(AsOld.Contains('install.cmd'),
+    'an exe as old as its process was never replaced: ' + AsOld);
+  // beaUnknown must behave like "not replaced": naming the install is the
+  // safe direction when Windows would not say.
+  Assert.AreEqual(AsOld, BridgeVersionProblem('1.16.29', '1.22.0', beaUnknown),
+    'an unknown age reads as "the install did not replace it"');
+  Assert.AreEqual(AsOld, BridgeVersionProblem('1.16.29', '1.22.0'),
+    'and that is also the default, so every old caller keeps its wording');
 end;
 
 procedure TMcpPipeRegressionTests.BridgeVersion_ReachesTheServerOverARealPipe;

@@ -35,6 +35,12 @@ type
     ///  block had no terminator and ran straight into :mcp_failed.
     /// </summary>
     [Test] procedure InstallScripts_HaveNoLabelFallThrough;
+    /// <summary>User, 2026-10-04: the bridge stayed four versions behind
+    ///  although every install.cmd succeeded. The aside name was FIXED, so an
+    ///  .old a bridge still ran from could not be deleted, the move had
+    ///  nowhere to go and the live exe could not be overwritten - and an
+    ///  install while a Claude Code session runs is the normal case.</summary>
+    [Test] procedure TheBridgeIsMovedAsideUnderAUniqueName;
     /// <summary>
     ///  GetCurrentContext walks the edit position to read the word under the
     ///  cursor, and that COLLAPSES an active selection - the helper says so
@@ -184,6 +190,27 @@ begin
     if (T = '') or T.StartsWith('::') or T.StartsWith('rem ', True) then Continue;
     Result := T;
   end;
+end;
+
+procedure TRepoHygieneTests.TheBridgeIsMovedAsideUnderAUniqueName;
+var
+  Lines: TArray<string>;
+  MoveLine: string;
+begin
+  var F := TPath.Combine(TPath.Combine(RepoRoot, 'Mcp'), 'buildmcp.cmd');
+  Assert.IsTrue(TFile.Exists(F), 'buildmcp.cmd must be there: ' + F);
+  Lines := TFile.ReadAllText(F).Replace(#13#10, #10).Split([#10]);
+  for var L in Lines do
+    if L.TrimLeft.StartsWith('if exist "%TARGET%" move', True) or
+       L.TrimLeft.StartsWith('move /y "%TARGET%"', True) then
+      MoveLine := L.Trim;
+  Assert.AreNotEqual('', MoveLine,
+    'the live exe must still be moved aside before the copy');
+  Assert.IsTrue(MoveLine.Contains('%RANDOM%'),
+    'and under a UNIQUE name, or an undeletable .old blocks the whole ' +
+    'install: ' + MoveLine);
+  Assert.IsFalse(MoveLine.Contains('"%TARGET%.old"'),
+    'the fixed name is exactly what broke it: ' + MoveLine);
 end;
 
 procedure TRepoHygieneTests.InstallScripts_HaveNoLabelFallThrough;

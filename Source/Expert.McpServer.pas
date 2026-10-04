@@ -1967,7 +1967,8 @@ begin
     ADetail := ADetail + Format('bridge pid %d (%s): %d request(s), last %d s ago',
       [C.Pid, Ver, C.Requests, (GetTickCount64 - C.LastTick) div 1000]);
     if Problem = '' then
-      Problem := BridgeVersionProblem(C.Version, PluginVersion);
+      Problem := BridgeVersionProblem(C.Version, PluginVersion,
+        BridgeExeAgeOf(C.Pid));
   end;
   if Problem <> '' then
   begin
@@ -1984,7 +1985,8 @@ begin
   if GServer = nil then Exit;
   for var C in GServer.RecentClients(15000) do
   begin
-    Result := BridgeVersionProblem(C.Version, PluginVersion);
+    Result := BridgeVersionProblem(C.Version, PluginVersion,
+      BridgeExeAgeOf(C.Pid));
     if Result <> '' then Exit;
   end;
 end;

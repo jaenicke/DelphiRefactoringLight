@@ -83,12 +83,31 @@ function StampBridgeVersion(const ARequest, AVersion: string): string;
 ///  same reason - the server must not parse a huge request twice.</summary>
 function BridgeVersionOfRequest(const ARequest: string): string;
 
+type
+  /// <summary>What the bridge exe ON DISK is, compared with the process that
+  ///  is talking to us. The two cases need OPPOSITE actions, which is why the
+  ///  message must not name both (user, 2026-10-04: "version mismatch trotz
+  ///  install.cmd und Claude Code Neustart" - the exe had been replaced
+  ///  meanwhile, so only his session was old).</summary>
+  TBridgeExeAge = (
+    /// <summary>Not known - no process to ask, or Windows refused.</summary>
+    beaUnknown,
+    /// <summary>The exe was last written BEFORE that process started, so the
+    ///  running image IS the installed file: the install did not replace
+    ///  it.</summary>
+    beaAsOld,
+    /// <summary>The exe is NEWER than the process: it has been replaced and
+    ///  only this session still runs the old image.</summary>
+    beaReplaced);
+
 /// <summary>'' when the two versions agree (nothing to report); otherwise one
-///  line naming BOTH numbers and the two things that cause a skew. Pure, so
-///  the status row, get_status and the tests share one wording. Deliberately
-///  does not compare which is newer: the answer is the same either way - the
-///  install did not finish.</summary>
-function BridgeVersionProblem(const ABridge, APlugin: string): string;
+///  line naming BOTH numbers and WHAT TO DO. Pure, so the status row,
+///  get_status and the tests share one wording. It does not compare which
+///  version is newer - that says nothing - but it does use AAGE, because
+///  "start a new Claude Code session" and "the install did not replace the
+///  exe" are different problems and only one of them is the user's.</summary>
+function BridgeVersionProblem(const ABridge, APlugin: string;
+  AAge: TBridgeExeAge = beaUnknown): string;
 
 // ---- what an IDE instance tells the bridge about itself ----
 
@@ -490,7 +509,8 @@ begin
   if (P > Length(Head)) or (Head[P] <> '"') then Result := '';   // truncated
 end;
 
-function BridgeVersionProblem(const ABridge, APlugin: string): string;
+function BridgeVersionProblem(const ABridge, APlugin: string;
+  AAge: TBridgeExeAge): string;
 begin
   Result := '';
   if (APlugin = '') or (ABridge = APlugin) then Exit;
@@ -498,11 +518,17 @@ begin
     Result := Format('the bridge exe does not report its version, so it is ' +
       'older than %s - if its tools behave oddly (timeouts, missing tools), ' +
       'run install.cmd and start a new Claude Code session', [APlugin])
+  else if AAge = beaReplaced then
+    // The file is already right; a process cannot swap its own image.
+    Result := Format('bridge exe %s, plugin %s - but the exe ON DISK has ' +
+      'been replaced since this bridge started, so it is only the running ' +
+      'session that is old: start a new Claude Code session, nothing else ' +
+      'is needed', [ABridge, APlugin])
   else
-    Result := Format('bridge exe %s, plugin %s - these must match. Either ' +
-      'install.cmd could not replace RefactoringLightMcp.exe (a running ' +
-      'Claude Code session holds it: close them all and install again) or ' +
-      'RAD Studio was not restarted after the install', [ABridge, APlugin]);
+    Result := Format('bridge exe %s, plugin %s - these must match. The ' +
+      'installed exe is still the old one, so run install.cmd (it reports ' +
+      'whether the bridge was really replaced) and then start a new Claude ' +
+      'Code session', [ABridge, APlugin]);
 end;
 
 function NormDir(const S: string): string;

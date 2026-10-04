@@ -409,6 +409,23 @@ begin
   Result := ReadContent(AFile, AContent);
 end;
 
+/// <summary>Every file the IDE currently has loaded, upper-cased. Main
+///  thread. The sweep below compares the set before and after a call, so a
+///  module the call OPENED can be told from one the user already had.
+/// </summary>
+function LoadedModuleFiles: TArray<string>;
+var
+  MS: IOTAModuleServices;
+begin
+  Result := nil;
+  if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
+  for var I := 0 to MS.ModuleCount - 1 do
+  begin
+    var M := MS.Modules[I];
+    if M <> nil then Result := Result + [UpperCase(M.FileName)];
+  end;
+end;
+
 function AvailabilityName(const AUnit: string): string;
 var
   Snap: IUnitSnapshot;
@@ -455,6 +472,32 @@ begin
   finally
     O.Free;
   end;
+end;
+
+/// <summary>Adds one field to a successful answer's result object, and does
+///  nothing to a failed one. Any failure keeps the original answer: a note
+///  must never cost a result.</summary>
+function WithResultField(const AAnswer, AField, AText: string): string;
+var
+  V: TJSONValue;
+begin
+  Result := AAnswer;
+  V := nil;
+  try
+    V := TJSONObject.ParseJSONValue(AAnswer);
+    if not (V is TJSONObject) then Exit;
+    var O := TJSONObject(V);
+    var OkVal := O.GetValue('ok');
+    if not ((OkVal is TJSONBool) and TJSONBool(OkVal).AsBoolean) then Exit;
+    if O.GetValue('result') is TJSONObject then
+      TJSONObject(O.GetValue('result')).AddPair(AField, AText)
+    else
+      O.AddPair(AField, AText);
+    Result := O.ToJSON;
+  except
+    Result := AAnswer;
+  end;
+  V.Free;
 end;
 
 function WithArgumentWarning(const AAnswer, ANote: string): string;
@@ -1342,6 +1385,10 @@ begin
         O.AddPair('file', FN);
         O.AddPair('modified', TJSONBool.Create(ModuleIsModified(M)));
         O.AddPair('headless', TJSONBool.Create(IsHeadless(FN)));
+        // "headless" is only what buffer_open tracked. A module a WRITE
+        // opened has a buffer and no tab either, so the honest answer to
+        // "can the user see this?" is the view (audit #36, M42).
+        O.AddPair('visible', TJSONBool.Create(ModuleHasEditView(M)));
         Arr.Add(O);
       end;
     end, True, AStop, Err) then
@@ -1787,6 +1834,79 @@ begin
   end;
 end;
 
+function WasInSet(const ASet: TArray<string>; const AFile: string): Boolean;
+begin
+  Result := False;
+  for var S in ASet do
+    if SameText(S, AFile) then Exit(True);
+end;
+
+/// <summary>Releases every module the call itself opened, following
+///  ModuleSweepVerdict. Returns the files it wrote to disk, '' when there is
+///  nothing to report. Best effort throughout: a sweep that cannot run must
+///  never cost a result (the main thread can be busy), and a module it
+///  leaves behind is reported rather than hidden.</summary>
+function SweepModulesOpenedByCall(const ABefore: TArray<string>;
+  ASucceeded: Boolean; AStop: THandle): string;
+
+var
+  Err, Saved, Kept: string;
+begin
+  Result := '';
+  Saved := '';
+  Kept := '';
+  if not RunOnMain(
+    procedure
+    var
+      MS: IOTAModuleServices;
+    begin
+      if not Supports(BorlandIDEServices, IOTAModuleServices, MS) then Exit;
+      // Collect first: CloseModule changes the list we are walking.
+      var Targets: TArray<IOTAModule> := nil;
+      for var I := 0 to MS.ModuleCount - 1 do
+      begin
+        var M := MS.Modules[I];
+        if M = nil then Continue;
+        var FN := M.FileName;
+        if FN = '' then Continue;
+        var Ext := LowerCase(ExtractFileExt(FN));
+        if (Ext = '.groupproj') or (Ext = '.dproj') or (Ext = '.dpk') then Continue;
+        if WasInSet(ABefore, FN) then Continue;
+        if ModuleSweepVerdict(False, IsHeadless(FN), ModuleHasEditView(M),
+             ASucceeded) = msvLeave then Continue;
+        Targets := Targets + [M];
+      end;
+      for var M in Targets do
+      begin
+        var FN := M.FileName;
+        var Ok := True;
+        try
+          if ASucceeded then Ok := M.Save(False, True);
+          M.CloseModule(True);
+        except
+          Ok := False;
+        end;
+        if ASucceeded then
+          if Ok then
+          begin
+            if Saved <> '' then Saved := Saved + ', ';
+            Saved := Saved + FN;
+          end
+          else
+          begin
+            if Kept <> '' then Kept := Kept + ', ';
+            Kept := Kept + FN;
+          end;
+      end;
+    end, True, AStop, Err) then Exit;
+  if Saved <> '' then
+    Result := 'written to disk and closed again (the IDE did not have ' +
+      'it open): ' + Saved;
+  if Kept <> '' then
+    Result := Trim(Result + ' COULD NOT be saved, the edit is only in the ' +
+      'IDE buffer: ' + Kept);
+end;
+
 function HandleRequest(const ARequest: string; AStop: THandle): string;
 var
   V: TJSONValue;
@@ -1834,6 +1954,16 @@ begin
         Names := Names + [P.JsonString.Value];
       ArgNote := UnknownArgumentNote(Tool, Names);
     end;
+    // A write goes through the editor helper, which OPENS the file it edits.
+    // Remember what the IDE had before, so such a module does not stay
+    // behind with an edit nobody can see (found 2026-10-04 with
+    // extract_method on a closed file).
+    var Before: TArray<string> := nil;
+    RunOnMain(
+      procedure
+      begin
+        Before := LoadedModuleFiles;
+      end, True, AStop, Err);
     var T0 := StatBegin(Tool);
     var Failed := True;
     try
@@ -1866,6 +1996,10 @@ begin
       else
         StatEnd(Tool, T0, Result);
     end;
+    var SweepNote := SweepModulesOpenedByCall(Before,
+      Pos('"ok":true', Copy(Result, 1, 24)) > 0, AStop);
+    if SweepNote <> '' then
+      Result := WithResultField(Result, 'modules', SweepNote);
     if ArgNote <> '' then
       Result := WithArgumentWarning(Result, ArgNote);
   finally

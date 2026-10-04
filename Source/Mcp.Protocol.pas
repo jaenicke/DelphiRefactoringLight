@@ -109,6 +109,36 @@ type
 function BridgeVersionProblem(const ABridge, APlugin: string;
   AAge: TBridgeExeAge = beaUnknown): string;
 
+// ---- a module a tool had to open must not stay behind invisibly ----
+
+type
+  /// <summary>What to do with a module that is loaded in the IDE when a tool
+  ///  call ends. A write through the editor helper OPENS the file it edits
+  ///  (OpenModuleSafe), so a file the IDE did not have loaded comes back as a
+  ///  module with no tab: the edit then lives only in memory, the user cannot
+  ///  see it, Ctrl+Z cannot reach it and the IDE asks about it when it
+  ///  closes. The quick-fix tools have handled this since 2026-09-18 - this
+  ///  is the same rule for every tool.</summary>
+  TModuleSweepVerdict = (
+    /// <summary>Not ours: the IDE had it before the call, the bridge opened
+    ///  it headless on purpose, or the user can see it.</summary>
+    msvLeave,
+    /// <summary>The call opened it and succeeded: write it to DISK and
+    ///  release it, so the result is where the user looks for it.</summary>
+    msvSaveAndClose,
+    /// <summary>The call opened it and failed: discard, which restores the
+    ///  state before the call.</summary>
+    msvDiscard);
+
+/// <summary>The rule itself, pure so it can be tested and so there is only
+///  ONE of it. The order of the tests is the point: ownership first (a module
+///  the IDE already had, or one the bridge promised to keep, is never touched
+///  - rename's "changed but not saved, undoable" stays exactly that), then
+///  whether the user can SEE it, and only then the success of the call.
+/// </summary>
+function ModuleSweepVerdict(AWasLoadedBefore, ABridgeHeadless, AHasEditView,
+  ACallSucceeded: Boolean): TModuleSweepVerdict;
+
 // ---- what an IDE instance tells the bridge about itself ----
 
 type
@@ -507,6 +537,17 @@ begin
     Inc(P);
   end;
   if (P > Length(Head)) or (Head[P] <> '"') then Result := '';   // truncated
+end;
+
+function ModuleSweepVerdict(AWasLoadedBefore, ABridgeHeadless, AHasEditView,
+  ACallSucceeded: Boolean): TModuleSweepVerdict;
+begin
+  if AWasLoadedBefore or ABridgeHeadless or AHasEditView then
+    Exit(msvLeave);
+  if ACallSucceeded then
+    Result := msvSaveAndClose
+  else
+    Result := msvDiscard;
 end;
 
 function BridgeVersionProblem(const ABridge, APlugin: string;

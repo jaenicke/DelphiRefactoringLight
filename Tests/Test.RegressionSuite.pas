@@ -427,6 +427,11 @@ type
     ///  diagnostics the indices shift, and an id of the first listing
     ///  used to select a different fix in the second one.</summary>
     [Test] procedure AFixIdNamesItsOwnListing;
+    /// <summary>Found live on 2026-10-04: extract_method on a file the IDE
+    ///  did not have open left it loaded and MODIFIED with no tab - an edit
+    ///  nobody can see and Ctrl+Z cannot reach. Only the quick-fix tools
+    ///  cleaned up after themselves; the rule is shared now.</summary>
+    [Test] procedure AModuleTheCallOpenedIsNotLeftBehind;
   end;
 
   /// <summary>A forum screenshot (2026-10-02) showed the Extract Method
@@ -3220,6 +3225,34 @@ begin
   Assert.AreEqual('', UnknownArgumentNote('no_such_tool', ['x']));
 end;
 
+
+procedure TSelfProtectionTests.AModuleTheCallOpenedIsNotLeftBehind;
+begin
+  // The call opened it and nobody can see it: that is ours to settle.
+  Assert.AreEqual(Integer(Ord(msvSaveAndClose)),
+    Integer(Ord(ModuleSweepVerdict(False, False, False, True))),
+    'a module the call opened and wrote goes to disk');
+  Assert.AreEqual(Integer(Ord(msvDiscard)),
+    Integer(Ord(ModuleSweepVerdict(False, False, False, False))),
+    'a failed call leaves nothing behind');
+
+  // Ownership beats everything: the IDE had it, so rename's "changed but
+  // not saved, undoable" must stay exactly that.
+  Assert.AreEqual(Integer(Ord(msvLeave)),
+    Integer(Ord(ModuleSweepVerdict(True, False, False, True))),
+    'a module the IDE already had is never touched');
+  // buffer_open promised a headless buffer that SURVIVES the call.
+  Assert.AreEqual(Integer(Ord(msvLeave)),
+    Integer(Ord(ModuleSweepVerdict(False, True, False, True))),
+    'a bridge-opened headless buffer stays open');
+  // And a tab the user can see is the user's, whatever we think we opened.
+  Assert.AreEqual(Integer(Ord(msvLeave)),
+    Integer(Ord(ModuleSweepVerdict(False, False, True, True))),
+    'a module with a view belongs to the user');
+  Assert.AreEqual(Integer(Ord(msvLeave)),
+    Integer(Ord(ModuleSweepVerdict(True, True, True, False))),
+    'ownership wins over a failed call too');
+end;
 
 procedure TSelfProtectionTests.AFixIdNamesItsOwnListing;
 var

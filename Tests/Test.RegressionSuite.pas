@@ -570,6 +570,12 @@ type
     ///  every occurrence EXCEPT the edit's own result, with an honest total.
     /// </summary>
     [Test] procedure WhatStillNeedsHandWorkAfterTheEdit;
+    /// <summary>User, 2026-10-04: he moved five methods whose headers name
+    ///  IOTAKeyContext / TKeyBindingResult into a unit without ToolsAPI in
+    ///  its uses. The move said nothing - the compiler did. A unit is only
+    ///  named when the SOURCE's own uses clause has it: the moved code
+    ///  compiled there, so that is where its types come from.</summary>
+    [Test] procedure TheTargetGetsTheUnitsTheMovedCodeNeeds;
     /// <summary>A preview must not report a line as changed that did not
     ///  change. Found live: the first edit_method call answered 45 changed
     ///  lines for a move that touches eight, with pairs like
@@ -4414,6 +4420,114 @@ begin
   Assert.AreEqual(1, Integer(Length(Refs)), 'one row per member at most');
   Assert.AreEqual(2, Total, 'while the total still says what there is');
   Assert.IsTrue(Capped, 'and it says that it capped');
+end;
+
+procedure TMethodEditTests.TheTargetGetsTheUnitsTheMovedCodeNeeds;
+var
+  Src, Tgt: TArray<string>;
+  Plan: TMethodMovePlan;
+
+  // How many LINES of the target name that text - a second uses entry
+  // would show up here.
+  function Lines_(const AText: string): Integer;
+  begin
+    Result := 0;
+    for var L in Plan.TargetLines do
+      if ContainsText(L, AText) then Inc(Result);
+  end;
+
+  // The identifier index, as this test knows it.
+  function Lookup: TMethodEditUnitLookup;
+  begin
+    Result :=
+      function(const AIdent: string): TArray<string>
+      begin
+        Result := nil;
+        if SameText(AIdent, 'IOTAKeyContext') then Result := ['ToolsAPI'];
+        if SameText(AIdent, 'TKeyBindingResult') then Result := ['ToolsAPI'];
+        if SameText(AIdent, 'TStringList') then Result := ['System.Classes'];
+        // The real risk, and the reason the SOURCE's uses clause decides:
+        // the index knows a Count somewhere, and the body's own field is
+        // called Count. A unit nobody here uses must never be added.
+        if SameText(AIdent, 'Count') then Result := ['Winapi.Windows'];
+        // Named in a COMMENT only - the masking must not even ask.
+        if SameText(AIdent, 'TcxGrid') then Result := ['cxGrid'];
+      end;
+  end;
+
+begin
+  Src := [
+    'unit Old;',
+    'interface',
+    'uses ToolsAPI, System.Classes;',        // both reachable HERE
+    'type',
+    '  TOld = class',
+    '  public',
+    '    procedure KeyProc(const Context: IOTAKeyContext;',
+    '      var BindingResult: TKeyBindingResult);',
+    '  end;',
+    'implementation',
+    'procedure TOld.KeyProc(const Context: IOTAKeyContext;',
+    '  var BindingResult: TKeyBindingResult);',
+    'begin',
+    '  FList := TStringList.Create;',
+    '  Count := 0;',                         // a field of TOld, not a type
+    '  // TcxGrid is only named in a COMMENT',
+    'end;',
+    'end.'];
+  Tgt := [
+    'unit New;',
+    'interface',
+    'uses System.Classes;',                  // has Classes, NOT ToolsAPI
+    'type',
+    '  TNew = class',
+    '  private',
+    '  end;',
+    'implementation',
+    'end.'];
+
+  // Lookup() with the parentheses: without them Delphi passes the nested
+  // FUNCTION itself, not what it returns.
+  Plan := PlanMethodMove(Src, Tgt, 'TOld', ['KeyProc'], 'TNew', 'private',
+    Lookup());
+  Assert.IsTrue(Plan.Ok, 'the move is planned: ' + Plan.Error);
+  var TgtText := string.Join(NL, Plan.TargetLines);
+
+  // The unit the DECLARATION needs goes into the interface uses.
+  Assert.IsTrue(ContainsText(TgtText, 'ToolsAPI'),
+    'the target gets ToolsAPI - the moved header names its types');
+  var UsesLine := '';
+  for var L in Plan.TargetLines do
+    if StartsText('uses', TrimLeft(L)) and (UsesLine = '') then UsesLine := L;
+  Assert.IsTrue(ContainsText(UsesLine, 'ToolsAPI'),
+    'and it goes into the INTERFACE clause: ' + UsesLine);
+
+  // What the target already has is not added again, and a unit NOBODY uses
+  // is never invented from a name in a comment.
+  Assert.AreEqual(1, Lines_('System.Classes'),
+    'System.Classes was already there - not added a second time');
+  var AllUses := '';
+  for var L in Plan.TargetLines do
+    if StartsText('uses', TrimLeft(L)) then AllUses := AllUses + L + NL;
+  Assert.IsFalse(ContainsText(AllUses, 'Winapi.Windows'),
+    'a unit the SOURCE does not use is never added: ' + AllUses);
+  Assert.IsFalse(ContainsText(AllUses, 'cxGrid'),
+    'a name in a comment is not looked up: ' + AllUses);
+
+  // And the plan SAYS it, so the preview shows what happened.
+  var Said := False;
+  for var I in Plan.Issues do
+    if ContainsText(I.Text, 'ToolsAPI') then Said := True;
+  Assert.IsTrue(Said, 'the plan names the unit it added');
+
+  // Without the index: nothing is invented, and nothing breaks.
+  Plan := PlanMethodMove(Src, Tgt, 'TOld', ['KeyProc'], 'TNew', 'private', nil);
+  Assert.IsTrue(Plan.Ok, 'the move still works without a lookup');
+  var NoUses := '';
+  for var L in Plan.TargetLines do
+    if StartsText('uses', TrimLeft(L)) then NoUses := NoUses + L + NL;
+  Assert.IsFalse(ContainsText(NoUses, 'ToolsAPI'),
+    'and says nothing it cannot know: ' + NoUses);
 end;
 
 procedure TMethodEditTests.TheToolDeclaresWhatItTakes;

@@ -45,6 +45,12 @@ type
     Why: string;            // why not, when Movable is False
   end;
 
+  /// <summary>Which units declare an identifier - the identifier index,
+  ///  injected so this unit stays pure (the same shape AnalyzeUses uses for
+  ///  the designer answer). Without it the uses check below simply does not
+  ///  run, which is what every existing caller got before.</summary>
+  TMethodEditUnitLookup = reference to function(const AIdent: string): TArray<string>;
+
   TMethodEditIssueKind = (
     meiVeto,        // the member cannot be moved at all
     meiOwnMember,   // the body uses something that stays in the old class
@@ -72,6 +78,9 @@ type
   /// <summary>What the dialog (or the tool) asks for. Everything is
   ///  optional: only members plus at least one action is required.</summary>
   TMethodEditRequest = record
+    /// <summary>The identifier index, so the plan can name the units the
+    ///  moved code needs. nil = that check does not run.</summary>
+    Lookup: TMethodEditUnitLookup;
     Members: TArray<string>;
     TargetFile: string;          // '' = stay in this unit
     TargetClass: string;         // '' = do not move at all
@@ -168,6 +177,17 @@ function CollectPostEditRefs(const AFiles, AContents, AMembers: TArray<string>;
   AMaxPerMember, AMaxTotal: Integer; out ATotal: Integer;
   out ACapped: Boolean): TArray<TPostEditRef>;
 
+/// <summary>The units the MOVED code needs and the target does not have
+///  yet: every identifier of the moved declaration and body is looked up,
+///  and a unit is only named when the SOURCE's own uses clause has it -
+///  the code compiled there, so that is where its types come from. Pure;
+///  ALOOKUP nil answers nothing. (User, 2026-10-04: his move took five
+///  methods whose headers name IOTAKeyContext / TKeyBindingResult into a
+///  unit without ToolsAPI, and nothing said so - the compiler did.)</summary>
+function UnitsMovedCodeNeeds(const ASourceLines, ATargetLines: TArray<string>;
+  const AMovedText: TArray<string>; const ALookup: TMethodEditUnitLookup;
+  out AIdentsPerUnit: TArray<string>): TArray<string>;
+
 /// <summary>Moves AMembers of AOwnerType into ATargetClass of the target
 ///  unit: declarations into ASection, bodies to the end of the target's
 ///  implementation, their headers requalified. Both files come back
@@ -176,7 +196,8 @@ function CollectPostEditRefs(const AFiles, AContents, AMembers: TArray<string>;
 ///  that code will not compile in the new class.</summary>
 function PlanMethodMove(const ASourceLines, ATargetLines: TArray<string>;
   const AOwnerType: string; const AMembers: TArray<string>;
-  const ATargetClass, ASection: string): TMethodMovePlan;
+  const ATargetClass, ASection: string;
+  const ALookup: TMethodEditUnitLookup = nil): TMethodMovePlan;
 
 /// <summary>ADeclLine with the directives in AAdd added and those in ARemove
 ///  taken out ('virtual', 'overload', 'inline', 'static', ...). The
@@ -223,7 +244,7 @@ implementation
 
 uses
   System.Classes, System.StrUtils, System.Math, System.Generics.Collections,
-  Expert.ReferenceKind,
+  Expert.ReferenceKind, Expert.UsesGraph,
   Expert.PascalScanner, Expert.UnitIndex, Expert.AutoImport,
   Expert.SafeDeletePlan, Expert.SignatureCheck, Expert.UsesEditor;
 
@@ -872,9 +893,97 @@ begin
       if (N <> '') and HasWholeWordCI(L, N) then Exit(N);
 end;
 
+function UnitsMovedCodeNeeds(const ASourceLines, ATargetLines: TArray<string>;
+  const AMovedText: TArray<string>; const ALookup: TMethodEditUnitLookup;
+  out AIdentsPerUnit: TArray<string>): TArray<string>;
+var
+  SrcUses, TgtUses: TArray<string>;
+  Seen: TStringList;
+
+  function HasUnit(const AList: TArray<string>; const AName: string): Boolean;
+  begin
+    for var U in AList do
+      if SameText(U, AName) then Exit(True);
+    Result := False;
+  end;
+
+begin
+  Result := nil;
+  AIdentsPerUnit := nil;
+  if not Assigned(ALookup) or (Length(AMovedText) = 0) then Exit;
+
+  for var E in TUsesGraphAnalyzer.ParseUsesEntries(string.Join(#13#10, ASourceLines)) do
+    SrcUses := SrcUses + [E.UnitName];
+  for var ET in TUsesGraphAnalyzer.ParseUsesEntries(string.Join(#13#10, ATargetLines)) do
+    TgtUses := TgtUses + [ET.UnitName];
+  var TgtUnit := UnitNameOf(ATargetLines);
+  if TgtUnit <> '' then TgtUses := TgtUses + [TgtUnit];
+
+  Seen := TStringList.Create;
+  try
+    Seen.Sorted := True;
+    Seen.Duplicates := dupIgnore;
+    var Masked := MaskCommentsAndStrings(AMovedText);
+    for var L := 0 to High(Masked) do
+    begin
+      var Sc := TPascalScanner.Create(Masked[L]);
+      try
+        var Tok: TPasToken;
+        var PrevWasDot := False;
+        while Sc.Next(Tok) do
+        begin
+          var IsDot := (Tok.Kind = ptSymbol) and (Tok.Text = '.');
+          // No keyword filter on purpose: a keyword is not a declared
+          // identifier, so the lookup answers nothing for it - and the
+          // source-uses test below drops the built-ins as well.
+          if (Tok.Kind = ptIdent) and not PrevWasDot then
+          begin
+            if Seen.IndexOf(UpperCase(Tok.Text)) < 0 then
+            begin
+              Seen.Add(UpperCase(Tok.Text));
+              var Units := ALookup(Tok.Text);
+              // Declared in the target itself, or already reachable there?
+              // Then there is nothing to say.
+              var Known := False;
+              for var U in Units do
+                if HasUnit(TgtUses, U) then Known := True;
+              if not Known then
+                for var U in Units do
+                  // ONLY a unit the SOURCE really uses: the moved code
+                  // compiled there, so that is where its types come from.
+                  // Anything else would be a guess from a name.
+                  if HasUnit(SrcUses, U) then
+                  begin
+                    var Idx := -1;
+                    for var I := 0 to High(Result) do
+                      if SameText(Result[I], U) then Idx := I;
+                    if Idx < 0 then
+                    begin
+                      Result := Result + [U];
+                      AIdentsPerUnit := AIdentsPerUnit + [Tok.Text];
+                    end
+                    else
+                      AIdentsPerUnit[Idx] := AIdentsPerUnit[Idx] + ', ' + Tok.Text;
+                    Break;
+                  end;
+            end;
+          end;
+          PrevWasDot := IsDot;
+        end;
+      finally
+        Sc.Free;
+      end;
+    end;
+  finally
+    Seen.Free;
+  end;
+end;
+
+
 function PlanMethodMove(const ASourceLines, ATargetLines: TArray<string>;
   const AOwnerType: string; const AMembers: TArray<string>;
-  const ATargetClass, ASection: string): TMethodMovePlan;
+  const ATargetClass, ASection: string;
+  const ALookup: TMethodEditUnitLookup = nil): TMethodMovePlan;
 var
   Plan: TMethodMovePlan;
 
@@ -1118,6 +1227,39 @@ begin
           '(a declaration names a type of it) - check that %s does not use %s ' +
           'in its own interface, or the units close a circle',
           [TgtUnit, SrcUnit, SrcUnit, TgtUnit]));
+    end;
+  end;
+  // (3) what the moved code needs from a THIRD unit. The two steps above
+  // only know the SOURCE unit itself, so a header naming a type of some
+  // other unit (ToolsAPI in the report) arrived in a target that cannot see
+  // it - and nothing said so.
+  if SrcUnit <> '' then
+  begin
+    var Idents: TArray<string>;
+    var Need := UnitsMovedCodeNeeds(ASourceLines, Plan.TargetLines,
+      Decls + BodyBlock, ALookup, Idents);
+    for var I := 0 to High(Need) do
+    begin
+      // A type in the DECLARATION is an interface need, a body-only use an
+      // implementation one - the same rule step (2) follows. One unit can
+      // carry SEVERAL identifiers ("IOTAKeyContext, TKeyBindingResult"), so
+      // every one of them is asked - a comma list is no identifier.
+      var InDecl := AnyNameOccursIn(Decls,
+        TArray<string>(Idents[I].Split([', ']))) <> '';
+      var Sect2: TUsesSection;
+      if InDecl then Sect2 := usInterface else Sect2 := usImplementation;
+      if PlanAddUnitToUsesText(string.Join(#13#10, Plan.TargetLines), Need[I],
+        Sect2, Text) then
+      begin
+        Plan.TargetLines := SplitContentLines(Text);
+        AddIssue(meiNote, '', Format('%s gains "%s" in its %s uses - the moved ' +
+          'code needs it (%s)', [IfThen(TgtUnit <> '', TgtUnit, 'the target'),
+          Need[I], IfThen(InDecl, 'interface', 'implementation'), Idents[I]]));
+      end
+      else
+        AddIssue(meiNote, '', Format('the moved code uses %s, which comes from ' +
+          '"%s" - add it to %s''s uses by hand', [Idents[I], Need[I],
+          IfThen(TgtUnit <> '', TgtUnit, 'the target')]));
     end;
   end;
   Plan.Ok := True;
@@ -1391,7 +1533,7 @@ begin
   end;
 
   Plan := PlanMethodMove(Src, Tgt, AOwnerType, AReq.Members, AReq.TargetClass,
-    IfThen(AReq.Section <> '', AReq.Section, 'private'));
+    IfThen(AReq.Section <> '', AReq.Section, 'private'), AReq.Lookup);
   Res.Issues := Res.Issues + Plan.Issues;
   if not Plan.Ok then
   begin

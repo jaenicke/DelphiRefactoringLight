@@ -526,6 +526,29 @@ end;
 //  Plan and apply
 // ---------------------------------------------------------------------------
 
+/// <summary>The identifier index as the planner wants it. The snapshot is
+///  immutable and lock-free, so the captured reference answers on any
+///  thread - and it is captured ONCE, not per identifier (the 1.8.2 lesson:
+///  asking TUnitIndex.Instance per occurrence is what made a scan crawl).
+///  No index yet -> nil, and the uses check simply does not run.</summary>
+function IndexLookup: TMethodEditUnitLookup;
+begin
+  var Snap := TUnitIndex.Instance.Snapshot;
+  if Snap = nil then Exit(nil);
+  Result :=
+    function(const AIdent: string): TArray<string>
+    begin
+      Result := nil;
+      for var H in Snap.Lookup(AIdent) do
+      begin
+        var Known := False;
+        for var U in Result do
+          if SameText(U, H.UnitName) then Known := True;
+        if not Known then Result := Result + [H.UnitName];
+      end;
+    end;
+end;
+
 function ReadUnitForEdit(const AFile: string): string;
 begin
   Result := '';
@@ -1080,6 +1103,7 @@ end;
 procedure TMethodEditDialog.BuildRequest;
 begin
   FReq := Default(TMethodEditRequest);
+  FReq.Lookup := IndexLookup();
   FReq.Members := SelectedMembers;
   if not FKeepHere.Checked then
   begin
@@ -1873,6 +1897,7 @@ begin
     J.AddPair('note', N);
 
   Req := Default(TMethodEditRequest);
+  Req.Lookup := IndexLookup();
   Req.Members := StringArrayArg(AArgs, 'members');
   Req.TargetClass := Trim(AArgs.GetValue<string>('target_class', ''));
   Req.Section := LowerCase(Trim(AArgs.GetValue<string>('section', 'private')));

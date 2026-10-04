@@ -103,7 +103,12 @@ function McpPipeSecurityProbe(out AErr: DWORD): Boolean;
 ///  us - a process that ended, no rights - answers beaUnknown, because a
 ///  guess here would send the user the wrong way. Called from the status
 ///  path only (once per read), never per request.</summary>
-function BridgeExeAgeOf(APid: Cardinal): TBridgeExeAge;
+function BridgeExeAgeOf(APid: Cardinal): TBridgeExeAge; overload;
+/// <summary>Same, and it also hands back the image the process really runs
+///  from - which the status row names, because that path is what explains
+///  the verdict (an aside ".old", or a copy inside the Claude app's own
+///  package cache).</summary>
+function BridgeExeAgeOf(APid: Cardinal; out AImage: string): TBridgeExeAge; overload;
 
 implementation
 
@@ -233,14 +238,22 @@ function QueryFullProcessImageNameW(hProcess: THandle; dwFlags: DWORD;
 
 function BridgeExeAgeOf(APid: Cardinal): TBridgeExeAge;
 var
+  Img: string;
+begin
+  Result := BridgeExeAgeOf(APid, Img);
+end;
+
+function BridgeExeAgeOf(APid: Cardinal; out AImage: string): TBridgeExeAge;
+var
   H: THandle;
   Buf: array[0..MAX_PATH] of Char;
   Len: DWORD;
   Created, Exited, Kernel, User: TFileTime;
-  Path: string;
+  Path, Canon: string;
   Attr: TWin32FileAttributeData;
 begin
   Result := beaUnknown;
+  AImage := '';
   if APid = 0 then Exit;
   H := OpenProcess(PROCESS_QUERY_LIMITED_INFO, False, APid);
   if H = 0 then Exit;
@@ -251,6 +264,17 @@ begin
     if not GetProcessTimes(H, Created, Exited, Kernel, User) then Exit;
   finally
     CloseHandle(H);
+  end;
+  AImage := Path;
+  // THE NAME IS THE EVIDENCE, and it beats the timestamps: our own install
+  // renames the live exe aside, so a process running from such a file is
+  // running from an image that HAS been replaced - as long as the name it
+  // was installed under is there again.
+  Canon := CanonicalBridgeExePath(Path);
+  if Canon <> '' then
+  begin
+    if FileExists(Canon) then Exit(beaReplaced);
+    Exit;   // moved aside and nothing put back: the install did not finish
   end;
   if (Path = '') or not GetFileAttributesEx(PChar(Path), GetFileExInfoStandard,
     @Attr) then Exit;

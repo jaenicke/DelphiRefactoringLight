@@ -109,6 +109,18 @@ type
 function BridgeVersionProblem(const ABridge, APlugin: string;
   AAge: TBridgeExeAge = beaUnknown): string;
 
+/// <summary>The exe an install moved aside, mapped back to the name it was
+///  installed under: buildmcp.cmd renames the LIVE exe to
+///  "&lt;exe&gt;.&lt;number&gt;.old" before copying the new one in, so a bridge that
+///  started before that install reports the ASIDE name as its own image.
+///  '' when the path is not such a name. MEASURED 2026-10-04: without this
+///  the age probe compared the aside FILE's write time with the process
+///  start - always older, of course - and the status row then said "the
+///  installed exe is still the old one, run install.cmd" in exactly the
+///  situation where the install HAD worked and only a new session was
+///  needed. The user followed that advice twice.</summary>
+function CanonicalBridgeExePath(const AImagePath: string): string;
+
 // ---- a module a tool had to open must not stay behind invisibly ----
 
 type
@@ -548,6 +560,26 @@ begin
     Result := msvSaveAndClose
   else
     Result := msvDiscard;
+end;
+
+function CanonicalBridgeExePath(const AImagePath: string): string;
+var
+  Base: string;
+begin
+  Result := '';
+  if not EndsText('.old', AImagePath) then Exit;
+  Base := Copy(AImagePath, 1, Length(AImagePath) - Length('.old'));
+  // "<exe>.<number>" - the number is what makes the aside name unique, and
+  // only our own install writes it. Anything else is not ours to interpret.
+  var Dot := LastDelimiter('.', Base);
+  if Dot <= 1 then Exit;
+  var Num := Copy(Base, Dot + 1, MaxInt);
+  if Num = '' then Exit;
+  for var C in Num do
+    if not CharInSet(C, ['0'..'9']) then Exit;
+  Base := Copy(Base, 1, Dot - 1);
+  if not EndsText('.exe', Base) then Exit;
+  Result := Base;
 end;
 
 function BridgeVersionProblem(const ABridge, APlugin: string;

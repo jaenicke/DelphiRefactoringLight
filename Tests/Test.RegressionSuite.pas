@@ -111,6 +111,13 @@ type
     ///  request carries it.</summary>
     [Test] procedure BridgeVersion_IsStampedAndReadBack;
     [Test] procedure BridgeVersion_MismatchIsNamedNotGuessed;
+    /// <summary>Found live on 2026-10-04: the age probe asked the PROCESS
+    ///  for its image, and after an install that image is the file the
+    ///  install renamed aside - older than the process, of course. So the
+    ///  row said "the installed exe is still the old one, run install.cmd"
+    ///  in exactly the case where the install had worked and only a new
+    ///  session was missing; the user followed it twice.</summary>
+    [Test] procedure AnAsideExeNamesTheInstallThatReplacedIt;
     [Test] procedure BridgeVersion_ReachesTheServerOverARealPipe;
     /// <summary>Audit #22, H4: Stop waited 5 s for the handlers and then
     ///  returned as if all was well, so the owner freed the server (and the
@@ -1134,6 +1141,49 @@ begin
   Assert.AreEqual('', BridgeVersionOfRequest('{"method":"context"}'));
   Assert.AreEqual('{"method":"context"}',
     StampBridgeVersion('{"method":"context"}', ''), 'no version, no stamp');
+end;
+
+procedure TMcpPipeRegressionTests.AnAsideExeNamesTheInstallThatReplacedIt;
+var
+  Dir, Exe, Aside: string;
+begin
+  // The shape buildmcp.cmd writes: "<exe>.<number>.old" beside the exe.
+  Assert.AreEqual('C:\x\mcp\RefactoringLightMcp.exe',
+    CanonicalBridgeExePath('C:\x\mcp\RefactoringLightMcp.exe.1052527944.old'),
+    'the aside name maps back to the name it was installed under');
+  Assert.AreEqual('C:\x\mcp\RefactoringLightMcp.exe',
+    CanonicalBridgeExePath('C:\x\mcp\RefactoringLightMcp.exe.7.old'),
+    'any number');
+
+  // Everything else is NOT ours to interpret - a guess here would send the
+  // user the wrong way, which is the whole point of this round.
+  Assert.AreEqual('', CanonicalBridgeExePath('C:\x\mcp\RefactoringLightMcp.exe'),
+    'the plain exe is no aside file');
+  Assert.AreEqual('', CanonicalBridgeExePath('C:\x\mcp\RefactoringLightMcp.exe.old'),
+    'the OLD fixed name carries no number - 1.22.1 replaced it');
+  Assert.AreEqual('', CanonicalBridgeExePath('C:\x\mcp\RefactoringLightMcp.exe.keep.old'),
+    'not a number');
+  Assert.AreEqual('', CanonicalBridgeExePath('C:\x\mcp\something.7.old'),
+    'the name it maps back to must be an exe');
+  Assert.AreEqual('', CanonicalBridgeExePath(''), 'nothing to read');
+
+  // And the verdict itself, on real files: a process whose image was moved
+  // aside while the installed name exists again IS running a replaced exe.
+  Dir := TPath.Combine(TPath.GetTempPath, 'rl_aside_' + IntToStr(GetCurrentProcessId));
+  TDirectory.CreateDirectory(Dir);
+  try
+    Exe := TPath.Combine(Dir, 'RefactoringLightMcp.exe');
+    Aside := Exe + '.4711.old';
+    TFile.WriteAllText(Aside, 'old');
+    Assert.AreEqual(Exe, CanonicalBridgeExePath(Aside), 'the name maps back');
+    Assert.IsFalse(TFile.Exists(Exe),
+      'nothing installed yet, so the install did not finish - no advice to start a session');
+    TFile.WriteAllText(Exe, 'new');
+    Assert.IsTrue(TFile.Exists(CanonicalBridgeExePath(Aside)),
+      'the installed name is back: only the running session is old');
+  finally
+    TDirectory.Delete(Dir, True);
+  end;
 end;
 
 procedure TMcpPipeRegressionTests.BridgeVersion_MismatchIsNamedNotGuessed;

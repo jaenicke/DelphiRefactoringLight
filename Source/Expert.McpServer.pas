@@ -2101,8 +2101,20 @@ begin
     ADetail := ADetail + Format('bridge pid %d (%s): %d request(s), last %d s ago',
       [C.Pid, Ver, C.Requests, (GetTickCount64 - C.LastTick) div 1000]);
     if Problem = '' then
+    begin
+      var Img := '';
       Problem := BridgeVersionProblem(C.Version, PluginVersion,
-        BridgeExeAgeOf(C.Pid));
+        BridgeExeAgeOf(C.Pid, Img));
+      // Name the file the verdict was made about: an aside ".old", or a copy
+      // inside the Claude app's package cache (a packaged app gets its
+      // %LOCALAPPDATA% redirected, so install.cmd's folder need not be the
+      // one the bridge runs from). Measured 2026-10-04 - without the path
+      // the next report has to be guessed at again.
+      if (Problem <> '') and (Img <> '') and
+         not SameText(Img, IncludeTrailingPathDelimiter(ExtractFilePath(Img)) +
+           'RefactoringLightMcp.exe') then
+        Problem := Problem + '. This bridge runs from ' + Img;
+    end;
   end;
   if Problem <> '' then
   begin

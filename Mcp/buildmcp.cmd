@@ -69,9 +69,13 @@ echo MCP bridge: no command-line compiler, falling back to bds.exe ...
 :: it, so an inherited Config / Platform would decide this build.
 set "Config=Release"
 set "Platform=Win32"
-if exist "%CLOSEDLG%" start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%CLOSEDLG%" -ProcessName bds 2>nul
+set "DLGPID=%TEMP%\mcp_closedialog_%RANDOM%.pid"
+if exist "%CLOSEDLG%" start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%CLOSEDLG%" -ProcessName bds -PidFile "%DLGPID%" 2>nul
 "%BDSROOT%bin\bds.exe" -b -ns "%GROUPPROJ%"
-if %ERRORLEVEL% NEQ 0 goto :bds_failed
+:: FIRST the exit code, THEN the call - a call resets ERRORLEVEL.
+set BDS_ERR=%ERRORLEVEL%
+call :stop_watcher
+if %BDS_ERR% NEQ 0 goto :bds_failed
 if not exist "%BUILT%" goto :no_exe
 goto :install
 
@@ -129,3 +133,11 @@ echo  NOT a reason any more (the exe is moved aside under a unique name).
 echo  Check that %TARGETDIR%
 echo  is writable, then run install.cmd again.
 exit /b 1
+
+:stop_watcher
+:: Best effort, and by PID only - never by image name: a developer has
+:: other powershell processes, and this one may already have ended.
+if not defined DLGPID exit /b 0
+if exist "%DLGPID%" for /f "usebackq tokens=1" %%p in ("%DLGPID%") do taskkill /f /pid %%p >nul 2>&1
+if exist "%DLGPID%" del /f /q "%DLGPID%" >nul 2>&1
+exit /b 0

@@ -64,10 +64,18 @@ set "Config=Release"
 set "Platform=Win32"
 
 :: Start background watcher to auto-close bds.exe save dialogs
-start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPTDIR%closedialog.ps1" -ProcessName bds 2>nul
+:: The watcher shares THIS console, so it has to be stopped when the
+:: build is over - an orphan keeps the window open after the final
+:: pause (user report 2026-10-05). It writes its pid for us and has a
+:: timeout of its own as a second net.
+set "DLGPID=%TEMP%\dih_closedialog_%RANDOM%.pid"
+start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPTDIR%closedialog.ps1" -ProcessName bds -PidFile "%DLGPID%" 2>nul
 
 "%BDSEXE%" -b -ns "%GROUPPROJ%"
-if %ERRORLEVEL% NEQ 0 goto :build_failed
+:: FIRST the exit code, THEN the call - a call resets ERRORLEVEL.
+set BDS_ERR=%ERRORLEVEL%
+call :stop_watcher
+if %BDS_ERR% NEQ 0 goto :build_failed
 
 :: Signal to calling scripts: no cmd compiler, use bds.exe
 echo.>"%EXEDIR%\.dih_usebds"
@@ -102,3 +110,11 @@ exit /b 1
 :exe_missing
 echo ERROR: delinst.exe was not created
 exit /b 1
+
+:stop_watcher
+:: Best effort, and by PID only - never by image name: a developer has
+:: other powershell processes, and this one may already have ended.
+if not defined DLGPID exit /b 0
+if exist "%DLGPID%" for /f "usebackq tokens=1" %%p in ("%DLGPID%") do taskkill /f /pid %%p >nul 2>&1
+if exist "%DLGPID%" del /f /q "%DLGPID%" >nul 2>&1
+exit /b 0

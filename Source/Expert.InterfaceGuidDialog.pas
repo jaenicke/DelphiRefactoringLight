@@ -413,14 +413,44 @@ end;
 
 procedure TInterfaceGuidDialog.GotoSelected;
 var
-  Idx: Integer;
+  Idx, L, Col: Integer;
+  Content: string;
+  Lines: TArray<string>;
+  At: TArray<Integer>;
 begin
   if FListView.Selected = nil then Exit;
   Idx := FListView.Selected.Index;
   if (Idx < 0) or (Idx >= Length(FEntries)) then Exit;
-  // GotoLocation expects 0-based line/col (LSP convention).
-  Editor.GotoLocation(FEntries[Idx].FileName, FEntries[Idx].Line - 1, 0,
-    Length(FEntries[Idx].InterfaceName));
+  var E := FEntries[Idx];
+  L := E.Line - 1;                 // GotoLocation: 0-based (LSP convention)
+  Col := -1;
+  // The NAME's column, never 0: a highlight LENGTH counted from the line
+  // start marks the indentation and the keyword instead of the identifier
+  // (user report 2026-10-05 - the same column-0 trap as 1.10.1).
+  if ReadEffectiveContent(E.FileName, Content) then
+  begin
+    Lines := SplitEditorLines(Content);
+    if (L >= 0) and (L < Length(Lines)) then
+      Col := NameColumnOnLine(Lines[L], E.InterfaceName);
+    if Col < 0 then
+    begin
+      // The line moved since the scan. Locate the declaration BY NAME, but
+      // only when the answer is unambiguous - two of them is a conditional
+      // declaration, and guessing a branch jumps somewhere else.
+      At := InterfaceDeclLines(Lines, E.InterfaceName);
+      if Length(At) = 1 then
+      begin
+        L := At[0];
+        Col := NameColumnOnLine(Lines[L], E.InterfaceName);
+      end;
+    end;
+  end;
+  if Col >= 0 then
+    Editor.GotoLocation(E.FileName, L, Col, Length(E.InterfaceName))
+  else
+    // Nothing to mark: go to the line and highlight NOTHING rather than
+    // marking text that is not the name.
+    Editor.GotoLocation(E.FileName, E.Line - 1, 0, 0);
 end;
 
 procedure TInterfaceGuidDialog.DoDblClick(Sender: TObject);

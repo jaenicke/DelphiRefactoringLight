@@ -52,6 +52,15 @@ type
     ///  above its own GetSelection.
     /// </summary>
     [Test] procedure NoRoutineReadsTheContextBeforeTheSelection;
+
+    /// <summary>A "Go to" that HIGHLIGHTS has to know the identifier's
+    ///  COLUMN. The interface GUID dialog passed column 0 together with
+    ///  the name's length, so the IDE marked the first N characters of the
+    ///  LINE - the indentation and "IFoo = inte" instead of the name
+    ///  (user report 2026-10-05; the partner query had the same column-0
+    ///  trap in 1.10.1). A call that highlights NOTHING may of course go
+    ///  to the line start.</summary>
+    [Test] procedure NoGotoHighlightsFromTheLineStart;
   end;
 
 implementation
@@ -300,6 +309,92 @@ begin
     // sites - a renamed method would otherwise make it pass vacuously.
     Assert.IsTrue(Checked >= 4,
       Format('the sweep must find the GetSelection call sites, found %d',
+        [Checked]));
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    Offenders.Free;
+  end;
+end;
+
+// The arguments of the call whose '(' stands at AParenPos, split at the
+// commas of ITS level - the call may wrap over lines, so this works on the
+// whole text. Empty when the call is not closed: the sweep then reports
+// nothing rather than guessing.
+function CallArgsAt(const AText: string; AParenPos: Integer): TArray<string>;
+var
+  Depth, I, Start: Integer;
+begin
+  Result := nil;
+  Depth := 0;
+  Start := AParenPos + 1;
+  for I := AParenPos to Length(AText) do
+    case AText[I] of
+      '(', '[': Inc(Depth);
+      ')', ']':
+        begin
+          Dec(Depth);
+          if Depth = 0 then
+            Exit(Result + [Trim(Copy(AText, Start, I - Start))]);
+        end;
+      ',':
+        if Depth = 1 then
+        begin
+          Result := Result + [Trim(Copy(AText, Start, I - Start))];
+          Start := I + 1;
+        end;
+    end;
+  Result := nil;
+end;
+
+procedure TRepoHygieneTests.NoGotoHighlightsFromTheLineStart;
+const
+  Call = 'GotoLocation(';
+var
+  Offenders: TStringList;
+  Checked: Integer;
+  Args: TArray<string>;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository root must be found');
+  var Dir := TPath.Combine(Root, 'Source');
+  Assert.IsTrue(TDirectory.Exists(Dir), 'Source must be there: ' + Dir);
+
+  Offenders := TStringList.Create;
+  try
+    Checked := 0;
+    for var F in TDirectory.GetFiles(Dir, '*.pas') do
+    begin
+      // Masked: a "GotoLocation(" inside a comment or a string is none,
+      // and a comment between two arguments cannot break the split.
+      var Lines := MaskCommentsAndStrings(SplitEditorLines(TFile.ReadAllText(F)));
+      var Text := string.Join(#10, Lines);
+      var P := Pos(Call, Text);
+      while P > 0 do
+      begin
+        var Head := Copy(Text, 1, P - 1);
+        var LineStart := LastDelimiter(#10, Head) + 1;
+        var Before := Trim(Copy(Text, LineStart, P - LineStart));
+        // the declarations and implementations of GotoLocation itself
+        if not (Before.StartsWith('function ') or Before.StartsWith('procedure ') or
+                Before.StartsWith('class function ')) then
+        begin
+          Args := CallArgsAt(Text, P + Length(Call) - 1);
+          if Length(Args) >= 4 then
+          begin
+            Inc(Checked);
+            if (Args[2] = '0') and (Args[3] <> '0') then
+              Offenders.Add(Format('%s: GotoLocation(..., %s, %s) - column 0 ' +
+                'with a highlight marks the start of the LINE, not the name',
+                [ExtractFileName(F), Args[2], Args[3]]));
+          end
+          else if Length(Args) = 3 then
+            Inc(Checked);   // no highlight at all - nothing to get wrong
+        end;
+        P := Pos(Call, Text, P + 1);
+      end;
+    end;
+    Assert.IsTrue(Checked >= 20,
+      Format('the sweep must find the GotoLocation call sites, found %d',
         [Checked]));
     Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
   finally

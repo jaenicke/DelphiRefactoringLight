@@ -36,7 +36,7 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics,
   Vcl.Dialogs, Vcl.ExtCtrls,
   Expert.EditorHelperIntf, Expert.DfmEventCheck, Expert.DialogHelper,
-  Expert.IdeThemes, Expert.ListViewSort, Expert.UnitIndex;
+  Expert.IdeThemes, Expert.ListViewSort, Expert.UnitIndex, Expert.PascalScanner;
 
 type
   // ListView that re-applies native double buffering on every handle
@@ -82,6 +82,8 @@ type
     function GroupKeyOf(const AIssue: TDfmEventIssue): string;
     function NameColumn(const AFile: string; ALine1: Integer;
       const AName: string): Integer;
+    procedure GotoName(const AFile: string; ALine1: Integer;
+      const AName: string);
     procedure DoDblClick(Sender: TObject);
     procedure DoGotoClick(Sender: TObject);
     procedure DoGotoTypeClick(Sender: TObject);
@@ -611,30 +613,46 @@ end;
 // 0-based column of AName on 1-based line ALine1 of AFile (case-insensitive),
 // so the editor highlights the handler name itself rather than a fixed-width
 // span from column 0 (which would land on "procedure ..." instead).
+// The 0-based column of AName on ALine1, or -1 when it is not there -
+// which the callers must not turn into 0: a highlight length counted from
+// column 0 marks the indentation and the keyword instead of the name
+// (user report 2026-10-05). The column itself comes from the shared
+// NameColumnOnLine, so there is one implementation of that question.
 function TDfmEventCheckDialog.NameColumn(const AFile: string; ALine1: Integer;
   const AName: string): Integer;
 var
-  Content, Line: string;
+  Content: string;
   Lines: TArray<string>;
-  P: Integer;
 begin
-  Result := 0;
+  Result := -1;
   if (AName = '') or (ALine1 <= 0) then Exit;
   if (Editor = nil) or not Editor.ReadEditorContent(AFile, Content) then
   begin
     if not TFile.Exists(AFile) then Exit;
     try Content := TFile.ReadAllText(AFile); except Exit; end;
   end;
-  Lines := Content.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+  Lines := SplitEditorLines(Content);
   if (ALine1 - 1) > High(Lines) then Exit;
-  Line := Lines[ALine1 - 1];
-  P := Pos(UpperCase(AName), UpperCase(Line));
-  if P > 0 then Result := P - 1;
+  Result := NameColumnOnLine(Lines[ALine1 - 1], AName);
+end;
+
+// Go to AName on ALine1 and mark the NAME. When its column is unknown the
+// line is still shown, but NOTHING is highlighted.
+procedure TDfmEventCheckDialog.GotoName(const AFile: string; ALine1: Integer;
+  const AName: string);
+var
+  Col: Integer;
+begin
+  Col := NameColumn(AFile, ALine1, AName);
+  if Col >= 0 then
+    Editor.GotoLocation(AFile, ALine1 - 1, Col, Length(AName))
+  else
+    Editor.GotoLocation(AFile, ALine1 - 1, 0, 0);
 end;
 
 procedure TDfmEventCheckDialog.GotoSelected;
 var
-  Idx, Col: Integer;
+  Idx: Integer;
 begin
   if FListView.Selected = nil then Exit;
   Idx := NativeInt(FListView.Selected.Data);
@@ -643,19 +661,11 @@ begin
   // handler -> jump to the offending .dfm line so the user sees which
   // event reference to remove (or which method to create).
   if (FIssues[Idx].Kind = eikSignatureMismatch) and (FIssues[Idx].PasLine > 0) then
-  begin
-    Col := NameColumn(FIssues[Idx].PasFile, FIssues[Idx].PasLine,
-      FIssues[Idx].HandlerName);
-    Editor.GotoLocation(FIssues[Idx].PasFile, FIssues[Idx].PasLine - 1, Col,
-      Length(FIssues[Idx].HandlerName));
-  end
+    GotoName(FIssues[Idx].PasFile, FIssues[Idx].PasLine,
+      FIssues[Idx].HandlerName)
   else
-  begin
-    Col := NameColumn(FIssues[Idx].DfmFile, FIssues[Idx].DfmLine,
+    GotoName(FIssues[Idx].DfmFile, FIssues[Idx].DfmLine,
       FIssues[Idx].HandlerName);
-    Editor.GotoLocation(FIssues[Idx].DfmFile, FIssues[Idx].DfmLine - 1, Col,
-      Length(FIssues[Idx].HandlerName));
-  end;
 end;
 
 procedure TDfmEventCheckDialog.DoDblClick(Sender: TObject);
@@ -681,8 +691,8 @@ begin
       'resolved from source. This row has no resolved event type.');
     Exit;
   end;
-  Editor.GotoLocation(FIssues[Idx].EventTypeFile,
-    FIssues[Idx].EventTypeLine - 1, 0, Length(FIssues[Idx].EventTypeName));
+  GotoName(FIssues[Idx].EventTypeFile, FIssues[Idx].EventTypeLine,
+    FIssues[Idx].EventTypeName);
 end;
 
 procedure TDfmEventCheckDialog.DoFixClick(Sender: TObject);

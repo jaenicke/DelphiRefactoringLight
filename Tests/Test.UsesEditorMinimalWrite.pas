@@ -69,6 +69,13 @@ type
     ///  between the two, the planned window names other lines - the edit
     ///  lands on the wrong one and the call reports success.</summary>
     [Test] procedure BufferChangedSinceTheCallerReadIt_IsRefused;
+
+    /// <summary>A dialog that reports what it just wrote has to ASK where
+    ///  the write went. The interface GUID check and the signature check
+    ///  both said "changed in the editor, Ctrl+Z undoes it" for every file
+    ///  - and they walk the WHOLE project, so most of their files are not
+    ///  open and really end up on disk (user report 2026-10-05).</summary>
+    [Test] procedure TheMessageMustSayWhereTheWriteWent;
   end;
 
 implementation
@@ -630,6 +637,39 @@ begin
     'not even as a whole-file write: that would discard what the user typed');
   Assert.AreEqual(Typed, GFake.Content('Foo.pas'),
     'the buffer is exactly as the user left it');
+end;
+
+procedure TUsesEditorMinimalWriteTests.TheMessageMustSayWhereTheWriteWent;
+var
+  Orig, Note: string;
+begin
+  Orig := Src(['uses', '  A;', '', 'implementation']);
+  NewEditor('Open.pas', Orig);             // only THIS file has a buffer
+
+  Assert.IsTrue(MinimalWriteGoesToBuffer('Open.pas'),
+    'a file the IDE has in a buffer is edited there');
+  Assert.IsFalse(MinimalWriteGoesToBuffer('Closed.pas'),
+    'a file nobody opened is written to disk');
+
+  // The predicate must agree with what ApplyLinesMinimal really does -
+  // it is the same probe, and that is the whole point of sharing it.
+  Assert.IsTrue(Apply('Open.pas', Orig,
+    ['uses', '  A, B;', '', 'implementation']), 'the open file is written');
+  Assert.AreEqual<Integer>(1, GFake.LineOps, 'in its buffer, line by line');
+  NewEditor('Open.pas', Orig);
+  Assert.IsTrue(Apply('Closed.pas', Orig,
+    ['uses', '  A, B;', '', 'implementation']), 'the closed file is written');
+  Assert.AreEqual<Integer>(1, GFake.WholeWrites, 'as a whole file, on disk');
+
+  Note := MinimalWriteNote(True);
+  Assert.IsTrue(Note.Contains('Ctrl+Z'), 'the buffer note offers the undo');
+  Assert.IsFalse(Note.Contains('DISK'), 'and does not mention disk');
+  Note := MinimalWriteNote(False);
+  Assert.IsTrue(Note.Contains('DISK'), 'the disk note says where it went');
+  Assert.IsTrue(Note.Contains('Ctrl+Z cannot reach it'),
+    'and that the undo is out of reach - the reported case');
+  Assert.AreNotEqual(MinimalWriteNote(True), MinimalWriteNote(False),
+    'two different facts cannot share one sentence');
 end;
 
 initialization

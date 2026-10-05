@@ -445,6 +445,7 @@ var
   At: TArray<Integer>;
   Plan: TGuidEditPlan;
   SL: TStringList;
+  ToBuffer: Boolean;
 begin
   if FListView.Selected = nil then
   begin
@@ -496,6 +497,10 @@ begin
     ShowThemedMessage('Not changed: ' + Plan.Problem);
     Exit;
   end;
+  // BEFORE the write: this check lists every project source, so most of
+  // its files are NOT open - ApplyLinesMinimal then writes them to disk
+  // and no Ctrl+Z can reach that (user report 2026-10-05).
+  ToBuffer := MinimalWriteGoesToBuffer(E.FileName);
   Old := Content;
   var LB := #13#10;
   if (Pos(#13#10, Old) = 0) and (Pos(#10, Old) > 0) then LB := #10;
@@ -519,11 +524,11 @@ begin
   RefreshFileEntries(E.FileName);
   if Plan.Inserted then
     ShowThemedMessage(E.InterfaceName + ' now carries ' + NewGuid +
-      ' (inserted on line ' + IntToStr(Plan.Line + 1) + '). The unit is ' +
-      'changed in the editor and not saved - Ctrl+Z undoes it.')
+      ' (inserted on line ' + IntToStr(Plan.Line + 1) + '). ' +
+      MinimalWriteNote(ToBuffer))
   else
     ShowThemedMessage(E.InterfaceName + ': ' + Plan.OldGuid + ' -> ' + NewGuid +
-      '. The unit is changed in the editor and not saved - Ctrl+Z undoes it.');
+      '. ' + MinimalWriteNote(ToBuffer));
 end;
 
 procedure TInterfaceGuidDialog.DoCloseClick(Sender: TObject);

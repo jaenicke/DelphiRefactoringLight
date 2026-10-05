@@ -81,7 +81,8 @@ type
 implementation
 
 uses
-  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort;
+  Winapi.UxTheme, Expert.DialogHelper, Expert.IdeThemes, Expert.ListViewSort,
+  Expert.UsesEditor;
 
 { TSignatureCheckDialog }
 
@@ -285,11 +286,15 @@ var
   Idx: Integer;
   Ref: TSignatureEntry;
   Why: string;
+  ToBuffer: Boolean;
 begin
   Idx := SelectedIndex;
   Why := AlignBlocker(Idx);
   if Why = '' then
     if not ReferenceEntry(Ref) then Why := 'no reference signature';
+  // Asked BEFORE the write: this check walks the whole project, so the row
+  // usually names a file nobody has open - that one is written to DISK.
+  ToBuffer := (Why = '') and MinimalWriteGoesToBuffer(FEntries[Idx].FilePath);
   if Why = '' then
     Why := FOnAlign(FEntries[Idx], Ref);
   if Why <> '' then
@@ -297,14 +302,21 @@ begin
     SetStatus('Not aligned: ' + Why);
     Exit;
   end;
-  // The buffer is changed (not saved); the row now carries the reference.
+  // Written; the row now carries the reference signature.
   FEntries[Idx].Normalized := FReferenceNormalized;
   if FListView.Selected <> nil then
     FListView.Selected.SubItems[3] := 'aligned';
   FListView.Invalidate;
-  SetStatus(Format('%s in %s, line %d aligned (not saved - Ctrl+Z undoes it).',
-    [TSignatureChecker.RoleToString(FEntries[Idx].Role),
-     ExtractFileName(FEntries[Idx].FilePath), FEntries[Idx].Line + 1]));
+  if ToBuffer then
+    SetStatus(Format('%s in %s, line %d aligned (in the editor, not saved - ' +
+      'Ctrl+Z undoes it).',
+      [TSignatureChecker.RoleToString(FEntries[Idx].Role),
+       ExtractFileName(FEntries[Idx].FilePath), FEntries[Idx].Line + 1]))
+  else
+    SetStatus(Format('%s in %s, line %d aligned (that file was not open - ' +
+      'written to DISK, no Ctrl+Z).',
+      [TSignatureChecker.RoleToString(FEntries[Idx].Role),
+       ExtractFileName(FEntries[Idx].FilePath), FEntries[Idx].Line + 1]));
   UpdateAlignButton;
 end;
 

@@ -101,6 +101,20 @@ function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;
   const AOriginal: string): Boolean;
 
+/// <summary>True when a write through ApplyLinesMinimal lands in an IDE
+///  EDITOR BUFFER (undoable, unsaved), False when it goes straight to
+///  DISK. It is the very probe ApplyLinesMinimal gates on, so a message
+///  built on it cannot claim something else than what was written - and it
+///  must be asked BEFORE the write, the way the MCP tools do (1.23.0).
+///  A project-wide check reports on files the user never opened, so
+///  "changed in the editor, Ctrl+Z undoes it" is simply untrue for most
+///  of them (user report 2026-10-05).</summary>
+function MinimalWriteGoesToBuffer(const AFilePath: string): Boolean;
+
+/// <summary>The sentence for that fact - ONE wording, so two dialogs
+///  cannot describe the same mechanism differently.</summary>
+function MinimalWriteNote(AToBuffer: Boolean): string;
+
 implementation
 
 uses
@@ -254,6 +268,23 @@ var
 begin
   Low := LowerCase(Trim(AMasked));
   Result := (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9);
+end;
+
+function MinimalWriteGoesToBuffer(const AFilePath: string): Boolean;
+var
+  Live: string;
+begin
+  Result := (Editor <> nil) and Editor.ReadEditorContent(AFilePath, Live);
+end;
+
+function MinimalWriteNote(AToBuffer: Boolean): string;
+begin
+  if AToBuffer then
+    Result := 'The unit is changed in the IDE''s editor buffer and not ' +
+      'saved - Ctrl+Z undoes it there, Ctrl+S writes it.'
+  else
+    Result := 'The IDE did not have this unit open, so the change was ' +
+      'written to DISK - Ctrl+Z cannot reach it.';
 end;
 
 function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;

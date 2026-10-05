@@ -14,6 +14,14 @@ uses
   DIH.Types, DIH.Logger, DIH.Placeholders;
 
 type
+  /// <summary>A registry value that was taken out for the duration of a
+  ///  build, so it can be put back exactly as it was.</summary>
+  TDIHSuspendedValue = record
+    Key: string;
+    Name: string;
+    Value: string;
+  end;
+
   TDIHPackageManager = class
   private
     FLogger: TDIHLogger;
@@ -25,6 +33,19 @@ type
     constructor Create(ALogger: TDIHLogger; AResolver: TDIHPlaceholderResolver);
     procedure RegisterPackages(const APackages: TArray<TDIHPackageEntry>; APlatform: TDIHPlatform);
     procedure UnregisterPackages(const APackages: TArray<TDIHPackageEntry>; APlatform: TDIHPlatform);
+    /// <summary>Takes this entry's packages OUT of "Known Packages" and
+    ///  returns what was there. For the bds.exe path only, and the reason
+    ///  is the user's (2026-10-05): bds.exe IS the IDE, and the IDE loads
+    ///  every registered design-time package at startup - so it reports
+    ///  "[Fataler Fehler] Package X.bpl kann nicht geladen werden" when
+    ///  the file is not there yet, and worse, it HOLDS the .bpl we are
+    ///  about to link. A package that is not registered is not loaded.
+    ///  Always pair with RestoreSuspended in a finally.</summary>
+    function SuspendPackages(const APackages: TArray<TDIHPackageEntry>;
+      APlatform: TDIHPlatform): TArray<TDIHSuspendedValue>;
+    /// <summary>Writes suspended values back, whatever happened to the
+    ///  build. Safe to call with an empty array.</summary>
+    procedure RestoreSuspended(const AValues: TArray<TDIHSuspendedValue>);
   end;
 
   TDIHExpertManager = class
@@ -37,6 +58,11 @@ type
     constructor Create(ALogger: TDIHLogger; AResolver: TDIHPlaceholderResolver);
     procedure RegisterExperts(const AExperts: TArray<TDIHExpertEntry>; APlatform: TDIHPlatform);
     procedure UnregisterExperts(const AExperts: TArray<TDIHExpertEntry>; APlatform: TDIHPlatform);
+    /// <summary>The same for experts: a registered expert DLL is loaded by
+    ///  the IDE at startup too, so a bds.exe build would hold the file it
+    ///  is supposed to replace.</summary>
+    function SuspendExperts(const AExperts: TArray<TDIHExpertEntry>;
+      APlatform: TDIHPlatform): TArray<TDIHSuspendedValue>;
   end;
 
 implementation
@@ -136,6 +162,81 @@ begin
     end;
   finally
     Names.Free;
+  end;
+end;
+
+// Deletes the value and remembers it. ONE helper for packages and experts:
+// the only difference is which key and which value name.
+function SuspendValues(ALogger: TDIHLogger; const AKey: string;
+  const ANames: TArray<string>): TArray<TDIHSuspendedValue>;
+var
+  Reg: TRegistry;
+  V: TDIHSuspendedValue;
+begin
+  Result := nil;
+  if Length(ANames) = 0 then Exit;
+  Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    // False: a key that does not exist has nothing to suspend.
+    if not Reg.OpenKey(AKey, False) then Exit;
+    try
+      for var Name in ANames do
+      begin
+        if Name = '' then Continue;
+        if not Reg.ValueExists(Name) then Continue;
+        V.Key := AKey;
+        V.Name := Name;
+        try
+          V.Value := Reg.ReadString(Name);
+        except
+          V.Value := '';          // a wrong value type is still worth putting back
+        end;
+        Reg.DeleteValue(Name);
+        Result := Result + [V];
+        ALogger.Detail('Not loaded during the build: %s', [ExtractFileName(Name)]);
+      end;
+    finally
+      Reg.CloseKey;
+    end;
+  finally
+    Reg.Free;
+  end;
+end;
+
+function TDIHPackageManager.SuspendPackages(const APackages: TArray<TDIHPackageEntry>;
+  APlatform: TDIHPlatform): TArray<TDIHSuspendedValue>;
+var
+  Names: TArray<string>;
+begin
+  Names := nil;
+  for var Pkg in APackages do
+    if APlatform in Pkg.Platforms then
+      // The very name RegisterPackages writes, or we would delete nothing.
+      Names := Names + [FResolver.ResolveKeepEnvVars(Pkg.BplPath)];
+  Result := SuspendValues(FLogger, GetKnownPackagesKey(APlatform), Names);
+end;
+
+procedure TDIHPackageManager.RestoreSuspended(const AValues: TArray<TDIHSuspendedValue>);
+var
+  Reg: TRegistry;
+begin
+  if Length(AValues) = 0 then Exit;
+  Reg := TRegistry.Create(KEY_READ or KEY_WRITE);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    for var V in AValues do
+      if Reg.OpenKey(V.Key, True) then
+      try
+        Reg.WriteString(V.Name, V.Value);
+      finally
+        Reg.CloseKey;
+      end
+      else
+        FLogger.Error('Could not put %s back into %s - register it again ' +
+          'with install.cmd', [ExtractFileName(V.Name), V.Key]);
+  finally
+    Reg.Free;
   end;
 end;
 
@@ -241,6 +342,18 @@ begin
     ResolvedBpl := FResolver.Resolve(AEntry.BplPath);
     Result := ChangeFileExt(ExtractFileName(ResolvedBpl), '');
   end;
+end;
+
+function TDIHExpertManager.SuspendExperts(const AExperts: TArray<TDIHExpertEntry>;
+  APlatform: TDIHPlatform): TArray<TDIHSuspendedValue>;
+var
+  Names: TArray<string>;
+begin
+  Names := nil;
+  for var Expert in AExperts do
+    if APlatform in Expert.Platforms then
+      Names := Names + [ResolveExpertName(Expert)];
+  Result := SuspendValues(FLogger, GetExpertsKey(APlatform), Names);
 end;
 
 procedure TDIHExpertManager.RegisterExperts(const AExperts: TArray<TDIHExpertEntry>;

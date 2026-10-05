@@ -24,6 +24,8 @@ set BDSVER=%~1
 if "%BDSVER%"=="" set BDSVER=37.0
 set SCRIPTDIR=%~dp0
 set DPROJ=%SCRIPTDIR%RefactoringLightMcp.dproj
+set GROUPPROJ=%SCRIPTDIR%RefactoringLightMcp.groupproj
+set CLOSEDLG=%SCRIPTDIR%..\dih\closedialog.ps1
 set BUILT=%SCRIPTDIR%Bin\RefactoringLightMcp.exe
 set TARGETDIR=%LOCALAPPDATA%\DelphiRefactoringLight\mcp
 set TARGET=%TARGETDIR%\RefactoringLightMcp.exe
@@ -39,22 +41,50 @@ echo Building the MCP bridge (RefactoringLightMcp.exe) ...
 call "%BDSROOT%bin\rsvars.bat" 2>nul
 set "MCP_LOG=%TEMP%\refactoringlight_mcp_build.log"
 msbuild "%DPROJ%" /t:Build /p:Platform=Win32 /p:Config=Release /v:m /nologo > "%MCP_LOG%" 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    findstr /i /c:"does not support command line" "%MCP_LOG%" >nul 2>&1
-    if not errorlevel 1 (
-        echo MCP bridge: this Delphi edition has no command-line compiler.
-        echo Open Mcp\RefactoringLightMcp.dproj in the IDE and build it there,
-        echo then run install.cmd again.
-    ) else (
-        type "%MCP_LOG%"
-        echo MCP bridge: build FAILED - see above.
-    )
-    exit /b 1
-)
-if not exist "%BUILT%" (
-    echo MCP bridge: build produced no exe.
-    exit /b 1
-)
+set MSBUILD_ERR=%ERRORLEVEL%
+:: No command-line compiler (Community Edition) - build with the IDE, the
+:: same fallback dih\builddih.cmd has. Without it the bridge was simply
+:: never built there and every MCP tool was missing, while install.cmd
+:: told the user to open the project by hand (user report 2026-10-05).
+findstr /i /c:"does not support command line" "%MCP_LOG%" >nul 2>&1
+if %ERRORLEVEL% EQU 0 goto :try_bds
+if %MSBUILD_ERR% NEQ 0 goto :msbuild_failed
+if not exist "%BUILT%" goto :no_exe
+goto :install
+
+:msbuild_failed
+type "%MCP_LOG%"
+echo MCP bridge: build FAILED - see above.
+exit /b 1
+
+:no_exe
+echo MCP bridge: build produced no exe.
+exit /b 1
+
+:try_bds
+if not exist "%BDSROOT%bin\bds.exe" goto :no_compiler
+echo MCP bridge: no command-line compiler, falling back to bds.exe ...
+:: MSBuild - and the IDE's own project builder - reads EVERY environment
+:: variable as a property, and nothing on the bds command line can correct
+:: it, so an inherited Config / Platform would decide this build.
+set "Config=Release"
+set "Platform=Win32"
+if exist "%CLOSEDLG%" start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%CLOSEDLG%" -ProcessName bds 2>nul
+"%BDSROOT%bin\bds.exe" -b -ns "%GROUPPROJ%"
+if %ERRORLEVEL% NEQ 0 goto :bds_failed
+if not exist "%BUILT%" goto :no_exe
+goto :install
+
+:bds_failed
+echo MCP bridge: the IDE build FAILED.
+if exist "%SCRIPTDIR%RefactoringLightMcp.err" type "%SCRIPTDIR%RefactoringLightMcp.err"
+exit /b 1
+
+:no_compiler
+echo MCP bridge: neither a command-line compiler nor bds.exe was found.
+exit /b 1
+
+:install
 
 if not exist "%TARGETDIR%" mkdir "%TARGETDIR%"
 :: Best effort only: an .old a bridge still runs from cannot be deleted, and

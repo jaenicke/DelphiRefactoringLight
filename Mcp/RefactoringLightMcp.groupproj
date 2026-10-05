@@ -1,0 +1,32 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{D1E00003-D1E0-D1E0-D1E0-D1E000000003}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="RefactoringLightMcp.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType>GroupProjectType</Borland.ProjectType>
+    </ProjectExtensions>
+    <Target Name="RefactoringLightMcp">
+        <MSBuild Projects="RefactoringLightMcp.dproj"/>
+    </Target>
+    <Target Name="RefactoringLightMcp:Clean">
+        <MSBuild Projects="RefactoringLightMcp.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="RefactoringLightMcp:Make">
+        <MSBuild Projects="RefactoringLightMcp.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="RefactoringLightMcp"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="RefactoringLightMcp:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="RefactoringLightMcp:Make"/>
+    </Target>
+</Project>

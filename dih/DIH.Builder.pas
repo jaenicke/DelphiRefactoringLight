@@ -14,6 +14,28 @@ uses
   DIH.Types, DIH.Logger, DIH.Placeholders;
 
 type
+  /// <summary>What a line of bds.exe's .err file means.</summary>
+  TBdsErrSeverity = (
+    /// plain build output (command lines, "Erfolg", timings)
+    besPlain,
+    /// a bracketed IDE message without a compiler code
+    besIdeMessage,
+    /// a compiler ERROR or FATAL error - this build did not produce code
+    besCompilerError);
+
+/// <summary>The severity of one line of a bds.exe .err file. The IDE
+///  writes the severity LOCALIZED ("[Fataler Fehler]" / "[Fatal Error]"),
+///  so the word is useless - the COMPILER CODE is language-independent: a
+///  letter class plus exactly four digits (F2063, E2003, W1036, H2164).
+///  A bracketed line WITHOUT a code is an IDE message and must NEVER fail
+///  an install: a design-time package the IDE loads at startup and cannot
+///  find on disk reports exactly "[Fataler Fehler] Package X.bpl kann
+///  nicht geladen werden", and the build that follows is what creates that
+///  file (user log 2026-10-05). W and H codes do not fail a build either.
+///  Exported so it can be checked against real .err output.</summary>
+function BdsErrLineSeverity(const ALine: string): TBdsErrSeverity;
+
+type
   TDIHBuilder = class
   private
     FLogger: TDIHLogger;
@@ -32,7 +54,7 @@ type
     procedure SetEnv(const AName, AValue: string);
     procedure CreateSingleProjectGroupProj(const AGroupProjPath, AProjectPath: string; APlatform: TDIHPlatform;
       const ABuildConfig, ADcuDir, ABplDir, ADcpDir: string);
-    procedure ReadBdsErrFile(const AErrPath: string);
+    function ReadBdsErrFile(const AErrPath: string): Boolean;
     procedure CleanupBdsTempFiles(const AGroupProjPath: string);
     function RelocateBdsArtifacts(const AProjectPath, ABplDir, ADcpDir: string;
       AStart: TDateTime): Boolean;
@@ -290,25 +312,87 @@ begin
   end;
 end;
 
-procedure TDIHBuilder.ReadBdsErrFile(const AErrPath: string);
+function BdsErrLineSeverity(const ALine: string): TBdsErrSeverity;
+
+  // A compiler code is a letter and EXACTLY four digits, standing on its
+  // own - "-K00400000" or a path like "Win32\Release" must not match.
+  function CodeLetter: Char;
+  var
+    I, D: Integer;
+  begin
+    Result := #0;
+    for I := 1 to Length(ALine) do
+    begin
+      if not CharInSet(ALine[I], ['A'..'Z']) then Continue;
+      if (I > 1) and (CharInSet(ALine[I - 1], ['A'..'Z', 'a'..'z', '0'..'9', '_', '-', '/'])) then
+        Continue;
+      D := 0;
+      while (I + D + 1 <= Length(ALine)) and CharInSet(ALine[I + D + 1], ['0'..'9']) do
+        Inc(D);
+      if D <> 4 then Continue;
+      if (I + 5 <= Length(ALine)) and
+         CharInSet(ALine[I + 5], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then Continue;
+      Exit(ALine[I]);
+    end;
+  end;
+
+var
+  T: string;
+  L: Char;
+begin
+  Result := besPlain;
+  T := ALine.TrimLeft;
+  if not T.StartsWith('[') then Exit;
+  if Pos(']', T) <= 1 then Exit;
+  Result := besIdeMessage;
+  L := CodeLetter;
+  if CharInSet(L, ['E', 'F']) then
+    Result := besCompilerError;
+end;
+
+// True when the output names a COMPILER error. bds.exe returns 0 even when
+// its own output ends in a fatal error, so the exit code alone must not
+// decide whether a build succeeded (user log 2026-10-05).
+function TDIHBuilder.ReadBdsErrFile(const AErrPath: string): Boolean;
 var
   Lines: TStringList;
-  Line: string;
+  Line, FirstError, FirstNote: string;
+  Notes: Integer;
 begin
+  Result := False;
   if not FileExists(AErrPath) then
     Exit;
 
+  Notes := 0;
   Lines := TStringList.Create;
   try
     Lines.LoadFromFile(AErrPath);
     for Line in Lines do
     begin
-      if not Line.Trim.IsEmpty then
-        FLogger.CompilerOutput(Line);
+      if Line.Trim.IsEmpty then Continue;
+      FLogger.CompilerOutput(Line);
+      case BdsErrLineSeverity(Line) of
+        besCompilerError:
+          begin
+            Result := True;
+            if FirstError = '' then FirstError := Line.Trim;
+          end;
+        besIdeMessage:
+          begin
+            Inc(Notes);
+            if FirstNote = '' then FirstNote := Line.Trim;
+          end;
+      end;
     end;
   finally
     Lines.Free;
   end;
+
+  if Result then
+    FLogger.Error('The IDE reported a compiler error: %s', [FirstError])
+  else if Notes > 0 then
+    FLogger.Warning('%d IDE message(s) during the build, no compiler code - ' +
+      'not a compile error: %s', [Notes, FirstNote]);
 end;
 
 procedure TDIHBuilder.CleanupBdsTempFiles(const AGroupProjPath: string);
@@ -475,9 +559,18 @@ begin
         FLogger.Error('Build failed (bds.exe): %s', [Proj.ProjectPath]);
         Result := False;
       end
+      // bds.exe returns 0 even when its own output ends in a fatal error,
+      // so the .err has the last word (user log 2026-10-05: an install
+      // that reported OK right under "[Fataler Fehler]").
+      else if ReadBdsErrFile(ErrPath) then
+      begin
+        FLogger.FlushBuildOutputToConsole;
+        FLogger.Error('Build failed (bds.exe reported success, its output did ' +
+          'not): %s', [Proj.ProjectPath]);
+        Result := False;
+      end
       else
       begin
-        ReadBdsErrFile(ErrPath);
         FLogger.Success('Build succeeded (bds.exe): %s', [ExtractFileName(Proj.ProjectPath)]);
         // bds.exe ignored the output-dir overrides - move the BPL/DCP to
         // the registered target dirs.

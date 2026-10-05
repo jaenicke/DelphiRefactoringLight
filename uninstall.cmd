@@ -8,7 +8,7 @@ setlocal
 
 set BDSVER=37.0
 set DELINST=%~dp0delinst.exe
-set CONFIG=%~dp0DelphiRefactoringLight.xml
+set DIHCONFIG=%~dp0DelphiRefactoringLight.xml
 set USEBDS=
 
 :: Build delinst.exe first (also detects if cmd compiler is available)
@@ -24,7 +24,7 @@ echo  Delphi Refactoring Light - Uninstall (BDS %BDSVER%)
 echo ============================================
 echo.
 
-"%DELINST%" %BDSVER% -config "%CONFIG%" -platforms Win32,Win64 -configs Release -action uninstall -verbose log %USEBDS%
+"%DELINST%" %BDSVER% -config "%DIHCONFIG%" -platforms Win32,Win64 -configs Release -action uninstall -verbose log %USEBDS%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

@@ -52,6 +52,16 @@ echo.
 echo msbuild not available, falling back to bds.exe ...
 echo.
 set "DIH_ExeOutput=%EXEDIR%\."
+:: MSBuild - and the IDE's own project builder, which is what bds.exe -b
+:: uses - reads EVERY environment variable as a property. An inherited
+:: Config or Platform therefore decides this build: a caller that does
+:: "set CONFIG=<config file>" makes DCC_DcuOutput ".\Win32\<that path>",
+:: which cannot be created, and a Visual Studio prompt exports
+:: Platform=x64, which no Delphi project has. The msbuild branch above
+:: passes both with /p: and cannot be fooled; here only the environment
+:: can say it, so pin both to what we are building.
+set "Config=Release"
+set "Platform=Win32"
 
 :: Start background watcher to auto-close bds.exe save dialogs
 start /b powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPTDIR%closedialog.ps1" -ProcessName bds 2>nul

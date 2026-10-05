@@ -27,6 +27,9 @@ type
       const ABuildConfig, AExtraParams: string): Boolean;
     function BuildWithBds(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform;
       const ABuildConfig: string): Boolean;
+    function BuildWithBdsProjects(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform;
+      const ABuildConfig: string): Boolean;
+    procedure SetEnv(const AName, AValue: string);
     procedure CreateSingleProjectGroupProj(const AGroupProjPath, AProjectPath: string; APlatform: TDIHPlatform;
       const ABuildConfig, ADcuDir, ABplDir, ADcpDir: string);
     procedure ReadBdsErrFile(const AErrPath: string);
@@ -383,7 +386,48 @@ begin
   end;
 end;
 
+// '' removes the variable, so the project's own default applies again.
+procedure TDIHBuilder.SetEnv(const AName, AValue: string);
+begin
+  if AValue = '' then
+    Winapi.Windows.SetEnvironmentVariable(PChar(AName), nil)
+  else
+    Winapi.Windows.SetEnvironmentVariable(PChar(AName), PChar(AValue));
+end;
+
 function TDIHBuilder.BuildWithBds(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform;
+  const ABuildConfig: string): Boolean;
+// MSBuild - and with it the IDE's OWN project builder - reads EVERY
+// environment variable as a property; that is how the groupproj's
+// DIH_ExeOutput reaches a bds build, while the Properties baked into that
+// groupproj are ignored (see RelocateBdsArtifacts above). So an inherited
+// "Config" or "Platform" decides what this build does, and nothing on the
+// command line can correct it: a caller's `set CONFIG=<config file>` - the
+// shape our own install.cmd had - turned DCC_DcuOutput into
+// ".\Win32\E:\...\DelphiRefactoringLight.xml" and the build died in
+// MakeDir (user report 2026-10-05), while a Visual Studio prompt exports
+// Platform=x64, which no Delphi project has. The msbuild path passes both
+// with /p: and is therefore immune. Pin them to what is really being
+// built, and put the caller's environment back afterwards.
+var
+  OldConfig, OldPlatform: string;
+begin
+  OldConfig := System.SysUtils.GetEnvironmentVariable('Config');
+  OldPlatform := System.SysUtils.GetEnvironmentVariable('Platform');
+  if not SameText(OldConfig, ABuildConfig) and (OldConfig <> '') then
+    FLogger.Detail('Inherited Config=%s replaced by %s for the bds build',
+      [OldConfig, ABuildConfig]);
+  SetEnv('Config', ABuildConfig);
+  SetEnv('Platform', APlatform.ToString);
+  try
+    Result := BuildWithBdsProjects(AProjects, APlatform, ABuildConfig);
+  finally
+    SetEnv('Config', OldConfig);
+    SetEnv('Platform', OldPlatform);
+  end;
+end;
+
+function TDIHBuilder.BuildWithBdsProjects(const AProjects: TArray<TDIHBuildProject>; APlatform: TDIHPlatform;
   const ABuildConfig: string): Boolean;
 var
   BdsExe, BdsProfile, Cmd, FullProjectPath, DcuDir, BplDir, DcpDir, GroupProjPath, ErrPath: string;

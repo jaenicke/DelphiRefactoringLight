@@ -61,6 +61,19 @@ type
     ///  trap in 1.10.1). A call that highlights NOTHING may of course go
     ///  to the line start.</summary>
     [Test] procedure NoGotoHighlightsFromTheLineStart;
+
+    /// <summary>MSBuild - and the IDE's own project builder, which is what
+    ///  a bds.exe build uses - reads EVERY environment variable as a
+    ///  property. So a script that does `set CONFIG=&lt;path to the config
+    ///  file&gt;` silently sets $(Config), and the Delphi projects build
+    ///  into ".\$(Platform)\$(Config)": the user's other PC, which has no
+    ///  command-line compiler and therefore takes the bds path, died with
+    ///  "the directory .\Win32\E:\...\DelphiRefactoringLight.xml cannot be
+    ///  created" (2026-10-05). The msbuild path passes /p:Config and is
+    ///  immune, which is why this survived since 1.8.5 made that value a
+    ///  full path. A build property may be SET to a configuration name,
+    ///  never to a file path.</summary>
+    [Test] procedure NoScriptPutsAPathIntoABuildProperty;
   end;
 
 implementation
@@ -398,6 +411,73 @@ begin
         [Checked]));
     Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
   finally
+    Offenders.Free;
+  end;
+end;
+
+// The property names the Delphi projects of this repository really read.
+// 'Base' and the Cfg_ flags are set by the dprojs themselves, so a script
+// must not touch them at all; Config and Platform may be pinned to a
+// configuration or platform NAME - just never to a path.
+function BuildPropertyName(const AName: string): Boolean;
+const
+  Names: array[0..6] of string = ('CONFIG', 'PLATFORM', 'BASE', 'PROJECTNAME',
+    'TARGETNAME', 'CFG_1', 'CFG_2');
+begin
+  var U := UpperCase(Trim(AName));
+  Result := U.StartsWith('DCC_');
+  if not Result then
+    for var N in Names do
+      if U = N then Exit(True);
+end;
+
+// A value that cannot be a configuration or platform name
+function LooksLikeAPath(const AValue: string): Boolean;
+begin
+  var V := Trim(AValue);
+  Result := V.Contains('\') or V.Contains('/') or V.Contains(':') or
+    UpperCase(V).Contains('.XML');
+end;
+
+procedure TRepoHygieneTests.NoScriptPutsAPathIntoABuildProperty;
+var
+  Offenders: TStringList;
+  Checked: Integer;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository must be reachable from ' + ParamStr(0));
+  Offenders := TStringList.Create;
+  var SL := TStringList.Create;
+  try
+    Checked := 0;
+    for var Rel in ScriptFiles do
+    begin
+      var F := TPath.Combine(Root, Rel);
+      Assert.IsTrue(TFile.Exists(F), 'the script is missing: ' + Rel);
+      SL.Text := TEncoding.ANSI.GetString(TFile.ReadAllBytes(F));
+      for var I := 0 to SL.Count - 1 do
+      begin
+        var L := Trim(SL[I]);
+        if L.StartsWith('::') or L.StartsWith('rem ', True) then Continue;
+        if not UpperCase(L).StartsWith('SET ') then Continue;
+        // set NAME=VALUE and set "NAME=VALUE"
+        var Assign := Trim(Copy(L, 5, MaxInt)).DeQuotedString('"');
+        var Eq := Pos('=', Assign);
+        if Eq <= 1 then Continue;
+        var Name := Copy(Assign, 1, Eq - 1);
+        var Value := Copy(Assign, Eq + 1, MaxInt);
+        Inc(Checked);
+        if BuildPropertyName(Name) and LooksLikeAPath(Value) then
+          Offenders.Add(Format('%s(%d): set %s=%s - MSBuild reads that as ' +
+            'the property $(%s), so every project builds into a path made ' +
+            'from it', [Rel, I + 1, Name, Value, Name]));
+      end;
+    end;
+    Assert.IsTrue(Checked >= 20,
+      Format('the sweep must see the scripts'' assignments, found %d', [Checked]));
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    SL.Free;
     Offenders.Free;
   end;
 end;

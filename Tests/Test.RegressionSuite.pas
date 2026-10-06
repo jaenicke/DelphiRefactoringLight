@@ -124,6 +124,13 @@ type
     ///  package unloaded) under a handler that ignores the stop event. Stop
     ///  now says so, and Destroy waits for the last handler.</summary>
     [Test] procedure Stop_ReportsAHandlerThatOutlivesTheDeadline;
+    /// <summary>Issue #22, the PR #31 follow-up: a handler in a wait that
+    ///  ignores the stop event made the IDE give up at the first deadline,
+    ///  leak the server and pin the package - although ending what it waits
+    ///  for (DelphiLSP) would have let it leave a moment later. The wake
+    ///  action runs exactly once, only when needed, and the stop is clean
+    ///  after it.</summary>
+    [Test] procedure Stop_WakesAStragglerAndThenStopsCleanly;
     /// <summary>Audit #22, H5: handler threads were bare anonymous threads,
     ///  invisible to ShutdownWorkersAndWait - the unload never waited for a
     ///  handler that outlived Stop. They are started through the latch now.
@@ -1327,6 +1334,66 @@ begin
         Release.SetEvent;
         Assert.IsTrue(Srv.Stop(5000), 'once it has left, the stop is clean');
         Assert.AreEqual(0, Srv.ActiveHandlers);
+      finally
+        Release.SetEvent;
+        Client.WaitFor;
+        Client.Free;
+      end;
+    finally
+      Srv.Free;
+    end;
+  finally
+    Release.Free;
+    Entered.Free;
+  end;
+end;
+
+procedure TMcpPipeRegressionTests.Stop_WakesAStragglerAndThenStopsCleanly;
+var
+  Srv: TMcpPipeServer;
+  Entered, Release: TEvent;
+  Client: TThread;
+  Probe: string;
+  Wakes: Integer;
+begin
+  Probe := 'wake-' + FormatDateTime('hhnnsszzz', Now);
+  Wakes := 0;
+  Entered := TEvent.Create(nil, True, False, '');
+  Release := TEvent.Create(nil, True, False, '');
+  try
+    Srv := TMcpPipeServer.Create(McpPipeName(GetCurrentProcessId),
+      function(const ARequest: string; AStop: THandle): string
+      begin
+        if ARequest.Contains(Probe) then
+        begin
+          Entered.SetEvent;
+          // ignores AStop - only the wake action ends this wait, as ending
+          // DelphiLSP ends an LSP one
+          Release.WaitFor(10000);
+        end;
+        Result := '{"ok":true}';
+      end);
+    try
+      Assert.IsTrue(Srv.Start, 'the test pipe is there: ' + Srv.LastError);
+      Client := StartProbeClient(Probe);
+      try
+        Assert.IsTrue(Entered.WaitFor(5000) = wrSignaled, 'the handler runs');
+        Assert.IsTrue(Srv.Stop(100,
+          procedure
+          begin
+            Inc(Wakes);
+            Release.SetEvent;
+          end, 5000),
+          'the woken handler leaves within the grace period - a clean stop');
+        Assert.AreEqual(1, Wakes, 'the wake action ran once');
+        Assert.AreEqual(0, Srv.ActiveHandlers);
+        Assert.IsTrue(Srv.Stop(100,
+          procedure
+          begin
+            Inc(Wakes);
+          end),
+          'nothing running: a clean stop');
+        Assert.AreEqual(1, Wakes, 'and no wake when no handler needs one');
       finally
         Release.SetEvent;
         Client.WaitFor;

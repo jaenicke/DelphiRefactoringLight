@@ -20,9 +20,12 @@ unit Mcp.PipeServer;
 //   so ShutdownWorkersAndWait sees it like every other worker;
 // * Stop signals FStopEvent - every wait in here and in the handler (see
 //   StopEvent) watches it - and waits for the listener and all handlers.
-//   A handler that ignores the event can outlive the deadline; Stop then
-//   returns False, and the owner must not free anything that handler can
-//   reach. Destroy waits for the last handler.
+//   A handler that ignores the event can outlive the deadline. The owner
+//   can pass a WAKE action for that case (the IDE ends DelphiLSP, which
+//   fails every LSP wait at once), and Stop gives the handlers a second
+//   grace period after it. Only a handler that outlives that too makes
+//   Stop return False; the owner must then not free anything that handler
+//   can reach. Destroy waits for the last handler.
 
 interface
 
@@ -78,7 +81,13 @@ type
     ///  handlers. False = a handler is still running (it ignores the stop
     ///  event): the server and everything the handler reaches must then stay
     ///  alive, and so must the code it runs.</summary>
-    function Stop(ATimeoutMs: Cardinal = 5000): Boolean;
+    function Stop(ATimeoutMs: Cardinal = 5000): Boolean; overload;
+    /// <summary>Stop, and when a handler is still running after ATimeoutMs:
+    ///  run AWake once - an action that ends whatever such a handler waits
+    ///  for and that does not watch the stop event - and wait up to AGraceMs
+    ///  more. False = a handler outlived both.</summary>
+    function Stop(ATimeoutMs: Cardinal; const AWake: TProc;
+      AGraceMs: Cardinal = 5000): Boolean; overload;
     /// <summary>Handlers running right now.</summary>
     function ActiveHandlers: Integer;
     function LastError: string;
@@ -412,6 +421,22 @@ begin
   while (ActiveHandlers > 0) and (GetTickCount64 < Deadline) do
     Sleep(10);
   Result := ActiveHandlers = 0;
+end;
+
+function TMcpPipeServer.Stop(ATimeoutMs: Cardinal; const AWake: TProc;
+  AGraceMs: Cardinal): Boolean;
+begin
+  Result := Stop(ATimeoutMs);
+  if Result or not Assigned(AWake) then Exit;
+  // A handler outlived the deadline: it waits for something that does not
+  // watch the stop event. Ending that is the owner's job - the usual case
+  // is an LSP request, and ending DelphiLSP fails it at once. Without this
+  // the owner had to give up at the first deadline and leak everything the
+  // handler could reach, although the handler would have left a moment
+  // later. A wake that fails must not cost the second wait (this runs in a
+  // finalization).
+  try AWake(); except end;
+  Result := Stop(AGraceMs);
 end;
 
 function TMcpPipeServer.ActiveHandlers: Integer;

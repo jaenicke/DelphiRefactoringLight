@@ -2065,9 +2065,19 @@ begin
   // may the dispatch window go.
   if GServer <> nil then
   begin
-    if not GServer.Stop then
+    // A handler that ignores the stop event is almost always in an LSP wait
+    // (a long lsp_request, a verification scan). Ending DelphiLSP fails all
+    // of those at once - so that is the wake action, and the stop is clean
+    // after it. The finalization ends DelphiLSP anyway, right after this:
+    // doing it here first, and only when a handler needs it, is what used
+    // to be missing - the server had already given up and leaked by then.
+    if not GServer.Stop(5000,
+      procedure
+      begin
+        TLspManager.ShutdownIfRunning;
+      end) then
     begin
-      // A handler ignored the stop event (an LSP wait, a long lsp_request).
+      // A handler outlived even that (a wait that is not an LSP one).
       // Freeing the server, the fix cache or the scratch store now would pull
       // them from under it, and the unload would unmap the code it runs. So
       // nothing it can reach is freed and the module stays mapped - a

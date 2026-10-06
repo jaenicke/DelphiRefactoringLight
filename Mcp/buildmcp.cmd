@@ -40,22 +40,29 @@ echo.
 echo Building the MCP bridge (RefactoringLightMcp.exe) ...
 call "%BDSROOT%bin\rsvars.bat" 2>nul
 set "MCP_LOG=%TEMP%\refactoringlight_mcp_build.log"
-msbuild "%DPROJ%" /t:Build /p:Platform=Win32 /p:Config=Release /v:m /nologo > "%MCP_LOG%" 2>&1
+:: /tv:4.0 - a .dproj carries no ToolsVersion (Delphi writes none either),
+:: so MSBuild takes the machine default, and a machine whose default is
+:: the 2.0 toolset looks for its tasks in v2.0.50727 and fails with
+:: MSB4036 unless .NET 3.5 is installed (forum log 2026-10-06). Delphi
+:: itself points at .NET 4.x, so naming the toolset only removes a
+:: machine-dependent choice.
+msbuild "%DPROJ%" /t:Build /tv:4.0 /p:Platform=Win32 /p:Config=Release /v:m /nologo > "%MCP_LOG%" 2>&1
 set MSBUILD_ERR=%ERRORLEVEL%
-:: No command-line compiler (Community Edition) - build with the IDE, the
-:: same fallback dih\builddih.cmd has. Without it the bridge was simply
-:: never built there and every MCP tool was missing, while install.cmd
-:: told the user to open the project by hand (user report 2026-10-05).
-findstr /i /c:"does not support command line" "%MCP_LOG%" >nul 2>&1
-if %ERRORLEVEL% EQU 0 goto :try_bds
-if %MSBUILD_ERR% NEQ 0 goto :msbuild_failed
-if not exist "%BUILT%" goto :no_exe
+:: ANY msbuild failure goes to the IDE, exactly as dih\builddih.cmd does.
+:: Gating the fallback on the "does not support command line" message was
+:: too narrow: on the machine above msbuild failed for another reason, so
+:: the bridge was never built while delinst.exe built fine through bds
+:: (forum log 2026-10-06). The log is shown either way, so a real compile
+:: error is still readable - it just no longer ends the script before the
+:: fallback had its turn.
+if %MSBUILD_ERR% NEQ 0 goto :msbuild_failed_try_bds
+if not exist "%BUILT%" goto :msbuild_failed_try_bds
 goto :install
 
-:msbuild_failed
+:msbuild_failed_try_bds
 type "%MCP_LOG%"
-echo MCP bridge: build FAILED - see above.
-exit /b 1
+echo MCP bridge: msbuild did not produce the exe - trying bds.exe ...
+goto :try_bds
 
 :no_exe
 echo MCP bridge: build produced no exe.
@@ -63,7 +70,9 @@ exit /b 1
 
 :try_bds
 if not exist "%BDSROOT%bin\bds.exe" goto :no_compiler
-echo MCP bridge: no command-line compiler, falling back to bds.exe ...
+:: Reached for TWO reasons now (no command-line compiler, or msbuild did
+:: not produce the exe), so the line above says which one it was.
+echo MCP bridge: building with the IDE (bds.exe) ...
 :: MSBuild - and the IDE's own project builder - reads EVERY environment
 :: variable as a property, and nothing on the bds command line can correct
 :: it, so an inherited Config / Platform would decide this build.

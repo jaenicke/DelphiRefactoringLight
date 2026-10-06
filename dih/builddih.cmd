@@ -33,7 +33,10 @@ call "%RSVARS%" 2>nul
 
 echo Trying msbuild ...
 set "MSBUILD_LOG=%TEMP%\dih_msbuild.log"
-msbuild "%DPROJ%" /t:Build /p:Platform=Win32 /p:Config=Release /p:DCC_ExeOutput="%EXEDIR%\." /v:m /nologo > "%MSBUILD_LOG%" 2>&1
+:: /tv:4.0: without it MSBuild takes the machine's default toolset, and a
+:: default of 2.0 needs .NET 3.5 for its task assemblies (MSB4036 on the
+:: forum machine of 2026-10-06). Delphi points at .NET 4.x itself.
+msbuild "%DPROJ%" /t:Build /tv:4.0 /p:Platform=Win32 /p:Config=Release /p:DCC_ExeOutput="%EXEDIR%\." /v:m /nologo > "%MSBUILD_LOG%" 2>&1
 set MSBUILD_ERR=%ERRORLEVEL%
 
 :: Check for "does not support command line compiling" in output

@@ -249,7 +249,14 @@ begin
   BplDir := FResolver.Resolve('{#BplTargetDir}');
   DcpDir := FResolver.Resolve('{#DcpTargetDir}');
 
-  Cmd := Format('msbuild.exe "%s" /t:Build /p:Platform=%s /p:Config=%s /p:DCC_DcuOutput="%s" /p:DCC_BplOutput="%s" /p:DCC_DcpOutput="%s"',
+  // /tv:4.0 - a .dproj carries no ToolsVersion (Delphi's own projects do
+  // not either), so MSBuild falls back to the machine's default toolset.
+  // Where that default is 2.0, MSBuild looks for its task assemblies in
+  // v2.0.50727 and fails with MSB4010/MSB4036 unless .NET 3.5 is
+  // installed - which is what a forum log of 2026-10-06 shows, on an IDE
+  // that points at .NET 4.x itself. Naming the toolset takes that choice
+  // away from the machine.
+  Cmd := Format('msbuild.exe "%s" /t:Build /tv:4.0 /p:Platform=%s /p:Config=%s /p:DCC_DcuOutput="%s" /p:DCC_BplOutput="%s" /p:DCC_DcpOutput="%s"',
     [FullProjectPath, APlatform.ToString, ABuildConfig, DcuDir, BplDir, DcpDir]);
 
   if not AExtraParams.IsEmpty then

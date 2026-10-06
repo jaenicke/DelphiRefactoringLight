@@ -29,6 +29,8 @@ type
     function GetKnownPackagesKey(APlatform: TDIHPlatform): string;
     function ExpandRegisteredPath(const AValueName: string): string;
     procedure RemoveStaleEntries(AReg: TRegistry; const AKeepName, ATargetFile: string);
+    function SuspendedNamesFor(AReg: TRegistry;
+      const ATargetFile: string): TArray<string>;
   public
     constructor Create(ALogger: TDIHLogger; AResolver: TDIHPlaceholderResolver);
     procedure RegisterPackages(const APackages: TArray<TDIHPackageEntry>; APlatform: TDIHPlatform);
@@ -204,17 +206,73 @@ begin
   end;
 end;
 
+// Every value of the key that names the same BPL FILE, whatever it is
+// spelled like. Taking only the name RegisterPackages writes was not
+// enough: the IDE loads what the REGISTRY says, and the same package can
+// sit there as "$(BDSCOMMONDIR)\Bpl\X.bpl" or as the expanded absolute
+// path - RemoveStaleEntries exists for exactly that reason. A forum log of
+// 2026-10-06 still showed "[Fataler Fehler] Package X.bpl kann nicht
+// geladen werden" during a bds build, with no "not loaded during the
+// build" line above it: the entry the IDE loaded was not the name we
+// looked for.
+function TDIHPackageManager.SuspendedNamesFor(AReg: TRegistry;
+  const ATargetFile: string): TArray<string>;
+var
+  Names: TStringList;
+begin
+  Result := nil;
+  Names := TStringList.Create;
+  try
+    try
+      AReg.GetValueNames(Names);
+    except
+      Exit;
+    end;
+    // Compared the way RemoveStaleEntries compares: both sides through
+    // ExpandRegisteredPath and ExpandFileName, so "$(BDSCOMMONDIR)\Bpl\X"
+    // and the absolute path really are one file.
+    var Target := ExpandFileName(ExpandRegisteredPath(ATargetFile));
+    for var N in Names do
+      if (N <> '') and
+         SameText(ExpandFileName(ExpandRegisteredPath(N)), Target) then
+        Result := Result + [N];
+  finally
+    Names.Free;
+  end;
+end;
+
 function TDIHPackageManager.SuspendPackages(const APackages: TArray<TDIHPackageEntry>;
   APlatform: TDIHPlatform): TArray<TDIHSuspendedValue>;
 var
   Names: TArray<string>;
+  Reg: TRegistry;
+  Key: string;
 begin
   Names := nil;
-  for var Pkg in APackages do
-    if APlatform in Pkg.Platforms then
-      // The very name RegisterPackages writes, or we would delete nothing.
-      Names := Names + [FResolver.ResolveKeepEnvVars(Pkg.BplPath)];
-  Result := SuspendValues(FLogger, GetKnownPackagesKey(APlatform), Names);
+  Key := GetKnownPackagesKey(APlatform);
+  Reg := TRegistry.Create(KEY_READ);
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    if Reg.OpenKeyReadOnly(Key) then
+    try
+      for var Pkg in APackages do
+        if APlatform in Pkg.Platforms then
+        begin
+          // The name RegisterPackages writes, plus every other spelling of
+          // the same file that is already in the key.
+          var Written := FResolver.ResolveKeepEnvVars(Pkg.BplPath);
+          Names := Names + [Written];
+          for var N in SuspendedNamesFor(Reg, FResolver.Resolve(Pkg.BplPath)) do
+            if not SameText(N, Written) then
+              Names := Names + [N];
+        end;
+    finally
+      Reg.CloseKey;
+    end;
+  finally
+    Reg.Free;
+  end;
+  Result := SuspendValues(FLogger, Key, Names);
 end;
 
 procedure TDIHPackageManager.RestoreSuspended(const AValues: TArray<TDIHSuspendedValue>);

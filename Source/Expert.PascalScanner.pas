@@ -120,6 +120,33 @@ function MaskCommentsAndStrings(const ALines: TArray<string>): TArray<string>;
 ///  (audit #39, L7p).</summary>
 function SplitEditorLines(const AContent: string): TArray<string>;
 
+/// <summary>Does ALine contain the ';' that ENDS a declaration - the first
+///  one outside ( ) and [ ]? ADepth carries the bracket depth from line to
+///  line, so a WRAPPED parameter list is one declaration. The plain "first
+///  ';'" cut it after its first parameter: move to unit shipped only the
+///  first line (forum 2026-09-22), and extract interface truncated
+///  "procedure Test3( const AParam1: string;" and then read the
+///  continuation line as a FIELD (issue #44). ALine must have comments and
+///  strings removed already.</summary>
+function LineEndsDeclaration(const ALine: string; var ADepth: Integer): Boolean;
+
+/// <summary>ANAME without its '&' escape: "&String" -> "String". The
+///  escape belongs to the NAME, so it has to be written where the name is
+///  written - but a name DERIVED from it must not carry it, because
+///  "Get&String" is not an identifier at all (issue #44: an escaped
+///  property produced "function Get: String" and "property : String").
+///  </summary>
+function UnescapedIdentifier(const AName: string): string;
+
+/// <summary>The identifier that ends just before APos (1-based; blanks and
+///  tabs in between are skipped), with its start column in AStartCol, or ''
+///  when there is none. Unicode: the ASCII-only walk of signature help read
+///  "Groesse(" with a non-ASCII letter as "e" and "Aerger(" as "rger",
+///  because it stopped at the first character outside A-Z (issue #22, the
+///  L7o residual).</summary>
+function IdentifierBefore(const ALine: string; APos: Integer;
+  out AStartCol: Integer): string;
+
 type
   /// <summary>Where a remembered line is NOW.</summary>
   TLineRelocation = record
@@ -546,6 +573,42 @@ begin
         end;
     end;
   Result := False;
+end;
+
+function LineEndsDeclaration(const ALine: string; var ADepth: Integer): Boolean;
+begin
+  for var C in ALine do
+    case C of
+      '(', '[': Inc(ADepth);
+      ')', ']': if ADepth > 0 then Dec(ADepth);
+      ';': if ADepth = 0 then Exit(True);
+    end;
+  Result := False;
+end;
+
+function UnescapedIdentifier(const AName: string): string;
+begin
+  Result := AName;
+  if (Result <> '') and (Result[1] = '&') then
+    Result := Copy(Result, 2, MaxInt);
+end;
+
+function IdentifierBefore(const ALine: string; APos: Integer;
+  out AStartCol: Integer): string;
+var
+  P, EndP: Integer;
+begin
+  Result := '';
+  AStartCol := 0;
+  P := APos - 1;
+  if P > Length(ALine) then P := Length(ALine);
+  while (P >= 1) and CharInSet(ALine[P], [' ', #9]) do Dec(P);
+  if (P < 1) or not IsIdentChar(ALine[P]) then Exit;
+  EndP := P;
+  while (P >= 1) and IsIdentChar(ALine[P]) do Dec(P);
+  Inc(P);
+  AStartCol := P;
+  Result := Copy(ALine, P, EndP - P + 1);
 end;
 
 function SplitEditorLines(const AContent: string): TArray<string>;

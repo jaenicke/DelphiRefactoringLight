@@ -46,6 +46,14 @@ type
     /// <summary>On a TComponent-style base only QueryInterface is virtual;
     ///  "override" on _AddRef/_Release does not compile (E2170).</summary>
     [Test] procedure IInterfaceDirective_OnlyQueryInterfaceOnComponents;
+
+    /// <summary>Issue #44, the reported class verbatim. Two defects in one
+    ///  shape: a WRAPPED parameter list was cut at the ';' inside it, so
+    ///  "procedure Test3( const AParam1: string;" was the whole method and
+    ///  the continuation line became a FIELD member; and a '&'-ESCAPED
+    ///  property name was parsed as EMPTY, which generated
+    ///  "function Get: String" and "property : String read Get".</summary>
+    [Test] procedure WrappedParametersAndEscapedNames_Issue44;
   end;
 
 implementation
@@ -174,6 +182,66 @@ begin
   Assert.AreEqual('', TExtractInterfaceEngine.IInterfaceDirective('TComponent', '_Release'), False,
     '_Release is static in TComponent');
   Assert.AreEqual('', TExtractInterfaceEngine.IInterfaceDirective('TObject', 'QueryInterface'), False);
+end;
+
+procedure TExtractInterfaceTests.WrappedParametersAndEscapedNames_Issue44;
+var
+  Info: TExtractInterfaceInfo;
+  Names, Sigs: string;
+  I: Integer;
+begin
+  // The reporter's class, verbatim.
+  Assert.IsTrue(TExtractInterfaceEngine.ParseClassAtLine([
+    'unit U;',                                      // 1
+    'interface',                                    // 2
+    'type',                                         // 3
+    '  TMyObject = class(TObject)',                 // 4
+    '  private',                                    // 5
+    '    FString: String;',                         // 6
+    '  protected',                                  // 7
+    '  public',                                     // 8
+    '    procedure &Integer;',                      // 9
+    '    procedure &Test;',                         // 10
+    '    procedure Test2( const AParam: Boolean);', // 11
+    '    procedure Test3( const AParam1: string;',  // 12
+    '                     const AParam2: Boolean);',// 13
+    '    property &String: String read FString;',   // 14
+    '  end;',                                       // 15
+    'implementation',                               // 16
+    'end.'], '', 4, Info));
+
+  for I := 0 to High(Info.Members) do
+  begin
+    Names := Names + '|' + Info.Members[I].Name;
+    Sigs := Sigs + '|' + Info.Members[I].Signature;
+    // What the reporter ticked: the public members, not the private field.
+    Info.Members[I].Selected := Info.Members[I].Visibility = mvPublic;
+  end;
+
+  // ONE entry for Test3, and its continuation line is not a member of its
+  // own - it used to arrive as a "field" called "const AParam2".
+  Assert.AreEqual('|FString|&Integer|&Test|Test2|Test3|&String', Names, False,
+    'six members, and the escaped names are names');
+  Assert.IsTrue(Sigs.Contains(
+    '|procedure Test3( const AParam1: string; const AParam2: Boolean)'),
+    'the wrapped parameter list stays with its header: ' + Sigs);
+
+  Info.InterfaceName := 'IMyObject';
+  Info.Guid := '{23E240A6-23A0-4DC8-883E-3BA021063342}';
+
+  // The reporter's expected preview, verbatim.
+  Assert.AreEqual(
+    '  IMyObject = interface' + sLineBreak +
+    '    [''{23E240A6-23A0-4DC8-883E-3BA021063342}'']' + sLineBreak +
+    '    procedure &Integer;' + sLineBreak +
+    '    procedure &Test;' + sLineBreak +
+    '    procedure Test2( const AParam: Boolean);' + sLineBreak +
+    '    procedure Test3( const AParam1: string; const AParam2: Boolean);' + sLineBreak +
+    '    function GetString: String;' + sLineBreak +
+    '    property &String: String read GetString;' + sLineBreak +
+    '  end;',
+    TExtractInterfaceEngine.BuildInterfaceText(Info), False,
+    'the escaped property keeps its & and its getter drops it');
 end;
 
 initialization

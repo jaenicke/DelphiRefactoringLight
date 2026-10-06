@@ -790,8 +790,10 @@ begin
     begin
       Pn := M.ExposedName;
       T := M.TypeName;
-      Get := 'Get' + Pn;
-      Setter := 'Set' + Pn;
+      // The same rule the interface text uses, or the class would declare
+      // an accessor the interface does not name (issue #44).
+      Get := AccessorName('Get', Pn);
+      Setter := AccessorName('Set', Pn);
       EmitLines.Add(Indent + Indent + 'function ' + Get + ': ' + T + ';');
       if not (M.IsReadOnly and (M.Kind <> mkField)) then
         EmitLines.Add(Indent + Indent + 'procedure ' + Setter + '(const AValue: ' + T + ');');
@@ -833,8 +835,8 @@ var
 begin
   Pn := M.ExposedName;
   T := M.TypeName;
-  Get := 'Get' + Pn;
-  Setter := 'Set' + Pn;
+  Get := AccessorName('Get', Pn);
+  Setter := AccessorName('Set', Pn);
   Backing := AFieldName;
   SB := TStringBuilder.Create;
   try

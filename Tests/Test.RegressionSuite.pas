@@ -173,6 +173,12 @@ type
   public
     [Test] procedure NameColumn_ImplementationHeaderPrefersTheMember;
     [Test] procedure NameColumn_DeclarationCommentAndMisses;
+    /// <summary>Issue #22, his follow-up: signature help walked back over
+    ///  an ASCII-only character set, so a call name with an umlaut
+    ///  answered its own TAIL - "Groesse(" with the real umlaut asked
+    ///  about "e". The shared, Unicode-aware reader is one function now,
+    ///  and the declaration end it needs next door is too.</summary>
+    [Test] procedure IdentifierBefore_IsUnicodeAware;
   end;
 
   /// <summary>A declaration whose implementation exists with ANOTHER
@@ -2553,6 +2559,45 @@ begin
   Assert.AreEqual(9, NameColumnOnLine('  A := B(A, A);', 'A', 9));
   // a hint between occurrences falls back to the first one
   Assert.AreEqual(2, NameColumnOnLine('  A := B(A, A);', 'A', 10));
+end;
+
+procedure TPartnerQueryTests.IdentifierBefore_IsUnicodeAware;
+var
+  Col: Integer;
+  Line: string;
+begin
+  // His two red-first cases. The '(' is what signature help asks about, so
+  // APos is its position and the identifier ends right before it.
+  Line := '  Größe(';
+  Assert.AreEqual('Größe', IdentifierBefore(Line, Pos('(', Line), Col), False,
+    'the walk back must not stop at the umlaut');
+  Assert.AreEqual(3, Col);
+  Line := '  Ärger(';
+  Assert.AreEqual('Ärger', IdentifierBefore(Line, Pos('(', Line), Col), False,
+    'nor at a leading one');
+  // Plain ASCII, blanks before the bracket, and the cases with no name
+  Line := '  Foo2 (';
+  Assert.AreEqual('Foo2', IdentifierBefore(Line, Pos('(', Line), Col), False);
+  Assert.AreEqual(3, Col);
+  Assert.AreEqual('', IdentifierBefore('  (', 3, Col), False, 'nothing before it');
+  Assert.AreEqual(0, Col);
+  Assert.AreEqual('', IdentifierBefore('', 1, Col), False, 'an empty line');
+
+  // The declaration end that extract interface and move to unit share: the
+  // ';' inside a parameter list does not end the header (issue #44).
+  var Depth := 0;
+  Assert.IsFalse(LineEndsDeclaration('procedure Test3( const AParam1: string;', Depth),
+    'the '';'' inside the open parameter list is not the end');
+  Assert.AreEqual(1, Depth, 'and the depth is carried to the next line');
+  Assert.IsTrue(LineEndsDeclaration('const AParam2: Boolean);', Depth),
+    'the one after the closing bracket is');
+  Depth := 0;
+  Assert.IsTrue(LineEndsDeclaration('procedure Test2( const A: Boolean);', Depth),
+    'a one-line header ends on its own line');
+
+  Assert.AreEqual('String', UnescapedIdentifier('&String'), False);
+  Assert.AreEqual('String', UnescapedIdentifier('String'), False, 'idempotent');
+  Assert.AreEqual('', UnescapedIdentifier(''), False);
 end;
 
 { TAlignSignatureFixTests }

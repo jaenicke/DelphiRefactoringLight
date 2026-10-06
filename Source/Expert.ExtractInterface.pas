@@ -292,10 +292,25 @@ type
     class function ScanProject(const AFiles: TArray<string>): TArray<TInterfaceDeclLocation>;
   end;
 
+/// <summary>The name of a synthesised accessor for the member exposed as
+///  AExposedName: APrefix ('Get' / 'Set') plus the name WITHOUT its '&'
+///  escape. The property itself KEEPS the escape - the bare word is the
+///  reserved one, which is why the author escaped it - but a name DERIVED
+///  from it must drop it, because "Get&String" is not an identifier at
+///  all. ONE place, because four sites build these names: the interface
+///  text, the "would emit" check, and the class's own declarations and
+///  bodies in the wizard (issue #44).</summary>
+function AccessorName(const APrefix, AExposedName: string): string;
+
 implementation
 
 uses
   System.StrUtils, System.Character, System.Math, Winapi.ActiveX, Winapi.Windows, Expert.PascalScanner;
+
+function AccessorName(const APrefix, AExposedName: string): string;
+begin
+  Result := APrefix + UnescapedIdentifier(AExposedName);
+end;
 
 { ---------- helpers ---------- }
 
@@ -324,8 +339,16 @@ begin
   AEndPos := AFromPos;
   I := AFromPos;
   while (I <= Length(ALine)) and ALine[I].IsWhiteSpace do Inc(I);
-  if (I > Length(ALine)) or not IsIdentStart(ALine[I]) then Exit;
+  if I > Length(ALine) then Exit;
+  // A '&' ESCAPES a reserved word into an identifier ("property &String"),
+  // and it is part of the name: without it the name came out EMPTY and the
+  // generated interface read "property : String read Get" (issue #44).
   AEndPos := I;
+  if (ALine[AEndPos] = '&') and (AEndPos < Length(ALine)) and
+     IsIdentStart(ALine[AEndPos + 1]) then
+    Inc(AEndPos)
+  else if not IsIdentStart(ALine[AEndPos]) then
+    Exit;
   while (AEndPos <= Length(ALine)) and IsIdentChar(ALine[AEndPos]) do Inc(AEndPos);
   Result := Copy(ALine, I, AEndPos - I);
 end;
@@ -575,14 +598,21 @@ begin
          (FirstWord = 'CONSTRUCTOR') or (FirstWord = 'DESTRUCTOR') or
          (FirstWord = 'OPERATOR') then
       begin
-        // Collect the full signature: may span multiple lines until ';'
+        // Collect the full signature: may span several lines. The ';' that
+        // ends it is the first one OUTSIDE ( ) and [ ] - a WRAPPED
+        // parameter list carries its own, and taking that one truncated
+        // the header and made the continuation line a "field" (issue #44).
         var SigStart := I;
         var Acc := Line;
-        while Pos(';', StripLineComment(Acc)) = 0 do
+        var HDepth := 0;
+        var HDone := LineEndsDeclaration(StripLineComment(Line), HDepth);
+        while not HDone do
         begin
           Inc(I);
           if I >= EndLine - 1 then Break;
-          Acc := Acc + ' ' + Trim(StripLineComment(AFileLines[I]));
+          var NextLine := Trim(StripLineComment(AFileLines[I]));
+          Acc := Acc + ' ' + NextLine;
+          HDone := LineEndsDeclaration(NextLine, HDepth);
         end;
         // Stop accumulating after first ';' that closes the header.
         var SigEnd := I + 1;
@@ -622,10 +652,10 @@ begin
         var After := Length(FirstWord) + 1; // FirstWord found at start of (trimmed) Acc
         var TrimmedAcc := Trim(Acc);
         var AfterKw := Pos(' ', TrimmedAcc);
-        var NameStart := AfterKw + 1;
-        var NameEnd := NameStart;
-        while (NameEnd <= Length(TrimmedAcc)) and IsIdentChar(TrimmedAcc[NameEnd]) do Inc(NameEnd);
-        var MName := Copy(TrimmedAcc, NameStart, NameEnd - NameStart);
+        // Through the shared reader, so an escaped name ("procedure
+        // &Integer") is the name and not an empty string (issue #44).
+        var NameEnd := 0;
+        var MName := ExtractIdentAfter(TrimmedAcc, AfterKw, NameEnd);
         if After = 0 then ; // silence hint
 
         var M: TClassMember;
@@ -651,11 +681,18 @@ begin
       begin
         var SigStart := I;
         var Acc := Line;
-        while Pos(';', StripLineComment(Acc)) = 0 do
+        // Same rule as for a method: an index specification
+        // "property Items[const A: Integer; const B: Integer]: T" has its
+        // own ';' inside the brackets (issue #44).
+        var PDepth := 0;
+        var PDone := LineEndsDeclaration(StripLineComment(Line), PDepth);
+        while not PDone do
         begin
           Inc(I);
           if I >= EndLine - 1 then Break;
-          Acc := Acc + ' ' + Trim(StripLineComment(AFileLines[I]));
+          var NextLine := Trim(StripLineComment(AFileLines[I]));
+          Acc := Acc + ' ' + NextLine;
+          PDone := LineEndsDeclaration(NextLine, PDepth);
         end;
         var SigEnd := I + 1;
         Inc(I);
@@ -735,7 +772,15 @@ begin
         begin
           var FN := Trim(NItem);
           if FN = '' then Continue;
-          if not IsIdentStart(FN[1]) then Continue;
+          // A field name is ONE identifier, optionally '&'-escaped. The
+          // blank test is what keeps a continuation line like
+          // "const AParam2: Boolean)" from becoming a member (issue #44) -
+          // it cannot happen any more now that a wrapped parameter list
+          // stays with its header, but a parse that invents members is
+          // worth a guard of its own.
+          var FBare := UnescapedIdentifier(FN);
+          if (FBare = '') or not IsIdentStart(FBare[1]) then Continue;
+          if Pos(' ', FN) > 0 then Continue;
           var M: TClassMember;
           M := Default(TClassMember);
           M.Name := FN;
@@ -746,9 +791,11 @@ begin
           M.TypeName := TypePart;
           M.LineStart := I + 1;
           M.LineEnd := I + 1;
-          // ExposedName: F-prefix stripped if present.
-          if (Length(FN) >= 2) and (FN[1].ToUpper = 'F') and IsIdentStart(FN[2]) then
-            M.ExposedName := Copy(FN, 2, MaxInt)
+          // ExposedName: F-prefix stripped if present. An escaped name
+          // keeps its '&' - it is the reserved word that needs it.
+          if (Length(FBare) >= 2) and (FBare[1].ToUpper = 'F') and
+             IsIdentStart(FBare[2]) then
+            M.ExposedName := Copy(FBare, 2, MaxInt)
           else
             M.ExposedName := FN;
           Members.Add(M);
@@ -797,8 +844,8 @@ begin
         mkField:
         begin
           Pn := M.ExposedName;
-          Getter := 'Get' + Pn;
-          Setter := 'Set' + Pn;
+          Getter := AccessorName('Get', Pn);
+          Setter := AccessorName('Set', Pn);
           TN := M.TypeName;
           SB.Append(Indent).Append('function ').Append(Getter)
             .Append(': ').Append(TN).Append(';').AppendLine;
@@ -817,13 +864,13 @@ begin
           else
           begin
             Pn := M.ExposedName;
-            Getter := 'Get' + Pn;
+            Getter := AccessorName('Get', Pn);
             TN := M.TypeName;
             SB.Append(Indent).Append('function ').Append(Getter)
               .Append(': ').Append(TN).Append(';').AppendLine;
             if not M.IsReadOnly then
             begin
-              Setter := 'Set' + Pn;
+              Setter := AccessorName('Set', Pn);
               SB.Append(Indent).Append('procedure ').Append(Setter)
                 .Append('(const AValue: ').Append(TN).Append(');').AppendLine;
               SB.Append(Indent).Append('property ').Append(Pn)
@@ -834,7 +881,7 @@ begin
             else
               SB.Append(Indent).Append('property ').Append(Pn)
                 .Append(': ').Append(TN)
-                .Append(' read ').Append('Get' + Pn).Append(';').AppendLine;
+                .Append(' read ').Append(Getter).Append(';').AppendLine;
           end;
         end;
       end;
@@ -979,16 +1026,16 @@ begin
       mkField:
       begin
         L.Add(M.ExposedName);          // interface property name
-        L.Add('Get' + M.ExposedName);
-        L.Add('Set' + M.ExposedName);
+        L.Add(AccessorName('Get', M.ExposedName));
+        L.Add(AccessorName('Set', M.ExposedName));
       end;
       mkProperty:
       begin
         L.Add(M.ExposedName);
         if M.NeedsSynthAccessors then
         begin
-          L.Add('Get' + M.ExposedName);
-          if not M.IsReadOnly then L.Add('Set' + M.ExposedName);
+          L.Add(AccessorName('Get', M.ExposedName));
+          if not M.IsReadOnly then L.Add(AccessorName('Set', M.ExposedName));
         end;
       end;
     end;

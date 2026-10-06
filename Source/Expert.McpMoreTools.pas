@@ -2030,32 +2030,41 @@ begin
   try
     if ADoApply then
     begin
-      if (Token <> '') and not CheckPreviewToken(Token, ATool,
-        function(AF: string): string
-        begin
-          if not McpReadContent(AF, Result) then Result := '';
-        end, AArgs, Problem) then
-      begin
-        AExtra.Free;
-        Exit(McpErr(Problem));
-      end;
-      // THE WRITE BELONGS ON THE MAIN THREAD. This runs on a pipe handler
-      // thread, and ApplyLinesMinimal goes through the editor helper -
-      // ToolsAPI, main thread only (Ian's audit, critical 1; our own
-      // main-thread guard reported it live as "1 violation(s) - last:
-      // ReplaceFileContent"). ApplyLinesMinimal also compares the live
-      // buffer against AOld, so a buffer that changed since the plan was
-      // made is refused rather than overwritten.
+      // BOTH HALVES BELONG ON THE MAIN THREAD, and in the SAME trip. The
+      // write goes through the editor helper - ToolsAPI, main thread only
+      // (Ian's audit, critical 1; our own guard reported it live as "1
+      // violation(s) - last: ReplaceFileContent"). And the TOKEN CHECK
+      // reads the buffer through McpReadContent, which is a ToolsAPI read
+      // the guard cannot see, because it only counts the writing methods -
+      // so it stayed on the pipe handler thread after critical 1 was
+      // fixed (issue #22, his follow-up of 2026-10-02; every other token
+      // check already sat inside an McpRunOnMain block). One block also
+      // closes the window between "token checked" and "buffer written".
+      // ApplyLinesMinimal compares the live buffer against AOld, so a
+      // buffer that changed since the plan was made is refused rather
+      // than overwritten.
       Written := False;
+      Problem := '';
       SL.Text := NewContent;
       if not McpRunOnMain(
         procedure
         begin
+          if (Token <> '') and not CheckPreviewToken(Token, ATool,
+            function(AF: string): string
+            begin
+              if not McpReadContent(AF, Result) then Result := '';
+            end, AArgs, Problem) then
+            Exit;
           Written := ApplyLinesMinimal(AFile, SL, AOld);
         end, False, AStop, RunErr) then
       begin
         AExtra.Free;
         Exit(McpErr(RunErr));
+      end;
+      if Problem <> '' then
+      begin
+        AExtra.Free;
+        Exit(McpErr(Problem));
       end;
       if not Written then
       begin

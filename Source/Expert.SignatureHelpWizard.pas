@@ -323,21 +323,14 @@ end;
 
 { TLspSignatureHelpWizard }
 
+// Through the shared, Unicode-aware reader: the ASCII-only walk that used
+// to stand here stopped at the first non-ASCII letter, so a call written
+// with an umlaut asked signature help about the TAIL of its own name -
+// "Groesse(" with a non-ASCII vowel answered "e" (issue #22, L7o residual).
 function TLspSignatureHelpWizard.FindIdentBeforeOpenParen(const ALine: string;
   ACol: Integer; out AIdentCol: Integer): string;
-var
-  P, EndP: Integer;
 begin
-  Result := '';
-  AIdentCol := 0;
-  P := ACol - 2;
-  while (P >= 1) and CharInSet(ALine[P], [' ', #9]) do Dec(P);
-  if (P < 1) or not CharInSet(ALine[P], ['A'..'Z','a'..'z','0'..'9','_']) then Exit;
-  EndP := P;
-  while (P >= 1) and CharInSet(ALine[P], ['A'..'Z','a'..'z','0'..'9','_']) do Dec(P);
-  Inc(P);
-  AIdentCol := P;
-  Result := Copy(ALine, P, EndP - P + 1);
+  Result := IdentifierBefore(ALine, ACol - 1, AIdentCol);
 end;
 
 function TLspSignatureHelpWizard.ExtractFromHover(const AHover: string): string;

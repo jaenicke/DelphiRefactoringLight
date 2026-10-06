@@ -754,24 +754,9 @@ begin
   Result := ChangeFileExt(ExtractFileName(AFile), '');
 end;
 
-// Does ALine contain the ';' that ENDS a declaration - the first one
-// outside ( ) and [ ]? ADepth carries the bracket depth from line to line.
-// The plain "first ';'" cut a wrapped parameter list after its first
-// parameter (forum: "procedure Test( AParam1: Integer;" / "AParam2:
-// Integer);" was moved as its first line only), and the same held for a
-// record constant "R: TRec = (A: 1; B: 2);" and a procedural type
-// "TProc = procedure(A: Integer; B: Integer);". ALine has comments and
-// strings removed already.
-function LineEndsDeclaration(const ALine: string; var ADepth: Integer): Boolean;
-begin
-  for var C in ALine do
-    case C of
-      '(', '[': Inc(ADepth);
-      ')', ']': if ADepth > 0 then Dec(ADepth);
-      ';': if ADepth = 0 then Exit(True);
-    end;
-  Result := False;
-end;
+// LineEndsDeclaration moved into Expert.PascalScanner (issue #44): extract
+// interface needed the same rule, and a second copy of "where does a
+// declaration end" is exactly how two features start disagreeing.
 
 function LocateMoveDeclaration(const ASymbol, ASource: string;
   out AStartLine, AEndLine: Integer): Boolean;

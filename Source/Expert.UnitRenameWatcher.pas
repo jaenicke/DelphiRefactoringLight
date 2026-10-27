@@ -118,6 +118,7 @@ var
 implementation
 
 uses
+  Expert.WorkerLatch,
   System.SysUtils,
   Expert.RenameWizard;
 
@@ -369,7 +370,7 @@ begin
   // crashes in TCustomCodeIProject.IBaseModule_GetFileName. Defer the attach
   // to the next message-loop tick so construction is finished.
   FileNameCopy := AFileName;
-  TThread.ForceQueue(nil,
+  ForceQueueSafe(
     procedure
     var
       ModuleServices: IOTAModuleServices;

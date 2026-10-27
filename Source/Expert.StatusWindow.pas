@@ -55,6 +55,7 @@ function StatusSnapshot: TArray<TStatusRow>;
 implementation
 
 uses
+  Expert.WorkerLatch,
   Expert.ResourceMonitor, Expert.CompletionWizard, Expert.LineEndingWatcher,
   System.SysUtils, System.Classes, System.IniFiles, System.IOUtils,
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Graphics,
@@ -815,6 +816,19 @@ begin
       Format('last: %s - ToolsAPI and the editor buffers are main thread ' +
       'only; this is a DEFECT in the plugin, please report it',
       [LastOffMainThreadCall]), slBad);
+
+  // What QueueSafe swallowed. It HAS to swallow - an exception escaping a
+  // queued closure makes CheckSynchronize open a modal box inside whatever
+  // IDE transaction pumped the queue - but swallowing is only defensible
+  // with a channel, and this is it.
+  if QueuedErrorCount = 0 then
+    Row('queued callbacks', 'clean', 'no deferred callback of this plugin ' +
+      'has raised')
+  else
+    Row('queued callbacks', Format('%d raised', [QueuedErrorCount]),
+      Format('last: %s - swallowed on purpose (an escaping exception would ' +
+      'open a modal box inside an IDE transaction), but it is a DEFECT in ' +
+      'the plugin: please report it', [LastQueuedError]), slBad);
 
   // Line endings at file open: the check corrects files on disk, so what it
   // did (and whether it is asking at all) must be readable somewhere - this

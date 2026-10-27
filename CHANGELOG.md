@@ -6,6 +6,49 @@ development builds and were never released.
 
 ---
 
+## 2.6.11 - 2026-10-27
+
+### The restart hint hung the IDE
+
+Reported with a stack trace: after installing the package into a running
+IDE the restart warning appeared, and confirming it left RAD Studio hanging
+with "unexpected wait event 4" over and over - the box coming back each
+time.
+
+`ShowRestartHint` opened its message box from a `TThread.ForceQueue`
+closure. Those run inside `CheckSynchronize`, which the IDE pumps from
+inside its OWN transactions - and `TRestartHint.Check` is the last
+statement of the package's `Register`, i.e. it runs inside exactly such a
+transaction (`InstallPackage` -> `ClearCaches` -> `SetCompState` ->
+`TParseThread.Add`). A modal window there does not return until the user
+answers, so the install never finishes.
+
+The project's own remedy, used twice before for the same reason (the
+Structure notifier and the unit-rename dialog): the hint parks a flag and a
+plain `TTimer` tick opens the box. Measured in the RTL, that is the channel
+a transaction cannot reach - `CheckSynchronize` runs the synchronization
+queue and dispatches no window messages, so it cannot deliver a `WM_TIMER`.
+
+### ...and the same wedge on the way back
+
+Chasing the defect class found a second route into it, in the RTL rather
+than in our code: when a **queued** closure raises, `CheckSynchronize`
+itself calls `ApplicationHandleException` - in the VCL a modal
+`TApplication.MessageBox`, inside whatever transaction pumped the queue, and
+one that does not even raise `Application.ModalLevel`. So "state only" was
+never the whole rule for such a closure: it must also not raise. Three of
+the ten queued callbacks called into real work unguarded, two of them on the
+project-open path, which is a transaction.
+
+The rule now lives in one place - `QueueSafe` / `ForceQueueSafe` in
+`Expert.WorkerLatch` - and what it swallows is counted and named in the
+status window, because swallowing without a channel is how a defect goes
+quiet. Two repository checks hold both halves: nothing may call
+`TThread.Queue` directly any more, and no such callback may open a modal
+window.
+
+---
+
 ## 2.6.10 - 2026-10-26
 
 ### Extract Method refused two things the compiler accepts

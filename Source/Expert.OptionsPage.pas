@@ -41,6 +41,7 @@ procedure UnregisterOptionsPage;
 implementation
 
 uses
+  Expert.WorkerLatch,
   Winapi.Windows, System.SysUtils,
   Expert.OptionsFrame, Expert.Shortcuts, Expert.PluginSettings;
 
@@ -134,7 +135,7 @@ begin
   // the IDE has finished its startup tick.
   DoRegister;
   if OptionsAddIn = nil then
-    TThread.ForceQueue(nil,
+    ForceQueueSafe(
       procedure
       begin
         DoRegister;

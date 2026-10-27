@@ -485,7 +485,7 @@ begin
           Err := E.Message;
       end;
 
-      TThread.Queue(nil,
+      QueueSafe(
         procedure
         begin
           // Drop stale responses - either the user dismissed the popup

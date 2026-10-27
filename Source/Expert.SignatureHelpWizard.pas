@@ -697,7 +697,7 @@ begin
         // Network / LSP error - show nothing.
       end;
 
-      TThread.Queue(nil,
+      QueueSafe(
         procedure
         begin
           if MySeq <> FCallSeq then Exit;

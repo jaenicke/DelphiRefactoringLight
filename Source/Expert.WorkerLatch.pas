@@ -50,6 +50,33 @@ function ActiveWorkerCount: Integer;
 ///  still touch.</summary>
 function ShutdownWorkersAndWait(ATimeoutMs: Cardinal = 35000): Boolean;
 
+/// <summary>TThread.Queue / ForceQueue, plus the second rule a queued
+///  closure has to keep: it must not let an exception ESCAPE.
+///
+///  A closure handed to TThread.Queue runs inside
+///  System.Classes.CheckSynchronize, and when it raises, CheckSynchronize
+///  itself calls ApplicationHandleException (System.Classes.pas:16374, the
+///  `SyncProc.Queued` branch) - which in the VCL ends in
+///  TApplication.MessageBox, a MODAL Win32 box. The IDE pumps
+///  CheckSynchronize from inside its own transactions (a package install,
+///  a project load), so that box stops a transaction mid-flight and the
+///  IDE hangs. It is the same wedge a modal window in the closure itself
+///  produces - see Expert.RestartHint, which cost a user an IDE session on
+///  2026-10-26 - and it bypasses Application.ModalLevel entirely, because
+///  TApplication.MessageBox never calls ModalStarted.
+///
+///  So the exception is swallowed here. Swallowing is only defensible with
+///  a channel: it is counted and the last one is kept
+///  (QueuedErrorCount / LastQueuedError), and the status window reports
+///  them.</summary>
+procedure QueueSafe(const AProc: TProc);
+procedure ForceQueueSafe(const AProc: TProc);
+
+/// <summary>How many queued closures raised, and what the last one said -
+///  the channel that makes swallowing defensible.</summary>
+function QueuedErrorCount: Integer;
+function LastQueuedError: string;
+
 /// <summary>Test support only: re-opens the latch.</summary>
 procedure ResetWorkerLatch;
 
@@ -70,6 +97,11 @@ var
   // waited for as well.
   GHandleLock: TObject = nil;
   GHandles: TArray<THandle>;
+  // What the swallowed exceptions of QueueSafe amount to. GHandleLock
+  // guards the string as well - one lock is enough for both, and nothing
+  // here is on a hot path.
+  GQueueErrors: Integer = 0;
+  GLastQueueError: string = '';
 
 procedure NoteWorkerThread(AThread: TThread);
 var
@@ -211,9 +243,76 @@ begin
       if not CheckSynchronize(0) then Break;   // drain queued closures
 end;
 
+// The closure every QueueSafe / ForceQueueSafe call really hands to the
+// RTL: whatever AProc does, nothing leaves it.
+// TThreadProcedure, not TProc: the two are structurally identical and
+// still distinct types, so TThread.Queue takes no TProc (E2250).
+function Guarded(const AProc: TProc): TThreadProcedure;
+begin
+  Result :=
+    procedure
+    begin
+      if not Assigned(AProc) then Exit;
+      try
+        AProc();
+      except
+        on E: Exception do
+        begin
+          AtomicIncrement(GQueueErrors);
+          if GHandleLock <> nil then
+          begin
+            TMonitor.Enter(GHandleLock);
+            try
+              GLastQueueError := E.ClassName + ': ' + E.Message;
+            finally
+              TMonitor.Exit(GHandleLock);
+            end;
+          end;
+        end;
+      end;
+    end;
+end;
+
+procedure QueueSafe(const AProc: TProc);
+begin
+  TThread.Queue(nil, Guarded(AProc));
+end;
+
+procedure ForceQueueSafe(const AProc: TProc);
+begin
+  TThread.ForceQueue(nil, Guarded(AProc));
+end;
+
+function QueuedErrorCount: Integer;
+begin
+  Result := GQueueErrors;
+end;
+
+function LastQueuedError: string;
+begin
+  Result := '';
+  if GHandleLock = nil then Exit;
+  TMonitor.Enter(GHandleLock);
+  try
+    Result := GLastQueueError;
+  finally
+    TMonitor.Exit(GHandleLock);
+  end;
+end;
+
 procedure ResetWorkerLatch;
 begin
   AtomicExchange(GShutdown, 0);
+  AtomicExchange(GQueueErrors, 0);
+  if GHandleLock <> nil then
+  begin
+    TMonitor.Enter(GHandleLock);
+    try
+      GLastQueueError := '';
+    finally
+      TMonitor.Exit(GHandleLock);
+    end;
+  end;
 end;
 
 initialization

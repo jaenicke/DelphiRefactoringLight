@@ -528,6 +528,7 @@ procedure LiveRefreshAfterCompile;
 implementation
 
 uses
+  Expert.WorkerLatch,
   Expert.ResourceMonitor,
   System.Classes, System.Types, System.UITypes,
   System.Generics.Collections, System.Generics.Defaults,
@@ -5363,7 +5364,7 @@ begin
           except
             R := nil;
           end;
-          TThread.Queue(nil,
+          QueueSafe(
             procedure
             begin
               if GLive = nil then Exit;
@@ -5544,7 +5545,7 @@ begin
           except
             R := nil;
           end;
-          TThread.Queue(nil,
+          QueueSafe(
             procedure
             begin
               if GLive <> nil then

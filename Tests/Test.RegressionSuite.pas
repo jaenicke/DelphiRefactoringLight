@@ -556,6 +556,15 @@ type
     ///  A duplicate key is valid JSON of which a parser keeps one pair -
     ///  its choice - so one of the two sentences was lost at random.</summary>
     [Test] procedure AnAnswerCarriesNoKeyTwice;
+    /// <summary>The second half of the 2026-10-26 IDE hang: a closure
+    ///  handed to TThread.Queue runs inside CheckSynchronize, and when it
+    ///  RAISES, CheckSynchronize calls ApplicationHandleException
+    ///  (System.Classes.pas:16374) - in the VCL a modal
+    ///  TApplication.MessageBox, inside whichever IDE transaction pumped
+    ///  the queue, and one that does not even raise ModalLevel. So the
+    ///  exception may not escape; QueueSafe is the one place that holds
+    ///  that rule, and it counts what it swallows.</summary>
+    [Test] procedure AQueuedClosureNeverLetsAnExceptionEscape;
   end;
 
   /// <summary>A forum screenshot (2026-10-02) showed the Extract Method
@@ -4784,6 +4793,40 @@ end;
 
 
 { TLspConfigHintTests }
+
+procedure TSelfProtectionTests.AQueuedClosureNeverLetsAnExceptionEscape;
+var
+  Ran: Integer;
+begin
+  // The counter is global, so measure the DIFFERENCE - another fixture may
+  // have queued something.
+  var Before := QueuedErrorCount;
+  Ran := 0;
+
+  QueueSafe(
+    procedure
+    begin
+      Inc(Ran);
+      raise Exception.Create('a queued closure that raises');
+    end);
+  ForceQueueSafe(
+    procedure
+    begin
+      Inc(Ran);
+    end);
+
+  // This is the main thread, so CheckSynchronize is what runs them - the
+  // same call the IDE makes from inside its transactions.
+  for var I := 1 to 20 do
+    if not CheckSynchronize(0) then Break;
+
+  Assert.AreEqual(2, Ran, 'both closures ran');
+  Assert.AreEqual(Before + 1, QueuedErrorCount,
+    'the one that raised is counted, and nothing escaped to the caller');
+  Assert.IsTrue(LastQueuedError.Contains('a queued closure that raises'),
+    'and it is NAMED - swallowing is only defensible with a channel: ' +
+    LastQueuedError);
+end;
 
 procedure TLspConfigHintTests.TheHintNamesTheFileAndTheSwitch;
 begin

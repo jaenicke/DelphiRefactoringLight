@@ -259,7 +259,7 @@ begin
   // Defer to the next message-loop tick so the IDE has finished its
   // own project-load work first - some ToolsAPI calls (GetProjectRoot,
   // search-path access) can be flaky during construction.
-  TThread.ForceQueue(nil,
+  ForceQueueSafe(
     procedure
     begin
       // Add this project's scope to the identifier index (the global scope
@@ -277,7 +277,7 @@ begin
   LProj := AProjectFile;
   FLastProject := '';
   // State only here (notifier context); the ToolsAPI work runs queued.
-  TThread.ForceQueue(nil,
+  ForceQueueSafe(
     procedure
     var
       Proj: string;
@@ -389,7 +389,7 @@ begin
         // A switch that arrived while this ran is served now. On the MAIN
         // thread: StartPrewarmFor reads ToolsAPI (project root, the
         // .delphilsp.json, the source list), which is main-thread only.
-        TThread.Queue(nil,
+        QueueSafe(
           procedure
           begin
             var Next := FPending;

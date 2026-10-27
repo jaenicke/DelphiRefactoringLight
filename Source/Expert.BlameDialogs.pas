@@ -520,7 +520,7 @@ begin
         except
           Ok := False;
         end;
-        TThread.Queue(nil,
+        QueueSafe(
           procedure
           begin
             Holder.Info := Res;

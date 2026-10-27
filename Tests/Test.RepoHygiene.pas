@@ -99,6 +99,36 @@ type
     ///  this menu was until now. BuildMenuTree is IDE-only (ToolsAPI), so
     ///  this reads the SOURCE, like the other sweeps here.</summary>
     [Test] procedure TheMenuRefactorBlocksStayAlphabetical;
+    /// <summary>
+    ///  TWO rules about queued callbacks, both learned from one IDE hang.
+    ///
+    ///  (1) Nothing in Source may call TThread.Queue / ForceQueue directly -
+    ///  QueueSafe / ForceQueueSafe (Expert.WorkerLatch) are the way, because
+    ///  a closure that RAISES makes CheckSynchronize call
+    ///  ApplicationHandleException, i.e. open a modal box ITSELF
+    ///  (System.Classes.pas:16374), which bypasses Application.ModalLevel
+    ///  entirely. The guard therefore belongs in one place, not per site.
+    ///
+    ///  (2) No such callback may open a MODAL window. Those closures run
+    ///  inside
+    ///  System.Classes.CheckSynchronize, and the IDE pumps CheckSynchronize
+    ///  from inside its OWN transactions - a package install among them. A
+    ///  modal window there does not return until the user answers, so the
+    ///  transaction never finishes: the IDE hangs and reports "unexpected
+    ///  wait event 4" over and over (reported 2026-10-26, with our own
+    ///  Expert.RestartHint.ShowRestartHint in the stack). The remedy the
+    ///  project uses everywhere else is a plain WM_TIMER tick, which
+    ///  CheckSynchronize cannot deliver.
+    ///  THE RULE IS MODALITY, deliberately: a NON-modal window operation in
+    ///  such a callback is rude but not fatal (the completion popup has
+    ///  done it for a year - it is WS_EX_NOACTIVATE, so it neither blocks
+    ///  the caller nor starts an activation cascade), and a sweep that
+    ///  flagged it would be switched off. A bare call is also told from a
+    ///  method of the same name: FPopup.ShowMessage only fills our own
+    ///  popup's list.
+    ///  LIMIT: this reads the closure's own text, so a callback that opens
+    ///  a dialog through a routine one level down is not found here.</summary>
+    [Test] procedure NoQueuedCallbackOpensAModalWindow;
   end;
 
 implementation
@@ -677,6 +707,159 @@ begin
     // Vacuous otherwise: a renamed helper would make this pass silently.
     Assert.IsTrue(Sets >= 2,
       Format('the notes must go through SetJsonNote, found %d call(s)', [Sets]));
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    Offenders.Free;
+  end;
+end;
+
+// The position just after the '(' of the next TThread.Queue / ForceQueue /
+// Synchronize call at or after AFrom, 0 when there is none. AText is
+// upper-cased and masked.
+function NextQueuedCall(const AText: string; AFrom: Integer;
+  out AName: string): Integer;
+const
+  Names: array[0..4] of string =
+    ('TTHREAD.FORCEQUEUE(', 'TTHREAD.QUEUE(', 'TTHREAD.SYNCHRONIZE(',
+     'FORCEQUEUESAFE(', 'QUEUESAFE(');
+begin
+  Result := 0;
+  AName := '';
+  for var N in Names do
+  begin
+    var P := Pos(N, AText, AFrom);
+    if (P > 0) and ((Result = 0) or (P < Result)) then
+    begin
+      Result := P + Length(N);
+      AName := Copy(N, 1, Length(N) - 1);
+    end;
+  end;
+end;
+
+// Everything inside the call's parentheses - the whole argument list, so
+// the closure body with it. '' when the call is not closed: the sweep then
+// reports nothing rather than guessing, like CallArgsAt above.
+function QueuedArgSpan(const AText: string; AAfterOpen: Integer): string;
+begin
+  Result := '';
+  var Depth := 1;
+  var I := AAfterOpen;
+  while I <= Length(AText) do
+  begin
+    if AText[I] = '(' then
+      Inc(Depth)
+    else if AText[I] = ')' then
+    begin
+      Dec(Depth);
+      if Depth = 0 then
+        Exit(Copy(AText, AAfterOpen, I - AAfterOpen));
+    end;
+    Inc(I);
+  end;
+end;
+
+// The name of the first modal opener in ASpan, '' when there is none.
+// ASpan is upper-cased and masked.
+//
+// THE WHITESPACE MUST STAY. The first version of this squeezed it out so a
+// call wrapped before its '(' would still match - and then "begin
+// MessageDlg(" read as "BEGINMESSAGEDLG(", whose preceding character is a
+// letter, so the rule below dismissed the reported defect as a method call
+// and the negative check passed. The boundary IS the test.
+function ModalOpenerIn(const ASpan: string): string;
+const
+  // A BARE call only - a method of the same name is something else: the
+  // completion popup's own ShowMessage just fills its list.
+  Bare: array[0..8] of string = ('SHOWMESSAGE', 'MESSAGEDLG', 'MESSAGEDLGPOS',
+    'SHOWTHEMEDMESSAGE', 'ASKTHEMEDCONFIRM', 'ASKTHEMEDTEXT',
+    'CHOOSETHEMEDOPTION', 'INPUTQUERY', 'INPUTBOX');
+  // These are only ever modal, whoever they are called on.
+  Dotted: array[0..1] of string = ('.SHOWMODAL', '.MESSAGEBOX');
+
+  // AP points at the character after the name: the call's '(', possibly
+  // behind whitespace or a line break.
+  function OpensACall(const AText: string; AP: Integer): Boolean;
+  begin
+    while (AP <= Length(AText)) and CharInSet(AText[AP], [#9, #10, #13, ' ']) do
+      Inc(AP);
+    Result := (AP <= Length(AText)) and (AText[AP] = '(');
+  end;
+
+begin
+  for var N in Bare do
+  begin
+    var P := Pos(N, ASpan);
+    while P > 0 do
+    begin
+      var Before := ' ';
+      if P > 1 then Before := ASpan[P - 1];
+      if not ((Before = '.') or CharInSet(Before, ['A'..'Z', '0'..'9', '_'])) and
+         OpensACall(ASpan, P + Length(N)) then
+        Exit(N);
+      P := Pos(N, ASpan, P + 1);
+    end;
+  end;
+  for var N in Dotted do
+    if Pos(N, ASpan) > 0 then
+      Exit(N);
+  Result := '';
+end;
+
+procedure TRepoHygieneTests.NoQueuedCallbackOpensAModalWindow;
+var
+  Offenders: TStringList;
+  Checked: Integer;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository root must be found');
+  var Dir := TPath.Combine(Root, 'Source');
+  Assert.IsTrue(TDirectory.Exists(Dir), 'Source must be there: ' + Dir);
+
+  Offenders := TStringList.Create;
+  try
+    Checked := 0;
+    for var F in TDirectory.GetFiles(Dir, '*.pas') do
+    begin
+      // CODE only: two of these calls stand in comments that explain where
+      // generation is offered, and a sweep that counts prose finds the
+      // explanation instead of the defect.
+      var Masked := MaskCommentsAndStrings(TFile.ReadAllLines(F));
+      var Text := UpperCase(string.Join(#10, Masked));
+      var At := 1;
+      while True do
+      begin
+        var Name := '';
+        At := NextQueuedCall(Text, At, Name);
+        if At = 0 then Break;
+        Inc(Checked);
+        var Span := QueuedArgSpan(Text, At);
+        var Line := Text.Substring(0, At).CountChar(#10) + 1;
+        // RULE 1 - the rule lives in ONE place. A closure that raises makes
+        // CheckSynchronize itself open a modal box, so the try/except
+        // belongs around every one of them; Expert.WorkerLatch is where it
+        // is, and a second direct call is how the next gap appears.
+        if Name.StartsWith('TTHREAD.') and
+           not SameText(ExtractFileName(F), 'Expert.WorkerLatch.pas') then
+          Offenders.Add(Format('%s(%d): %s(...) - call QueueSafe / ' +
+            'ForceQueueSafe instead: a queued closure that RAISES makes ' +
+            'CheckSynchronize open a modal box itself, and that wedges the ' +
+            'IDE transaction that pumped it',
+            [ExtractFileName(F), Line, Name]));
+        // RULE 2 - and the closure must not open a modal window of its own.
+        var Opener := ModalOpenerIn(Span);
+        if Opener <> '' then
+          Offenders.Add(Format('%s(%d): %s(...) opens %s - a modal window in a ' +
+            'queued callback wedges the IDE transaction that pumped it; ' +
+            'defer it to a plain TTimer tick',
+            [ExtractFileName(F), Line, Name, Opener]));
+        Inc(At, Length(Span) + 1);
+      end;
+    end;
+    // The sweep is only worth anything if it really saw the call sites - a
+    // renamed method, or a masker that blanks too much, would otherwise
+    // make it pass vacuously.
+    Assert.IsTrue(Checked >= 8,
+      Format('the sweep must find the queued call sites, found %d', [Checked]));
     Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
   finally
     Offenders.Free;

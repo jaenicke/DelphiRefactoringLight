@@ -33,29 +33,52 @@ uses
 procedure RegisterStatusWindow;
 /// <summary>Unregisters and closes it. Call before the BPL unloads.</summary>
 procedure UnregisterStatusWindow;
+const
+  /// <summary>The identifier INTACustomDockableForm.GetIdentifier answers -
+  ///  and therefore the window's SECTION NAME in the desktop file, which is
+  ///  also how a dock site lists it ("TabDockClients=MessageView,
+  ///  RefactoringLightStatus"). ONE place: the registration, the desktop
+  ///  lookup and the .dsk all have to mean the same string.</summary>
+  StatusWindowIdentifier = 'RefactoringLightStatus';
+  McpToolsWindowIdentifier = 'RefactoringLightMcpTools';
+
 type
   /// <summary>What a dockable window of ours was doing at the unload.</summary>
   TRlDockState = record
     Open: Boolean;
     Docked: Boolean;
     Bounds: TRect;
+    /// <summary>The DeskSection of the dock HOST that held it, e.g.
+    ///  "DockSite5". That host is the IDE's own form and survives our
+    ///  unload, so this one string is what makes a docked restore
+    ///  possible.</summary>
+    HostSection: string;
   end;
 
 /// <summary>What the status window is doing right now - read at the unload,
 ///  while the form still exists, and handed to the next instance through the
-///  marker. MEASURED in the user's own project desktop: the docking position
-///  is NOT stored with our window ([RefactoringLightStatus] holds geometry
-///  only) but with the dock site ([DockSite5]: "TabDockClients=MessageView,
-///  RefactoringLightStatus"), and ToolsAPI has no entry point that loads a
-///  desktop or restores one client. So a docked window cannot be put back by
-///  us - only said.</summary>
+///  marker.
+///  MEASURED in the user's own project desktop: the docking position is NOT
+///  stored with our window ([RefactoringLightStatus] holds geometry and
+///  Docked=1 only) but with the dock SITE ("[DockSite5] HostDockSite=
+///  DockBottomCenterPanel / TabDockClients=MessageView,
+///  RefactoringLightStatus"). What that file cannot say, the LIVE form can:
+///  HostDockSite -> its form -> TDesktopForm.DeskSection answers
+///  "DockSite5", and that host survives our unload.</summary>
 function StatusDockWindowState: TRlDockState;
 
-/// <summary>Opens the status window and puts it back where it was. For a
-///  FREE-STANDING window that reproduces the previous state exactly; for a
-///  docked one it would produce the floating window in the middle of the
-///  screen that the user reported, so the caller must not use it there.</summary>
-procedure ShowStatusWindowAt(const ABounds: TRect);
+/// <summary>That state in one line, for the status window's own row - which
+///  is where one looks to find out whether a reload will be able to put the
+///  window back.</summary>
+function StatusDockWindowStateText: string;
+
+/// <summary>Opens the status window and puts it back where it was - docked
+///  into AHostSection when that host can be found, else free-standing at
+///  ABounds. True when the window really is back where it was; the caller
+///  reports a False, because a box that sends the user to the desktop menu
+///  must not appear while the window is already sitting in its place.</summary>
+function ShowStatusWindowAt(const ABounds: TRect;
+  const AHostSection: string = ''): Boolean;
 
 /// <summary>Menu entry point: shows (and focuses) the status window.</summary>
 procedure ShowStatusWindow;
@@ -86,6 +109,13 @@ uses
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Graphics,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
   ToolsAPI, DesignIntf,   // DesignIntf: TEditState / TEditAction
+  // THE IDE'S OWN DOCKING UNITS. They ship without source but live in
+  // designide.dcp, which this package already requires - verified by
+  // compiling against them (scratchpad mmx\DockProbe): DeskForm gives
+  // TDesktopForm with DeskSection, DockForm gives TDockableForm, TabDock
+  // gives TTabDockHostForm.ShowDockClient and DeskUtil gives
+  // ShowDockableForm(TCustomForm) + FocusWindow(TCustomForm).
+  DeskForm, DockForm, TabDock, DeskUtil,
   Expert.EditorHelperIntf, Expert.UnitIndex, Expert.LspManager, Expert.PluginSettings,
   Expert.AutoImport, Expert.ContextMenu, Expert.DialogHelper,   // IdeThemes: interface uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.VcsBlame,
@@ -220,6 +250,11 @@ type
   end;
 
 var
+  /// <summary>The dock host we last SAW the status window in. Filled by
+  ///  StatusDockWindowState, which the status row asks once a second, so it
+  ///  is known long before the window is closed - and it is what lets a
+  ///  reopen re-dock a window the IDE handed back undocked.</summary>
+  GLastStatusHost: string;
   GDockable: INTACustomDockableForm;
   GForm: TCustomForm;
   GRegistered: Boolean;
@@ -855,6 +890,17 @@ begin
       'open a modal box inside an IDE transaction), but it is a DEFECT in ' +
       'the plugin: please report it', [LastQueuedError]), slBad);
 
+  // THIS WINDOW ITSELF, and the row exists because the answer decides what a
+  // reload can restore: a docked window can be put back only when the dock
+  // HOST is known, since the desktop file records the membership with the
+  // site and not with us. So the row names the host - and when it says
+  // "docked, host unknown" after a reload, that is exactly the case the
+  // restart box then has to mention.
+  Row('this window', StatusDockWindowStateText,
+    'a docked window is handed back to the dock host that held it when the ' +
+    'package is installed again; a free-standing one goes back to its ' +
+    'bounds (see "Installieren" in the IDE)');
+
   // Line endings at file open: the check corrects files on disk, so what it
   // did (and whether it is asking at all) must be readable somewhere - this
   // is where one looks when a file was silently rewritten, or was not.
@@ -1372,7 +1418,17 @@ end;
 procedure TStatusDockable.SaveWindowState(Desktop: TCustomIniFile;
   const Section: string; IsProject: Boolean);
 begin
-  // nothing of our own - the IDE persists size and dock position
+  // Nothing of our own: this window has no state besides its geometry, and
+  // the rows rebuild themselves from the IDE on the next tick.
+  // WHAT THE IDE WRITES, measured in the user's own project desktop rather
+  // than assumed: our [RefactoringLightStatus] section is key for key the
+  // same as the IDE's own [MessageView] and [StructureView] (Docked=1, the
+  // geometry, Dockable, StayOnTop), and WHERE we were docked is recorded with
+  // the dock SITE ("[DockSite5] TabDockClients=MessageView,
+  // RefactoringLightStatus"). So the IDE persists our docking exactly as it
+  // persists its own - but ONLY a saved desktop does: a package reload
+  // neither saves nor loads one, which is why the unload hands the host
+  // section to the next instance instead of relying on this.
 end;
 
 procedure TStatusDockable.LoadWindowState(Desktop: TCustomIniFile;
@@ -1391,6 +1447,116 @@ begin
 end;
 
 { registration }
+
+function DockHostSectionOfForm(AForm: TCustomForm): string;
+var
+  Host: TWinControl;
+  HostForm: TCustomForm;
+begin
+  // The dock SITE is a control inside the host form, so the name we want is
+  // one level up: the form that owns the site carries the DeskSection the
+  // desktop file uses ("DockSite5").
+  Result := '';
+  if AForm = nil then Exit;
+  try
+    Host := AForm.HostDockSite;
+    if Host = nil then Exit;
+    HostForm := GetParentForm(Host);
+    if HostForm is TDesktopForm then
+      Result := TDesktopForm(HostForm).DeskSection;
+  except
+    Result := '';
+  end;
+end;
+
+function FindDockHostForm(const ASection: string): TCustomForm;
+begin
+  // The host belongs to the IDE, so it is still on screen after our package
+  // was unloaded and loaded again - which is the whole reason this works.
+  Result := nil;
+  if ASection = '' then Exit;
+  try
+    for var I := 0 to Screen.FormCount - 1 do
+    begin
+      var F := Screen.Forms[I];
+      if (F is TDesktopForm) and
+         SameText(TDesktopForm(F).DeskSection, ASection) then
+        Exit(F);
+    end;
+  except
+    Result := nil;
+  end;
+end;
+
+function RedockFormInto(AForm: TCustomForm; const ASection: string): Boolean;
+var
+  HostForm: TCustomForm;
+begin
+  // TWO DIFFERENT JOBS, and using the wrong primitive for one of them is
+  // either a no-op or an access violation. Both bodies were measured:
+  //  * ManualDockClient is what the IDE'S OWN restore does -
+  //    TTabDockHostForm.LoadWindowState reads TabDockClients and then calls
+  //    Vcl.Controls.TControl.ManualDock. It DOCKS a form that is not a client
+  //    of this host yet, which is the case after a package reload: the form
+  //    is brand new, floating, and the host has never seen it.
+  //  * ShowDockClient is 16 bytes - GetDockClientInfo(Client) then
+  //    TTabDockInfo.ShowClient. It only brings an EXISTING client's tab to
+  //    the front, and for a form the host does not know the info is nil, so
+  //    the call runs with Self = nil. It is the second step, never the first.
+  Result := False;
+  if (AForm = nil) or (ASection = '') then Exit;
+  HostForm := FindDockHostForm(ASection);
+  if not (HostForm is TTabDockHostForm) then Exit;
+  try
+    if not SameText(DockHostSectionOfForm(AForm), ASection) then
+      TTabDockHostForm(HostForm).ManualDockClient(AForm, nil, alClient, True);
+    Result := SameText(DockHostSectionOfForm(AForm), ASection) and
+      not AForm.Floating;
+    // Now that it IS a client of this host, its tab may still be behind
+    // another one. This is what that call is for.
+    if Result then
+      try TTabDockHostForm(HostForm).ShowDockClient(AForm); except end;
+  except
+    Result := False;
+  end;
+end;
+
+procedure ShowFormDockAware(AForm: TCustomForm; const AFallbackHost: string);
+begin
+  // THE DEFECT THIS REPLACES: Show + BringToFront on a form that is DOCKED
+  // (merely hidden, because the user closed it with the X) leaves it hidden
+  // where it is. DeskUtil.FocusWindow is the IDE's own entry point for showing
+  // a dockable window, and it takes exactly the TCustomForm that
+  // INTAServices.CreateDockableForm hands us.
+  //
+  // MEASURED, by disassembling both routines of designide370.bpl rather than
+  // trusting the names: FocusWindow IS ShowDockableForm plus SetWindowState,
+  // BringToFront and the focus walk, so calling it alone is the superset.
+  // ShowDockableForm reads HostDockSite, and when the form IS docked it makes
+  // the form AND its host form visible (it returns the host) - which is
+  // exactly the hidden-dock-client case. What it does NOT do is DOCK: for a
+  // form with no host it degenerates to Visible := True, with no write to
+  // HostDockSite and no ManualDock anywhere in its 216 bytes.
+  // Hence the fallback below: whether the IDE leaves a closed dock client
+  // docked or undocks it is not measurable without a live IDE, so the show is
+  // followed by a CHECK, and a window that did not come back docked is handed
+  // to the host we last saw it in. Right under either behaviour.
+  if AForm = nil then Exit;
+  try
+    FocusWindow(AForm);
+  except
+    // Never lose the window over this: the old behaviour is still a window
+    // on screen, just not in its dock site.
+    try
+      AForm.Show;
+      AForm.BringToFront;
+    except
+    end;
+  end;
+  if (AFallbackHost <> '') and
+     ((AForm.HostDockSite = nil) or AForm.Floating) then
+    RedockFormInto(AForm, AFallbackHost);
+end;
 
 procedure RegisterDock(var ADock: INTACustomDockableForm; var ARegistered: Boolean;
   const ACaption, AIdent: string; AFrameClass: TCustomFrameClass);
@@ -1414,29 +1580,41 @@ procedure UnregisterDock(var ADock: INTACustomDockableForm; var AForm: TCustomFo
   var ARegistered: Boolean);
 var
   Svc: INTAServices;
+  WasRegistered: Boolean;
 begin
   // MANDATORY before the BPL unloads - the IDE would otherwise hold a
   // reference to code that is no longer mapped.
+  //
+  // THE ORDER IS THE POINT, and it is measured: the body of
+  // INTAServices.UnregisterDockableForm is FreeAndNil on the IDE's OWN copy
+  // of this very form (coreide370.bpl, @Otadockableform@
+  // TOTADockableFormManager@UnregisterDockableForm, rva 00405C68: FreeAndNil
+  // then IntfClear). Freeing it ourselves first was therefore a DOUBLE FREE
+  // on every unload with the window open - which is exactly the
+  // "Installieren" case this whole area is about, and a double free corrupts
+  // the heap rather than raising, so the try/except below would not have
+  // caught it. The IDE frees the form; we only let go of our pointer.
+  WasRegistered := ARegistered;
   try
-    if AForm <> nil then
-    begin
-      AForm.Free;
-      AForm := nil;
-    end;
-  except
-    AForm := nil;
-  end;
-  try
-    if ARegistered and Supports(BorlandIDEServices, INTAServices, Svc) then
+    if WasRegistered and Supports(BorlandIDEServices, INTAServices, Svc) then
       Svc.UnregisterDockableForm(ADock);
   except
   end;
+  // Only when the registration never happened can the form still be ours -
+  // then nobody else frees it. (ShowDock creates none without it, so this is
+  // belt and braces.)
+  if not WasRegistered then
+    try
+      AForm.Free;
+    except
+    end;
+  AForm := nil;
   ARegistered := False;
   ADock := nil;
 end;
 
 procedure ShowDock(var ADock: INTACustomDockableForm; var AForm: TCustomForm;
-  const AWhat: string);
+  const AWhat: string; const AFallbackHost: string = '');
 var
   Svc: INTAServices;
   Why: string;
@@ -1460,10 +1638,7 @@ begin
         Why := 'CreateDockableForm returned nil';
     end;
     if AForm <> nil then
-    begin
-      AForm.Show;
-      AForm.BringToFront;
-    end;
+      ShowFormDockAware(AForm, AFallbackHost);
   except
     on E: Exception do
       Why := E.ClassName + ': ' + E.Message;
@@ -1476,9 +1651,9 @@ end;
 procedure RegisterStatusWindow;
 begin
   RegisterDock(GDockable, GRegistered, 'Refactoring Light Status ' + PluginVersion,
-    'RefactoringLightStatus', TStatusFrame);
+    StatusWindowIdentifier, TStatusFrame);
   RegisterDock(GToolsDockable, GToolsRegistered, 'Refactoring Light MCP Tools',
-    'RefactoringLightMcpTools', TMcpToolsFrame);
+    McpToolsWindowIdentifier, TMcpToolsFrame);
 end;
 
 procedure UnregisterStatusWindow;
@@ -1497,18 +1672,73 @@ begin
   // all, so a free-standing window would read as docked.
   Result.Docked := (GForm.HostDockSite <> nil) and not GForm.Floating;
   Result.Bounds := GForm.BoundsRect;
+  Result.HostSection := DockHostSectionOfForm(GForm);
+  // REMEMBERED WHILE IT IS TRUE. The status row asks this once a second, so
+  // by the time the user closes the window we know which host held it - and
+  // a host we have seen is the only thing that can put a window back that
+  // the IDE handed back undocked.
+  if Result.HostSection <> '' then
+    GLastStatusHost := Result.HostSection;
 end;
 
-procedure ShowStatusWindowAt(const ABounds: TRect);
+function StatusDockWindowStateText: string;
+var
+  S: TRlDockState;
+begin
+  S := StatusDockWindowState;
+  if not S.Open then
+    Exit('not open');
+  if not S.Docked then
+    Exit('open, free-standing');
+  if S.HostSection = '' then
+    Exit('open and docked, host unknown');
+  Result := 'open and docked in ' + S.HostSection;
+end;
+
+function ShowStatusWindowAt(const ABounds: TRect;
+  const AHostSection: string): Boolean;
 begin
   ShowStatusWindow;
-  if (GForm <> nil) and (ABounds.Width > 0) and (ABounds.Height > 0) then
-    try GForm.BoundsRect := ABounds; except end;
+  Result := False;
+  if GForm = nil then Exit;
+  // DOCKED FIRST: moving the window to remembered bounds and only then
+  // docking it would make it jump across the screen on the way.
+  if AHostSection <> '' then
+  begin
+    Result := RedockFormInto(GForm, AHostSection);
+    // AND A DOCK THAT WAS ASKED FOR AND DID NOT HAPPEN IS NOT A RESTORE.
+    // Putting the window at its old bounds is still the better behaviour -
+    // a window on screen beats none - but the ANSWER stays False, because
+    // the window is NOT where the user had it and the box exists to say so.
+    // Reporting True here would be the one thing this round is against.
+    if not Result then
+      try GForm.BoundsRect := ABounds; except end;
+    Exit;
+  end;
+  if (ABounds.Width > 0) and (ABounds.Height > 0) then
+    try
+      GForm.BoundsRect := ABounds;
+      Result := True;
+    except
+    end;
 end;
 
 procedure ShowStatusWindow;
+var
+  Host: string;
 begin
-  ShowDock(GDockable, GForm, 'status window');
+  ShowDock(GDockable, GForm, 'status window', GLastStatusHost);
+  // AND THE SHOW ITSELF REMEMBERS WHERE IT LANDED. StatusDockWindowState
+  // fills GLastStatusHost too, but only because the status ROW asks it once
+  // a second - an indirect coupling that a later edit to that row would
+  // switch off in silence. This one cannot be lost: whenever the window is
+  // on screen and docked, the next reopen knows its host.
+  if GForm <> nil then
+  begin
+    Host := DockHostSectionOfForm(GForm);
+    if Host <> '' then
+      GLastStatusHost := Host;
+  end;
 end;
 
 procedure ShowMcpToolsWindow;

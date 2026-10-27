@@ -26,6 +26,14 @@ type
     DockWasOpen: Boolean;
     DockWasDocked: Boolean;
     DockBounds: TRect;
+    /// <summary>The DeskSection of the DOCK HOST that held the window, e.g.
+    ///  "DockSite5" - measured from the live form before the unload
+    ///  (HostDockSite -> its form -> TDesktopForm.DeskSection). That host
+    ///  belongs to the IDE and survives our unload, so this string is what
+    ///  makes a docked restore possible at all: the desktop file records the
+    ///  membership with the SITE ("[DockSite5] TabDockClients=MessageView,
+    ///  RefactoringLightStatus"), never with our own window.</summary>
+    DockHostSection: string;
     /// <summary>Files the MCP bridge had opened without an editor tab and
     ///  that were still loaded at the unload.</summary>
     Headless: TArray<string>;
@@ -77,7 +85,8 @@ type
     ///  the instance that loads next. Called ONCE, at the end of the
     ///  package's finalization, when every shutdown has had its say.</summary>
     class procedure RecordUnload(const AProblems, AHeadless: TArray<string>;
-      ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect); static;
+      ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
+      const ADockHostSection: string); static;
     /// <summary>The MCP server had to pin this module: it can never be
     ///  unmapped now, so there is no next load and no marker to hand over to -
     ///  THIS instance has to say it. Measured (scratchpad pinprobe): after a
@@ -95,16 +104,53 @@ type
     class var SettleHook: TFunc<string>;
   end;
 
-/// <summary>WHAT A RELOAD HAS TO TELL THE USER, and what of it the caller
-///  may simply put back (AReopenStatusWindow). PURE, and deliberately apart
+type
+  /// <summary>What the caller should DO about the status window after a
+  ///  reload. The docked case is no longer a dead end: the dock host belongs
+  ///  to the IDE and survives our unload, so it can be found again by its
+  ///  DeskSection and asked to take the window back.</summary>
+  TReloadWindowAction = (
+    /// <summary>Nothing - it was not open, or this is a fresh IDE start.</summary>
+    rwaNothing,
+    /// <summary>It was free-standing: create it and put it at its bounds.</summary>
+    rwaFloating,
+    /// <summary>It was docked and we know the host section: create it and ask
+    ///  that host to show it again.</summary>
+    rwaRedock,
+    /// <summary>It was docked but the host is unknown (a marker written before
+    ///  2.8.0, or a window whose host we could not read) - then there is
+    ///  nothing to put it back into and the box has to say so.</summary>
+    rwaDockedUnknownHost);
+
+/// <summary>What to do with the status window after a reload. PURE - the
+///  caller performs it, and reports back through ReloadReportText whether it
+///  worked.</summary>
+function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;
+
+/// <summary>WHAT A RELOAD HAS TO TELL THE USER. PURE, and deliberately apart
 ///  from the doing: the catch-up itself needs ToolsAPI and a live IDE, this
-///  decision does not - so the rule that a DOCKED status window is SAID
-///  rather than reopened is checkable without one.
-///  '' means there is nothing to report, which is the normal outcome: a
-///  fresh start reports nothing at all, and a reload reports nothing once
-///  the catch-up has restored everything it can.</summary>
+///  decision does not.
+///  AWindowRestored is what the caller ACHIEVED - so the window is mentioned
+///  only when it could not be put back, which is the whole point of this
+///  round: a sentence that sends the user to the desktop menu must not appear
+///  when the window is already sitting where it was.
+///  '' means there is nothing to report, which is the normal outcome.</summary>
 function ReloadReportText(const AFacts: TReloadFacts;
-  out AReopenStatusWindow: Boolean): string;
+  AWindowRestored: Boolean): string;
+
+/// <summary>Which DOCK HOST section of a desktop file lists this window, e.g.
+///  "DockSite5" for "RefactoringLightStatus". PURE text work on the lines of a
+///  .dsk, so it is testable - and it is the FALLBACK for the hand-over: the
+///  file reflects the last SAVED desktop, which may be older than what the
+///  user last did, so a live answer always wins over this one.
+///  MEASURED shape (the user's own project desktop):
+///    [DockSite5]
+///    HostDockSite=DockBottomCenterPanel
+///    TabDockClients=MessageView,RefactoringLightStatus
+///  The membership is recorded with the SITE, which is why our own section
+///  ([RefactoringLightStatus], Docked=1) cannot answer where it was.</summary>
+function FindDockHostSection(const ALines: TArray<string>;
+  const AIdentifier: string): string;
 
 implementation
 
@@ -242,32 +288,75 @@ begin
     MessageDlg(Text, mtWarning, [mbOK], 0);
 end;
 
+function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;
+begin
+  Result := rwaNothing;
+  if not AFacts.Reloaded then Exit;
+  if not AFacts.DockWasOpen then Exit;
+  if not AFacts.DockWasDocked then Exit(rwaFloating);
+  if AFacts.DockHostSection <> '' then
+    Result := rwaRedock
+  else
+    Result := rwaDockedUnknownHost;
+end;
+
+function FindDockHostSection(const ALines: TArray<string>;
+  const AIdentifier: string): string;
+const
+  KeyClients = 'tabdockclients';
+var
+  Section: string;
+begin
+  Result := '';
+  if AIdentifier = '' then Exit;
+  Section := '';
+  for var Raw in ALines do
+  begin
+    var L := Trim(Raw);
+    if L = '' then Continue;
+    if (L[1] = '[') and (L[Length(L)] = ']') then
+    begin
+      Section := Copy(L, 2, Length(L) - 2);
+      Continue;
+    end;
+    var Eq := Pos('=', L);
+    if Eq <= 1 then Continue;
+    if not SameText(Trim(Copy(L, 1, Eq - 1)), KeyClients) then Continue;
+    // The value is a comma list of client identifiers. Compare the ENTRIES,
+    // never a substring: "RefactoringLightStatus" must not be answered for
+    // "RefactoringLightStatusExtra".
+    for var Entry in SplitString(Copy(L, Eq + 1, MaxInt), ',') do
+      if SameText(Trim(Entry), AIdentifier) then
+        Exit(Section);
+  end;
+end;
+
 function ReloadReportText(const AFacts: TReloadFacts;
-  out AReopenStatusWindow: Boolean): string;
+  AWindowRestored: Boolean): string;
 var
   Lines: TArray<string>;
 begin
   Result := '';
-  AReopenStatusWindow := False;
   // A fresh IDE start has nothing to catch up and nothing to report: every
   // notification this package listens to is still ahead of it.
   if not AFacts.Reloaded then Exit;
 
-  // THE STATUS WINDOW. A free-standing one can simply be put back where it
-  // was. A DOCKED one cannot: measured in the user's own project desktop,
-  // the place is stored with the DOCK SITE ("[DockSite5] TabDockClients=
-  // MessageView,RefactoringLightStatus") and not with our window, and
-  // ToolsAPI has no entry point that loads a desktop or restores a single
-  // client. Opening it anyway produces exactly the floating window in the
-  // middle of the screen the user reported - so this half is SAID.
-  if AFacts.DockWasOpen then
+  // THE STATUS WINDOW. Both cases are DONE by the caller now - a
+  // free-standing one goes back to its bounds, a docked one is handed to the
+  // dock host that held it (that host is the IDE's own form and survives our
+  // unload, so it can be found again by its DeskSection). Only a restore that
+  // did NOT work is worth a sentence, and then it names what the user can do.
+  if AFacts.DockWasOpen and not AWindowRestored then
     if AFacts.DockWasDocked then
-      Lines := Lines + ['The status window was docked and is closed now. ' +
-        'Where it sat belongs to the project desktop, which only the IDE can ' +
-        'restore: pick your desktop again in the toolbar. Opening the window ' +
-        'from the menu brings it back free-standing.']
+      // NOT "open it from the menu": the caller falls back to the window's
+      // old bounds, so after a failed re-dock it is usually ON SCREEN and
+      // merely free-standing. One action, true in both cases.
+      Lines := Lines + ['The status window was docked and could not be put ' +
+        'back into its dock site. Pick your desktop again in the toolbar to ' +
+        'get your layout back.']
     else
-      AReopenStatusWindow := True;
+      Lines := Lines + ['The status window was open and could not be ' +
+        'reopened. The menu entry opens it again.'];
 
   // WHAT THE PREVIOUS UNLOAD COULD NOT FINISH. The only half that really
   // asks for a restart - and it is empty unless something went wrong.
@@ -388,7 +477,10 @@ begin
         FFacts.Headless := FFacts.Headless + [Copy(L, Length(KeyHeadless) + 1, MaxInt)]
       else if StartsText(KeyDock, L) then
       begin
-        // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>
+        // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>[,<host section>]
+        // The 7th field arrived with 2.8.0; a marker without it is simply a
+        // window whose host we do not know, which is what the old behaviour
+        // was - so an older marker can never be a parse error.
         var P := SplitString(Copy(L, Length(KeyDock) + 1, MaxInt), ',');
         if Length(P) >= 6 then
         begin
@@ -396,6 +488,8 @@ begin
           FFacts.DockWasDocked := P[1] = '1';
           FFacts.DockBounds := TRect.Create(StrToIntDef(P[2], 0),
             StrToIntDef(P[3], 0), StrToIntDef(P[4], 0), StrToIntDef(P[5], 0));
+          if Length(P) >= 7 then
+            FFacts.DockHostSection := Trim(P[6]);
         end;
       end;
     end;
@@ -423,7 +517,8 @@ begin
 end;
 
 class procedure TRestartHint.RecordUnload(const AProblems, AHeadless: TArray<string>;
-  ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect);
+  ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
+  const ADockHostSection: string);
 var
   SL: TStringList;
 begin
@@ -438,8 +533,11 @@ begin
       for var S in AHeadless do
         if S <> '' then SL.Add(KeyHeadless + S);
       if ADockOpen then
-        SL.Add(Format('%s%d,%d,%d,%d,%d,%d', [KeyDock, 1, Ord(ADockDocked),
-          ADockBounds.Left, ADockBounds.Top, ADockBounds.Right, ADockBounds.Bottom]));
+        // A section name cannot carry a comma (it is an ini section the IDE
+        // writes), so the plain list stays unambiguous.
+        SL.Add(Format('%s%d,%d,%d,%d,%d,%d,%s', [KeyDock, 1, Ord(ADockDocked),
+          ADockBounds.Left, ADockBounds.Top, ADockBounds.Right, ADockBounds.Bottom,
+          ADockHostSection]));
       SL.SaveToFile(GetMarkerFilePath, TEncoding.UTF8);
     finally
       SL.Free;

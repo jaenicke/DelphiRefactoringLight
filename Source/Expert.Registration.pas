@@ -14,7 +14,8 @@ procedure Register;
 implementation
 
 uses
-  System.SysUtils, ToolsAPI,
+  System.SysUtils, System.IOUtils, ToolsAPI,
+  Expert.EditorHelperIntf,   // Editor.GetCurrentProjectDproj for the .dsk lookup
   Expert.RenameWizard, Expert.CompletionWizard, Expert.ExtractMethod,
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint,
@@ -27,6 +28,28 @@ uses
   Expert.BlameGutter, Expert.PluginSettings,
   Expert.DialogHelper, Expert.ResourceMonitor, Expert.McpServer,
   Expert.PluginInfo, Expert.WorkerLatch, Expert.LspManager;
+
+/// <summary>Where the SAVED desktop says our status window was docked.
+///  The project desktop sits next to the .dproj as <project>.dsk; the rule
+///  that reads it is pure and tested (FindDockHostSection), this only finds
+///  the file. '' when there is no project, no file or no entry - and then the
+///  caller has nothing to put the window into, which it says.</summary>
+function DockHostFromDesktopFile: string;
+var
+  Dproj: string;
+begin
+  Result := '';
+  try
+    Dproj := Editor.GetCurrentProjectDproj;
+    if Dproj = '' then Exit;
+    var Dsk := TPath.ChangeExtension(Dproj, '.dsk');
+    if not TFile.Exists(Dsk) then Exit;
+    Result := FindDockHostSection(TFile.ReadAllLines(Dsk),
+      StatusWindowIdentifier);
+  except
+    Result := '';
+  end;
+end;
 
 var
   /// <summary>Read in the finalization while the forms and the module list
@@ -171,8 +194,8 @@ begin
     function: string
     var
       Facts: TReloadFacts;
-      Reopen: Boolean;
-      Proj: string;
+      Restored: Boolean;
+      Proj, Host: string;
     begin
       Facts := TRestartHint.Facts;
       if Facts.Reloaded then
@@ -197,12 +220,32 @@ begin
         McpAdoptHeadless(Facts.Headless);
       end;
 
-      // 3. WHAT IS LEFT OVER. The rule is pure and tested (ReloadReportText);
-      //    this only carries it out - which for a free-standing status window
-      //    means putting it back, and for a docked one means saying so.
-      Result := ReloadReportText(Facts, Reopen);
-      if Reopen then
-        ShowStatusWindowAt(Facts.DockBounds);
+      // 3. THE WINDOW. Both cases are DONE now, not just reported: a
+      //    free-standing one goes back to its bounds, and a DOCKED one is
+      //    handed to the dock host that held it - that host is the IDE's own
+      //    form and survives our unload, so it can be found again by the
+      //    DeskSection the hand-over carries ("DockSite5").
+      //    THE DESKTOP FILE IS THE FALLBACK, and deliberately only that: it
+      //    reflects the last SAVED desktop, so a place the user moved the
+      //    window to without saving would be stale. The live hand-over wins.
+      Restored := False;
+      case ReloadWindowAction(Facts) of
+        rwaFloating:
+          Restored := ShowStatusWindowAt(Facts.DockBounds);
+        rwaRedock:
+          Restored := ShowStatusWindowAt(Facts.DockBounds, Facts.DockHostSection);
+        rwaDockedUnknownHost:
+          begin
+            // An older marker, or a window whose host could not be read.
+            // The saved desktop still knows where it sat.
+            Host := DockHostFromDesktopFile;
+            if Host <> '' then
+              Restored := ShowStatusWindowAt(Facts.DockBounds, Host);
+          end;
+      end;
+
+      // 4. AND ONLY WHAT IS LEFT OVER IS SAID. The rule is pure and tested.
+      Result := ReloadReportText(Facts, Restored);
     end;
   // Arms that tick. FILE I/O AND STATE ONLY in here: Register runs inside
   // the IDE's install transaction, and a window there wedges it (2.6.11).
@@ -271,5 +314,6 @@ finalization
   // picture. The marker file is the only channel to the next instance - the
   // one that knows is the one that is going away.
   TRestartHint.RecordUnload(ShutdownProblems, GHeadlessAtUnload,
-    GDockAtUnload.Open, GDockAtUnload.Docked, GDockAtUnload.Bounds);
+    GDockAtUnload.Open, GDockAtUnload.Docked, GDockAtUnload.Bounds,
+    GDockAtUnload.HostSection);
 end.

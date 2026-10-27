@@ -6,6 +6,44 @@ development builds and were never released.
 
 ---
 
+## 2.8.0 - 2026-10-27
+
+### The status window really comes back docked
+
+Two reports, one wrong claim of mine behind both. 2.7.0 said a docked status
+window "cannot be put back - its place belongs to the project desktop, which
+only the IDE can restore". The user pointed at MMX Code Explorer: close its
+window with the X, call its menu entry, and it reappears exactly where it was
+docked - saved desktop or not. So the claim was wrong, and measuring MMX said
+why.
+
+What the project desktop records is the membership of the DOCK SITE, not of
+our window: `[DockSite5] TabDockClients=MessageView,RefactoringLightStatus`.
+That site is a window of the IDE's own - so it is still on screen after our
+package was unloaded and loaded again, and it can be found at runtime by the
+same section name the file uses. Two things follow, and both are fixed:
+
+- **Closing the window and reopening it from the menu** now puts it back in
+  its dock site. It used to call `Show` on a form that was merely hidden,
+  which leaves a docked form hidden where it is; the IDE's own entry point for
+  showing a dockable window is what every other package uses here.
+- **After "Installieren"** the window is handed back to the dock host that
+  held it. The unload reads that host from the live form and passes its name
+  to the next instance; if that is missing - an older marker - the saved
+  desktop file is read as a fallback.
+
+The box therefore mentions the window only when it could NOT be put back, and
+the new status row "this window" says what it is doing ("open and docked in
+DockSite5"), so the next report has a number rather than an impression.
+
+### A double free on every unload with the window open
+
+Found while measuring the above, and older than it: `UnregisterDockableForm`
+frees the form itself - that is what its body does - and the plugin freed it
+one line earlier. So every unload with the status window open freed it twice,
+which corrupts the heap instead of raising, and the `try/except` around it
+could never have shown it. The IDE frees the window now.
+
 ## 2.7.0 - 2026-10-27
 
 ### Installing no longer asks for a restart it does not need

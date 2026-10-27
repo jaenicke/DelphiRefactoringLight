@@ -43,16 +43,43 @@ const
   McpToolsWindowIdentifier = 'RefactoringLightMcpTools';
 
 type
+  /// <summary>WHERE a dockable window sat, in the two parts it really takes:
+  ///  the DeskSection of the form that OWNS the dock site ("DockSite5", or
+  ///  "Main Window" for one of the IDE main form's own panels) and the NAME
+  ///  of the site control inside it ("DockPanel",
+  ///  "DockBottomCenterPanel").
+  ///
+  ///  MEASURED in the live IDE (2026-10-27) after the section alone proved
+  ///  not to be enough: the status window sat in DockSite5, a
+  ///  TTabDockHostForm, and the section read "Main Window" - because
+  ///  GetParentForm defaults to TopForm = True and walks past the tab host
+  ///  into the main window it is itself docked in. With the immediate parent
+  ///  form the section is right again, but a window docked straight into a
+  ///  main-window panel really does have the main form as its host, and
+  ///  there only the site control says where.</summary>
+  TRlDockTarget = record
+    Section: string;
+    SiteName: string;
+    /// <summary>Enough to try a restore at all. The site name may be empty -
+    ///  a marker written before 2.8.1 carries none, and a tab host can be
+    ///  docked into through the host form itself.</summary>
+    function Known: Boolean;
+    /// <summary>For the status row, which is where one reads whether a
+    ///  reload will be able to put the window back.</summary>
+    function Describe: string;
+  end;
+
   /// <summary>What a dockable window of ours was doing at the unload.</summary>
   TRlDockState = record
     Open: Boolean;
     Docked: Boolean;
+    /// <summary>Screen coordinates - and therefore only filled while the
+    ///  window is NOT docked. A docked form's BoundsRect is in its dock
+    ///  site's client coordinates, so Left/Top are near 0 and using it as a
+    ///  screen position puts the window in the top left corner. That is what
+    ///  a user got after an install on 2026-10-27.</summary>
     Bounds: TRect;
-    /// <summary>The DeskSection of the dock HOST that held it, e.g.
-    ///  "DockSite5". That host is the IDE's own form and survives our
-    ///  unload, so this one string is what makes a docked restore
-    ///  possible.</summary>
-    HostSection: string;
+    Host: TRlDockTarget;
   end;
 
 /// <summary>What the status window is doing right now - read at the unload,
@@ -63,8 +90,9 @@ type
 ///  Docked=1 only) but with the dock SITE ("[DockSite5] HostDockSite=
 ///  DockBottomCenterPanel / TabDockClients=MessageView,
 ///  RefactoringLightStatus"). What that file cannot say, the LIVE form can:
-///  HostDockSite -> its form -> TDesktopForm.DeskSection answers
-///  "DockSite5", and that host survives our unload.</summary>
+///  HostDockSite is the site control, and the form that OWNS it - its
+///  IMMEDIATE parent form, see ReadDockTarget - answers "DockSite5". That
+///  host belongs to the IDE and survives our unload.</summary>
 function StatusDockWindowState: TRlDockState;
 
 /// <summary>That state in one line, for the status window's own row - which
@@ -72,13 +100,24 @@ function StatusDockWindowState: TRlDockState;
 ///  window back.</summary>
 function StatusDockWindowStateText: string;
 
-/// <summary>Opens the status window and puts it back where it was - docked
-///  into AHostSection when that host can be found, else free-standing at
-///  ABounds. True when the window really is back where it was; the caller
-///  reports a False, because a box that sends the user to the desktop menu
-///  must not appear while the window is already sitting in its place.</summary>
-function ShowStatusWindowAt(const ABounds: TRect;
-  const AHostSection: string = ''): Boolean;
+/// <summary>Opens the status window free-standing at ABounds (screen
+///  coordinates). True when the window really is back where it was; the
+///  caller reports a False, because a box that sends the user to the desktop
+///  menu must not appear while the window is already sitting in its
+///  place.</summary>
+function ShowStatusWindowAt(const ABounds: TRect): Boolean;
+
+/// <summary>Opens the status window and hands it back to the dock site it
+///  came from. ASiteName may be empty (an older marker, or the saved desktop
+///  as the fallback) - a tab host can be docked into through its form.
+///
+///  DELIBERATELY NO BOUNDS HERE, and that is the whole reason this is a
+///  second entry point rather than an argument: the only bounds a DOCKED
+///  window ever had are its dock site's client coordinates, so "put it at
+///  its old place" would mean the top left corner of the screen. A window
+///  at the IDE's own default position is the better failure, and the box
+///  says what did not work.</summary>
+function ShowStatusWindowDocked(const ASection, ASiteName: string): Boolean;
 
 /// <summary>Menu entry point: shows (and focuses) the status window.</summary>
 procedure ShowStatusWindow;
@@ -250,11 +289,11 @@ type
   end;
 
 var
-  /// <summary>The dock host we last SAW the status window in. Filled by
+  /// <summary>The dock site we last SAW the status window in. Filled by
   ///  StatusDockWindowState, which the status row asks once a second, so it
   ///  is known long before the window is closed - and it is what lets a
   ///  reopen re-dock a window the IDE handed back undocked.</summary>
-  GLastStatusHost: string;
+  GLastStatusDock: TRlDockTarget;
   GDockable: INTACustomDockableForm;
   GForm: TCustomForm;
   GRegistered: Boolean;
@@ -1448,24 +1487,77 @@ end;
 
 { registration }
 
-function DockHostSectionOfForm(AForm: TCustomForm): string;
+function TRlDockTarget.Known: Boolean;
+begin
+  Result := Section <> '';
+end;
+
+function TRlDockTarget.Describe: string;
+begin
+  Result := Section;
+  if SiteName <> '' then
+    Result := Result + ' (' + SiteName + ')';
+end;
+
+function ReadDockTarget(AForm: TCustomForm): TRlDockTarget;
 var
   Host: TWinControl;
   HostForm: TCustomForm;
 begin
-  // The dock SITE is a control inside the host form, so the name we want is
-  // one level up: the form that owns the site carries the DeskSection the
-  // desktop file uses ("DockSite5").
-  Result := '';
+  // The dock SITE is a control inside a form, so both halves are read here:
+  // the site's own name, and the DeskSection of the form that owns it - the
+  // name the desktop file uses ("DockSite5", "Main Window").
+  //
+  // GetParentForm's SECOND ARGUMENT IS THE POINT. It defaults to
+  // TopForm = True and then walks to the OUTERMOST form, and a tab dock host
+  // is itself docked into the IDE's main window - so every docked window of
+  // ours answered "Main Window", the main form is no TTabDockHostForm, and
+  // the restore gave up before it started. MEASURED in the live IDE on
+  // 2026-10-27: the status window sat in DockSite5 (ide_introspect) while
+  // this function said "Main Window". With False it is the immediate parent
+  // form, which is the form that really owns the site.
+  Result := Default(TRlDockTarget);
   if AForm = nil then Exit;
   try
     Host := AForm.HostDockSite;
     if Host = nil then Exit;
-    HostForm := GetParentForm(Host);
+    Result.SiteName := Host.Name;
+    HostForm := GetParentForm(Host, False);
     if HostForm is TDesktopForm then
-      Result := TDesktopForm(HostForm).DeskSection;
+      Result.Section := TDesktopForm(HostForm).DeskSection;
   except
-    Result := '';
+    Result := Default(TRlDockTarget);
+  end;
+end;
+
+function FindDockSite(AHost: TCustomForm; const AName: string): TWinControl;
+
+  function Scan(AParent: TWinControl): TWinControl;
+  begin
+    Result := nil;
+    for var I := 0 to AParent.ControlCount - 1 do
+    begin
+      if not (AParent.Controls[I] is TWinControl) then Continue;
+      var C := TWinControl(AParent.Controls[I]);
+      if SameText(C.Name, AName) then Exit(C);
+      Result := Scan(C);
+      if Result <> nil then Exit;
+    end;
+  end;
+
+begin
+  // The site control inside the host form. FindComponent answers for
+  // anything the form owns, which is every panel the IDE streamed from its
+  // own DFM; the control TREE is asked as well, because a panel created at
+  // run time can be owned by something else entirely.
+  Result := nil;
+  if (AHost = nil) or (AName = '') then Exit;
+  try
+    if AHost.FindComponent(AName) is TWinControl then
+      Exit(TWinControl(AHost.FindComponent(AName)));
+    Result := Scan(AHost);
+  except
+    Result := nil;
   end;
 end;
 
@@ -1488,9 +1580,10 @@ begin
   end;
 end;
 
-function RedockFormInto(AForm: TCustomForm; const ASection: string): Boolean;
+function RedockFormInto(AForm: TCustomForm; const ATarget: TRlDockTarget): Boolean;
 var
   HostForm: TCustomForm;
+  Site: TWinControl;
 begin
   // TWO DIFFERENT JOBS, and using the wrong primitive for one of them is
   // either a no-op or an access violation. Both bodies were measured:
@@ -1503,25 +1596,42 @@ begin
   //    TTabDockInfo.ShowClient. It only brings an EXISTING client's tab to
   //    the front, and for a form the host does not know the info is nil, so
   //    the call runs with Self = nil. It is the second step, never the first.
+  //  * AND A HOST THAT IS NOT A TAB HOST IS STILL A HOST: a window docked
+  //    straight into one of the IDE main form's panels has TAppBuilder as
+  //    its host form, and requiring a TTabDockHostForm there is a restore
+  //    that cannot work. TControl.ManualDock ends in
+  //    NewDockSite.DockDrop (read in Vcl.Controls), i.e. exactly the path a
+  //    drag and drop takes - so docking into the site CONTROL behaves like
+  //    the user dropping the window there, whatever the site is.
   Result := False;
-  if (AForm = nil) or (ASection = '') then Exit;
-  HostForm := FindDockHostForm(ASection);
-  if not (HostForm is TTabDockHostForm) then Exit;
+  if (AForm = nil) or not ATarget.Known then Exit;
+  HostForm := FindDockHostForm(ATarget.Section);
+  if HostForm = nil then Exit;
   try
-    if not SameText(DockHostSectionOfForm(AForm), ASection) then
-      TTabDockHostForm(HostForm).ManualDockClient(AForm, nil, alClient, True);
-    Result := SameText(DockHostSectionOfForm(AForm), ASection) and
+    if not SameText(ReadDockTarget(AForm).Section, ATarget.Section) then
+    begin
+      Site := FindDockSite(HostForm, ATarget.SiteName);
+      if HostForm is TTabDockHostForm then
+        // The IDE's own wrapper, and the measured path: its LoadWindowState
+        // reads TabDockClients and docks each client this way.
+        TTabDockHostForm(HostForm).ManualDockClient(AForm, nil, alClient, True)
+      else if Site <> nil then
+        AForm.ManualDock(Site, nil, alClient)
+      else
+        Exit;
+    end;
+    Result := SameText(ReadDockTarget(AForm).Section, ATarget.Section) and
       not AForm.Floating;
     // Now that it IS a client of this host, its tab may still be behind
     // another one. This is what that call is for.
-    if Result then
+    if Result and (HostForm is TTabDockHostForm) then
       try TTabDockHostForm(HostForm).ShowDockClient(AForm); except end;
   except
     Result := False;
   end;
 end;
 
-procedure ShowFormDockAware(AForm: TCustomForm; const AFallbackHost: string);
+procedure ShowFormDockAware(AForm: TCustomForm; const AFallback: TRlDockTarget);
 begin
   // THE DEFECT THIS REPLACES: Show + BringToFront on a form that is DOCKED
   // (merely hidden, because the user closed it with the X) leaves it hidden
@@ -1553,9 +1663,9 @@ begin
     except
     end;
   end;
-  if (AFallbackHost <> '') and
+  if AFallback.Known and
      ((AForm.HostDockSite = nil) or AForm.Floating) then
-    RedockFormInto(AForm, AFallbackHost);
+    RedockFormInto(AForm, AFallback);
 end;
 
 procedure RegisterDock(var ADock: INTACustomDockableForm; var ARegistered: Boolean;
@@ -1614,7 +1724,7 @@ begin
 end;
 
 procedure ShowDock(var ADock: INTACustomDockableForm; var AForm: TCustomForm;
-  const AWhat: string; const AFallbackHost: string = '');
+  const AWhat: string; const AFallback: TRlDockTarget);
 var
   Svc: INTAServices;
   Why: string;
@@ -1638,7 +1748,7 @@ begin
         Why := 'CreateDockableForm returned nil';
     end;
     if AForm <> nil then
-      ShowFormDockAware(AForm, AFallbackHost);
+      ShowFormDockAware(AForm, AFallback);
   except
     on E: Exception do
       Why := E.ClassName + ': ' + E.Message;
@@ -1671,14 +1781,26 @@ begin
   // NOT Floating alone: the VCL makes it False for a window with no host at
   // all, so a free-standing window would read as docked.
   Result.Docked := (GForm.HostDockSite <> nil) and not GForm.Floating;
-  Result.Bounds := GForm.BoundsRect;
-  Result.HostSection := DockHostSectionOfForm(GForm);
+  // BOUNDS ONLY WHILE IT IS NOT DOCKED: a docked form's BoundsRect is in its
+  // dock site's client coordinates (Left and Top near 0), so handing it on
+  // as a screen position is what put the window in the top left corner
+  // after an install. For a docked window there is no such thing.
+  // The two are mutually exclusive, which is exactly the fact: a docked
+  // window has a site and no screen bounds, a free-standing one has bounds
+  // and no site. Reading the site of a floating window would be the next
+  // version of this defect - the VCL gives a floating control a host site
+  // of its own, and remembering THAT as "where it was docked" would hand
+  // the next reopen a target nobody ever docked into.
+  if not Result.Docked then
+    Result.Bounds := GForm.BoundsRect
+  else
+    Result.Host := ReadDockTarget(GForm);
   // REMEMBERED WHILE IT IS TRUE. The status row asks this once a second, so
   // by the time the user closes the window we know which host held it - and
   // a host we have seen is the only thing that can put a window back that
   // the IDE handed back undocked.
-  if Result.HostSection <> '' then
-    GLastStatusHost := Result.HostSection;
+  if Result.Host.Known then
+    GLastStatusDock := Result.Host;
 end;
 
 function StatusDockWindowStateText: string;
@@ -1690,31 +1812,16 @@ begin
     Exit('not open');
   if not S.Docked then
     Exit('open, free-standing');
-  if S.HostSection = '' then
+  if not S.Host.Known then
     Exit('open and docked, host unknown');
-  Result := 'open and docked in ' + S.HostSection;
+  Result := 'open and docked in ' + S.Host.Describe;
 end;
 
-function ShowStatusWindowAt(const ABounds: TRect;
-  const AHostSection: string): Boolean;
+function ShowStatusWindowAt(const ABounds: TRect): Boolean;
 begin
   ShowStatusWindow;
   Result := False;
   if GForm = nil then Exit;
-  // DOCKED FIRST: moving the window to remembered bounds and only then
-  // docking it would make it jump across the screen on the way.
-  if AHostSection <> '' then
-  begin
-    Result := RedockFormInto(GForm, AHostSection);
-    // AND A DOCK THAT WAS ASKED FOR AND DID NOT HAPPEN IS NOT A RESTORE.
-    // Putting the window at its old bounds is still the better behaviour -
-    // a window on screen beats none - but the ANSWER stays False, because
-    // the window is NOT where the user had it and the box exists to say so.
-    // Reporting True here would be the one thing this round is against.
-    if not Result then
-      try GForm.BoundsRect := ABounds; except end;
-    Exit;
-  end;
   if (ABounds.Width > 0) and (ABounds.Height > 0) then
     try
       GForm.BoundsRect := ABounds;
@@ -1723,27 +1830,38 @@ begin
     end;
 end;
 
-procedure ShowStatusWindow;
+function ShowStatusWindowDocked(const ASection, ASiteName: string): Boolean;
 var
-  Host: string;
+  Target: TRlDockTarget;
 begin
-  ShowDock(GDockable, GForm, 'status window', GLastStatusHost);
-  // AND THE SHOW ITSELF REMEMBERS WHERE IT LANDED. StatusDockWindowState
-  // fills GLastStatusHost too, but only because the status ROW asks it once
-  // a second - an indirect coupling that a later edit to that row would
-  // switch off in silence. This one cannot be lost: whenever the window is
-  // on screen and docked, the next reopen knows its host.
-  if GForm <> nil then
-  begin
-    Host := DockHostSectionOfForm(GForm);
-    if Host <> '' then
-      GLastStatusHost := Host;
-  end;
+  Target.Section := ASection;
+  Target.SiteName := ASiteName;
+  ShowStatusWindow;
+  // AND A DOCK THAT WAS ASKED FOR AND DID NOT HAPPEN IS NOT A RESTORE: the
+  // answer stays False and the box says so. Reporting True here would be the
+  // one thing this round is against.
+  Result := (GForm <> nil) and RedockFormInto(GForm, Target);
+end;
+
+procedure ShowStatusWindow;
+begin
+  ShowDock(GDockable, GForm, 'status window', GLastStatusDock);
+  // AND THE SHOW ITSELF REMEMBERS WHERE IT LANDED, instead of leaving that
+  // to the status ROW, which fills it only because it asks once a second -
+  // an indirect coupling a later edit to that row would switch off in
+  // silence. It asks the same function the row asks, whose documented side
+  // effect that is, so the two can never disagree about what "docked, and
+  // where" means; the answer is not needed here, only the note it leaves.
+  StatusDockWindowState;
 end;
 
 procedure ShowMcpToolsWindow;
 begin
-  ShowDock(GToolsDockable, GToolsForm, 'MCP tools window');
+  // No remembered dock site for this one: only the status window is restored
+  // after a reload, and saying so explicitly is better than a default
+  // argument that hides which window has that behaviour.
+  ShowDock(GToolsDockable, GToolsForm, 'MCP tools window',
+    Default(TRlDockTarget));
 end;
 
 end.

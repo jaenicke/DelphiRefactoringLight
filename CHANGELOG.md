@@ -6,6 +6,41 @@ development builds and were never released.
 
 ---
 
+## 2.8.1 - 2026-10-27
+
+### The docked window came back at the top left corner
+
+Report on 2.8.0: closing the status window and reopening it from the menu
+works, but after "Installieren" it reappeared free-standing in the top left
+corner of the screen. Two defects, and the status window named the first one
+in a single call - it said the window was docked in "Main Window" while the
+IDE's own object tree showed it sitting in DockSite5.
+
+- **The dock host was read one level too high.** `GetParentForm` defaults to
+  the OUTERMOST form, and a tab dock host is itself docked into the IDE's main
+  window - so every docked window of ours reported "Main Window", which is no
+  tab host, and the restore gave up before it started. It reads the form that
+  really owns the dock site now, and it also remembers the site CONTROL inside
+  it ("DockPanel", "DockBottomCenterPanel"): a window docked straight into one
+  of the main window's panels has the main form as its host, and there the
+  panel is the only thing that says where.
+- **A docked window has no screen bounds.** Its `BoundsRect` is in its dock
+  site's client coordinates, so Left and Top are near zero - and using that as
+  a free-standing position is exactly the top left corner. Those bounds are no
+  longer recorded for a docked window, and the docked restore no longer has a
+  bounds argument at all: a window at the IDE's own default place is the
+  better failure, and the box still says what did not work.
+
+The saved project desktop is now also asked when the live hand-over names a
+host the IDE does not offer, not only when the hand-over carries no host. That
+is what makes the FIRST install after this change work: it reads the marker
+that the previous version wrote, with the wrong host in it.
+
+The status row reads "open and docked in DockSite5 (DockPanel)" from now on,
+so a failure says which half of the pair did not work.
+
+---
+
 ## 2.8.0 - 2026-10-27
 
 ### The status window really comes back docked

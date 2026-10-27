@@ -28,12 +28,21 @@ type
     DockBounds: TRect;
     /// <summary>The DeskSection of the DOCK HOST that held the window, e.g.
     ///  "DockSite5" - measured from the live form before the unload
-    ///  (HostDockSite -> its form -> TDesktopForm.DeskSection). That host
+    ///  (HostDockSite -> the form that OWNS that site, which is its
+    ///  IMMEDIATE parent form and not the top-level one -> DeskSection).
+    ///  That host
     ///  belongs to the IDE and survives our unload, so this string is what
     ///  makes a docked restore possible at all: the desktop file records the
     ///  membership with the SITE ("[DockSite5] TabDockClients=MessageView,
     ///  RefactoringLightStatus"), never with our own window.</summary>
     DockHostSection: string;
+    /// <summary>The NAME of the dock SITE itself - "DockPanel" inside a tab
+    ///  host, "DockBottomCenterPanel" inside the main window. The section
+    ///  above names the FORM that owns the site, and on its own that is not
+    ///  enough: a window docked straight into one of the main window's own
+    ///  panels has the IDE's main form as its host, and there the panel is
+    ///  the only thing that says WHERE.</summary>
+    DockSiteName: string;
     /// <summary>Files the MCP bridge had opened without an editor tab and
     ///  that were still loaded at the unload.</summary>
     Headless: TArray<string>;
@@ -86,7 +95,7 @@ type
     ///  package's finalization, when every shutdown has had its say.</summary>
     class procedure RecordUnload(const AProblems, AHeadless: TArray<string>;
       ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
-      const ADockHostSection: string); static;
+      const ADockHostSection, ADockSiteName: string); static;
     /// <summary>The MCP server had to pin this module: it can never be
     ///  unmapped now, so there is no next load and no marker to hand over to -
     ///  THIS instance has to say it. Measured (scratchpad pinprobe): after a
@@ -477,10 +486,14 @@ begin
         FFacts.Headless := FFacts.Headless + [Copy(L, Length(KeyHeadless) + 1, MaxInt)]
       else if StartsText(KeyDock, L) then
       begin
-        // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>[,<host section>]
-        // The 7th field arrived with 2.8.0; a marker without it is simply a
-        // window whose host we do not know, which is what the old behaviour
-        // was - so an older marker can never be a parse error.
+        // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>
+        //      [,<host section>[,<site name>]]
+        // The 7th field arrived with 2.8.0, the 8th with 2.8.1; a marker
+        // without them is a window whose host, or whose dock site, we do not
+        // know - which is what the old behaviour was, so an older marker can
+        // never be a parse error. That is not a theoretical case either: an
+        // install over a running older version reads exactly such a marker,
+        // every time.
         var P := SplitString(Copy(L, Length(KeyDock) + 1, MaxInt), ',');
         if Length(P) >= 6 then
         begin
@@ -490,6 +503,8 @@ begin
             StrToIntDef(P[3], 0), StrToIntDef(P[4], 0), StrToIntDef(P[5], 0));
           if Length(P) >= 7 then
             FFacts.DockHostSection := Trim(P[6]);
+          if Length(P) >= 8 then
+            FFacts.DockSiteName := Trim(P[7]);
         end;
       end;
     end;
@@ -516,9 +531,20 @@ begin
   Arm;
 end;
 
+function NoComma(const S: string): string;
+begin
+  // The marker line is a comma list, so a name that carries one would move
+  // every field behind it - and a mis-parsed list hands the next instance a
+  // name that points at ANOTHER window. A control name cannot contain a
+  // comma, but the host section is an ini section the IDE writes, so this is
+  // measured rather than assumed: a stripped name is simply not found again,
+  // which is the honest failure.
+  Result := StringReplace(S, ',', ' ', [rfReplaceAll]);
+end;
+
 class procedure TRestartHint.RecordUnload(const AProblems, AHeadless: TArray<string>;
   ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
-  const ADockHostSection: string);
+  const ADockHostSection, ADockSiteName: string);
 var
   SL: TStringList;
 begin
@@ -533,11 +559,9 @@ begin
       for var S in AHeadless do
         if S <> '' then SL.Add(KeyHeadless + S);
       if ADockOpen then
-        // A section name cannot carry a comma (it is an ini section the IDE
-        // writes), so the plain list stays unambiguous.
-        SL.Add(Format('%s%d,%d,%d,%d,%d,%d,%s', [KeyDock, 1, Ord(ADockDocked),
+        SL.Add(Format('%s%d,%d,%d,%d,%d,%d,%s,%s', [KeyDock, 1, Ord(ADockDocked),
           ADockBounds.Left, ADockBounds.Top, ADockBounds.Right, ADockBounds.Bottom,
-          ADockHostSection]));
+          NoComma(ADockHostSection), NoComma(ADockSiteName)]));
       SL.SaveToFile(GetMarkerFilePath, TEncoding.UTF8);
     finally
       SL.Free;

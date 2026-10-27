@@ -194,6 +194,7 @@ begin
     function: string
     var
       Facts: TReloadFacts;
+      Action: TReloadWindowAction;
       Restored: Boolean;
       Proj, Host: string;
     begin
@@ -222,26 +223,34 @@ begin
 
       // 3. THE WINDOW. Both cases are DONE now, not just reported: a
       //    free-standing one goes back to its bounds, and a DOCKED one is
-      //    handed to the dock host that held it - that host is the IDE's own
-      //    form and survives our unload, so it can be found again by the
-      //    DeskSection the hand-over carries ("DockSite5").
-      //    THE DESKTOP FILE IS THE FALLBACK, and deliberately only that: it
-      //    reflects the last SAVED desktop, so a place the user moved the
-      //    window to without saving would be stale. The live hand-over wins.
+      //    handed to the dock SITE that held it - that site belongs to the
+      //    IDE and survives our unload, so it can be found again from the
+      //    two names the hand-over carries: the DeskSection of the form that
+      //    owns it ("DockSite5", "Main Window") and the site control's own
+      //    name ("DockPanel", "DockBottomCenterPanel").
       Restored := False;
-      case ReloadWindowAction(Facts) of
+      Action := ReloadWindowAction(Facts);
+      case Action of
         rwaFloating:
           Restored := ShowStatusWindowAt(Facts.DockBounds);
         rwaRedock:
-          Restored := ShowStatusWindowAt(Facts.DockBounds, Facts.DockHostSection);
-        rwaDockedUnknownHost:
-          begin
-            // An older marker, or a window whose host could not be read.
-            // The saved desktop still knows where it sat.
-            Host := DockHostFromDesktopFile;
-            if Host <> '' then
-              Restored := ShowStatusWindowAt(Facts.DockBounds, Host);
-          end;
+          Restored := ShowStatusWindowDocked(Facts.DockHostSection,
+            Facts.DockSiteName);
+      end;
+      if not Restored and (Action in [rwaRedock, rwaDockedUnknownHost]) then
+      begin
+        // THE SAVED DESKTOP, and only now that the live hand-over did not
+        // work: that file reflects the last desktop the user SAVED, so a
+        // place they moved the window to without saving would be stale -
+        // the hand-over wins while it can. But it is the one thing left
+        // that knows where the window sat when the hand-over names a host
+        // the IDE does not offer, and that is not a rare case: an install
+        // over an older version reads a marker that older version wrote.
+        // The file names the tab host, never a site control inside it -
+        // enough, because a tab host is docked into through its own form.
+        Host := DockHostFromDesktopFile;
+        if (Host <> '') and not SameText(Host, Facts.DockHostSection) then
+          Restored := ShowStatusWindowDocked(Host, '');
       end;
 
       // 4. AND ONLY WHAT IS LEFT OVER IS SAID. The rule is pure and tested.
@@ -315,5 +324,5 @@ finalization
   // one that knows is the one that is going away.
   TRestartHint.RecordUnload(ShutdownProblems, GHeadlessAtUnload,
     GDockAtUnload.Open, GDockAtUnload.Docked, GDockAtUnload.Bounds,
-    GDockAtUnload.HostSection);
+    GDockAtUnload.Host.Section, GDockAtUnload.Host.SiteName);
 end.

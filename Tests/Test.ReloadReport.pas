@@ -220,7 +220,7 @@ begin
     TRestartHint.RecordUnload(
       ['A blame worker did not finish in time.'],
       ['C:\work\Unit1.pas', 'C:\work\Unit2.pas'],
-      True, True, TRect.Create(10, 20, 410, 320), 'DockSite5');
+      True, True, TRect.Create(10, 20, 410, 320), 'DockSite5', 'DockPanel');
 
     F := TRestartHint.ReadFacts;
     Assert.IsTrue(F.Reloaded,
@@ -233,6 +233,9 @@ begin
     Assert.IsTrue(F.DockWasDocked, 'and docked');
     Assert.AreEqual('DockSite5', F.DockHostSection,
       'and THE HOST comes through - without it a docked window cannot be put back');
+    Assert.AreEqual('DockPanel', F.DockSiteName,
+      'and the SITE inside it - a window docked straight into a main-window ' +
+      'panel has the main form as its host, where only the site says where');
     Assert.AreEqual<Integer>(410, F.DockBounds.Right, 'with its own geometry');
     Assert.AreEqual<TReloadWindowAction>(rwaRedock, ReloadWindowAction(F),
       'so the next instance knows to re-dock');
@@ -246,6 +249,7 @@ begin
       'but the findings were consumed by the load that read them');
     Assert.IsFalse(F.DockWasOpen, 'and so was the window state');
     Assert.AreEqual('', F.DockHostSection, 'including the host');
+    Assert.AreEqual('', F.DockSiteName, 'and the site');
 
     // AN OLDER MARKER - six fields, written before the host was carried -
     // must still parse. It then means "docked, host unknown", which is
@@ -258,6 +262,32 @@ begin
     Assert.AreEqual('', F.DockHostSection, 'it just cannot say where');
     Assert.AreEqual<TReloadWindowAction>(rwaDockedUnknownHost,
       ReloadWindowAction(F), 'and that is a case of its own, not a crash');
+
+    // AND THE SEVEN-FIELD FORM of 2.8.0, which is not a museum piece: an
+    // install over a running older version reads a marker that older version
+    // wrote, so this is the shape the FIRST load after this change meets.
+    // It names a host and no site, which is still a re-dock - a tab host is
+    // docked into through its own form.
+    TFile.WriteAllText(TRestartHint.GetMarkerFilePath,
+      TFile.ReadAllText(TRestartHint.GetMarkerFilePath).Trim + sLineBreak +
+      'dock=1,1,10,20,410,320,DockSite5' + sLineBreak);
+    F := TRestartHint.ReadFacts;
+    Assert.AreEqual('DockSite5', F.DockHostSection, 'the host still parses');
+    Assert.AreEqual('', F.DockSiteName, 'the site is simply not in it');
+    Assert.AreEqual<TReloadWindowAction>(rwaRedock, ReloadWindowAction(F),
+      'and a host without a site is still enough to try');
+
+    // A NAME WITH A COMMA may not move the field behind it. The marker is a
+    // comma list, and a mis-parsed list would hand the next instance a name
+    // that points at ANOTHER window; a name that lost its comma is simply
+    // not found again, which is the honest failure.
+    TRestartHint.RecordUnload(nil, nil, True, True,
+      TRect.Create(0, 0, 0, 0), 'Odd, Host', 'DockPanel');
+    F := TRestartHint.ReadFacts;
+    Assert.AreEqual('DockPanel', F.DockSiteName,
+      'the site name is still the site name');
+    Assert.IsFalse(F.DockHostSection.Contains(','),
+      'and the host carries no comma into the list');
   finally
     if TFile.Exists(TRestartHint.GetMarkerFilePath) then
       TFile.Delete(TRestartHint.GetMarkerFilePath);

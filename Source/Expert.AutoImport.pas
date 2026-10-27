@@ -310,7 +310,15 @@ type
 function FindRemovablePrivate(const AContent: string; ADeclLine0: Integer;
   const AName: string; out AInfo: TPrivateMember): Boolean;
 
-/// <summary>Content with AInfo's declaration AND implementation removed.</summary>
+/// <summary>The first line of the XML doc comment block directly above
+///  ALine0 - ALine0 itself when there is none. A '///' block documents
+///  what FOLLOWS it, so whatever removes a declaration takes it along:
+///  safe delete always did, the quick fix left it behind pointing at
+///  nothing (forum #225).</summary>
+function DocCommentStart(const ALines: TArray<string>; ALine0: Integer): Integer;
+
+/// <summary>Content with AInfo's declaration AND implementation removed -
+///  each with the doc comment block above it.</summary>
 function RemovePrivateMemberText(const AContent: string;
   const AInfo: TPrivateMember): string;
 
@@ -401,6 +409,17 @@ function PlanMemberInsertion(const ALines: TArray<string>; AClassLine0: Integer;
 
 /// <summary>AContent split into lines (CRLF / LF).</summary>
 function SplitContentLines(const AContent: string): TArray<string>;
+/// <summary>The exact INVERSE of SplitContentLines: joined with the line
+///  break AOLDCONTENT uses and with none of its own, because the trailing
+///  empty element the split keeps for the file's final break produces it.
+///  A TStringList.Text gets both wrong - it appends a break (so the
+///  trailing element becomes a new blank line and every rewrite grows the
+///  file at its end; measured on "Remove unused private", 2026-10-26) and
+///  it joins with sLineBreak, which would turn an LF-only unit into a CRLF
+///  one. Expert.MethodEdit.JoinPlannedLines is this function; the rule
+///  lives here because SplitContentLines does.</summary>
+function JoinContentLines(const ALines: TArray<string>;
+  const AOldContent: string): string;
 /// <summary>0-based line of the 'implementation' keyword, or MaxInt when none.</summary>
 function ImplementationLineOf(const ALines: TArray<string>): Integer;
 /// <summary>S is a routine header: procedure / function / constructor /
@@ -541,6 +560,17 @@ type
 function SplitContentLines(const AContent: string): TArray<string>;
 begin
   Result := AContent.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+end;
+
+function JoinContentLines(const ALines: TArray<string>;
+  const AOldContent: string): string;
+var
+  LB: string;
+begin
+  if Pos(#13#10, AOldContent) > 0 then LB := #13#10
+  else if Pos(#10, AOldContent) > 0 then LB := #10
+  else LB := sLineBreak;
+  Result := string.Join(LB, ALines);
 end;
 
 // 0-based line index of the 'implementation' keyword, or MaxInt if none.
@@ -3437,22 +3467,34 @@ begin
   Result := False;
 end;
 
+function DocCommentStart(const ALines: TArray<string>; ALine0: Integer): Integer;
+begin
+  Result := ALine0;
+  if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
+  while (Result > 0) and Trim(ALines[Result - 1]).StartsWith('///') do
+    Dec(Result);
+end;
+
 function RemovePrivateMemberText(const AContent: string;
   const AInfo: TPrivateMember): string;
 var
   Lines: TArray<string>;
   SL: TStringList;
-  I: Integer;
+  I, DeclFrom, ImplFrom: Integer;
 begin
   Result := AContent;
   Lines := SplitContentLines(AContent);
   if (AInfo.DeclLine < 0) or (AInfo.DeclLine > High(Lines)) then Exit;
+  // the documentation of what goes, goes with it (forum #225)
+  DeclFrom := DocCommentStart(Lines, AInfo.DeclLine);
+  ImplFrom := AInfo.ImplFirst;
+  if ImplFrom >= 0 then ImplFrom := DocCommentStart(Lines, ImplFrom);
   SL := TStringList.Create;
   try
     for I := 0 to High(Lines) do
     begin
-      if I = AInfo.DeclLine then Continue;
-      if (AInfo.ImplFirst >= 0) and (I >= AInfo.ImplFirst)
+      if (I >= DeclFrom) and (I <= AInfo.DeclLine) then Continue;
+      if (AInfo.ImplFirst >= 0) and (I >= ImplFrom)
         and (I <= AInfo.ImplLast) then Continue;
       // A blank line directly after the removed implementation would
       // otherwise pile up.
@@ -3460,7 +3502,10 @@ begin
         and (Trim(Lines[I]) = '') then Continue;
       SL.Add(Lines[I]);
     end;
-    Result := SL.Text;
+    // NOT SL.Text: it would add a line break of its own, and the trailing
+    // empty element SplitContentLines keeps for the file's final break then
+    // becomes a new blank line at the end of the unit (measured).
+    Result := JoinContentLines(SL.ToStringArray, AContent);
   finally
     SL.Free;
   end;
@@ -3532,17 +3577,10 @@ var
   Lines: TArray<string>;
 
   // The exact inverse of SplitContentLines - a trailing empty element IS
-  // the file's final line break, so nothing is added and nothing is lost
-  // (a TStringList.Text here silently appended one, and the preview then
-  // reported a changed line at the end of every fix).
+  // the file's final line break, so nothing is added and nothing is lost.
   function Joined: string;
-  var
-    LB: string;
   begin
-    if Pos(#13#10, AContent) > 0 then LB := #13#10
-    else if Pos(#10, AContent) > 0 then LB := #10
-    else LB := sLineBreak;
-    Result := string.Join(LB, Lines);
+    Result := JoinContentLines(Lines, AContent);
   end;
 
   function ReplaceToken(ALine0, ACol0, ALen: Integer; const ANew: string): Boolean;

@@ -35,6 +35,21 @@ type
 ///  Exported so it can be checked against real .err output.</summary>
 function BdsErrLineSeverity(const ALine: string): TBdsErrSeverity;
 
+/// <summary>The msbuild command line for one project. ACOMMONDIROVERRIDE
+///  is added as /p:BDSCOMMONDIR when it is not empty: CodeGear.Delphi
+///  .Targets builds its CreateDirectories list from $(DelphiHPPOutputPath)
+///  and a Dcp path of its own, which the explicit DCC_* outputs do not
+///  reach - so on an account that cannot write Delphi's common directory
+///  the build dies with MSB3191 on folders it never writes to, however the
+///  outputs are redirected (measured 2026-10-21, forum #223). Moving the
+///  ROOT for the build fixes it, and as a PROPERTY rather than an
+///  environment variable: the bds.exe fallback starts the IDE, which loads
+///  its own packages from $(BDSCOMMONDIR)\Bpl. Exported so the command
+///  line is checkable without running a build.</summary>
+function MSBuildCommandLine(const AProjectPath, APlatform, ABuildConfig,
+  ADcuDir, ABplDir, ADcpDir, AHppDir, ACommonDirOverride,
+  AExtraParams: string): string;
+
 type
   TDIHBuilder = class
   private
@@ -236,10 +251,26 @@ begin
   Result := ExecuteProcess(WrappedCmd);
 end;
 
+function MSBuildCommandLine(const AProjectPath, APlatform, ABuildConfig,
+  ADcuDir, ABplDir, ADcpDir, AHppDir, ACommonDirOverride,
+  AExtraParams: string): string;
+begin
+  // /tv:4.0 - see BuildWithMSBuild: without it MSBuild takes the machine's
+  // default toolset, and a default of 2.0 needs .NET 3.5 (MSB4036).
+  Result := Format('msbuild.exe "%s" /t:Build /tv:4.0 /p:Platform=%s ' +
+    '/p:Config=%s /p:DCC_DcuOutput="%s" /p:DCC_BplOutput="%s" ' +
+    '/p:DCC_DcpOutput="%s" /p:DCC_HppOutput="%s"',
+    [AProjectPath, APlatform, ABuildConfig, ADcuDir, ABplDir, ADcpDir, AHppDir]);
+  if ACommonDirOverride <> '' then
+    Result := Result + Format(' /p:BDSCOMMONDIR="%s"', [ACommonDirOverride]);
+  if AExtraParams <> '' then
+    Result := Result + ' ' + AExtraParams;
+end;
+
 function TDIHBuilder.BuildWithMSBuild(const AProjectPath: string; APlatform: TDIHPlatform;
   const ABuildConfig, AExtraParams: string): Boolean;
 var
-  Cmd, FullProjectPath, DcuDir, BplDir, DcpDir, HppDir: string;
+  Cmd, FullProjectPath, DcuDir, BplDir, DcpDir, HppDir, CommonOverride: string;
 begin
   FullProjectPath := AProjectPath;
   if not TPath.IsPathRooted(FullProjectPath) then
@@ -257,12 +288,16 @@ begin
   // installed - which is what a forum log of 2026-10-06 shows, on an IDE
   // that points at .NET 4.x itself. Naming the toolset takes that choice
   // away from the machine.
-  Cmd := Format('msbuild.exe "%s" /t:Build /tv:4.0 /p:Platform=%s /p:Config=%s /p:DCC_DcuOutput="%s" /p:DCC_BplOutput="%s" /p:DCC_DcpOutput="%s" /p:DCC_HppOutput="%s"',
-    [FullProjectPath, APlatform.ToString, ABuildConfig, DcuDir, BplDir, DcpDir,
-     HppDir]);
+  // Only when this account really cannot write Delphi's own common
+  // directory - then the resolver has already moved the output root there,
+  // and the build has to be told as well or it dies creating folders it
+  // never writes to (forum #223).
+  CommonOverride := '';
+  if not SameText(FResolver.OutputRoot, FResolver.BDSCommonDir) then
+    CommonOverride := FResolver.OutputRoot;
 
-  if not AExtraParams.IsEmpty then
-    Cmd := Cmd + ' ' + AExtraParams;
+  Cmd := MSBuildCommandLine(FullProjectPath, APlatform.ToString, ABuildConfig,
+    DcuDir, BplDir, DcpDir, HppDir, CommonOverride, AExtraParams);
 
   FLogger.Detail('Executing: %s', [Cmd]);
   Result := ExecuteWithRsVars(Cmd) = 0;

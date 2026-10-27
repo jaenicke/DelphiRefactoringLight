@@ -22,7 +22,7 @@ unit Expert.SafeDeletePlan;
 interface
 
 uses
-  System.SysUtils;
+  System.SysUtils, System.Types;
 
 type
   TSafeDeleteKind = (sdkUnknown, sdkMethod, sdkRoutine, sdkField, sdkProperty,
@@ -184,8 +184,44 @@ function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 function HeaderDeclaresParameter(const ALines: TArray<string>;
   ALine0: Integer; const AName: string): Boolean;
 
+type
+  /// <summary>What could be established about the two headers a parameter
+  ///  is declared in. Delphi requires the two names to be identical, so
+  ///  this is not a matter of degree: either both places are known, or the
+  ///  routine really has one header, or the rename must not happen.</summary>
+  TParamPairing = (
+    ppUnknown,        // could not be established - refuse
+    ppPaired,         // both headers are known
+    ppSingleHeader);  // the routine has exactly one header
+
+  /// <summary>Everything the rename of a PARAMETER needs. POSITIONS are the
+  ///  places at which the name is really declared (0-based, X = column,
+  ///  Y = line), sorted; SPANS are the header spans they live in (Y = first
+  ///  line, X = last). The spans are what makes a line-based target safe: on
+  ///  a header line only the positions are the parameter - the routine's own
+  ///  name, a type or a default value spelled like it are not (issue
+  ///  #50).</summary>
+  TParamRenamePlan = record
+    Pairing: TParamPairing;
+    Positions: TArray<TPoint>;
+    Spans: TArray<TPoint>;
+    Reason: string;
+  end;
+
+/// <summary>The plan for renaming the parameter ANAME of the routine whose
+///  header ALINE0 belongs to. Parsed on the MASKED text over the header's
+///  own span, so a comment in the parameter list, a header longer than
+///  twelve lines and "const [ref]" are read like any other header; a shape
+///  that cannot be read at all (an operator header, a list that is never
+///  closed) answers ppUnknown WITH the reason, because renaming one of two
+///  names Delphi requires to be identical is a broken unit, not a smaller
+///  change (issue #50).</summary>
+function PlanParameterRename(const ALines: TArray<string>; ALine0: Integer;
+  const AName: string): TParamRenamePlan;
+
 /// <summary>The line in the routine's OTHER header on which the SAME
-///  parameter stands. A parameter is declared TWICE - in the routine's
+///  parameter stands - the projection of PlanParameterRename that older
+///  callers and its own tests use. A parameter is declared TWICE - in the routine's
 ///  declaration and in its implementation header - and Delphi requires the
 ///  two names to be identical: MEASURED with dcc32 37.0 for a class method
 ///  and for a free routine, they differ and the unit does not compile
@@ -211,29 +247,147 @@ uses
   Expert.AutoImport, Expert.UnitIndex, Expert.PascalScanner,
   Expert.InterfaceLinks, Expert.SignatureEdit;
 
+// ---- a parameter is declared TWICE, and only the names count ------------
+
+type
+  // One routine header, read over its OWN span on the MASKED text: a
+  // comment inside the parameter list is then not code, a header of twenty
+  // lines is still one header, and the positions are the real ones.
+  THeaderSpan = record
+    First, Last: Integer;          // 0-based lines; Last carries the ';'
+    EndCol: Integer;               // 1-based column of that ';'
+    HasList: Boolean;
+    Qualified: string;             // 'Foo' or 'TFoo.Foo'
+    Params: string;                // the parameter list as text
+    Names: TArray<TPoint>;         // where the parameter NAMES stand
+    NameTexts: TArray<string>;     // ...and what they are, same order
+  end;
+
+const
+  // A header longer than this is pathological; the answer is then "could
+  // not be read", which refuses a rename instead of half-doing it.
+  MaxHeaderSpanLines = 60;
+
+function IsParamModifierWord(const AWord: string): Boolean;
+begin
+  Result := SameText(AWord, 'const') or SameText(AWord, 'var')
+    or SameText(AWord, 'out') or SameText(AWord, 'constref');
+end;
+
+// ALine0 must BE a header line of AMASKED. Walks its span and collects the
+// positions at which parameter NAMES are declared: at bracket depth 1, in
+// the part of a group before its ':'. So never the routine's own name (it
+// stands before the '('), never a type, never a default value, and never
+// the parameters of a procedural parameter's own list (depth 2).
+function ReadHeaderSpanAt(const AMasked: TArray<string>; ALine0: Integer;
+  out ASpan: THeaderSpan): Boolean;
+var
+  Kind, Joined, Q, P, Rt: string;
+  IsCM: Boolean;
+  Depth, Angle, I, J, K: Integer;
+  Started, InNames: Boolean;
+begin
+  Result := False;
+  ASpan := Default(THeaderSpan);
+  if (ALine0 < 0) or (ALine0 > High(AMasked)) then Exit;
+  if not IsHeaderLine(Trim(AMasked[ALine0]), Kind, IsCM) then Exit;
+  ASpan.First := ALine0;
+  ASpan.Last := -1;
+  Depth := 0;
+  Angle := 0;
+  Started := False;
+  InNames := False;
+  for I := ALine0 to Min(ALine0 + MaxHeaderSpanLines, High(AMasked)) do
+  begin
+    var S := AMasked[I];
+    J := 1;
+    while (J <= Length(S)) and (ASpan.Last < 0) do
+    begin
+      var C := S[J];
+      if IsIdentStart(C) then
+      begin
+        K := J;
+        while (K <= Length(S)) and IsIdentChar(S[K]) do Inc(K);
+        if InNames and (Depth = 1) and (Angle = 0)
+          and not IsParamModifierWord(Copy(S, J, K - J)) then
+        begin
+          ASpan.Names := ASpan.Names + [Point(J - 1, I)];
+          ASpan.NameTexts := ASpan.NameTexts + [Copy(S, J, K - J)];
+        end;
+        J := K;
+        Continue;
+      end;
+      case C of
+        '(', '[':
+          begin
+            Inc(Depth);
+            if (C = '(') and (Depth = 1) and not Started then
+            begin
+              Started := True;
+              ASpan.HasList := True;
+              InNames := True;
+            end;
+          end;
+        ')', ']':
+          begin
+            if Depth > 0 then Dec(Depth);
+            if Depth = 0 then InNames := False;
+          end;
+        '<': Inc(Angle);
+        '>': if Angle > 0 then Dec(Angle);
+        ';':
+          if Depth = 0 then
+          begin
+            ASpan.Last := I;
+            ASpan.EndCol := J;
+          end
+          else if (Depth = 1) and (Angle = 0) then InNames := True;
+        ',': if (Depth = 1) and (Angle = 0) then InNames := True;
+        ':': if (Depth = 1) and (Angle = 0) then InNames := False;
+      end;
+      Inc(J);
+    end;
+    if ASpan.Last >= 0 then Break;
+  end;
+  if ASpan.Last < 0 then Exit;        // never closed within the cap
+  // ...and the join stops AT it: the first ';' of the text is the one
+  // INSIDE the parameter list as soon as there is more than one group.
+  Joined := '';
+  for I := ASpan.First to ASpan.Last - 1 do
+    Joined := Joined + ' ' + AMasked[I];
+  Joined := Joined + ' ' + Copy(AMasked[ASpan.Last], 1, ASpan.EndCol);
+  if not ParseHeader(Trim(Joined), Kind, Q, P, Rt) then Exit;
+  ASpan.Qualified := Q;
+  ASpan.Params := P;
+  Result := True;
+end;
+
 // The line the routine header covering ALine0 STARTS on - ALine0 itself
 // when it is one. A wrapped parameter list is answered by DelphiLSP with
 // whatever line its range starts on, and that need not be the first (1.15.4
 // measured a declaration reported at a continuation line).
-function HeaderLineOf(const ALines: TArray<string>; ALine0: Integer): Integer;
-const
-  MaxHeaderWrap = 40;
+function HeaderLineOfMasked(const AMasked: TArray<string>; ALine0: Integer): Integer;
 var
   Kind: string;
   IsCM: Boolean;
-  E: Integer;
+  Span: THeaderSpan;
 begin
   Result := -1;
-  if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
-  for var I := ALine0 downto Max(0, ALine0 - MaxHeaderWrap) do
+  if (ALine0 < 0) or (ALine0 > High(AMasked)) then Exit;
+  for var I := ALine0 downto Max(0, ALine0 - MaxHeaderSpanLines) do
   begin
-    if not IsHeaderLine(Trim(StripLineComment(ALines[I])), Kind, IsCM) then Continue;
-    CollectHeader(ALines, I, E);
+    if not IsHeaderLine(Trim(AMasked[I]), Kind, IsCM) then Continue;
     // the nearest header above either still covers ALine0 or ALine0 belongs
     // to something else entirely
-    if E >= ALine0 then Result := I;
+    if ReadHeaderSpanAt(AMasked, I, Span) and (Span.Last >= ALine0) then
+      Result := I;
     Exit;
   end;
+end;
+
+function HeaderLineOf(const ALines: TArray<string>; ALine0: Integer): Integer;
+begin
+  Result := HeaderLineOfMasked(MaskCommentsAndStrings(ALines), ALine0);
 end;
 
 // The parameter names of the routine header at ALine0, in order, and its
@@ -242,37 +396,17 @@ end;
 function RoutineParameterNamesOf(const ALines: TArray<string>; ALine0: Integer;
   out AQualified: string): TArray<string>;
 var
-  Kind, Q, P, R: string;
-  IsCM: Boolean;
-  E: Integer;
+  Masked: TArray<string>;
+  Span: THeaderSpan;
 begin
   Result := nil;
   AQualified := '';
-  ALine0 := HeaderLineOf(ALines, ALine0);
+  Masked := MaskCommentsAndStrings(ALines);
+  ALine0 := HeaderLineOfMasked(Masked, ALine0);
   if ALine0 < 0 then Exit;
-  if not IsHeaderLine(Trim(StripLineComment(ALines[ALine0])), Kind, IsCM) then Exit;
-  if not ParseHeader(CollectHeader(ALines, ALine0, E), Kind, Q, P, R) then Exit;
-  AQualified := Q;
-  for var Prm in ParseParamList(P) do
-    if Prm.Name <> '' then Result := Result + [Prm.Name];
-end;
-
-// Every line of the INTERFACE section that declares the free routine ANAME.
-// Deliberately not the implementation section: a header at the outer level
-// there is the routine's own body, and pairing a parameter with another
-// OVERLOAD's body would rename a parameter nobody meant.
-function FreeRoutineDeclLines(const ALines: TArray<string>; const AName: string;
-  AUpTo: Integer): TArray<Integer>;
-begin
-  Result := nil;
-  for var I := 0 to Min(AUpTo - 1, High(ALines)) do
-  begin
-    var Raw := ALines[I];
-    if (Raw = '') or CharInSet(Raw[1], [' ', #9]) then Continue;  // a type's member
-    var Q := '';
-    RoutineParameterNamesOf(ALines, I, Q);
-    if (Q <> '') and SameText(Q, AName) then Result := Result + [I];
-  end;
+  if not ReadHeaderSpanAt(Masked, ALine0, Span) then Exit;
+  AQualified := Span.Qualified;
+  Result := Span.NameTexts;
 end;
 
 function HeaderDeclaresParameter(const ALines: TArray<string>;
@@ -286,83 +420,309 @@ begin
     if SameText(N, AName) then Exit(True);
 end;
 
+// Same names, modifiers and types, in the same order - DEFAULTS ignored,
+// because they live in the declaration only. That is what tells two
+// overloads apart which share a parameter name at the same index, and it
+// is why a pair that does not match is no pair at all.
+function ParamListsMatch(const A, B: string): Boolean;
+var
+  PA, PB: TArray<TSigParam>;
+begin
+  PA := ParseParamList(A);
+  PB := ParseParamList(B);
+  Result := Length(PA) = Length(PB);
+  if not Result then Exit;
+  for var I := 0 to High(PA) do
+    if not (SameText(Trim(PA[I].Name), Trim(PB[I].Name))
+        and SameText(Trim(PA[I].Modifier), Trim(PB[I].Modifier))
+        and SameText(Trim(PA[I].TypeText), Trim(PB[I].TypeText))) then
+      Exit(False);
+end;
+
+// The type body a MEMBER DECLARATION at ALine0 belongs to: the nearest
+// opener above it, with its KIND. Deliberately not EnclosingContainerName /
+// ClassOpenerName, which accept 'class' and 'record' only - an INTERFACE
+// method has no implementation ANYWHERE, and that is not the same as
+// failing to find one (issue #50). A member's own type is always the
+// nearest opener above it: anything between would have to be nested, and
+// then the nested one IS the answer.
+function NearestTypeOpenerAbove(const ALines: TArray<string>; ALine0: Integer;
+  out AName, AKeyword: string): Boolean;
+begin
+  Result := False;
+  AName := '';
+  AKeyword := '';
+  for var I := Min(ALine0, High(ALines)) downto 0 do
+  begin
+    var T := Trim(StripLineComment(ALines[I]));
+    var Eq := Pos('=', T);
+    if Eq <= 1 then Continue;
+    var N := Trim(Copy(T, 1, Eq - 1));
+    if (N = '') or not IsIdentStart(N[1]) then Continue;
+    var Rest := TrimLeft(Copy(T, Eq + 1, MaxInt));
+    if StartsText('packed ', Rest) then Rest := TrimLeft(Copy(Rest, 8, MaxInt));
+    var K := 1;
+    while (K <= Length(Rest)) and IsIdentChar(Rest[K]) do Inc(K);
+    var Kw := LowerCase(Copy(Rest, 1, K - 1));
+    if (Kw <> 'class') and (Kw <> 'interface') and (Kw <> 'dispinterface')
+      and (Kw <> 'record') and (Kw <> 'object') then Continue;
+    if Rest.EndsWith(';') then Continue;    // a forward declaration or an alias
+    var Lt := Pos('<', N);
+    if Lt > 0 then N := Copy(N, 1, Lt - 1);
+    AName := N;
+    AKeyword := Kw;
+    Exit(True);
+  end;
+end;
+
+// Two routine names are the same when they are the same apart from their
+// generic arguments: an implementation header writes "TList<T>.Add" where
+// the declaration says "Add" inside "TList<T>".
+function SameRoutineName(const A, B: string): Boolean;
+
+  function Strip(const S: string): string;
+  begin
+    Result := '';
+    var Angle := 0;
+    for var I := 1 to Length(S) do
+      case S[I] of
+        '<': Inc(Angle);
+        '>': if Angle > 0 then Dec(Angle);
+      else
+        if Angle = 0 then Result := Result + S[I];
+      end;
+  end;
+
+begin
+  Result := SameText(Strip(A), Strip(B));
+end;
+
+// Every header at column 1 named ANAME: a top-level routine's interface
+// declaration, a 'forward' one and its implementation all qualify.
+function TopLevelHeadersNamed(const AMasked: TArray<string>;
+  const AName: string): TArray<Integer>;
+var
+  Span: THeaderSpan;
+begin
+  Result := nil;
+  for var I := 0 to High(AMasked) do
+  begin
+    var Raw := AMasked[I];
+    if (Raw = '') or CharInSet(Raw[1], [' ', #9]) then Continue;
+    if not ReadHeaderSpanAt(AMasked, I, Span) then Continue;
+    if SameRoutineName(Span.Qualified, AName) then Result := Result + [I];
+  end;
+end;
+
+// The headers named ANAME inside the ONE top-level block ALine0 sits in -
+// that is where a nested routine and its own 'forward' declaration live,
+// and nowhere else. A nested routine of the same name in ANOTHER routine
+// is a different symbol and must never be paired with this one.
+function NestedHeadersNamed(const AMasked: TArray<string>; ALine0: Integer;
+  const AName: string): TArray<Integer>;
+var
+  Span: THeaderSpan;
+  Outer: Integer;
+begin
+  Result := nil;
+  Outer := -1;
+  for var I := ALine0 downto 0 do
+    if (AMasked[I] <> '') and not CharInSet(AMasked[I][1], [' ', #9]) then
+    begin
+      Outer := I;
+      Break;
+    end;
+  if Outer < 0 then Exit;
+  for var I := Outer + 1 to High(AMasked) do
+  begin
+    var Raw := AMasked[I];
+    if (Raw <> '') and not CharInSet(Raw[1], [' ', #9]) then Break;
+    if not ReadHeaderSpanAt(AMasked, I, Span) then Continue;
+    if SameRoutineName(Span.Qualified, AName) then Result := Result + [I];
+  end;
+end;
+
+function PlanParameterRename(const ALines: TArray<string>; ALine0: Integer;
+  const AName: string): TParamRenamePlan;
+var
+  Masked: TArray<string>;
+  Span, Other: THeaderSpan;
+  Cands, Matches: TArray<Integer>;
+  Plan: TParamRenamePlan;
+
+  procedure Take(const ASpan: THeaderSpan);
+  begin
+    for var I := 0 to High(ASpan.NameTexts) do
+      if SameText(ASpan.NameTexts[I], AName) then
+        Plan.Positions := Plan.Positions + [ASpan.Names[I]];
+    Plan.Spans := Plan.Spans + [Point(ASpan.Last, ASpan.First)];
+  end;
+
+begin
+  Plan := Default(TParamRenamePlan);
+  Plan.Pairing := ppUnknown;
+  Result := Plan;
+  if (AName = '') or (Length(ALines) = 0) then Exit;
+  Masked := MaskCommentsAndStrings(ALines);
+  var H := HeaderLineOfMasked(Masked, ALine0);
+  if H < 0 then
+  begin
+    Plan.Reason := 'that line does not belong to a routine header';
+    Result := Plan;
+    Exit;
+  end;
+  if not ReadHeaderSpanAt(Masked, H, Span) then
+  begin
+    Plan.Reason := 'this routine header cannot be read (an operator header, '
+      + 'or a parameter list that is never closed), so the other place the '
+      + 'parameter is declared in cannot be found either';
+    Result := Plan;
+    Exit;
+  end;
+  Take(Span);
+  if Length(Plan.Positions) = 0 then
+  begin
+    Plan.Reason := Format('"%s" is not a parameter of %s', [AName, Span.Qualified]);
+    Plan.Spans := nil;
+    Result := Plan;
+    Exit;
+  end;
+
+  // WHICH of the two headers is this one? Not by section - a class may be
+  // declared in the implementation section, and a nested type anywhere
+  // (issue #50) - but by what encloses it.
+  Cands := nil;
+  var Dot := LastDelimiter('.', Span.Qualified);
+  if Dot > 0 then
+  begin
+    // a method's IMPLEMENTATION header -> its declaration in the class
+    var Owner := OwnerTypeOfImplHeader(ALines[H]);
+    var Member := Copy(Span.Qualified, Dot + 1, MaxInt);
+    var Lt := Pos('<', Member);
+    if Lt > 0 then Member := Copy(Member, 1, Lt - 1);
+    if (Owner <> '') and (Member <> '') then
+      Cands := FindMemberDeclarationLines(string.Join(#10, ALines), Owner, Member);
+  end
+  else if not ((ALines[H] <> '') and CharInSet(ALines[H][1], [' ', #9])) then
+    // a TOP-LEVEL routine: its interface declaration, a 'forward' one and
+    // its implementation all carry the bare name at column 1
+    Cands := TopLevelHeadersNamed(Masked, Span.Qualified)
+  else
+  begin
+    // INDENTED and unqualified: either nested in a routine body or a member
+    // declaration. What the nearest unindented line above is decides, and
+    // nothing else - the section does not (a class may be declared in the
+    // implementation section, a type may be nested).
+    var Outer := -1;
+    for var I := H - 1 downto 0 do
+      if (ALines[I] <> '') and not CharInSet(ALines[I][1], [' ', #9]) then
+      begin
+        Outer := I;
+        Break;
+      end;
+    var OKind: string;
+    var OIsCM: Boolean;
+    if (Outer >= 0) and IsHeaderLine(Trim(Masked[Outer]), OKind, OIsCM) then
+      // nested in that routine's body: its own 'forward' declaration is the
+      // only thing that may carry the name, and nothing outside the block
+      Cands := NestedHeadersNamed(Masked, H, Span.Qualified)
+    else
+    begin
+      var TName, TKw: string;
+      if not NearestTypeOpenerAbove(ALines, H, TName, TKw) then
+      begin
+        Plan.Reason := 'the type this declaration belongs to could not be '
+          + 'identified, so the implementation header that carries the same '
+          + 'parameter is unknown';
+        Result := Plan;
+        Exit;
+      end;
+      var Dirs := HeaderDirectives(ALines, Span.First, Span.Last);
+      if (TKw = 'interface') or (TKw = 'dispinterface')
+        or HasWholeWordCI(Dirs, 'abstract') or HasWholeWordCI(Dirs, 'external') then
+      begin
+        // declared once BY DESIGN - there is no implementation anywhere
+        Plan.Pairing := ppSingleHeader;
+        Result := Plan;
+        Exit;
+      end;
+      // EVERY implementation header of that qualified name is a candidate:
+      // with overloads the first one need not be ours (issue #50)
+      Cands := TopLevelHeadersNamed(Masked, TName + '.' + Span.Qualified);
+      if Length(Cands) = 0 then
+      begin
+        Plan.Reason := Format('no implementation of %s.%s was found in this '
+          + 'unit, so the second place the parameter is declared in is unknown',
+          [TName, Span.Qualified]);
+        Result := Plan;
+        Exit;
+      end;
+    end;
+  end;
+
+  // our own header is not a candidate for being the other one
+  var Rest: TArray<Integer> := nil;
+  for var P0 in Cands do
+    if P0 <> Span.First then Rest := Rest + [P0];
+  Cands := Rest;
+
+  Matches := nil;
+  for var P0 in Cands do
+  begin
+    if not ReadHeaderSpanAt(Masked, P0, Other) then Continue;
+    if not ParamListsMatch(Span.Params, Other.Params) then Continue;
+    Matches := Matches + [P0];
+  end;
+
+  if Length(Matches) = 1 then
+  begin
+    ReadHeaderSpanAt(Masked, Matches[0], Other);
+    Take(Other);
+    Plan.Pairing := ppPaired;
+    // sorted, so a caller can read the declaration and the body off the
+    // ends (two or three entries - no comparer needed for that)
+    for var I := 1 to High(Plan.Positions) do
+      for var J := High(Plan.Positions) downto I do
+        if (Plan.Positions[J].Y < Plan.Positions[J - 1].Y)
+          or ((Plan.Positions[J].Y = Plan.Positions[J - 1].Y)
+              and (Plan.Positions[J].X < Plan.Positions[J - 1].X)) then
+        begin
+          var Tmp := Plan.Positions[J];
+          Plan.Positions[J] := Plan.Positions[J - 1];
+          Plan.Positions[J - 1] := Tmp;
+        end;
+  end
+  else if Length(Matches) > 1 then
+    Plan.Reason := Format('%d headers of %s fit this one, so which of them '
+      + 'declares the same parameter cannot be decided here',
+      [Length(Matches), Span.Qualified])
+  else if Length(Cands) = 0 then
+    // nothing else carries that name: a nested routine, or a routine that
+    // is only defined in the implementation section
+    Plan.Pairing := ppSingleHeader
+  else
+    Plan.Reason := Format('the other header of %s does not carry the same '
+      + 'parameter list, so the two cannot be paired', [Span.Qualified]);
+  Result := Plan;
+end;
+
 function FindParameterPartnerLine(const ALines: TArray<string>;
   ALine0: Integer; const AName: string; out APartnerLine0: Integer): Boolean;
 var
-  Q: string;
-  Partners: TArray<Integer>;
+  Plan: TParamRenamePlan;
 begin
-  Result := False;
   APartnerLine0 := -1;
-  if AName = '' then Exit;
-  ALine0 := HeaderLineOf(ALines, ALine0);
-  if ALine0 < 0 then Exit;
-  var Names := RoutineParameterNamesOf(ALines, ALine0, Q);
-  var Idx := -1;
-  for var I := 0 to High(Names) do
-    if SameText(Names[I], AName) then
+  Plan := PlanParameterRename(ALines, ALine0, AName);
+  Result := False;
+  if (Plan.Pairing <> ppPaired) or (Length(Plan.Spans) = 0) then Exit;
+  // the anchor's own span is the first one - the partner is the position
+  // outside it
+  for var Pt in Plan.Positions do
+    if (Pt.Y < Plan.Spans[0].Y) or (Pt.Y > Plan.Spans[0].X) then
     begin
-      Idx := I;
-      Break;
+      APartnerLine0 := Pt.Y;
+      Exit(True);
     end;
-  if Idx < 0 then Exit;     // the routine's own name, or a local variable
-
-  // Which of the two headers is this one? A method's implementation header
-  // carries the qualifier; a free routine's does not, so its section says.
-  var ImplLine := ImplementationLineOf(ALines);
-  var Dot := LastDelimiter('.', Q);
-  Partners := nil;
-  if (Dot > 0) or ((ImplLine <> MaxInt) and (ALine0 > ImplLine)) then
-  begin
-    if Dot > 0 then
-    begin
-      var Owner := OwnerTypeOfImplHeader(ALines[ALine0]);
-      var Member := Copy(Q, Dot + 1, MaxInt);
-      var Lt := Pos('<', Member);
-      if Lt > 0 then Member := Copy(Member, 1, Lt - 1);
-      if (Owner <> '') and (Member <> '') then
-        Partners := FindMemberDeclarationLines(string.Join(#10, ALines),
-          Owner, Member);
-    end
-    else
-      Partners := FreeRoutineDeclLines(ALines, Q, ImplLine);
-  end
-  else
-  begin
-    var L := FindImplementationOfDecl(ALines, ALine0);
-    if L >= 0 then Partners := [L];
-  end;
-
-  for var P0 in Partners do
-  begin
-    if P0 = ALine0 then Continue;
-    var Q2: string;
-    var N2 := RoutineParameterNamesOf(ALines, P0, Q2);
-    // An OVERLOAD that carries another name at that place is another
-    // routine's header - evidence only, or the rename would hit a
-    // parameter nobody meant.
-    if (Idx > High(N2)) or not SameText(N2[Idx], AName) then Continue;
-    var E2: Integer;
-    CollectHeader(ALines, P0, E2);
-    for var I := P0 to Min(E2, High(ALines)) do
-    begin
-      var S := ALines[I];
-      var From := 1;
-      if I = P0 then
-      begin
-        // never the routine's OWN name, which may be spelled like the
-        // parameter: the list starts after the '('
-        var Op := Pos('(', S);
-        if Op = 0 then Continue;
-        From := Op + 1;
-      end;
-      if HasWholeWordCI(Copy(S, From, MaxInt), AName) then
-      begin
-        APartnerLine0 := I;
-        Exit(True);
-      end;
-    end;
-  end;
 end;
 
 function DeclaredParamCount(const ALines: TArray<string>; ALine0: Integer): Integer;
@@ -632,8 +992,9 @@ procedure AddEdit(var ASym: TSafeDeleteSymbol; AFirst, ALast: Integer;
 var
   E: TSafeDeleteEdit;
 begin
-  // XML doc comments directly above belong to the declaration
-  while (AFirst > 0) and Trim(ALines[AFirst - 1]).StartsWith('///') do Dec(AFirst);
+  // XML doc comments directly above belong to the declaration - one rule,
+  // in the unit the quick fix can reach too (forum #225)
+  AFirst := DocCommentStart(ALines, AFirst);
   // no double blank line left behind
   if (AFirst > 0) and (ALast < High(ALines)) and (Trim(ALines[AFirst - 1]) = '')
     and (Trim(ALines[ALast + 1]) = '') then

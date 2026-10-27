@@ -107,6 +107,13 @@ type
     ///  (triggered by the IDE module notifier). In that mode the preview
     ///  skips LSP verification and just does a text-based scan.</summary>
     FUnitRenameMode: Boolean;
+    // A PARAMETER is declared at POSITIONS, not on lines: on one of its
+    // two header lines the routine's own name, a type or a default value
+    // spelled like it must not be renamed with it (issue #50.4). Filled
+    // per run by the parameter plan, empty for every other rename.
+    FParamFile: string;
+    FParamPositions: TArray<TPoint>;
+    FParamSpans: TArray<TPoint>;
     procedure CollectFormEdits(const AFiles: TArray<string>;
       const ADefFile: string; ADefLine: Integer; const AOwnerType,
       AOldName, ANewName: string);
@@ -124,6 +131,10 @@ type
     /// <summary>'' or a report of places where ANewName already exists
     ///  (files of the edit, a member of the owner type, a used unit).</summary>
     function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
+    /// <summary>The candidate sits on one of the parameter's header lines
+    ///  but is NOT one of the places that declare it.</summary>
+    function ParamHeaderButNotTheParameter(const AFile: string;
+      ALine, ACol: Integer): Boolean;
     function VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>; const AOldName, ANewName: string;
       AIncludes: TLspIncludeContext;
       const ATargets: TLspSymbolTargets; AClient: TLspClient;
@@ -1123,7 +1134,30 @@ begin
     // it cannot be started this IS the main client.
     VClient := TLspManager.Instance.VerificationClient(Client, RootPath,
       FContext.ProjectFile, DelphiLspJson);
-    if VClient <> Client then
+    // A PARAMETER position is never answered by DelphiLSP: a parameter IS
+    // declared there, and the server answers null at a declaration.
+    // MEASURED 2026-10-21 on a warm session that resolves a USE of the same
+    // parameter two lines further down - both headers answered nothing.
+    // The probe below asks BOTH sessions for the declaration to find out
+    // which one can answer, so for such a caret it can only ever end in its
+    // own timeout (82 s on this project) and leave everything as it is -
+    // which is exactly the state skipping it reaches, 82 s earlier.
+    // Deliberately only the parameter: a caret on a method DECLARATION is
+    // answered when it overrides one, and that answer (the ancestor) is
+    // what makes the rename reach the whole family.
+    var CaretOnParameter := False;
+    begin
+      var CaretText: string;
+      if EditorOrDiskReader()(FContext.FileName, CaretText) then
+        CaretOnParameter := HeaderDeclaresParameter(
+          CaretText.Replace(#13#10, #10).Split([#10]),
+          FContext.Line - 1, FContext.WordAtCursor);
+      if CaretOnParameter then
+        FDiagLog := FDiagLog + 'The caret is on a PARAMETER - DelphiLSP ' +
+          'answers nothing at one, so the declaration probe is skipped: it ' +
+          'could only run into its own timeout.' + sLineBreak;
+    end;
+    if (VClient <> Client) and not CaretOnParameter then
     begin
       // otherwise it would read the start file from DISK
       var StartContent: string;
@@ -1385,6 +1419,16 @@ begin
     FHost.SetStatus('Searching for interface implementations...');
 
     var OwnerType := TImplementationFinder.FindContainingType(DefFilePath, DefLine);
+    // A PARAMETER is not a member: it has no implementers and no overrides,
+    // while the scan searches by NAME - so a same-named member of a
+    // descendant would have been renamed with it (issue #50.4).
+    if CaretOnParameter and (OwnerType <> '') then
+    begin
+      FDiagLog := FDiagLog + 'The caret is on a PARAMETER, so the owner-type '
+        + 'implementation scan is skipped: a parameter has no implementers, '
+        + 'and the scan would search for same-named MEMBERS.' + sLineBreak;
+      OwnerType := '';
+    end;
     FDiagLog := FDiagLog + 'Owner type for impl verification: ' +
       IfThen(OwnerType <> '', OwnerType, '(none - free procedure, impl scan skipped)') + sLineBreak;
 
@@ -1452,19 +1496,54 @@ begin
       // identifier). DelphiLSP answers nothing at either of them, so the
       // partner can only come from the sources; without it the rename changed
       // one of the two and left a unit that does not compile (issue #49).
-      try
-        var PartnerLine: Integer;
-        if FindParameterPartnerLine(ReadDelphiFileLines(AnchorFile), AnchorLine,
-             FContext.WordAtCursor, PartnerLine) then
-        begin
-          Targets.Add(AnchorFile, PartnerLine);
-          FDiagLog := FDiagLog + Format('Parameter partner: %s:%d - the same ' +
-            'parameter in the routine''s other header, which Delphi requires ' +
-            'to carry the same name.%s',
-            [ExtractFileName(AnchorFile), PartnerLine + 1, sLineBreak]);
+      FParamFile := '';
+      FParamPositions := nil;
+      FParamSpans := nil;
+      if CaretOnParameter then
+      begin
+        var PPlan := Default(TParamRenamePlan);
+        try
+          PPlan := PlanParameterRename(ReadDelphiFileLines(AnchorFile),
+            AnchorLine, FContext.WordAtCursor);
+        except
+          on E: Exception do
+          begin
+            PPlan.Pairing := ppUnknown;
+            PPlan.Reason := E.Message;
+          end;
         end;
-      except
-        // a diagnosis of the sources, never a reason to fail the rename
+        if PPlan.Pairing = ppUnknown then
+        begin
+          // Renaming ONE of two names Delphi requires to be identical is a
+          // broken unit, not a smaller change - so nothing is changed
+          // (issue #50.3).
+          FDiagLog := FDiagLog + 'Refused: ' + PPlan.Reason + sLineBreak;
+          FreeAndNil(IncCtx);
+          FHost.SetPreviewItems(nil);
+          FHost.SetDetailsText(FDiagLog);
+          FHost.SetStatus(Format('"%s" is a PARAMETER, and Delphi requires the '
+            + 'same name in the routine''s declaration and in its '
+            + 'implementation header - %s. Renaming one of the two would not '
+            + 'compile, so nothing was changed.',
+            [FContext.WordAtCursor, PPlan.Reason]));
+          FHost.EnableRename(False);
+          FHost.SetBusy(False);
+          Exit;
+        end;
+        FParamFile := AnchorFile;
+        FParamPositions := PPlan.Positions;
+        FParamSpans := PPlan.Spans;
+        for var Pt in PPlan.Positions do Targets.Add(AnchorFile, Pt.Y);
+        if PPlan.Pairing = ppPaired then
+          FDiagLog := FDiagLog + Format('Parameter: declared at %d place(s) in '
+            + '%s - both headers, which Delphi requires to carry the same '
+            + 'name.%s', [Length(PPlan.Positions), ExtractFileName(AnchorFile),
+            sLineBreak])
+        else
+          FDiagLog := FDiagLog + 'Parameter: this routine has ONE header (an '
+            + 'interface or abstract method, a nested routine, or a routine '
+            + 'only defined in the implementation section), so there is no '
+            + 'second place to change.' + sLineBreak;
       end;
       // The implementation scan is for OTHER types (interface implementers,
       // overrides in descendants). A header of the OWNER type itself that is
@@ -2013,6 +2092,23 @@ end;
 
 { LSP verification }
 
+function TLspRenameWizard.ParamHeaderButNotTheParameter(const AFile: string;
+  ALine, ACol: Integer): Boolean;
+var
+  InSpan: Boolean;
+begin
+  Result := False;
+  if (FParamFile = '') or (Length(FParamSpans) = 0) then Exit;
+  if not SameText(ExpandFileName(AFile), ExpandFileName(FParamFile)) then Exit;
+  InSpan := False;
+  for var S in FParamSpans do
+    if (ALine >= S.Y) and (ALine <= S.X) then InSpan := True;
+  if not InSpan then Exit;
+  for var Pt in FParamPositions do
+    if (Pt.Y = ALine) and (Pt.X = ACol) then Exit;   // it IS the parameter
+  Result := True;
+end;
+
 function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>;
   const AOldName, ANewName: string; AIncludes: TLspIncludeContext;
   const ATargets: TLspSymbolTargets; AClient: TLspClient;
@@ -2126,6 +2222,18 @@ begin
             [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1, PreLink.TypeName]);
           Continue;
         end;
+      end;
+
+      // A PARAMETER is declared at a POSITION. On its header lines only
+      // those positions are the parameter: the routine's own name may be
+      // spelled like it, so may a type or a default value (issue #50.4).
+      if ParamHeaderButNotTheParameter(C.FilePath, C.Line, C.Col) then
+      begin
+        Inc(SkippedCount);
+        FDiagLog := FDiagLog + Format('  [%d] %s:%d:%d => on the parameter''s '
+          + 'own header, but not where it is declared -> SKIP' + sLineBreak,
+          [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
+        Continue;
       end;
 
       // Hand the file to DelphiLSP - ONLY when its content changed since it

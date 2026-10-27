@@ -167,19 +167,23 @@ end;
 
 // Added to an EMPTY answer of the lsp_* tools when the file was sent a
 // moment ago - DelphiLSP is silent in a unit while it analyses it.
-// APrefix is the tool's own sentence: it goes into the SAME note, because
-// a second AddPair('note') would be a duplicate KEY (which is what
-// lsp_hover answered until 2.0.6).
+// Everything goes into the SAME note, because a second AddPair('note')
+// would be a duplicate KEY (which is what lsp_hover answered until 2.0.6).
+// AEmptySentence says what an EMPTY answer means for this tool and
+// ADescription what the answer is - two different things, and passing the
+// second one as the first dropped the first (issue #50.5). AAboutSymbol is
+// False for the tools that resolve no position at all.
 procedure AddFreshNote(ARes: TJSONObject; AClient: TLspClient;
-  const AFile: string; const APrefix: string = '';
-  ASuggestIndex: Boolean = False);
+  const AFile: string; const AEmptySentence: string = '';
+  const ADescription: string = ''; ASuggestIndex: Boolean = False;
+  AAboutSymbol: Boolean = True);
 begin
   // The TEXT is a pure rule (Mcp.Protocol) so a test can hold it; here
   // only the two facts it needs are measured: how long ago we sent the
   // file, and whether the session has analysed it at all.
-  SetJsonNote(ARes, LspEmptyAnswerNote(APrefix, AFile,
+  SetJsonNote(ARes, LspEmptyAnswerNote(AEmptySentence, ADescription, AFile,
     McpLspSentAgoMs(AClient, AFile),
-    AClient.HasReceivedDiagnostics(AFile), ASuggestIndex));
+    AClient.HasReceivedDiagnostics(AFile), ASuggestIndex, AAboutSymbol));
 end;
 
 function McpWaitLspAnalysed(AClient: TLspClient; const AFile: string;
@@ -279,7 +283,7 @@ begin
   Res.AddPair('hover', H);
   if H = '' then
     AddFreshNote(Res, Client, F,
-      'DelphiLSP returned nothing for this position.', True);
+      'DelphiLSP returned nothing for this position.', '', True, True);
   Result := McpOk(Res);
 end;
 
@@ -294,7 +298,7 @@ begin
   var Res := TJSONObject.Create;
   var Locs := Client.GotoDefinition(F, L0, C0);
   Res.AddPair('locations', LocationsToJson(Locs));
-  if Length(Locs) = 0 then AddFreshNote(Res, Client, F, '', True);
+  if Length(Locs) = 0 then AddFreshNote(Res, Client, F, '', '', True, True);
   Result := McpOk(Res);
 end;
 
@@ -313,7 +317,10 @@ begin
     'find_implementations (plugin scan) is usually more complete.';
   // An empty answer deserves the reason as well, like lsp_definition's -
   // and it goes into the SAME note, never a second one.
-  if Length(Locs) = 0 then AddFreshNote(Res, Client, F, What, True)
+  if Length(Locs) = 0 then
+    AddFreshNote(Res, Client, F, 'DelphiLSP returned no implementation for '
+      + 'this position - for a method that neither overrides nor implements '
+      + 'one that is the normal answer.', What, False, True)
   else SetJsonNote(Res, What);
   Result := McpOk(Res);
 end;
@@ -349,7 +356,9 @@ begin
   var Res := TJSONObject.Create;
   Res.AddPair('symbols', Arr);
   const What = 'raw LSP DocumentSymbol[] - ranges are 0-based.';
-  if Arr.Count = 0 then AddFreshNote(Res, Client, F, What)
+  if Arr.Count = 0 then
+    AddFreshNote(Res, Client, F, 'DelphiLSP returned no symbols for this '
+      + 'unit.', What, False, False)
   else SetJsonNote(Res, What);
   Result := McpOk(Res);
 end;
@@ -392,7 +401,9 @@ begin
   if R <> nil then Res.AddPair('signatureHelp', R) else Res.AddPair('signatureHelp', TJSONNull.Create);
   const What = 'raw LSP SignatureHelp (activeParameter/activeSignature ' +
     '0-based).';
-  if R = nil then AddFreshNote(Res, Client, F, What)
+  if R = nil then
+    AddFreshNote(Res, Client, F, 'DelphiLSP returned no signature help at '
+      + 'this position.', What, False, False)
   else SetJsonNote(Res, What);
   Result := McpOk(Res);
 end;
@@ -437,7 +448,9 @@ begin
     const What = 'kind = LSP CompletionItemKind (2 method, 3 function, ' +
       '5 field, 6 variable, 7 class, 8 interface, 10 property, 13 enum, ' +
       '14 keyword, 21 constant, 22 struct).';
-    if Total = 0 then AddFreshNote(Res, Client, F, What)
+    if Total = 0 then
+      AddFreshNote(Res, Client, F, 'DelphiLSP returned no completions at '
+        + 'this position.', What, False, False)
     else SetJsonNote(Res, What);
     Result := McpOk(Res);
   finally

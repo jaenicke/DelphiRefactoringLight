@@ -50,6 +50,8 @@ implementation
 
 function ReplaceFilePossiblyInUse(const ASource, ATarget: string;
   out AMovedAside: string): Boolean;
+const
+  MaxAsideTries = 20;
 var
   Aside: string;
   Tries: Integer;
@@ -71,11 +73,24 @@ begin
       if not TFile.Exists(ATarget) then raise;
   end;
 
+  // The name has to be FREE, and in practice free on the first try: the
+  // previous install's aside copy is still there (a process was started
+  // from it, so nothing can delete it). A timestamp differs per install,
+  // the try counter within one - Random would need Randomize, and without
+  // it every process walks the same sequence from the same first value.
+  // DIGITS ONLY, deliberately: a consumer tells its own aside copies from
+  // somebody else's file by the "<name>.<digits>.old" shape.
   Tries := 0;
   repeat
     Inc(Tries);
-    Aside := ATarget + '.' + IntToStr(Random(1000000)) + '.old';
-  until (not TFile.Exists(Aside)) or (Tries > 20);
+    Aside := Format('%s.%s%d.old',
+      [ATarget, FormatDateTime('yyyymmddhhnnsszzz', Now), Tries]);
+  until (not TFile.Exists(Aside)) or (Tries >= MaxAsideTries);
+
+  // Saying so beats renaming over a file somebody may still be running.
+  if TFile.Exists(Aside) then
+    raise Exception.CreateFmt('Cannot move %s aside: no unused name after ' +
+      '%d tries (last tried: %s)', [ATarget, Tries, Aside]);
 
   // A rename is allowed while the file is open; a delete is not, so the
   // aside copy is LEFT BEHIND rather than removed. It is evidence that

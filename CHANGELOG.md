@@ -6,6 +6,254 @@ development builds and were never released.
 
 ---
 
+## 2.6.10 - 2026-10-26
+
+### Extract Method refused two things the compiler accepts
+
+Issue #51 by Ian Branch, both of them in the parameter-type check 2.6.3
+added, and both measured with dcc32 37.0 before anything was changed.
+
+A parameter the block uses but that comes from the **enclosing routine's
+own header** was refused when its type is written out in place - the
+reported case is `const A: array of Integer`. That parameter already *is*
+an open array, and forwarding its declaration verbatim compiles and means
+the same thing. What 2.6.3 was built for stays refused: a **local**
+dynamic array promoted to a parameter really does lose `SetLength`
+(E2008), which the same probe confirms.
+
+And a type name is a name by the language's rule, not by an ASCII set:
+`TKündigung`, `Verträge.TÄnderung` and the escaped `&Type` are legal type
+names, compile as parameter types, and were read as "written out in place".
+
+Both refused rather than wrote wrong code, so they cost an extraction, not
+a unit.
+
+---
+
+## 2.6.9 - 2026-10-26
+
+### A build that failed does not get its artefacts installed
+
+Found while reviewing the installer helper before porting it upstream, by
+three of four review dimensions independently.
+
+Since 1.30.1 the installer copies a file the build it just ran PRODUCED -
+that is how the MCP bridge reaches its install folder. The build's result
+was discarded, though, so a compile error left the previous build's exe
+being copied over the target and logged as "Build artefacts installed: 1",
+with the entry's post event then verifying the old binary. That is exactly
+the stale-binary class of bug the staged copy was added to prevent, and it
+had a nine-day and a four-version precedent in this plugin's own history.
+
+The copy now happens only when the build succeeded, and when it did not,
+the log says how many artefacts were NOT installed and that the target
+keeps the file it had. A copy pass in which every file failed no longer
+writes a green success line either.
+
+### The name an install moves a running file aside under
+
+It promised to be unique and was not: it came from `Random` without
+`Randomize`, so every process started at the same first value and every
+install walked the same collisions - and after twenty tries the loop left
+with a name that exists, where the rename then failed with a message about
+a destination nobody had asked for. It is a timestamp now, and a name that
+is still taken is refused with its reason.
+
+The shape has a consumer: since 1.30.1 the installer writes the bridge's
+aside copy, and `CanonicalBridgeExePath` reads it back to tell "the install
+replaced the exe under this running session" from "the install never
+finished" - two situations that need opposite advice. A test now holds
+those two ends together.
+
+---
+
+## 2.6.8 - 2026-10-26
+
+### A parameter is declared at two POSITIONS, and only one pair of them
+
+Issue #50, an audit of the parameter pairing 2.6.1 had just shipped. Five
+points, and the first four are the same mistake seen from four sides: a
+parameter was looked for by NAME and on LINES, where it really stands at two
+positions in two headers that have to be the same routine.
+
+What that produced, each case measured against the compiler:
+
+- two overloads sharing a parameter name paired crosswise, so renaming
+  `Init(const Title: string)` renamed the `Title` of `Init(const Title:
+  string; X: Integer)` as well - and from a declaration the FIRST
+  implementation of that name was taken, whichever it was;
+- a nested routine paired with an interface declaration of the same name,
+  i.e. with a routine in another type entirely;
+- where the pairing could not be established the rename went ahead with one
+  header, which does not compile (E2037, plus an undeclared identifier for
+  every use in the body). Six shapes reached that: a class declared in the
+  implementation section, a nested type, a `{ }` comment inside the
+  parameter list, a header longer than twelve lines, a `const [ref]`
+  parameter, and a `class operator`;
+- and the targets were whole LINES, so a parameter named like its own
+  routine renamed the routine name too, a type or a default value spelled
+  like the parameter counted as the parameter, and the owner-type scan -
+  which exists to reach a method's overrides - ran with the parameter's name
+  and could rename a same-named parameter of a descendant.
+
+A parameter rename is therefore planned as a whole now: both headers are
+read with their real parameter lists, they pair only when those lists agree
+in names, modifiers and types, exactly one candidate has to fit, and every
+renamed place is a position inside a parameter list - never a line. A
+routine that is declared once by design (an interface or dispinterface
+member, `abstract`, `external`, a nested routine) is recognised as such
+instead of being paired with something; anything else that cannot be
+established REFUSES the rename and says why.
+
+### An empty answer lost the one thing it exists to say
+
+The fifth point, and it is older: 2.1.1 let a tool phrase the empty answer
+in its own words, and four tools then passed their DESCRIPTION there. So
+`lsp_implementation`, `lsp_document_symbols`, `lsp_signature_help` and
+`lsp_completion` never said that nothing came back, and the paragraph about
+an unresolved symbol followed a sentence about ranges.
+
+The two are separate now - what an empty answer MEANS for this tool, and
+what the answer is - and the symbol diagnosis only goes to the tools that
+resolve a position. `lsp_implementation` no longer points at
+`find_original_symbol` either: having no implementation is its normal
+answer.
+
+---
+
+## 2.6.7 - 2026-10-26
+
+### "Remove unused private" grew the unit by a blank line
+
+Found by running the fix of 2.6.4 on a real unit: the member and both its
+documentation blocks went, the two neighbours kept exactly one blank line
+between them - and the unit had one line more than before, at its very end.
+
+The removal joined its lines through a `TStringList`, which appends a line
+break of its own; the empty element that stands for the file's own final
+break then became a new blank line. Every removal added one. The same join
+also used the system line break, so the whole-file path would have rewritten
+an LF-only unit as CRLF - exactly what the line-ending check exists to
+prevent.
+
+That rule already existed twice in this plugin (the method move has it, and
+a copy sat forty lines below the defect in the same unit). It has one home
+now, next to the split it inverts, and the two copies use it.
+
+---
+
+## 2.6.6 - 2026-10-26
+
+### Extract Method: a member is not something the block needs
+
+Two reports from the same method: the extracted routine was given a
+parameter for `AWorkSheet.Cell` and none for the `LineStr` it really uses,
+and it declared a local `AsFloat: string` that nothing reads - `AsFloat`
+being a `Double` property of a cell.
+
+Both start in the same place: the block's identifiers were collected with
+every name the text holds, the MEMBER after a dot included. For
+`AWorkSheet.Cell['A' + LineStr].AsString` that is `Cell` and `AsString` as
+well - names that belong to a type and that the new routine can never be
+given. Each one costs a DelphiLSP round trip, and wherever the answer does
+not place it safely, such a name ends up as a parameter or as a local of
+the new routine. A member is skipped now, as the scan that looks for uses
+OUTSIDE the block has always done. A range (`cA..cZ`) is not a member
+access, and a name that is a member here and a variable three characters
+on is still found - at the right place.
+
+### ...and the selection's columns are the ones in the file
+
+`IOTAEditBlock` reports DISPLAY columns - a tab counts as its width on
+screen - while everything that works with a selection uses them as
+positions in the text. On a tab-indented file that shifts every position
+of the selection's FIRST line, so Extract Method asked DelphiLSP about
+whatever stood there instead. The conversion the completion popup already
+uses is applied to a selection now; on a line without a tab nothing changes at
+all.
+
+---
+
+## 2.6.5 - 2026-10-21
+
+### The install on a machine where Delphi belongs to another account
+
+Where Delphi was installed by a different user, its installer writes that
+user's Documents folder into `rsvars.bat` and the registry as the common
+directory - and msbuild then dies with `MSB3191` on folders the build never
+writes to. 1.25.3 moved the outputs (BPL, DCP, `.hpp`) away from there,
+which was not enough: `CodeGear.Delphi.Targets` also builds its
+"create these directories" list from `$(DelphiHPPOutputPath)` and a `Dcp`
+path of its own, which no `DCC_*` override reaches. Measured on both
+projects: two `MSB3191` survived.
+
+The ROOT moves with the outputs now - as an msbuild property, so the
+environment keeps Delphi's own value and the `bds.exe` fallback still finds
+the IDE's packages. For the helper that is built first this is
+unconditional (it produces an exe and writes none of those folders); for
+the entries of the install it happens only where this account really cannot
+write the common directory, i.e. exactly where the output root moved too.
+The artefacts still land where the explicit outputs say - measured.
+
+---
+
+## 2.6.4 - 2026-10-21
+
+### "Remove unused private ..." takes the XMLDOC with it
+
+Suggested in the forum: the quick fix removed the declaration and the
+implementation of an unused private member and left the `///` comments
+above them behind, documenting nothing. A `///` block describes what
+follows it, so it goes with it - above the declaration and above the body.
+Safe delete has always done this; it is one rule in one place now, and
+both ask it.
+
+---
+
+## 2.6.3 - 2026-10-21
+
+### Extract Method keeps a type that is written out in place
+
+Reported in the forum: a local `Handles: array[0..0] of THandle` arrived in
+the extracted method as `Handles: array;`, which compiles nowhere. The type
+was read as the first identifier after the colon, so everything from the
+`[` or the ` of ` on was dropped - the same for `set of Byte`,
+`string[20]`, `^Integer` and `procedure(X: Integer) of object`. Both paths
+that determine a type had it: the DelphiLSP hover and the fallback that
+reads the declaration line when there is no hover.
+
+A local that MOVES into the new method keeps its type verbatim now. A
+variable the block SHARES with the code around it would become a
+parameter - and there such a type is not allowed at all (measured with
+dcc32: E2029). That case is refused with the reason and the way out
+(give the type a name) instead of generating something that does not
+compile. `array of T` is refused too: it is accepted in a parameter list,
+but as an OPEN array, which is no longer the dynamic array it came from -
+`SetLength` on it does not compile.
+
+---
+
+## 2.6.2 - 2026-10-21
+
+### A rename on a parameter stops waiting for an answer that cannot come
+
+Starting a rename on a parameter in a declaration works since 2.6.1 - after
+82 seconds of nothing. Before the scan, the rename asks BOTH DelphiLSP
+sessions for the symbol's declaration, to find out which of the two can
+answer at all; a freshly started agent session answers everything with null
+and nothing else can tell them apart. For a parameter neither one ever
+answers, because a parameter is declared at that very position and the
+server says nothing at a declaration - measured on a warm session that
+resolves a use of the same parameter two lines further down. So that probe
+could only ever end in its own timeout, and the scan then continues exactly
+as it does when the probe is skipped. It is skipped now.
+
+Only for a parameter: a caret on a method declaration IS answered when that
+method overrides one, and that answer - the ancestor - is what makes the
+rename reach the whole family.
+
+---
+
 ## 2.6.1 - 2026-10-20
 
 ### Renaming a parameter changes both of its declarations (issue #49)

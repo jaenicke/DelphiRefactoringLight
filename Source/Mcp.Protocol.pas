@@ -276,8 +276,9 @@ type
 ///  RSS-5463 is the known one) - and THEN find_original_symbol, which asks
 ///  the identifier index, is the way out. Blaming the .dcu in that case
 ///  sent a reviewing session looking in the wrong place.</summary>
-function LspEmptyAnswerNote(const APrefix, AFile: string; AAgoMs: Integer;
-  AUnitAnalysed, ASuggestIndex: Boolean): string;
+function LspEmptyAnswerNote(const AEmptySentence, ADescription,
+  AFile: string; AAgoMs: Integer;
+  AUnitAnalysed, ASuggestIndex, AAboutSymbol: Boolean): string;
 
 /// <summary>The sections the guide is built from.</summary>
 function McpGuideSections: TArray<TMcpGuideSection>;
@@ -1837,8 +1838,9 @@ begin
      string.Join(', ', KnownToolArguments(ATool))]);
 end;
 
-function LspEmptyAnswerNote(const APrefix, AFile: string; AAgoMs: Integer;
-  AUnitAnalysed, ASuggestIndex: Boolean): string;
+function LspEmptyAnswerNote(const AEmptySentence, ADescription,
+  AFile: string; AAgoMs: Integer;
+  AUnitAnalysed, ASuggestIndex, AAboutSymbol: Boolean): string;
 
   procedure Add(const AText: string);
   begin
@@ -1848,20 +1850,28 @@ function LspEmptyAnswerNote(const APrefix, AFile: string; AAgoMs: Integer;
 
 begin
   Result := '';
-  // The tool''s own sentence comes first and the generic text must not
-  // say it again - "DelphiLSP returned nothing for this position.
-  // DelphiLSP returned nothing." was exactly that (2.0.6).
-  if APrefix <> '' then
-    Add(APrefix)
+  // WHAT AN EMPTY ANSWER MEANS comes first - in the tool's own words when
+  // it has them, and generically otherwise. It is deliberately not the
+  // same parameter as the DESCRIPTION of the answer: passing a description
+  // there used to replace this sentence, so the one thing the note exists
+  // to say was the one thing missing (issue #50.5).
+  if AEmptySentence <> '' then
+    Add(AEmptySentence)
   else
     Add('DelphiLSP returned nothing.');
+  if ADescription <> '' then Add(ADescription);
 
   if (AAgoMs >= 0) and (AAgoMs < 60000) then
     Add(Format('%s was (re)sent to DelphiLSP %d s ago because its content ' +
       'changed, so it may still be analysing it: retry shortly.',
       [ExtractFileName(AFile), AAgoMs div 1000]));
 
-  if AUnitAnalysed then
+  if AUnitAnalysed and not AAboutSymbol then
+    // document symbols, signature help and completion do not resolve a
+    // symbol at all: the paragraph below would be a wrong lead there.
+    Add('The session HAS analysed this unit, so this is the server''s own '
+      + 'answer here and not a timing problem.')
+  else if AUnitAnalysed then
   begin
     // The unit we ASKED about is fine, so the silence is about the symbol -
     // and there are exactly two causes, which only the log tells apart.

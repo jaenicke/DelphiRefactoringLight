@@ -41,7 +41,15 @@ set "MSBUILD_LOG=%TEMP%\dih_msbuild.log"
 :: $(BDSCOMMONDIR), which rsvars.bat hard-codes to the Documents folder of
 :: whoever INSTALLED Delphi. Where that is another account, msbuild dies
 :: with MSB3191 on folders this build never uses (forum log 2026-10-15).
-msbuild "%DPROJ%" /t:Build /tv:4.0 /p:Platform=Win32 /p:Config=Release /p:DCC_ExeOutput="%EXEDIR%\." /p:DCC_BplOutput="%TEMP%" /p:DCC_DcpOutput="%TEMP%" /p:DCC_HppOutput="%TEMP%" /v:m /nologo > "%MSBUILD_LOG%" 2>&1
+:: Overriding the three OUTPUTS is not enough and looked like it was: the
+:: targets file also builds its directory list from $(DelphiHPPOutputPath)
+:: and from a Dcp path of its own, neither of which DCC_HppOutput /
+:: DCC_DcpOutput reach (measured 2026-10-21 - two MSB3191 survived). The
+:: ROOT is what has to move, and as a PROPERTY: the environment keeps the
+:: IDE's own value, which the bds.exe fallback below needs to find its
+:: packages.
+set "DIH_COMMON=%TEMP%\dih_common"
+msbuild "%DPROJ%" /t:Build /tv:4.0 /p:Platform=Win32 /p:Config=Release /p:DCC_ExeOutput="%EXEDIR%\." /p:BDSCOMMONDIR="%DIH_COMMON%" /v:m /nologo > "%MSBUILD_LOG%" 2>&1
 set MSBUILD_ERR=%ERRORLEVEL%
 
 :: Check for "does not support command line compiling" in output

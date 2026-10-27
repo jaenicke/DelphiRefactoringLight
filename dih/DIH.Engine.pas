@@ -372,7 +372,9 @@ end;
 
 procedure TDIHEngine.InstallEntry(AEntry: TDIHEntry; APlatform: TDIHPlatform; const ABuildConfig: string);
 var
-  FileCount, Failed: Integer;
+  FileCount, Failed, Pending: Integer;
+  Built: Boolean;
+  F: TDIHFileEntry;
 begin
   // Pre-events
   if AEntry.PreEvents.Count > 0 then
@@ -400,32 +402,54 @@ begin
   if AEntry.Files.Count > 0 then
   begin
     FileCount := FFileOps.CopyFiles(AEntry.Files.ToArray, APlatform, False, Failed);
-    if (FileCount > 0) or (Failed > 0) then
+    if FileCount > 0 then
     begin
       FLogger.Success('Files copied: %d', [FileCount]);
       Inc(FSuccessCount);
-      Inc(FErrorCount, Failed);
     end;
+    // A file that did not arrive must reach the SUMMARY - that is the only
+    // place anybody reads, and an "OK" row above an error line is how a
+    // stale file can survive version after version. CopyFiles has already
+    // named each one, so a pass in which everything failed adds the errors
+    // and no success line at all.
+    Inc(FErrorCount, Failed);
   end;
 
   // 4. Build projects
+  Built := True;
   if AEntry.BuildProjects.Count > 0 then
-    BuildProjectsOf(AEntry, APlatform, ABuildConfig);
+    Built := BuildProjectsOf(AEntry, APlatform, ABuildConfig);
 
   // 4b. ... and the ARTEFACTS of that build afterwards. An entry that
   // builds an exe and installs it would otherwise copy the PREVIOUS
   // build - the copy ran before the compiler did.
   if AEntry.Files.Count > 0 then
   begin
-    FileCount := FFileOps.CopyFiles(AEntry.Files.ToArray, APlatform, True, Failed);
-    if (FileCount > 0) or (Failed > 0) then
+    if Built then
     begin
-      FLogger.Success('Build artefacts installed: %d', [FileCount]);
-      Inc(FSuccessCount);
-      // A file that did not arrive must reach the SUMMARY - that is the
-      // only place anybody reads, and an "OK" row above an error line is
-      // how a stale exe can survive version after version.
+      FileCount := FFileOps.CopyFiles(AEntry.Files.ToArray, APlatform, True, Failed);
+      if FileCount > 0 then
+      begin
+        FLogger.Success('Build artefacts installed: %d', [FileCount]);
+        Inc(FSuccessCount);
+      end;
       Inc(FErrorCount, Failed);
+    end
+    else
+    begin
+      // The "artefacts" of a build that FAILED are the files of the
+      // PREVIOUS build. Installing those is exactly what this stage
+      // exists to prevent: the target would be replaced by a stale
+      // binary, the entry would log it as installed, and a post event
+      // would then verify the old file. The build's own failure is
+      // already counted - this says what did NOT happen because of it.
+      Pending := 0;
+      for F in AEntry.Files do
+        if F.AfterBuild and (APlatform in F.Platforms) then
+          Inc(Pending);
+      if Pending > 0 then
+        FLogger.Warning('Build failed - %d build artefact(s) were NOT ' +
+          'installed, so the target keeps the file it had', [Pending]);
     end;
   end;
 

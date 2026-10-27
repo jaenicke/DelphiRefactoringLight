@@ -408,13 +408,9 @@ end;
 
 function JoinPlannedLines(const ALines: TArray<string>;
   const AOldContent: string): string;
-var
-  LB: string;
 begin
-  if Pos(#13#10, AOldContent) > 0 then LB := #13#10
-  else if Pos(#10, AOldContent) > 0 then LB := #10
-  else LB := sLineBreak;
-  Result := string.Join(LB, ALines);
+  // The rule lives next to SplitContentLines, which it inverts.
+  Result := JoinContentLines(ALines, AOldContent);
 end;
 
 function MembersInLineRange(const ALines: TArray<string>;

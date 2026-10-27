@@ -262,6 +262,16 @@ begin
         T := TrimLeft(Copy(T, Length(M) + 1, MaxInt));
         Break;
       end;
+    // ...and Delphi writes it AFTER the modifier ("const [ref] A: T"): an
+    // attribute left in front of the name made the NAME unreadable, so
+    // nothing recognised the parameter at all (issue #50).
+    while T.StartsWith('[') do
+    begin
+      var E := Pos(']', T);
+      if E = 0 then Break;
+      Attr := Attr + Copy(T, 1, E) + ' ';
+      T := TrimLeft(Copy(T, E + 1, MaxInt));
+    end;
     Modifier := Trim(Attr + Modifier);
     var Names := T;
     var TypeText := '';

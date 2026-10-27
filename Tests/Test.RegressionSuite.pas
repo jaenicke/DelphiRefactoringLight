@@ -446,6 +446,10 @@ type
     [Test] procedure RemoveLastVar_TakesTheVarKeywordLineAlong;
     [Test] procedure DeclareVar_GoesBeforeBeginAndAddsItsUnit;
     [Test] procedure GeneratingKinds_HaveNoTextPreview;
+    /// <summary>Forum #225: "Remove unused private ..." took the
+    ///  declaration and the body and left the XMLDOC above them behind,
+    ///  documenting nothing.</summary>
+    [Test] procedure RemovePrivate_TakesTheDocCommentAlong;
   end;
 
   /// <summary>Issue #20: the uses cleanup offered units for removal that the
@@ -608,6 +612,18 @@ type
     [Test] procedure AMethodNameMustBeAnIdentifier;
     [Test] procedure TheExpressionIsMatchedAsCode;
     [Test] procedure LinesAreSplitOnEveryLineBreakStyle;
+    /// <summary>Forum #224: a local "Handles: array[0..0] of THandle"
+    ///  arrived in the extracted method as "Handles: array;" - the type
+    ///  was read as ONE identifier after the colon. And what a local may
+    ///  be written as, a parameter may not.</summary>
+    [Test] procedure AWrittenOutTypeIsTheWholeType;
+    /// <summary>Forum #226/#227: the extracted method was given a
+    ///  parameter for "AWorkSheet.Cell" and none for LineStr, and it
+    ///  declared a local "AsFloat: string" that nothing uses. Every
+    ///  identifier of the block was asked about, the MEMBER after a dot
+    ///  included - and a member belongs to a type, never to the block's
+    ///  surroundings.</summary>
+    [Test] procedure AMemberIsNoFreeIdentifierOfTheBlock;
     /// <summary>Forum 2026-10-03: the generated CALL must stand where the
     ///  extracted code stood. The selection cannot say that - a drag that
     ///  starts at the first statement carries no leading whitespace, and
@@ -830,6 +846,11 @@ type
   TInstallOutputRootTests = class
   public
     [Test] procedure ABuildNeverWritesWhereItMayNot;
+    /// <summary>Forum #223: moving the three OUTPUTS was not enough -
+    ///  CodeGear.Delphi.Targets creates directories from properties they
+    ///  do not reach, so the build still died with MSB3191 on folders it
+    ///  never writes to. The ROOT has to move with them.</summary>
+    [Test] procedure TheBuildIsToldWhereItMayCreateDirectories;
     /// <summary>Installing over a file somebody is RUNNING. Windows
     ///  refuses to overwrite such a file but allows renaming it, and an
     ///  installer that does not know this reports success without
@@ -893,7 +914,7 @@ uses
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
   Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
   Expert.SignatureEdit, Expert.MethodEdit, System.StrUtils,
-  Expert.DebugConsistency, DIH.Placeholders, DIH.FileOps,
+  Expert.DebugConsistency, DIH.Placeholders, DIH.FileOps, DIH.Builder,
   // Generics.Collections: TJSONObject.GetPair is inline and the
   // doubled-note test calls it (H2443 without this entry).
   System.DateUtils, System.Generics.Collections;
@@ -2020,7 +2041,7 @@ const
 begin
   // The reported case: the unit IS analysed (hover answers), only this
   // position is unresolved.
-  var Pos_ := LspEmptyAnswerNote(Mine, F, -1, True, True);
+  var Pos_ := LspEmptyAnswerNote(Mine, '', F, -1, True, True, True);
   Assert.AreEqual(1, Occurrences(Pos_, 'DelphiLSP returned nothing'),
     'the sentence is said ONCE, not by the prefix AND the generic text: ' +
     Pos_);
@@ -2040,7 +2061,7 @@ begin
 
   // The other half: nothing of the unit was ever analysed. THERE the .dcu
   // is the usual cause, and that is where the recipe belongs.
-  var Silent := LspEmptyAnswerNote('', F, -1, False, True);
+  var Silent := LspEmptyAnswerNote('', '', F, -1, False, True, True);
   Assert.IsTrue(Silent.StartsWith('DelphiLSP returned nothing'),
     'without a prefix the note says it itself: ' + Silent);
   Assert.IsTrue(Silent.Contains('.dcu'), 'the usual cause: ' + Silent);
@@ -2054,9 +2075,39 @@ begin
     'but not the overload story, which is about a unit that IS analysed: ' +
     Silent);
 
+  // #50.5: four tools passed their DESCRIPTION where the empty-answer
+  // sentence belongs, so the one thing the note exists to say was gone and
+  // the paragraph about resolving a symbol followed a sentence about
+  // ranges. Both halves are their own parameter now.
+  const Desc = 'raw LSP DocumentSymbol[] - ranges are 0-based.';
+  var Syms := LspEmptyAnswerNote('DelphiLSP returned no symbols for this unit.',
+    Desc, F, -1, True, False, False);
+  Assert.IsTrue(Syms.StartsWith('DelphiLSP returned no symbols'),
+    'what an empty answer MEANS comes first: ' + Syms);
+  Assert.IsTrue(Syms.Contains(Desc),
+    'and the description is kept beside it, not instead of it: ' + Syms);
+  Assert.IsFalse(Syms.Contains('RSS-5463'),
+    'document symbols resolve no symbol - that lead would be wrong here: ' + Syms);
+  Assert.IsFalse(Syms.Contains('find_original_symbol'), 'nor that one');
+  Assert.IsTrue(Syms.Contains('server''s own answer'),
+    'it says what an analysed unit means instead: ' + Syms);
+
+  // ...while a tool that DOES resolve a position keeps the diagnosis - and
+  // lsp_implementation still does not point at the index, because having
+  // no implementation is its normal answer.
+  var Impl := LspEmptyAnswerNote('DelphiLSP returned no implementation for '
+    + 'this position - for a method that neither overrides nor implements '
+    + 'one that is the normal answer.', 'x', F, -1, True, False, True);
+  Assert.IsTrue(Impl.StartsWith('DelphiLSP returned no implementation'),
+    'the normal case is stated first: ' + Impl);
+  Assert.IsTrue(Impl.Contains('RSS-5463'),
+    'the diagnosis stays where a position IS resolved: ' + Impl);
+  Assert.IsFalse(Impl.Contains('find_original_symbol'),
+    'but it is not the answer to "there is no implementation": ' + Impl);
+
   // A file we have just sent is simply not ready yet - that comes first,
   // before any cause at all.
-  var Fresh := LspEmptyAnswerNote(Mine, F, 2500, False, False);
+  var Fresh := LspEmptyAnswerNote(Mine, '', F, 2500, False, False, True);
   Assert.IsTrue(Fresh.Contains('2 s ago'), 'how long ago, in seconds: ' + Fresh);
   Assert.IsTrue(Fresh.Contains('Expert.LspManager.pas'),
     'and which file: ' + Fresh);
@@ -3451,6 +3502,79 @@ begin
   Assert.IsTrue(PlanQuickFixText(Src, F, 0, NewText));
   Assert.IsTrue(Pos('  Q: TStringList;'#13#10'begin', NewText) > 0, 'declared before begin');
   Assert.IsTrue(Pos('System.Classes', NewText) > 0, 'the unit comes with it');
+end;
+
+procedure TQuickFixPreviewTests.RemovePrivate_TakesTheDocCommentAlong;
+const
+  Src =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TFoo = class'#13#10 +                                 // 3
+    '  private'#13#10 +                                      // 4
+    '    /// <summary>Kept: it documents Other.</summary>'#13#10 +  // 5
+    '    procedure Other;'#13#10 +                           // 6
+    '    /// <summary>What Bar does.</summary>'#13#10 +      // 7
+    '    /// <remarks>Over two lines.</remarks>'#13#10 +     // 8
+    '    procedure Bar;'#13#10 +                             // 9
+    '  end;'#13#10 +                                         // 10
+    'implementation'#13#10 +                                 // 11
+    '/// <summary>The body of Bar.</summary>'#13#10 +        // 12
+    'procedure TFoo.Bar;'#13#10 +                            // 13
+    'begin'#13#10 +                                          // 14
+    'end;'#13#10 +                                           // 15
+    'procedure TFoo.Other;'#13#10 +                          // 16
+    'begin'#13#10 +                                          // 17
+    'end;'#13#10 +                                           // 18
+    'end.'#13#10;
+var
+  Info: TPrivateMember;
+begin
+  Assert.IsTrue(FindRemovablePrivate(Src, 9, 'Bar', Info), 'Bar is removable');
+  var After := RemovePrivateMemberText(Src, Info);
+
+  Assert.IsFalse(After.Contains('What Bar does'),
+    'the doc of the declaration goes with it');
+  Assert.IsFalse(After.Contains('Over two lines'),
+    'the whole block, not just its last line');
+  Assert.IsFalse(After.Contains('The body of Bar'),
+    'and the doc above the implementation too');
+  Assert.IsFalse(After.Contains('procedure Bar;'), 'the declaration itself');
+  Assert.IsFalse(After.Contains('procedure TFoo.Bar;'), 'and its body');
+
+  // ...and nothing that belongs to the member next door
+  Assert.IsTrue(After.Contains('it documents Other'),
+    'the doc of the OTHER member stays');
+  Assert.IsTrue(After.Contains('procedure Other;'), 'and so does it');
+  Assert.IsTrue(After.Contains('procedure TFoo.Other;'), 'with its body');
+
+  // MEASURED LIVE (2026-10-26): the removal left the unit ONE LINE
+  // LONGER - the join went through TStringList.Text, which appends a break
+  // of its own, so the trailing empty element SplitContentLines keeps for
+  // the file's final break became a blank line at the end. The region
+  // between the two neighbours was always right; the END was not.
+  Assert.IsTrue(After.EndsWith('end.'#13#10),
+    'the unit still ends exactly as it did: ' + After.Substring(After.Length - 12).Replace(#13, '<CR>').Replace(#10, '<LF>'));
+  Assert.IsFalse(After.EndsWith('end.'#13#10#13#10),
+    'and NOT with a blank line the removal left behind');
+  Assert.AreEqual(Integer(Length(SplitContentLines(Src)) - 7),
+    Integer(Length(SplitContentLines(After))),
+    'exactly the 7 removed lines (2 doc + declaration, 1 doc + 3 body)');
+
+  // ...and the file's own line break survives: this quick fix must not
+  // turn an LF-only unit into a CRLF one (the whole-file fallback of
+  // ApplyLinesMinimal writes exactly this text).
+  var Lf := Src.Replace(#13#10, #10);
+  Assert.IsTrue(FindRemovablePrivate(Lf, 9, 'Bar', Info), 'the same member, LF only');
+  var AfterLf := RemovePrivateMemberText(Lf, Info);
+  Assert.AreEqual(0, Integer(Pos(#13, AfterLf)), 'no CR was invented');
+  Assert.IsTrue(AfterLf.EndsWith('end.'#10), 'and the final LF is still one');
+
+  // the rule on its own, including "there is none"
+  var L := SplitContentLines(Src);
+  Assert.AreEqual(7, DocCommentStart(L, 9), 'two doc lines above the declaration');
+  Assert.AreEqual(16, DocCommentStart(L, 16), 'a member without one is itself');
+  Assert.AreEqual(0, DocCommentStart(L, 0), 'the first line has nothing above it');
 end;
 
 procedure TQuickFixPreviewTests.GeneratingKinds_HaveNoTextPreview;
@@ -4945,6 +5069,130 @@ begin
   // An expression that is not an identifier keeps working.
   Assert.IsTrue(CodeOccurrenceOf('  X := A + B;', 'A + B', 0) > 0,
     'a composed expression');
+end;
+
+procedure TExtractAndCompletionTests.AMemberIsNoFreeIdentifierOfTheBlock;
+
+  function NamesOf(const ABlock: string): string;
+  begin
+    Result := '|';
+    for var T in ExtractBlockTokens(ABlock, 10, 1) do
+      Result := Result + T.Ident + '|';
+  end;
+
+begin
+  // the reporter's line, verbatim
+  var Names := NamesOf(
+    'AWorkSheet.Cell[''A'' + LineStr].AsString := RemoveAcceleratorKey(FFieldName.AsString);'#10 +
+    'AWorkSheet.Cell[''B'' + LineStr].AsFloat := Total;');
+
+  // what the block really needs from around it
+  Assert.IsTrue(Names.Contains('|AWorkSheet|'), 'the sheet: ' + Names);
+  Assert.IsTrue(Names.Contains('|LineStr|'),
+    'the local the reported method was NOT given: ' + Names);
+  Assert.IsTrue(Names.Contains('|RemoveAcceleratorKey|'), 'a routine it calls');
+  Assert.IsTrue(Names.Contains('|FFieldName|'), 'a field it reads');
+  Assert.IsTrue(Names.Contains('|Total|'), 'and the one on the right');
+
+  // ...and what belongs to a type rather than to the block
+  Assert.IsFalse(Names.Contains('|Cell|'),
+    'the indexed property became a parameter: ' + Names);
+  Assert.IsFalse(Names.Contains('|AsString|'), 'a property of the cell');
+  Assert.IsFalse(Names.Contains('|AsFloat|'),
+    'the reported "var AsFloat: string;" that nothing uses');
+
+  // A name that is a MEMBER here and a free identifier three characters on
+  // must still be found - and at the FREE occurrence, or the LSP is asked
+  // about the member again.
+  var Toks := ExtractBlockTokens('Foo.Value := Value;', 10, 1);
+  var Col := -1;
+  for var T in Toks do
+    if SameText(T.Ident, 'Value') then Col := T.Col0;
+  Assert.AreEqual(13, Col, 'the second Value, not the member at column 5');
+
+  // A RANGE is no member access: "cA..cZ" are two free identifiers.
+  Names := NamesOf('if C in [cA..cZ] then Hit := True;');
+  Assert.IsTrue(Names.Contains('|cA|') and Names.Contains('|cZ|'),
+    'a range is not a member access: ' + Names);
+
+  // A qualified unit reference keeps its first part only - that one is
+  // classified as a unit and dropped, the rest never costs a request.
+  Names := NamesOf('System.SysUtils.Trim(S);');
+  Assert.IsTrue(Names.Contains('|System|'), 'the first part: ' + Names);
+  Assert.IsFalse(Names.Contains('|SysUtils|') or Names.Contains('|Trim|'),
+    'what follows a dot is no free identifier: ' + Names);
+end;
+
+procedure TExtractAndCompletionTests.AWrittenOutTypeIsTheWholeType;
+begin
+  // The hovers DelphiLSP 37.0 really sends, measured 2026-10-21 - the
+  // reported one with its markdown link and code fence around it.
+  Assert.AreEqual('array [0..0] of UInt64',
+    TypeTextFromHover('[ExDemo.pas:18](file:///C%3A/x/ExDemo.pas#18)'#13#10#13#10 +
+      '```'#13#10'var Handles: array [0..0] of UInt64'#13#10'```'#13#10),
+    'the reported case - it used to arrive as "array"');
+  Assert.AreEqual('array of string', TypeTextFromHover('var Dyn: array of string'));
+  Assert.AreEqual('set of Byte', TypeTextFromHover('var Bytes: set of Byte'));
+  // the colon INSIDE the parameter list is not the one that separates
+  Assert.AreEqual('procedure(X: Integer) of object',
+    TypeTextFromHover('var Cb: procedure(X: Integer) of object'),
+    'a procedural type carries a colon of its own');
+  Assert.AreEqual('Integer', TypeTextFromHover('var Plain: Integer'),
+    'the ordinary case is unchanged');
+  Assert.AreEqual('TDictionary<string, Integer>',
+    TypeTextFromHover('var D: TDictionary<string, Integer>'), 'generics too');
+  Assert.AreEqual('Integer', TypeTextFromHover('const Max: Integer = 5'),
+    'a default value belongs to the declaration, not to the type');
+  Assert.AreEqual('', TypeTextFromHover('property TButton.OnClick'),
+    'no colon, no type');
+
+  // MEASURED with dcc32 37.0: only a NAMED type works as a parameter type.
+  Assert.IsTrue(TypeIsNamed('Integer'));
+  Assert.IsTrue(TypeIsNamed('System.UInt64'), 'dotted');
+  Assert.IsTrue(TypeIsNamed('TDictionary<string, Integer>'), 'generic');
+  Assert.IsFalse(TypeIsNamed('array [0..0] of UInt64'),
+    'E2029 in a parameter list - and that is the reported variable');
+  Assert.IsFalse(TypeIsNamed('array of string'),
+    'it compiles there, but as an OPEN array - SetLength on it is E2008');
+  Assert.IsFalse(TypeIsNamed('set of Byte'));
+  Assert.IsFalse(TypeIsNamed('string[20]'));
+  Assert.IsFalse(TypeIsNamed('^Integer'));
+  Assert.IsFalse(TypeIsNamed('procedure(X: Integer) of object'));
+  Assert.IsFalse(TypeIsNamed('record X: Integer; end'));
+  Assert.IsFalse(TypeIsNamed(''), 'nothing is no name');
+
+  // Issue #51: a name is a name by the LANGUAGE's rule, not by an ASCII
+  // set. All three of these compile as a parameter type (measured,
+  // dcc32 37.0 - scratchpad issue51/probe.py), so reading them as
+  // "written out in place" refused an extraction for nothing.
+  Assert.IsTrue(TypeIsNamed('TK' + #$00FC + 'ndigung'),
+    'a non-ASCII letter is a letter');
+  Assert.IsTrue(TypeIsNamed('Vertr' + #$00E4 + 'ge.T' + #$00C4 + 'nderung'),
+    'in every dotted part');
+  Assert.IsTrue(TypeIsNamed('&Type'), 'an escaped reserved word is a name');
+  Assert.IsTrue(TypeIsNamed('Unit1.&Type'), 'qualified as well');
+  Assert.IsTrue(TypeIsNamed('TList<TK' + #$00FC + 'ndigung>'),
+    'and as a generic argument');
+  // ...and what must stay refused: a name is not a sentence.
+  Assert.IsFalse(TypeIsNamed('&'), 'an escape with nothing behind it');
+  Assert.IsFalse(TypeIsNamed('A.'), 'a trailing dot is no part');
+  Assert.IsFalse(TypeIsNamed('array of TK' + #$00FC + 'ndigung'),
+    'the umlaut does not make an open array a name');
+  Assert.IsFalse(TypeIsNamed('1Foo'), 'a digit cannot start one');
+
+  // And the rule the type alone cannot decide (issue #51): a parameter
+  // FORWARDED from the enclosing header already is what its declaration
+  // says, so repeating it verbatim compiles - measured for const and var.
+  // A local dynamic array promoted to a parameter is still refused: there
+  // the declaration would change what the code means (E2008 on SetLength).
+  Assert.IsTrue(ParamTypeRefusesExtraction('array of Integer', False),
+    'a local that would BECOME an open array');
+  Assert.IsFalse(ParamTypeRefusesExtraction('array of Integer', True),
+    'but a forwarded open array is one already - the reported case');
+  Assert.IsFalse(ParamTypeRefusesExtraction('Integer', False),
+    'a named type never refuses');
+  Assert.IsFalse(ParamTypeRefusesExtraction('', False),
+    'and an unknown type is not a refusal either');
 end;
 
 procedure TExtractAndCompletionTests.LinesAreSplitOnEveryLineBreakStyle;
@@ -7303,9 +7551,10 @@ end;
 
 procedure TInstallOutputRootTests.AFileInUseIsMovedAsideAndReplaced;
 var
-  Dir, Target, Source, Aside: string;
+  Dir, Target, Source, Aside, Stamp, DayBefore, DayAfter: string;
   H: THandle;
   Failed: Boolean;
+  P: Integer;
 begin
   Dir := TPath.Combine(TPath.GetTempPath, 'dih_inuse_' + TGUID.NewGuid.ToString);
   TDirectory.CreateDirectory(Dir);
@@ -7333,8 +7582,10 @@ begin
       end;
       Assert.IsTrue(Failed, 'a file in use cannot simply be overwritten');
 
+      DayBefore := FormatDateTime('yyyymmdd', Now);
       Assert.IsTrue(ReplaceFilePossiblyInUse(Source, Target, Aside),
         'but it can be replaced');
+      DayAfter := FormatDateTime('yyyymmdd', Now);
       Assert.AreEqual('NEW', TFile.ReadAllText(Target), False,
         'the new bytes are in place');
       Assert.IsTrue(Aside <> '', 'and the old file was moved aside');
@@ -7345,6 +7596,27 @@ begin
       // was started from it last time, and then the move has nowhere to go.
       Assert.AreNotEqual(Target + '.old', Aside, False,
         'a fixed aside name is what blocked the next install');
+
+      // ...and unique ACROSS PROCESSES, which is the half that was wrong:
+      // Random without Randomize starts every process at the same first
+      // value, so every install walked the same collisions. A timestamp
+      // does not. 17 digits (yyyymmddhhnnsszzz) plus the try counter - a
+      // 6-digit random number fails both of these.
+      P := Aside.LastDelimiter('.');
+      Stamp := Aside.Substring(0, P);           // drop ".old"
+      Stamp := Stamp.Substring(Stamp.LastDelimiter('.') + 1);
+      Assert.IsTrue(Stamp.Length >= 17,
+        'the aside name carries a timestamp, not a 6-digit random: ' + Aside);
+      Assert.IsTrue(Stamp.StartsWith(DayBefore) or Stamp.StartsWith(DayAfter),
+        'and it is TODAY''s timestamp: ' + Aside);
+
+      // The shape is a CONTRACT, not a taste. Since 1.30.1 the installer
+      // writes the MCP bridge's aside copy, and this is the function that
+      // reads it back - it tells "the install replaced the exe under this
+      // process" (start a new session) from "the install never finished"
+      // (run install.cmd). The two ends have to agree.
+      Assert.AreEqual(Target, CanonicalBridgeExePath(Aside), False,
+        'the consumer must recognise the name the installer writes');
     finally
       CloseHandle(H);
     end;
@@ -7358,6 +7630,31 @@ begin
   finally
     TDirectory.Delete(Dir, True);
   end;
+end;
+
+procedure TInstallOutputRootTests.TheBuildIsToldWhereItMayCreateDirectories;
+begin
+  // The ordinary machine: the common directory is writable, the resolver
+  // leaves the root alone, and so does the command line.
+  var Cmd := MSBuildCommandLine('C:\p\X.dproj', 'Win32', 'Release',
+    'C:\o\dcu', 'C:\o\bpl', 'C:\o\dcp', 'C:\o\hpp', '', '');
+  Assert.IsTrue(Cmd.Contains('/tv:4.0'), 'the toolset is still named');
+  Assert.IsTrue(Cmd.Contains('/p:DCC_BplOutput="C:\o\bpl"'), 'the outputs');
+  Assert.IsFalse(Cmd.ToUpper.Contains('BDSCOMMONDIR'),
+    'nothing is moved while Delphi''s own common directory can be written');
+
+  // The forum machine: Delphi was installed by another account, the
+  // resolver moved the output root - and the build has to be told, or the
+  // targets file dies creating a Dcp and an hpp folder under the old one.
+  Cmd := MSBuildCommandLine('C:\p\X.dproj', 'Win64', 'Debug',
+    'C:\o\dcu', 'C:\o\bpl', 'C:\o\dcp', 'C:\o\hpp',
+    'C:\Users\me\AppData\Local\Embarcadero\Studio\37.0', '/v:d');
+  Assert.IsTrue(
+    Cmd.Contains('/p:BDSCOMMONDIR="C:\Users\me\AppData\Local\Embarcadero\Studio\37.0"'),
+    'the root the resolver chose: ' + Cmd);
+  Assert.IsTrue(Cmd.Contains('/p:DCC_BplOutput="C:\o\bpl"'),
+    'and the outputs still say where the artefacts really go');
+  Assert.IsTrue(Cmd.EndsWith('/v:d'), 'extra parameters stay at the end');
 end;
 
 procedure TInstallOutputRootTests.ABuildNeverWritesWhereItMayNot;

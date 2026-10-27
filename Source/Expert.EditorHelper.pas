@@ -1709,6 +1709,19 @@ begin
   AText := BL.Text;
   Mod_ := EB.Module;
   if Mod_ <> nil then AFilePath := Mod_.FileName;
+  // IOTAEditBlock reports DISPLAY columns - a tab counts as its width on
+  // screen - while every caller uses them as string indices: into the
+  // selected text (extract method asks DelphiLSP about the identifiers of
+  // its first line) and into the file's own lines. On a tab-indented file
+  // that shifts the first line's positions and the answers describe
+  // whatever stands there. Audit #39 (M36a) met the same confusion in the
+  // completion popup; RawColumn is its converter and returns at once for a
+  // line without a tab.
+  if AFilePath <> '' then
+  begin
+    AStartCol := RawColumn(AFilePath, AStartLine, AStartCol);
+    AEndCol := RawColumn(AFilePath, AEndLine, AEndCol);
+  end;
   Result := (AText <> '');
 end;
 

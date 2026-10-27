@@ -99,6 +99,12 @@ type
     ///  running on that thread; the Sleep(50) it used instead of a join was
     ///  a timing allowance, not a guarantee.</summary>
     [Test] procedure WorkerLatch_WaitsForTheThreadNotJustTheCount;
+    /// <summary>...and the two subsystems the latch does NOT start - the
+    ///  live quick-fix checker and the blame reader - note themselves, so
+    ///  the unload can wait for their threads too instead of only for
+    ///  their counters. What it still cannot finish is RECORDED, because
+    ///  a finalization has no other channel than the marker file.</summary>
+    [Test] procedure WorkerLatch_JoinsAWorkerItDidNotStart;
   end;
 
   /// <summary>The MCP pipe is how Claude Code reaches this IDE. On a 64-bit
@@ -1326,6 +1332,64 @@ end;
 function StartTailWorker(AStarted: TEvent): Boolean;
 begin
   Result := StartWorker(MakeTailProc(AStarted));
+end;
+
+var
+  GSelfNotedRan: Integer = 0;
+
+// A worker the LATCH DID NOT START - which is what the live quick-fix
+// checker and the blame reader really are: they raise a counter of their
+// own, so ShutdownWorkersAndWait never sees them and returns at once. Audit
+// #38's L1g was fixed for the latch's own workers and left those two with a
+// counter, and a counter is not a join: it drops in the closure's finally,
+// i.e. before the closure epilogue (which releases everything it captured,
+// with code from this package) and the thread's own exit path have run.
+function StartSelfNotedThread(AStarted: TEvent): TThread;
+begin
+  Result := TThread.CreateAnonymousThread(
+    procedure
+    begin
+      NoteCurrentWorkerThread;
+      AStarted.SetEvent;
+      Sleep(400);
+      AtomicExchange(GSelfNotedRan, 1);
+    end);
+  Result.FreeOnTerminate := True;
+  Result.Start;
+end;
+
+procedure TMiscRegressionTests.WorkerLatch_JoinsAWorkerItDidNotStart;
+var
+  Started: TEvent;
+begin
+  ResetWorkerLatch;
+  AtomicExchange(GSelfNotedRan, 0);
+  Started := TEvent.Create(nil, True, False, '');
+  try
+    StartSelfNotedThread(Started);
+    Assert.IsTrue(Started.WaitFor(5000) = wrSignaled, 'the worker runs');
+    Assert.IsTrue(JoinNotedWorkers(10000),
+      'the join reports that the noted thread is gone');
+    Assert.AreEqual<Integer>(1, AtomicCmpExchange(GSelfNotedRan, 0, 0),
+      'and it may only report that once the thread really ended - a counter ' +
+      'would have let the unload through while this was still running');
+
+    // AND WHAT IT COULD NOT FINISH IS RECORDED, because the only channel
+    // out of a finalization is the marker file the next load reads.
+    NoteShutdownProblem('a worker did not end');
+    NoteShutdownProblem('a worker did not end');   // the same twice says nothing twice
+    var P := ShutdownProblems;
+    Assert.AreEqual<Integer>(1, Length(P), 'recorded once');
+    Assert.AreEqual('a worker did not end', P[0]);
+    ResetWorkerLatch;
+    Assert.AreEqual<Integer>(0, Length(ShutdownProblems),
+      'and a reset means "as if nothing had happened"');
+  finally
+    for var I := 1 to 100 do
+      if AtomicCmpExchange(GSelfNotedRan, 0, 0) = 1 then Break else Sleep(50);
+    Started.Free;
+    ResetWorkerLatch;
+  end;
 end;
 
 procedure TMiscRegressionTests.WorkerLatch_WaitsForTheThreadNotJustTheCount;

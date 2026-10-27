@@ -220,7 +220,7 @@ var
 implementation
 
 uses
-  Expert.ResourceMonitor,
+  Expert.ResourceMonitor, Expert.WorkerLatch,
   System.SysUtils, System.UITypes, System.IOUtils, System.StrUtils,
   System.Actions, Winapi.Windows, ToolsAPI,
   Vcl.Forms, Vcl.Controls,
@@ -1392,7 +1392,16 @@ begin
   // chained on top of us, leave their handler alone - touching it
   // would break their plugin.
   if IsOurHandler(FPopupMenu.OnPopup) then
-    FPopupMenu.OnPopup := FOldOnPopup;
+    FPopupMenu.OnPopup := FOldOnPopup
+  else
+    // AND IT IS A DANGLING POINTER: their handler forwards to ours, which is
+    // about to be unmapped, so the next right-click in the editor runs code
+    // that is no longer there. This is the one condition that may promise a
+    // crash. Only the LEGACY fallback path can reach it - the official
+    // INTAEditorLocalMenu has no chain to be caught in.
+    NoteShutdownProblem('Another add-on chained its editor context menu onto ' +
+      'ours, so our handler could not be taken out of that chain. ' +
+      'Right-clicking in the editor can crash the IDE.');
   FOldOnPopup := nil;
   FHooked := False;
 end;

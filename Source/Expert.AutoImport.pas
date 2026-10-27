@@ -5355,6 +5355,7 @@ begin
         SSeen, SHandled: Integer;
         SCodes, SNote: string;
       begin
+        NoteCurrentWorkerThread;   // joinable - a counter is no join (#38 L1g)
         try
           SSeen := 0; SHandled := 0; SCodes := ''; SNote := '';
           try
@@ -5494,6 +5495,7 @@ begin
         DCodes, DNote: string;
         Params, TextDocObj: TJSONObject;
       begin
+        NoteCurrentWorkerThread;   // joinable - a counter is no join (#38 L1g)
         try
           R := nil;
           DSeen := 0; DHandled := 0; DCodes := ''; DNote := ''; DSig := 0;
@@ -5830,6 +5832,11 @@ begin
     Inc(Waited, 10);
   end;
   CheckSynchronize(0);   // drain closures queued by the last worker
+  // The counter reaching zero only says that the worker's finally ran. Wait
+  // for the THREADS: this package is unmapped a few statements from here,
+  // and their epilogue still executes its code.
+  if not JoinNotedWorkers then
+    NoteShutdownProblem('A live quick-fix worker did not finish in time.');
   FreeAndNil(GLive);
 end;
 

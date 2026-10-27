@@ -945,6 +945,48 @@ begin
   GTimer.Enabled := GEnabled;
 end;
 
+/// <summary>Hands back EVERY buffer we widened, not only the one on top.
+///  RestoreGutterWidth can reach the top buffer alone, and it refuses even
+///  that one unless the active file IS the one we widened - which it is not
+///  whenever the tab on top is a .dproj, an .inc or a text file, because the
+///  tick leaves those alone and GWidenedFile still names the last .pas. What
+///  is not handed back here stays widened: the next load reads that width as
+///  the buffer's own base (our dictionaries went with the old image) and adds
+///  the column on top of it, and that base is then sticky for the session.
+///  The neighbour rule is kept PER BUFFER - a width somebody else changed
+///  after us is never put back.</summary>
+procedure RestoreAllGutterWidths;
+var
+  ES: IOTAEditorServices;
+  Iter: IOTAEditBufferIterator;
+  Buf: IOTAEditBuffer;
+  Opt: IOTABufferOptions;
+  Orig, Added: Integer;
+  Key: string;
+begin
+  if (GOrigWidths = nil) or (GOrigWidths.Count = 0) then Exit;
+  try
+    if not Supports(BorlandIDEServices, IOTAEditorServices, ES) then Exit;
+    if not ES.GetEditBufferIterator(Iter) then Exit;
+    for var I := 0 to Iter.Count - 1 do
+      try
+        Buf := Iter.EditBuffers[I];
+        if Buf = nil then Continue;
+        Key := NormFile(Buf.FileName);
+        if not GOrigWidths.TryGetValue(Key, Orig) then Continue;
+        Added := GColumnWidth;
+        GAddedWidths.TryGetValue(Key, Added);
+        Opt := Buf.BufferOptions;
+        if (Opt <> nil) and (Opt.LeftGutterWidth = Orig + Added) then
+          Opt.LeftGutterWidth := Orig;
+      except
+        // one buffer that is closing must not cost the others their restore
+      end;
+  except
+    // no editor services at unload time - nothing to hand back through
+  end;
+end;
+
 procedure UninstallBlameGutter;
 var
   SV: INTACodeEditorServices;
@@ -955,6 +997,7 @@ begin
     FreeAndNil(GTimer);
   end;
   RestoreGutterWidth;
+  RestoreAllGutterWidths;
   FreeAndNil(GTicker);
   if (GNotifierIndex >= 0)
     and Supports(BorlandIDEServices, INTACodeEditorServices, SV) then

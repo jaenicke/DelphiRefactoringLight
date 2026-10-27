@@ -119,6 +119,9 @@
         <DCCReference Include="Test.UnusedUnits.pas"/>
         <DCCReference Include="Test.ExtractInterface.pas"/>
         <DCCReference Include="Test.EventGenPlan.pas"/>
+        <DCCReference Include="Test.ParameterRename.pas"/>
+        <DCCReference Include="Test.ReloadReport.pas"/>
+        <DCCReference Include="..\Source\Expert.RestartHint.pas"/>
         <BuildConfiguration Include="Release">
             <Key>Cfg_1</Key>
             <CfgParent>Base</CfgParent>

@@ -81,6 +81,18 @@ type
     /// <summary>Called by TPrewarmIdeNotifier when the IDE opens a
     ///  project file. Kicks off the background prewarm.</summary>
     procedure HandleProjectOpened(const AProjectFile: string);
+    /// <summary>A project that was ALREADY open when this instance loaded
+    ///  sends no "project opened" notification - which is what leaves a
+    ///  reloaded package with an empty project index scope and no prewarmed
+    ///  DelphiLSP, while the status window still says "ready". This does
+    ///  exactly what the notification does, and nothing at all when the
+    ///  notification has already been seen (FLastProject <> '') or when no
+    ///  project is open (then it is still coming).
+    ///  HandleProjectOpened deliberately, not RestartFor: only it refreshes
+    ///  the identifier index as well, and only it honours
+    ///  PrewarmLspOnProjectOpen. MAIN THREAD - its own ForceQueueSafe keeps
+    ///  the ToolsAPI work off the caller.</summary>
+    function AdoptAlreadyOpenProject(out AProject: string): Boolean;
     procedure HandleProjectSwitched(const AProjectFile: string);
     /// <summary>Starts a NEW session for AProjectFile after
     ///  TLspManager.Reset - main thread only. Unlike HandleProjectOpened it
@@ -268,6 +280,23 @@ begin
       try TUnitIndex.Instance.RefreshSourcesFromEditor; except end;
       if DoLsp then StartPrewarmFor(LProj);
     end);
+end;
+
+function TLspPrewarmer.AdoptAlreadyOpenProject(out AProject: string): Boolean;
+begin
+  Result := False;
+  AProject := '';
+  // The notification has already been seen - nothing to catch up.
+  if FLastProject <> '' then Exit;
+  try
+    AProject := Editor.GetCurrentProjectDproj;
+  except
+    AProject := '';
+  end;
+  // No project open: the notification is still ahead of us.
+  if AProject = '' then Exit;
+  HandleProjectOpened(AProject);
+  Result := True;
 end;
 
 procedure TLspPrewarmer.HandleProjectSwitched(const AProjectFile: string);

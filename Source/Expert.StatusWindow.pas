@@ -26,12 +26,37 @@ unit Expert.StatusWindow;
 interface
 
 uses
+  System.Types,       // TRect - the window's own geometry is part of its state
   Expert.IdeThemes;   // TStatusLevel: a row's colour is part of its data
 
 /// <summary>Registers the dockable form with the IDE. Call from Register.</summary>
 procedure RegisterStatusWindow;
 /// <summary>Unregisters and closes it. Call before the BPL unloads.</summary>
 procedure UnregisterStatusWindow;
+type
+  /// <summary>What a dockable window of ours was doing at the unload.</summary>
+  TRlDockState = record
+    Open: Boolean;
+    Docked: Boolean;
+    Bounds: TRect;
+  end;
+
+/// <summary>What the status window is doing right now - read at the unload,
+///  while the form still exists, and handed to the next instance through the
+///  marker. MEASURED in the user's own project desktop: the docking position
+///  is NOT stored with our window ([RefactoringLightStatus] holds geometry
+///  only) but with the dock site ([DockSite5]: "TabDockClients=MessageView,
+///  RefactoringLightStatus"), and ToolsAPI has no entry point that loads a
+///  desktop or restores one client. So a docked window cannot be put back by
+///  us - only said.</summary>
+function StatusDockWindowState: TRlDockState;
+
+/// <summary>Opens the status window and puts it back where it was. For a
+///  FREE-STANDING window that reproduces the previous state exactly; for a
+///  docked one it would produce the floating window in the middle of the
+///  screen that the user reported, so the caller must not use it there.</summary>
+procedure ShowStatusWindowAt(const ABounds: TRect);
+
 /// <summary>Menu entry point: shows (and focuses) the status window.</summary>
 procedure ShowStatusWindow;
 /// <summary>Menu entry point: the MCP tools window - every tool the bridge
@@ -1461,6 +1486,24 @@ begin
   FreeAndNil(GSnapshot);
   UnregisterDock(GToolsDockable, GToolsForm, GToolsRegistered);
   UnregisterDock(GDockable, GForm, GRegistered);
+end;
+
+function StatusDockWindowState: TRlDockState;
+begin
+  Result := Default(TRlDockState);
+  if GForm = nil then Exit;
+  Result.Open := True;
+  // NOT Floating alone: the VCL makes it False for a window with no host at
+  // all, so a free-standing window would read as docked.
+  Result.Docked := (GForm.HostDockSite <> nil) and not GForm.Floating;
+  Result.Bounds := GForm.BoundsRect;
+end;
+
+procedure ShowStatusWindowAt(const ABounds: TRect);
+begin
+  ShowStatusWindow;
+  if (GForm <> nil) and (ABounds.Width > 0) and (ABounds.Height > 0) then
+    try GForm.BoundsRect := ABounds; except end;
 end;
 
 procedure ShowStatusWindow;

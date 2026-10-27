@@ -6,6 +6,52 @@ development builds and were never released.
 
 ---
 
+## 2.7.0 - 2026-10-27
+
+### Installing no longer asks for a restart it does not need
+
+The box that appeared after every "Installieren" demanded a restart for a
+reason nobody had ever measured: "the IDE still holds references to the
+previous package version". Reading the registrations says otherwise -
+fourteen of the fifteen things `Register` sets up are taken back by the
+finalization, and the fifteenth is the package wizard, which the IDE owns
+and no API hands back.
+
+What a reload really loses is INITIALISATION: state that is built from IDE
+notifications which cannot fire again for a project that is already open.
+So the plugin catches that up by itself now and the box appears only for
+what is left:
+
+- **the project.** A project that was already open sends no "project
+  opened" notification, so the identifier index had no project scope and
+  DelphiLSP was never prewarmed - while the status window said "ready",
+  because the global scope was there. That is the gap that reads as "it
+  finds nothing any more since I installed".
+- **the headless buffers of the MCP bridge.** The modules belong to the IDE
+  and survive; only the plugin's list of them went with the old image - and
+  without that list `buffer_close` refused them as the user's own, so a
+  modified module nobody can see was unreachable for the rest of the
+  session.
+- **the status window.** A free-standing one is put back exactly where it
+  was. A docked one cannot be: its place belongs to the project desktop,
+  which only the IDE can restore - so that one is said, instead of coming
+  back as a floating window in the middle of the screen.
+
+What the previous unload could not finish is passed to the new instance and
+reported - a worker that did not end in time, or a foreign add-on that
+chained its editor context menu onto ours. Those are the cases that really
+do want a restart, and they are rare.
+
+### The gutter, and two workers that were never joined
+
+- **Live blame gave every buffer it had widened back**, not only the one on
+  top. What was not handed back read as the buffer's own width after the
+  reload, and the column was then added on top of it.
+- **The live quick-fix checker and the blame reader are joined**, not just
+  counted. A counter drops in the worker's own `finally`, i.e. before the
+  code that releases what the worker captured has run - and that code
+  belongs to the package that is about to be unmapped.
+
 ## 2.6.11 - 2026-10-27
 
 ### The restart hint hung the IDE

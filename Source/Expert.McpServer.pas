@@ -60,6 +60,22 @@ function McpErr(const AMsg: string): string;
 ///  again".</summary>
 function McpModuleIsLoaded(const AFile: string): Boolean;
 
+/// <summary>The files this bridge has open HEADLESS right now. Read at the
+///  unload and handed to the next instance: the MODULES survive a package
+///  reload (they belong to the IDE, not to us), but the list that says "the
+///  bridge opened this one and nobody can see it" lives in our own image and
+///  goes with it. Without the hand-over buffer_list reports such a module as
+///  the user's and buffer_close refuses it ("it belongs to the user's
+///  editor") - so a modified module nobody can see could only be ended by
+///  restarting the IDE. MAIN THREAD.</summary>
+function McpHeadlessFiles: TArray<string>;
+
+/// <summary>Takes those files back after a reload. Only a file that is still
+///  LOADED and still has no edit view is adopted: one the user has opened a
+///  tab for in the meantime is theirs (audit #36, M42), and one the IDE has
+///  closed since is gone. Returns how many were adopted. MAIN THREAD.</summary>
+function McpAdoptHeadless(const AFiles: TArray<string>): Integer;
+
 function McpReadContent(const AFile: string; out AContent: string): Boolean;
 
 procedure StartMcpServer;
@@ -105,7 +121,7 @@ uses
   Expert.EditorHelperIntf, Expert.AutoImport, Expert.DiagStore,
   Expert.McpTools, Expert.UnitIndex, Expert.UnitAvailability, Expert.UsesEditor,
   Mcp.Protocol, Mcp.PipeServer, Expert.StatusWindow, Expert.Version,
-  Delphi.FileEncoding;
+  Expert.RestartHint, Delphi.FileEncoding;
 
 type
   /// <summary>One answered get_quick_fixes: its generation, the buffer
@@ -1149,6 +1165,32 @@ begin
     if Supports(FE, IOTASourceEditor, SE) and (SE.EditViewCount > 0) then
       Exit(True);
   end;
+end;
+
+function McpHeadlessFiles: TArray<string>;
+begin
+  Result := nil;
+  if GHeadless = nil then Exit;
+  Result := GHeadless.ToArray;
+end;
+
+function McpAdoptHeadless(const AFiles: TArray<string>): Integer;
+begin
+  Result := 0;
+  if GHeadless = nil then Exit;
+  for var F in AFiles do
+    try
+      if (F = '') or IsHeadless(F) then Continue;
+      var M := LoadedModule(F);
+      // gone: the IDE closed it while we were away - nothing to adopt.
+      // visible: the user opened it in the meantime, so it is theirs now
+      // and buffer_close must keep refusing it.
+      if (M = nil) or ModuleHasEditView(M) then Continue;
+      GHeadless.Add(UpperCase(F));
+      Inc(Result);
+    except
+      // a module that is mid-close must not cost the others their adoption
+    end;
 end;
 
 function SplitLinesLF(const S: string): TArray<string>;
@@ -2406,6 +2448,9 @@ begin
       // violation in a closing IDE. The dispatch window does go: a late
       // RunOnMain then answers "shutting down" instead of running.
       PinThisModule;
+      // There is no next load to hand this to: the image can never be
+      // unmapped now, so THIS instance has to say it, from the deferred tick.
+      TRestartHint.NotePinned;
       GServer := nil;
       FreeAndNil(GDispatcher);
       Exit;

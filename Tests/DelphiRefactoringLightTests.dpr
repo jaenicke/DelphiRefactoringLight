@@ -36,6 +36,7 @@ uses
   Expert.DfmEventCheck in '..\Source\Expert.DfmEventCheck.pas',
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
   Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
+  Expert.RestartHint in '..\Source\Expert.RestartHint.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',
   Test.LspReadiness in 'Test.LspReadiness.pas',
   Test.WithScanner in 'Test.WithScanner.pas',
@@ -88,7 +89,8 @@ uses
   Test.UnusedUnits in 'Test.UnusedUnits.pas',
   Test.ExtractInterface in 'Test.ExtractInterface.pas',
   Test.EventGenPlan in 'Test.EventGenPlan.pas',
-  Test.ParameterRename in 'Test.ParameterRename.pas';
+  Test.ParameterRename in 'Test.ParameterRename.pas',
+  Test.ReloadReport in 'Test.ReloadReport.pas';
 
 var
   Runner: ITestRunner;

@@ -189,7 +189,7 @@ implementation
 uses
   System.IOUtils, System.DateUtils, System.SyncObjs, System.Math,
   System.StrUtils, System.Win.Registry, Winapi.Windows, Winapi.ShellAPI,
-  Expert.ResourceMonitor, Delphi.FileEncoding;
+  Expert.ResourceMonitor, Delphi.FileEncoding, Expert.WorkerLatch;
 
 { TBlameLine }
 
@@ -1033,6 +1033,7 @@ begin
         Kind: TVcsKind;
         Ent: TBlameEntry;
       begin
+        NoteCurrentWorkerThread;   // joinable - a counter is no join (#38 L1g)
         try
           Parsed := nil;
           Ok := False;
@@ -1485,6 +1486,9 @@ begin
     CheckSynchronize(10);
   end;
   CheckSynchronize(0);
+  // see StopAutoImportLive: the counter is not the thread
+  if not JoinNotedWorkers then
+    NoteShutdownProblem('A blame worker did not finish in time.');
 end;
 
 initialization

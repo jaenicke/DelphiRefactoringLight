@@ -28,6 +28,15 @@ uses
   Expert.DialogHelper, Expert.ResourceMonitor, Expert.McpServer,
   Expert.PluginInfo, Expert.WorkerLatch, Expert.LspManager;
 
+var
+  /// <summary>Read in the finalization while the forms and the module list
+  ///  still exist, and handed to the next instance through the marker file -
+  ///  the finalization itself cannot declare locals, and by the time
+  ///  RecordUnload runs (last statement, so that every shutdown has had its
+  ///  say) the window and the buffer list are long gone.</summary>
+  GDockAtUnload: TRlDockState;
+  GHeadlessAtUnload: TArray<string>;
+
 type
   TShortcutChangeHook = class
     class procedure HandleChanged;
@@ -154,14 +163,66 @@ begin
   // and quick fixes for Claude Code & co, one pipe per IDE instance.
   StartMcpServer;
 
-  // On manual (re-)install inside a running IDE: show the restart hint.
+  // WHAT A RELOAD REALLY LOSES, and what of it can be put back. This runs
+  // from the deferred tick - main thread, outside the install transaction -
+  // so it may use ToolsAPI; it must not open a window (that is the tick's
+  // job) and it must not raise.
+  TRestartHint.SettleHook :=
+    function: string
+    var
+      Facts: TReloadFacts;
+      Reopen: Boolean;
+      Proj: string;
+    begin
+      Facts := TRestartHint.Facts;
+      if Facts.Reloaded then
+      begin
+        // 1. THE PROJECT. A project that was already open sends no
+        //    "project opened" notification, so the identifier index has no
+        //    project scope and DelphiLSP was never prewarmed - while the
+        //    status window says "ready", because the global scope IS there.
+        //    That is the gap a user meets as "it finds nothing any more
+        //    since I installed".
+        //    The answer is deliberately discarded: a catch-up that ran is a
+        //    restore, and one that found nothing was not needed - neither is
+        //    anything the box has to say.
+        if LspPrewarmerInstance <> nil then
+          LspPrewarmerInstance.AdoptAlreadyOpenProject(Proj);
+
+        // 2. THE HEADLESS BUFFERS of the MCP bridge. The modules belong to
+        //    the IDE and survive; only our list of them went with the old
+        //    image - and without that list buffer_close refuses them as the
+        //    user's own (audit #36, M42), so a modified module nobody can
+        //    see would be unreachable for the rest of the session.
+        McpAdoptHeadless(Facts.Headless);
+      end;
+
+      // 3. WHAT IS LEFT OVER. The rule is pure and tested (ReloadReportText);
+      //    this only carries it out - which for a free-standing status window
+      //    means putting it back, and for a docked one means saying so.
+      Result := ReloadReportText(Facts, Reopen);
+      if Reopen then
+        ShowStatusWindowAt(Facts.DockBounds);
+    end;
+  // Arms that tick. FILE I/O AND STATE ONLY in here: Register runs inside
+  // the IDE's install transaction, and a window there wedges it (2.6.11).
   TRestartHint.Check;
 end;
 
 initialization
 
 finalization
-  // Our own windows first: a modeless result window or the quick-fix
+  // FIRST, while everything still exists: what the next instance will have
+  // to catch up. Both reads are ToolsAPI/VCL and answer nothing once the
+  // teardown below has run.
+  GDockAtUnload := StatusDockWindowState;
+  GHeadlessAtUnload := McpHeadlessFiles;
+  // And the tick may not call into the IDE-only units from here on - their
+  // state is about to go. Clearing the hook is also what makes the ONE tick
+  // that survives this finalization safe: the pinned case, where the image
+  // can no longer be unmapped and the box is all that is left to do.
+  TRestartHint.SettleHook := nil;
+  // Our own windows next: a modeless result window or the quick-fix
   // popup that is still on screen would keep handlers - and a 250 ms
   // timer - in code this unload is about to unmap (audit #40, M31 /
   // #37, L3s).
@@ -178,7 +239,13 @@ finalization
   // Ending DelphiLSP first wakes those waiting for an answer - their
   // requests fail at once instead of timing out.
   TLspManager.ShutdownIfRunning;
-  ShutdownWorkersAndWait;
+  // A worker that is still running when the image is unmapped executes code
+  // that is no longer there. It is the one shutdown failure the user has to
+  // hear about, so it is recorded rather than returned into nothing.
+  if not ShutdownWorkersAndWait then
+    NoteShutdownProblem('Background threads of the plugin did not finish in ' +
+      'time. Code of the old version may still be running, which can crash ' +
+      'this IDE - please restart it.');
   ResourceTickHook := nil;   // before the timer goes, and before the BPL unloads
   StopResourceMonitor;
   UninstallBlameGutter;
@@ -200,4 +267,9 @@ finalization
   FreeAndNil(ExtractMethodInstance);
   FreeAndNil(CompletionWizardInstance);
   UninstallKeyBinding;
+  // LAST: every shutdown above has had its say, so this is the complete
+  // picture. The marker file is the only channel to the next instance - the
+  // one that knows is the one that is going away.
+  TRestartHint.RecordUnload(ShutdownProblems, GHeadlessAtUnload,
+    GDockAtUnload.Open, GDockAtUnload.Docked, GDockAtUnload.Bounds);
 end.

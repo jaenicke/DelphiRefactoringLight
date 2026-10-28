@@ -1,8 +1,19 @@
-# Changelog
+﻿# Changelog
 
 Every released version of Delphi Refactoring Light, newest first. Each entry
 links to the full notes of that release. Versions before 1.7.0 were
 development builds and were never released.
+
+---
+
+## 2.9.2 - 2026-10-28
+
+### The reload report is readable after the box is gone
+
+The marker that carries what a reload could not restore is consumed by the
+load that reads it, so once the warning box was dismissed its content existed
+nowhere. Every report that is shown is now appended to
+`%TEMP%\DelphiRefactoringLight.reload.log` with a timestamp.
 
 ---
 

@@ -591,7 +591,23 @@ begin
     end;
 
   if Text <> '' then
+  begin
+    // AND IT IS READABLE AFTERWARDS. The marker is CONSUMED by the load that
+    // reads it, so once this box is dismissed its content existed nowhere -
+    // which is why "the message box should be gone then" (user, 2026-10-28)
+    // could not be answered from data at all, only by asking what it said.
+    // One appended line costs nothing and makes the next report measurable.
+    try
+      TFile.AppendAllText(TPath.Combine(TPath.GetTempPath,
+        'DelphiRefactoringLight.reload.log'),
+        Format('%s  reload report:%s%s%s%s', [
+          FormatDateTime('yyyy-mm-dd hh:nn:ss', Now), sLineBreak,
+          Text, sLineBreak, sLineBreak]), TEncoding.UTF8);
+    except
+      // A log is a convenience; it must never cost the user the message.
+    end;
     MessageDlg(Text, mtWarning, [mbOK], 0);
+  end;
 end;
 
 function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;

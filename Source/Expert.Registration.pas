@@ -60,6 +60,11 @@ var
   ///  say) the window and the buffer list are long gone.</summary>
   GDockAtUnload: TRlDockState;
   GHeadlessAtUnload: TArray<string>;
+  /// <summary>What the catch-up measured, for the REPORT stage five seconds
+  ///  later: it asks the tab relation again, because the IDE settles part of
+  ///  a dock through a posted message (TRestartHint.FinalHook).</summary>
+  GReloadFacts: TReloadFacts;
+  GReloadOutcome: TReloadWindowOutcome;
 
 type
   TShortcutChangeHook = class
@@ -187,6 +192,24 @@ begin
   // and quick fixes for Claude Code & co, one pipe per IDE instance.
   StartMcpServer;
 
+  // WHAT IS STILL WORTH SAYING when the box is actually due. The tab
+  // relation is the one thing the catch-up can measure too early: the IDE's
+  // own dock bookkeeping is partly POSTED, and the editor window's dock
+  // panel makes two clients a tab group by ITSELF - so a dock that could
+  // only report the place may BE a tab a moment later. It was, and the box
+  // then named a loss the status row could not see (2026-10-28).
+  TRestartHint.FinalHook :=
+    function: string
+    var
+      Outcome: TReloadWindowOutcome;
+    begin
+      Outcome := GReloadOutcome;
+      if (Outcome = rwoPlaceOnly) and
+         StatusDockTabRelationBack(GReloadFacts.DockPlace) then
+        Outcome := rwoRestored;
+      Result := ReloadReportText(GReloadFacts, Outcome);
+    end;
+
   // WHAT A RELOAD REALLY LOSES, and what of it can be put back. This runs
   // from the deferred tick - main thread, outside the install transaction -
   // so it may use ToolsAPI; it must not open a window (that is the tick's
@@ -290,6 +313,11 @@ begin
         ShowStatusWindowAt(Facts.DockBounds);
 
       // 4. AND ONLY WHAT IS LEFT OVER IS SAID. The rule is pure and tested.
+      //    The two it needs are kept, because the REPORT stage asks again
+      //    five seconds later: part of what was just measured settles
+      //    afterwards (see TRestartHint.FinalHook).
+      GReloadFacts := Facts;
+      GReloadOutcome := Outcome;
       Result := ReloadReportText(Facts, Outcome);
     end;
   // Arms that tick. FILE I/O AND STATE ONLY in here: Register runs inside
@@ -310,6 +338,7 @@ finalization
   // that survives this finalization safe: the pinned case, where the image
   // can no longer be unmapped and the box is all that is left to do.
   TRestartHint.SettleHook := nil;
+  TRestartHint.FinalHook := nil;
   // Our own windows next: a modeless result window or the quick-fix
   // popup that is still on screen would keep handlers - and a 250 ms
   // timer - in code this unload is about to unmap (audit #40, M31 /

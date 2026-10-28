@@ -245,6 +245,16 @@ type
     ///  plain WM_TIMER tick, so it may use ToolsAPI - but it must not open a
     ///  window: the box is the tick's job.</summary>
     class var SettleHook: TFunc<string>;
+    /// <summary>Asked AGAIN at the report stage - five seconds after the
+    ///  catch-up - and its answer is what the box says; '' means there is
+    ///  nothing left to report. Some of what the catch-up measures settles
+    ///  LATER: the IDE's own dock bookkeeping is partly POSTED ($506 ->
+    ///  UMFinalUndock, measured for 2.8.2), and the editor window's dock
+    ///  panel makes two clients a TAB GROUP by itself - so a restore that
+    ///  could only report the PLACE may BE a tab a moment later. It was, and
+    ///  the box told a user the tab was lost while the status row said it
+    ///  was there (2026-10-28).</summary>
+    class var FinalHook: TFunc<string>;
   end;
 
 type
@@ -352,7 +362,13 @@ function SettleStage(ATicks: Integer): TSettleStage;
 ///  The user saw it land beside its neighbour and the box said nothing.
 ///  Restraint belongs in the REPORT, which is the only place that knows
 ///  whether it can name what is missing.</summary>
-function OutcomeOfDockedLink(AIndex: Integer): TReloadWindowOutcome;
+///  ATABRELATIONBACK is a MEASUREMENT and not an inference: the place the
+///  window was docked into says nothing about the tab, because the editor
+///  window's own dock panel makes two clients a tab group by itself - which
+///  is what a user got on 2026-10-28, with the box naming a loss the status
+///  row could not see.</summary>
+function OutcomeOfDockedLink(AIndex: Integer;
+  ATabRelationBack: Boolean = False): TReloadWindowOutcome;
 
 /// <summary>WHAT A RELOAD HAS TO TELL THE USER. PURE, and deliberately apart
 ///  from the doing: the catch-up itself needs ToolsAPI and a live IDE, this
@@ -583,11 +599,19 @@ begin
   else if (Text = '') and Assigned(TRestartHint.SettleHook) then
     // THE CATCH-UP DID NOT RUN - the guards were red at its own tick and
     // green at this one, which is possible when a modal dialog of the IDE
-    // sat exactly across tick 2. Then this stage does both.
+    // sat exactly across tick 2. Then this stage does both, and what it
+    // measures is current by construction.
     try
       Text := TRestartHint.SettleHook();
     except
       Text := '';
+    end
+  else if Assigned(TRestartHint.FinalHook) then
+    // WHAT IS STILL TRUE NOW, see FinalHook. A failure here keeps what the
+    // catch-up said rather than costing the report.
+    try
+      Text := TRestartHint.FinalHook();
+    except
     end;
 
   if Text <> '' then
@@ -841,9 +865,10 @@ begin
     Result := ssWait;
 end;
 
-function OutcomeOfDockedLink(AIndex: Integer): TReloadWindowOutcome;
+function OutcomeOfDockedLink(AIndex: Integer;
+  ATabRelationBack: Boolean): TReloadWindowOutcome;
 begin
-  if AIndex = 0 then
+  if (AIndex = 0) or ATabRelationBack then
     Result := rwoRestored
   else
     Result := rwoPlaceOnly;

@@ -6,6 +6,34 @@ development builds and were never released.
 
 ---
 
+## 2.9.5 - 2026-10-28
+
+### Two things the live install of 2.9.4 showed
+
+- **The reload report said the tab was lost while the window WAS a tab.** The
+  box after an install reported "back in its dock site, but no longer as a TAB
+  beside the Messages view" - and the status window said, at the same moment,
+  that it is a tab beside it. The outcome was INFERRED from the dock site the
+  window was handed back into; the editor window's own dock panel makes two
+  clients a tab group by itself, so that inference was wrong. It is a
+  measurement now, and it is taken again when the box is actually due, because
+  the IDE settles part of a dock through a posted message.
+  Found with it: the sibling lookup that rebuilds a tab group required the
+  neighbour to be a `TDockableForm` and therefore rejected the IDE's own
+  Messages view. What a splice really needs is the neighbour's dock SITE, which
+  is what it asks for now.
+- **The MCP bridge handed its pipes over only once per Claude Code session.**
+  Since 1.33.0 a bridge whose exe an install replaced hands stdin/stdout to the
+  new one - but the successor was started with `--no-relaunch`, which is
+  permanent, so the SECOND install in one session left the old bridge serving
+  while the status row promised otherwise. The successor now carries a hop
+  count instead, with a backstop; measured end to end with two installs in a
+  row. The mismatch row also says what a new session cannot fix: the exe on
+  disk is only as new as the last `install.cmd`, because the IDE's own
+  "Install" renews the BPL alone.
+
+---
+
 ## 2.9.4 - 2026-10-28
 
 ### Renaming a parameter: eight shapes (issue #54)

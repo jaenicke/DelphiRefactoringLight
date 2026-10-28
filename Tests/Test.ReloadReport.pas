@@ -731,6 +731,17 @@ begin
     'is the place alone, whatever the marker carried');
   Assert.AreEqual(rwoPlaceOnly, OutcomeOfDockedLink(5),
     'and that holds however far out it is');
+  // ...UNLESS THE TAB IS REALLY THERE, which is a MEASUREMENT and the second
+  // half of the same report: the editor window's own dock panel makes two
+  // clients a TAB GROUP by itself, so a dock into an outer link can leave
+  // the window a tab anyway. On 2026-10-28 it did, and the box named a loss
+  // the status row could not see.
+  Assert.AreEqual(rwoRestored, OutcomeOfDockedLink(1, True),
+    'an outer link WITH the tab relation back is a full restore');
+  Assert.AreEqual(rwoRestored, OutcomeOfDockedLink(5, True),
+    'wherever it landed - the relation is what the sentence is about');
+  Assert.AreEqual(rwoPlaceOnly, OutcomeOfDockedLink(1, False),
+    'and without it the place is all there is');
 
   // AND THE TWO WAITS ARE SEPARATE, because they wait for different things:
   // the five ticks were measured for the MODAL BOX (2.6.11 - a modal window
@@ -738,6 +749,26 @@ begin
   // no modal window and is the only part the user can SEE. Waiting out the
   // box's margin is what he reported as "mehrere Sekunden, in denen visuell
   // nichts zu sehen ist".
+  // AND THE REPORT FOLLOWS THAT: the whole point of asking is that the box
+  // stays silent when nothing was lost.
+  begin
+    var F := Default(TReloadFacts);
+    F.Reloaded := True;
+    F.DockWasOpen := True;
+    F.DockWasDocked := True;
+    F.DockPlace.Links := [Default(TDockLink)];
+    F.DockPlace.Links[0].Section := 'DockSite5';
+    // Siblings is DERIVED (every client that is not our own window), so the
+    // fixture fills the list the marker really carries.
+    F.DockPlace.Links[0].Clients := [Default(TDockClientRef)];
+    F.DockPlace.Links[0].Clients[0].Section := 'MessageView';
+    Assert.IsTrue(ReloadReportText(F, OutcomeOfDockedLink(1, False))
+      .Contains('MessageView'),
+      'without the relation the box names the neighbour - the reported case');
+    Assert.AreEqual('', ReloadReportText(F, OutcomeOfDockedLink(1, True)),
+      'and with the tab really back it says NOTHING at all');
+  end;
+
   Assert.AreEqual(ssWait, SettleStage(1), 'tick 1 is still too early');
   Assert.AreEqual(ssCatchUp, SettleStage(CatchUpTicks),
     'the catch-up - and with it the window - runs as soon as the IDE is usable');

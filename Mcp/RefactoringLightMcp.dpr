@@ -21,6 +21,11 @@ program RefactoringLightMcp;
 //   --list     print the running IDEs as the bridge sees them, then exit
 //   --version  print the version, then exit
 //   --no-relaunch  do not hand over to a newer exe (see RunServer)
+//   --relaunch-hop=<n>  how often this chain has handed over already; the
+//                  successor gets n+1, and MaxRelaunchHops is the backstop.
+//                  1.33.0 passed --no-relaunch to every successor instead,
+//                  which is permanent - so the SECOND install in one session
+//                  left a stale bridge behind (2026-10-28).
 
 {$APPTYPE CONSOLE}
 
@@ -44,10 +49,26 @@ begin
   Result := False;
 end;
 
+// "--name=value" - the value, or '' when the argument is not there.
+function ArgValue(const AName: string): string;
+begin
+  Result := '';
+  for var I := 1 to ParamCount do
+  begin
+    var S := ParamStr(I).TrimLeft(['-', '/']);
+    var Eq := Pos('=', S);
+    if (Eq > 1) and SameText(Copy(S, 1, Eq - 1), AName) then
+      Exit(Copy(S, Eq + 1, MaxInt));
+  end;
+end;
+
 var
   // stdout is written by the request loop AND the tools watcher - one
   // message must never interleave with another.
   GOutLock: TCriticalSection;
+  // How often this chain of bridges has handed its pipes on already - the
+  // successor is started with this raised by one (see HandOverTo).
+  GHop: Integer;
 
 procedure WriteOut(AHandle: THandle; const S: string);
 var
@@ -177,7 +198,8 @@ end;
 // Start AExe on OUR OWN std handles and wait for it. The client created
 // those pipes and waits on THIS process, so this one stays alive until the
 // successor is done - from the outside nothing happened but a slower start.
-function HandOverTo(const AExe: string; out AError: string): Integer;
+function HandOverTo(const AExe: string; AHop: Integer;
+  out AError: string): Integer;
 var
   SI: TStartupInfo;
   PI: TProcessInformation;
@@ -194,9 +216,13 @@ begin
   SetHandleInformation(SI.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
   SetHandleInformation(SI.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
   SetHandleInformation(SI.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+  // THE SUCCESSOR MAY HAND OVER AGAIN, and that is the whole correction:
+  // the next install renames IT aside, and a permanent --no-relaunch meant
+  // it could not react - the second install in one Claude Code session left
+  // the stale bridge serving (2026-10-28). The count is the backstop.
   if not CreateProcess(nil,
-    PChar('"' + AExe + '" --no-relaunch --announce-tools'), nil, nil,
-    True, 0, nil, nil, SI, PI) then
+    PChar(Format('"%s" --relaunch-hop=%d --announce-tools', [AExe, AHop + 1])),
+    nil, nil, True, 0, nil, nil, SI, PI) then
   begin
     AError := SysErrorMessage(GetLastError);
     Exit;
@@ -271,7 +297,7 @@ begin
           function(APath: string): Boolean
           begin
             Result := TFile.Exists(APath);
-          end, False);
+          end, False, GHop);
         if Plan.Wanted then Break;
       end;
       if not (ReadFile(InH, Buf[0], SizeOf(Buf), Got, nil) and (Got > 0)) then
@@ -319,7 +345,7 @@ begin
     Exit;
   end;
   WriteOut(ErrH, Format('%s (now: %s)', [Plan.Reason, Ver]));
-  ExitCode := HandOverTo(Plan.NewExe, Err);
+  ExitCode := HandOverTo(Plan.NewExe, GHop, Err);
   if Err <> '' then
     WriteOut(ErrH, 'could not start it: ' + Err + ' - this session has no ' +
       'bridge any more, start a new one');
@@ -327,6 +353,10 @@ end;
 
 begin
   GOutLock := TCriticalSection.Create;
+  // Read ONCE, here: every later reader is the request loop, which must not
+  // parse the command line between two requests.
+  GHop := StrToIntDef(ArgValue('relaunch-hop'), 0);
+  if GHop < 0 then GHop := 0;
   try
     if HasArg('version') then
       Writeln('RefactoringLightMcp ', BridgeVersion)

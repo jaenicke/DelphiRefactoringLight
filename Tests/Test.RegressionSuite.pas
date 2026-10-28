@@ -1523,11 +1523,25 @@ begin
   Assert.AreEqual('', Plan.NewExe, False, 'and no path is invented');
   Assert.IsTrue(Plan.Reason.Contains('not there'), Plan.Reason);
 
-  // The successor ALWAYS gets --no-relaunch, so a loop is impossible even
-  // if an install ever produced an aside name twice.
+  // --no-relaunch is the explicit kill switch and still refuses.
   Plan := PlanBridgeRelaunch(Aside, Everything, True);
   Assert.IsFalse(Plan.Wanted, 'suppressed: serve from here');
   Assert.IsTrue(Plan.Reason.Contains('no-relaunch'), Plan.Reason);
+
+  // ...BUT A SUCCESSOR MAY HAND OVER AGAIN, which is what 1.33.0 forbade by
+  // passing --no-relaunch to every one of them: the NEXT install renames
+  // that process aside too, and then it served stale for the rest of the
+  // session (measured in a live IDE, 2026-10-28 - bridge 2.8.2 against
+  // plugin 2.9.4, running from an aside copy). A loop needs none of that
+  // ban: a successor runs from the INSTALLED name, which the first case
+  // above refuses.
+  Plan := PlanBridgeRelaunch(Aside, Everything, False, 1);
+  Assert.IsTrue(Plan.Wanted, 'the second hand-over of a chain: ' + Plan.Reason);
+  Assert.AreEqual(Canon, Plan.NewExe, False);
+  // ...up to a backstop, so a pathological chain cannot grow forever.
+  Plan := PlanBridgeRelaunch(Aside, Everything, False, MaxRelaunchHops);
+  Assert.IsFalse(Plan.Wanted, 'at the cap it serves from here');
+  Assert.IsTrue(Plan.Reason.Contains('already handed the pipes on'), Plan.Reason);
 
   // The cleanup: every aside copy but the one we run from. That one is
   // in use - Windows refuses it, and the NEXT bridge removes it.
@@ -1603,8 +1617,25 @@ begin
     'both numbers, whatever the age: ' + Replaced);
   Assert.IsTrue(Replaced.Contains('new Claude Code session'),
     'the exe is already right, so a new session is the whole fix: ' + Replaced);
-  Assert.IsFalse(Replaced.Contains('install.cmd'),
-    'and running the install again would be the WRONG advice: ' + Replaced);
+  // THE SESSION COMES FIRST, which is the whole point of 1.22.3: the exe on
+  // disk is already right, so sending the user to the install was what made
+  // him run it twice. It may still be NAMED afterwards, and since 2.9.5 it
+  // is - the live state of 2026-10-28 was a bridge replaced at 10:54 (so
+  // "replaced") whose on-disk version was 2.9.0 against a plugin of 2.9.4,
+  // because the IDE's own "Install" renews the BPL alone. A new session
+  // alone could not have fixed that, and saying nothing about it would send
+  // the next report in a circle of its own.
+  Assert.IsTrue(Pos('new Claude Code session', Replaced) <
+                Pos('install.cmd', Replaced + 'install.cmd'),
+    'the new session is the FIRST thing it says, the install at most the ' +
+    'second: ' + Replaced);
+  // AND IT SAYS FROM WHEN THE BRIDGE DOES IT BY ITSELF, because until 2.9.5
+  // it did so ONCE per session: the successor of a hand-over was started
+  // with --no-relaunch, so a SECOND install left it serving stale (live,
+  // 2026-10-28). The sentence promised otherwise.
+  Assert.IsTrue(Replaced.Contains(FirstRepeatedHandOver),
+    'the version from which a bridge hands over as often as it is '
+    + 'replaced: ' + Replaced);
 
   var AsOld := BridgeVersionProblem('1.16.29', '1.22.0', beaAsOld);
   Assert.IsTrue(AsOld.Contains('install.cmd'),

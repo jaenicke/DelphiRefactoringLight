@@ -84,6 +84,11 @@ type
 ///  and so on up to the IDE's main window.</summary>
 function StatusDockWindowState: TRlDockState;
 
+/// <summary>Is the status window a tab beside one of the neighbours APLACE
+///  recorded? The report stage asks this AFTER the restore, because a dock
+///  can become a tab a moment later - see TRestartHint.FinalHook.</summary>
+function StatusDockTabRelationBack(const APlace: TDockPlace): Boolean;
+
 /// <summary>That state in one line, for the status window's own row - which
 ///  is where one looks to find out whether a reload will be able to put the
 ///  window back.</summary>
@@ -1788,11 +1793,20 @@ begin
       if not SameText(TDesktopForm(F).DeskSection, ARef.Section) then Continue;
       if (ARef.FormClass <> '') and
          not SameText(F.ClassName, ARef.FormClass) then Continue;
-      // ONLY A DOCKABLE FORM CAN BE SPLICED INTO A TAB HOST: the host takes
-      // the sibling's own dock zone, which a form that is not docked through
-      // the IDE's dockable-form machinery does not have. Found and then
-      // refused is the safe direction - the relation is simply not restored.
-      if not (F is TDockableForm) then Continue;
+      // THE PRECONDITION IS THE SIBLING'S DOCK SITE, not its class: the new
+      // host takes that site's zone, and whether it can is a property of the
+      // SITE (a dock manager) - which is exactly what MakeTabBeside tests
+      // before it builds anything. The class test that stood here rejected
+      // the IDE's own Messages view, and that is not a guess: the box said
+      // the PLACE-ONLY sentence, so the dock went through an outer link,
+      // which means MakeTabBeside was never called - while every other
+      // condition of this lookup is proven by the fact that the sibling was
+      // RECORDED and NAMED (its DeskSection is read off a TDesktopForm). So
+      // TMessageViewForm is a TDesktopForm with a DeskSection and not a
+      // TDockableForm, and the tab group was not rebuilt by us at all
+      // (2026-10-28).
+      if (F.HostDockSite = nil) or not F.HostDockSite.UseDockManager
+        or (F.HostDockSite.DockManager = nil) then Continue;
       Exit(F);
     end;
   except
@@ -1900,6 +1914,32 @@ begin
     var F := FindSiblingForm(Ref);
     if (F <> nil) and MakeTabBeside(AForm, F) then
       Exit(True);
+  end;
+end;
+
+// Is AFORM a client of ONE host together with a sibling the marker
+// recorded? That - and not the place - is what a tab group IS, so it is what
+// "the tab came back" has to be read off. Both sides are compared by
+// DeskSection, which is the only name a sibling really owns (a run-time host
+// has none at all, which is why its own entry is skipped by Section = '').
+function TabRelationBack(AForm: TCustomForm; const APlace: TDockPlace): Boolean;
+var
+  Nowp: TDockPlace;
+begin
+  Result := False;
+  if (AForm = nil) or (AForm.HostDockSite = nil) then Exit;
+  try
+    Nowp := ReadDockTarget(AForm);
+    for var L in Nowp.Links do
+      for var S in L.Siblings do
+      begin
+        if S.IsSelf or (S.Section = '') then Continue;
+        for var WasL in APlace.Links do
+          for var W in WasL.Siblings do
+            if not W.IsSelf and SameText(W.Section, S.Section) then Exit(True);
+      end;
+  except
+    Result := False;
   end;
 end;
 
@@ -2034,7 +2074,12 @@ begin
       // wrong and what it cost: the first install after it reported a dock
       // into the PANEL as a restore, which skipped the desktop fallback that
       // knows the tab group, and the box stayed silent about it.
-      Exit(OutcomeOfDockedLink(I));
+      // ...BUT THE TAB IS A FACT TO BE ASKED: docking into an outer link can
+      // leave us a tab anyway, because the editor window's dock panel groups
+      // two clients by itself. Asking is the only honest answer, and the
+      // report stage asks once more - the IDE settles part of this through a
+      // POSTED message.
+      Exit(OutcomeOfDockedLink(I, TabRelationBack(AForm, APlace)));
     // THIS link's host is gone - a drag-created one dissolves when our client
     // leaves it. Its tab GROUP can still be rebuilt, and that beats falling
     // through to the next link, which can only give the place back.
@@ -2200,6 +2245,11 @@ begin
   FreeAndNil(GSnapshot);
   UnregisterDock(GToolsDockable, GToolsForm, GToolsRegistered);
   UnregisterDock(GDockable, GForm, GRegistered);
+end;
+
+function StatusDockTabRelationBack(const APlace: TDockPlace): Boolean;
+begin
+  Result := (GForm <> nil) and TabRelationBack(GForm, APlace);
 end;
 
 function StatusDockWindowState: TRlDockState;

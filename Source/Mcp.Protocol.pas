@@ -150,18 +150,37 @@ type
 ///  the startup code, where nothing has been renamed yet.</summary>
 function CurrentProcessImagePath: string;
 
+/// <summary>How often ONE bridge process may hand its pipes on. A chain is
+///  finite by construction - every hop needs an install that renames the
+///  running exe aside - so this is a backstop and not the rule.</summary>
+const
+  MaxRelaunchHops = 8;
+
+/// <summary>The version from which a bridge hands over as OFTEN as it is
+///  replaced. 1.33.0 to 2.9.4 did it once per session: the successor was
+///  started with --no-relaunch, so the SECOND install in one Claude Code
+///  session left a stale bridge behind (measured 2026-10-28, and the status
+///  row's own sentence promised otherwise).</summary>
+  FirstRepeatedHandOver = '2.9.5';
+
 /// <summary>Whether this image should hand its stdio to the exe that
 ///  replaced it. AIMAGEPATH is CurrentProcessImagePath, never ParamStr(0)
-///  - see there. Three reasons NOT to, each
+///  - see there. Four reasons NOT to, each
 ///  named: this IS the installed exe (the normal case), the caller said so
-///  (--no-relaunch, which the successor always gets so a loop is
-///  impossible), or the installed name is not on disk - a packaged host
-///  redirects %LOCALAPPDATA%, so the aside copy can live in a view the
-///  install never wrote to (1.22.3), and there is nothing to hand over
-///  to.</summary>
+///  (--no-relaunch, the explicit kill switch), it has handed over
+///  MaxRelaunchHops times already, or the installed name is not on disk - a
+///  packaged host redirects %LOCALAPPDATA%, so the aside copy can live in a
+///  view the install never wrote to (1.22.3), and there is nothing to hand
+///  over to.
+///  AHOP is how often this chain has handed over already; the successor gets
+///  it raised by one. A LOOP IS IMPOSSIBLE WITHOUT THAT COUNTER TOO - the
+///  successor runs from the INSTALLED name, which this function refuses with
+///  "this is the installed exe" - which is why 1.33.0's permanent
+///  --no-relaunch only ever cost the thing it was meant to protect: the next
+///  install renames THAT process aside, and then it may not react.</summary>
 function PlanBridgeRelaunch(const AImagePath: string;
   const AFileExists: TFunc<string, Boolean>;
-  ASuppressed: Boolean): TBridgeRelaunch;
+  ASuppressed: Boolean; AHop: Integer = 0): TBridgeRelaunch;
 
 /// <summary>Of AFILES, the aside copies an install left behind that may be
 ///  deleted - every "&lt;exe&gt;.&lt;number&gt;.old" except AMYIMAGE, which is the
@@ -688,7 +707,7 @@ end;
 
 function PlanBridgeRelaunch(const AImagePath: string;
   const AFileExists: TFunc<string, Boolean>;
-  ASuppressed: Boolean): TBridgeRelaunch;
+  ASuppressed: Boolean; AHop: Integer): TBridgeRelaunch;
 begin
   Result := Default(TBridgeRelaunch);
   Result.NewExe := CanonicalBridgeExePath(AImagePath);
@@ -700,6 +719,14 @@ begin
   if ASuppressed then
   begin
     Result.Reason := 'started from the aside copy on purpose (--no-relaunch)';
+    Result.NewExe := '';
+    Exit;
+  end;
+  if AHop >= MaxRelaunchHops then
+  begin
+    Result.Reason := Format('an install replaced this exe, but this chain has '
+      + 'already handed the pipes on %d times in this session - not again',
+      [AHop]);
     Result.NewExe := '';
     Exit;
   end;
@@ -739,9 +766,14 @@ begin
     // The file is already right; a process cannot swap its own image.
     Result := Format('bridge exe %s, plugin %s - but the exe ON DISK has ' +
       'been replaced since this bridge started, so it is only the running ' +
-      'session that is old. A bridge of 1.33.0 or newer hands over to the ' +
-      'new exe by itself with the next request; an older one needs a new ' +
-      'Claude Code session, nothing else', [ABridge, APlugin])
+      'session that is old. A bridge of %s or newer hands the pipes over to ' +
+      'the new exe by itself with the next request, as often as it is ' +
+      'replaced; 1.33.0 to 2.9.4 did it ONCE per session, so a SECOND ' +
+      'install in one session needs a new Claude Code session - and so does ' +
+      'anything older. And the exe on disk is only as new as the last ' +
+      'install.cmd: the IDE''s own "Install" renews this BPL alone, so when ' +
+      'a new session still reports a mismatch, that install is what is ' +
+      'missing', [ABridge, APlugin, FirstRepeatedHandOver])
   else
     Result := Format('bridge exe %s, plugin %s - these must match. The ' +
       'installed exe is still the old one, so run install.cmd (it reports ' +

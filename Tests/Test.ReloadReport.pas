@@ -52,6 +52,7 @@ type
     ///  chain carries the site that host was itself docked in.</summary>
     [Test] procedure ARunTimeDockHostIsStillAHost;
     [Test] procedure APlaceWithoutItsTabIsNotARestore;
+    [Test] procedure TheFirstInstallMustNotStopLooking;
   end;
 
 implementation
@@ -657,20 +658,21 @@ begin
   Assert.IsFalse(S.Contains('could not be put back'),
     'it is NOT the sentence a failed restore gets: ' + S);
 
-  // AND WITHOUT A RECORDED SIBLING it says the half it knows instead of
-  // naming a window it cannot name - a marker older than 2.9.0 carries no
-  // clients at all, and that must not produce a sentence about nothing.
+  // AND WITHOUT A RECORDED SIBLING IT SAYS NOTHING, which 2.9.1 changed on
+  // purpose: rwoPlaceOnly means "not in the host it came from", and a window
+  // that was ALONE in that host has no tab to miss - so a sentence there
+  // would be about something we cannot know. The restraint belongs HERE and
+  // nowhere else; 2.9.0 put it into the decision whether to keep LOOKING for
+  // the tab, which is what cost the first install after it (see
+  // OutcomeOfDockedLink).
   // A FRESH PLACE, not Place with its list emptied: TDockPlace.Links is a
   // dynamic array, so assigning the record SHARES it and clearing it through
   // one name clears it for the other. (That is what this assertion caught on
   // its first run, in the test rather than in the code.)
   F.DockPlace := PlaceOf([DockLinkOf('TabDockHostForm', 'TTabDockHostForm',
     '', 'DockPanel')]);
-  S := ReloadReportText(F, rwoPlaceOnly);
-  Assert.IsTrue(S.Contains('tab') or S.Contains('TAB'),
-    'the generic form still names the loss: ' + S);
-  Assert.IsFalse(S.Contains('beside '),
-    'and it does not pretend to know the neighbour: ' + S);
+  Assert.AreEqual('', ReloadReportText(F, rwoPlaceOnly),
+    'with no sibling recorded there is nothing we can honestly say');
 
   // THE MARKER CARRIES THE LIST - without that none of it survives the
   // reload. Written interleaved behind its own dockat= line, so the reader
@@ -708,6 +710,43 @@ begin
     'and it names the tab group: the one client that is not us');
   Assert.AreEqual('MessageView', Place.Innermost.Siblings[0].Section,
     'by the section the lookup needs');
+end;
+
+procedure TReloadReportTests.TheFirstInstallMustNotStopLooking;
+begin
+  // THE DEFECT OF 2.9.0, reported after installing it: "anders als beim
+  // letzten Versuch kam das Fenster nun daneben statt als Tab" - and then
+  // "beim zweiten Versuch ging es", which is what named the cause. The first
+  // install reads the marker the PREVIOUS version wrote, and that carries no
+  // clients; 2.9.0 answered rwoRestored for a dock into the PANEL whenever
+  // no sibling had been recorded, so Registration skipped the desktop
+  // fallback - the one source that does know the tab group - and the box
+  // stayed silent about it.
+  //
+  // THE RULE IS WHERE WE LANDED, and nothing about what we happen to know.
+  Assert.AreEqual(rwoRestored, OutcomeOfDockedLink(0),
+    'the innermost link IS the host that held the window: place and tabs');
+  Assert.AreEqual(rwoPlaceOnly, OutcomeOfDockedLink(1),
+    'any link further out is a dock site that cannot express a tab - so it ' +
+    'is the place alone, whatever the marker carried');
+  Assert.AreEqual(rwoPlaceOnly, OutcomeOfDockedLink(5),
+    'and that holds however far out it is');
+
+  // AND THE TWO WAITS ARE SEPARATE, because they wait for different things:
+  // the five ticks were measured for the MODAL BOX (2.6.11 - a modal window
+  // inside the install transaction wedges the IDE), while the catch-up opens
+  // no modal window and is the only part the user can SEE. Waiting out the
+  // box's margin is what he reported as "mehrere Sekunden, in denen visuell
+  // nichts zu sehen ist".
+  Assert.AreEqual(ssWait, SettleStage(1), 'tick 1 is still too early');
+  Assert.AreEqual(ssCatchUp, SettleStage(CatchUpTicks),
+    'the catch-up - and with it the window - runs as soon as the IDE is usable');
+  Assert.AreEqual(ssWait, SettleStage(CatchUpTicks + 1),
+    'and the ticks between the two stages do nothing');
+  Assert.AreEqual(ssReport, SettleStage(DeferTicks),
+    'the box keeps the distance that was measured for it');
+  Assert.IsTrue(CatchUpTicks < DeferTicks,
+    'the window must never wait for the box');
 end;
 
 initialization

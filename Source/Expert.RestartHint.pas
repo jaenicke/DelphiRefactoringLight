@@ -292,6 +292,68 @@ type
 ///  worked.</summary>
 function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;
 
+const
+  /// <summary>Ticks to sit out before the BOX may open. THE DELAY IS ALSO A
+  ///  GUARD: on a fresh IDE start the project-open notification has long
+  ///  arrived after five seconds, so the catch-up finds nothing to do and
+  ///  stays silent; on a reload it never arrives at all.</summary>
+  DeferTicks = 10;
+  /// <summary>And ticks to sit out before the CATCH-UP runs, which is a much
+  ///  shorter wait on purpose (user, 2026-10-28: "das sind aber mehrere
+  ///  Sekunden, in denen visuell nichts zu sehen ist").
+  ///
+  ///  THE TWO HAVE DIFFERENT REASONS, and 2.7.0 put them in one hook without
+  ///  noticing: the five ticks were MEASURED for the modal box, because a
+  ///  modal window inside the IDE's install transaction wedges it (2.6.11) -
+  ///  that is the defect that whole round was about. The catch-up opens no
+  ///  modal window; what it does is ordinary window work, and the two guards
+  ///  below are exactly the test for "the transaction is over": ModalLevel,
+  ///  and an ENABLED main window, which every modal path of the VCL disables.
+  ///  The tick count does not even start until both are green, so this is a
+  ///  buffer on top of a measured state rather than a guess about one - and
+  ///  the user waits for the WINDOW, never for the box.</summary>
+  CatchUpTicks = 2;
+  DeferIntervalMs = 500;
+
+type
+  /// <summary>What the deferred tick should do at tick number N.</summary>
+  TSettleStage = (
+    /// <summary>Not yet - keep ticking.</summary>
+    ssWait,
+    /// <summary>Run the catch-up (project, headless buffers, the window) and
+    ///  remember what it reports.</summary>
+    ssCatchUp,
+    /// <summary>Show what the catch-up could not do.</summary>
+    ssReport);
+
+/// <summary>WHEN THE DEFERRED TICK DOES WHAT. PURE, and separated because
+///  the two halves wait for different reasons - see CatchUpTicks.</summary>
+function SettleStage(ATicks: Integer): TSettleStage;
+
+/// <summary>WHAT A DOCK INTO LINK NUMBER <c>AIndex</c> OF THE CHAIN
+///  ACHIEVED. Trivial, named and tested because this is exactly where 2.9.0
+///  was wrong, and the mistake cost the first install after it.
+///
+///  THE QUESTION IS WHERE WE LANDED, and nothing else. The innermost link IS
+///  the host that held the window, so landing there restores the place and
+///  every tab with it; any link further out is a dock site that cannot
+///  express a tab at all (measured: Vcl.Controls' TDockTree turns alClient
+///  into alRight in a non-empty tree, and designide's own dock tree has no
+///  tab set), so it is the place ALONE.
+///  WHAT 2.9.0 DID INSTEAD was to answer rwoRestored for an outer link
+///  whenever no sibling had been RECORDED - meant as restraint ("do not
+///  claim a lost tab when we know of no tab"), and it conflated two
+///  questions: may I SAY the relation is missing, and may I STOP LOOKING for
+///  it. The second one is never answered by what the marker happens to
+///  carry: the saved desktop names the tab group itself. So the first
+///  install after 2.9.0 - which reads the marker the PREVIOUS version wrote,
+///  with no clients in it - docked into the panel, reported a restore, and
+///  with that skipped the desktop fallback that would have rebuilt the tab.
+///  The user saw it land beside its neighbour and the box said nothing.
+///  Restraint belongs in the REPORT, which is the only place that knows
+///  whether it can name what is missing.</summary>
+function OutcomeOfDockedLink(AIndex: Integer): TReloadWindowOutcome;
+
 /// <summary>WHAT A RELOAD HAS TO TELL THE USER. PURE, and deliberately apart
 ///  from the doing: the catch-up itself needs ToolsAPI and a live IDE, this
 ///  decision does not.
@@ -371,12 +433,6 @@ uses
   Winapi.Windows, Vcl.Forms, Vcl.ExtCtrls, Vcl.Dialogs, System.UITypes;
 
 const
-  /// <summary>Ticks to sit out before the catch-up runs and the box may
-  ///  open. THE DELAY IS ALSO A GUARD: on a fresh IDE start the project-open
-  ///  notification has long arrived after five seconds, so the catch-up finds
-  ///  nothing to do and stays silent; on a reload it never arrives at all.</summary>
-  DeferTicks = 10;
-  DeferIntervalMs = 500;
 
   /// <summary>Marker keys. A line the reader does not know is ignored, so an
   ///  older marker left by a previous version can never break a load.</summary>
@@ -418,6 +474,9 @@ type
   private
     FTimer: TTimer;
     FTicks: Integer;
+    /// <summary>What the catch-up stage reported, shown by the report
+    ///  stage - the two are separate ticks now (see CatchUpTicks).</summary>
+    FCatchUpText: string;
     procedure DoTick(Sender: TObject);
   public
     constructor Create; reintroduce;
@@ -480,13 +539,32 @@ begin
      not IsWindowEnabled(Application.MainFormHandle) then
     Exit;
   Inc(FTicks);
-  if FTicks < DeferTicks then
-    Exit;
+  case SettleStage(FTicks) of
+    ssWait:
+      Exit;
+    ssCatchUp:
+      begin
+        // THE CATCH-UP, as soon as the IDE is usable - the window is the one
+        // thing the user SEES, and it used to wait out the box's own margin.
+        // The timer keeps running: the box is a separate stage, and its text
+        // is what this stage produces.
+        FCatchUpText := '';
+        if not TRestartHint.FPinned and Assigned(TRestartHint.SettleHook) then
+          try
+            FCatchUpText := TRestartHint.SettleHook();
+          except
+            // The catch-up may not cost the user an exception box of its own;
+            // a failure here means the same as "nothing to report".
+            FCatchUpText := '';
+          end;
+        Exit;
+      end;
+  end;
   // BEFORE anything that pumps: a modal box's own message loop would deliver
   // the next tick and stack a second box on top of this one.
   FTimer.Enabled := False;
 
-  Text := '';
+  Text := FCatchUpText;
   if TRestartHint.FPinned then
     // The one case that is NOT about this load: this instance is the one that
     // pinned itself, so its own finalization has already run. Nothing of the
@@ -502,12 +580,13 @@ begin
       'and the plugin is gone from this session.' + sLineBreak +
       sLineBreak +
       'Please restart RAD Studio.'
-  else if Assigned(TRestartHint.SettleHook) then
+  else if (Text = '') and Assigned(TRestartHint.SettleHook) then
+    // THE CATCH-UP DID NOT RUN - the guards were red at its own tick and
+    // green at this one, which is possible when a modal dialog of the IDE
+    // sat exactly across tick 2. Then this stage does both.
     try
       Text := TRestartHint.SettleHook();
     except
-      // The catch-up may not cost the user an exception box of its own; a
-      // failure here means the same as "nothing to report".
       Text := '';
     end;
 
@@ -736,6 +815,24 @@ begin
   end;
 end;
 
+function SettleStage(ATicks: Integer): TSettleStage;
+begin
+  if ATicks = CatchUpTicks then
+    Result := ssCatchUp
+  else if ATicks >= DeferTicks then
+    Result := ssReport
+  else
+    Result := ssWait;
+end;
+
+function OutcomeOfDockedLink(AIndex: Integer): TReloadWindowOutcome;
+begin
+  if AIndex = 0 then
+    Result := rwoRestored
+  else
+    Result := rwoPlaceOnly;
+end;
+
 function ReloadReportText(const AFacts: TReloadFacts;
   AOutcome: TReloadWindowOutcome): string;
 var
@@ -766,15 +863,17 @@ begin
       for var S in C.Siblings do
         if (Sibling = '') and (S.Section <> '') then
           Sibling := S.Section;
+    // AND WITHOUT A NAME IT SAYS NOTHING, which is where the restraint
+    // belongs: rwoPlaceOnly means "not in the host it came from", and for a
+    // window that was ALONE in that host there is no tab to miss. Only a
+    // recorded sibling proves there was a group, so only then is there
+    // something to report - and then it can be named, which is what makes
+    // the sentence actionable.
     if Sibling <> '' then
       Lines := Lines + [Format('The status window is back in its dock site, ' +
         'but no longer as a TAB beside %s - it sits next to it instead. ' +
         'Dragging it onto that tab bar once puts it back, and the IDE ' +
-        'remembers it with your desktop.', [Sibling])]
-    else
-      Lines := Lines + ['The status window is back in its dock site, but ' +
-        'not in the tab group it was in. Dragging it onto that tab bar ' +
-        'once puts it back.'];
+        'remembers it with your desktop.', [Sibling])];
   end;
 
   if AFacts.DockWasOpen and (AOutcome = rwoNotDone) then

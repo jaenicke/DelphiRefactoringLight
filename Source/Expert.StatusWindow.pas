@@ -1988,8 +1988,6 @@ end;
 
 function RedockFormInto(AForm: TCustomForm;
   const APlace: TDockPlace): TReloadWindowOutcome;
-var
-  HadRelation: Boolean;
 begin
   // THE DEEPEST LINK THAT STILL EXISTS. The host that held the window is the
   // first try, and for a host the desktop file created (DockSite0..N, kept
@@ -2028,24 +2026,15 @@ begin
   // TAB beside the Messages view. A Boolean cannot carry that, so the box
   // said nothing and he had to find it by looking.
   Result := rwoNotDone;
-  HadRelation := False;
-  for var Link in APlace.Links do
-    if Length(Link.Siblings) > 0 then
-      HadRelation := True;
-
   for var I := 0 to High(APlace.Links) do
   begin
     if DockIntoLink(AForm, APlace.Links[I]) then
-    begin
-      // THE INNERMOST LINK IS THE HOST THAT HELD THE WINDOW, so landing
-      // there restores the place and every tab with it. Any link further out
-      // is the place ALONE - and only worth saying when there was a relation
-      // to lose: a marker older than 2.9.0 records no clients, and then
-      // "place" is all we can check, which is exactly the old behaviour.
-      if (I = 0) or not HadRelation then
-        Exit(rwoRestored);
-      Exit(rwoPlaceOnly);
-    end;
+      // WHERE WE LANDED DECIDES IT, and nothing we happen to know about
+      // siblings - see OutcomeOfDockedLink, which is where 2.9.0 got this
+      // wrong and what it cost: the first install after it reported a dock
+      // into the PANEL as a restore, which skipped the desktop fallback that
+      // knows the tab group, and the box stayed silent about it.
+      Exit(OutcomeOfDockedLink(I));
     // THIS link's host is gone - a drag-created one dissolves when our client
     // leaves it. Its tab GROUP can still be rebuilt, and that beats falling
     // through to the next link, which can only give the place back.

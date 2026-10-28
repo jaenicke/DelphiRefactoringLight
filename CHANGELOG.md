@@ -6,6 +6,26 @@ development builds and were never released.
 
 ---
 
+## 2.9.1 - 2026-10-28
+
+### The first install of 2.9.0 still landed beside the neighbour
+
+Two reports on 2.9.0, and the second one ("beim zweiten Versuch ging es")
+named the cause: the first install after it reads the marker the PREVIOUS
+version wrote, which carries no tab siblings - and the code then treated a
+dock into the panel as a full restore, which skipped the saved desktop, the
+one source that knows the tab group without that marker. So the window landed
+beside its neighbour and the report said nothing. It now decides from WHERE
+the window landed and keeps looking until the tab is back; whether it can
+NAME the neighbour only decides what the report says.
+
+- **The window no longer waits five seconds.** Those five seconds were
+  measured for the warning box, which must not open while the IDE is still
+  installing - and the window had been put on the same timer. It comes back as
+  soon as the IDE is usable again; the box keeps its distance.
+
+---
+
 ## 2.9.0 - 2026-10-28
 
 ### The status window comes back as a TAB, not just in the right place

@@ -122,6 +122,15 @@ function CollectIncludeFiles(const AFile, AText: string;
 ///  '' when it is no include ({$I+}, {$IFDEF}, ...).</summary>
 function IncludeNameOfDirective(const ABody: string): string;
 
+/// <summary>Whether ATEXT carries an include directive - '{$I foo.inc}',
+///  '{$INCLUDE foo.inc}' or the (*$I *) form. NOT the IO-check switch
+///  '{$I+}' / '{$I-}' and not '{$IFDEF}' and its kin, which only start the
+///  same way: IncludeNameOfDirective is what decides, so this answer cannot
+///  drift from the expander's own reading of the same text. Scanned as TEXT
+///  rather than per line, so a directive wrapped over two lines is seen
+///  too.</summary>
+function TextHasIncludeDirective(const AText: string): Boolean;
+
 /// <summary>AName (as written in the directive) resolved against ABaseDir;
 ///  a name without extension tries .inc and .pas. '' when not found.</summary>
 function ResolveIncludeFile(const AName, ABaseDir: string): string;
@@ -198,6 +207,30 @@ var
 begin
   Ext := LowerCase(ExtractFileExt(AFile));
   Result := (Ext <> '.pas') and (Ext <> '.dpr') and (Ext <> '.dpk');
+end;
+
+function TextHasIncludeDirective(const AText: string): Boolean;
+var
+  S: TPascalScanner;
+  T: TPasToken;
+  Body: string;
+begin
+  Result := False;
+  if AText = '' then Exit;
+  S := TPascalScanner.Create(AText, False, True);   // directives, no comments
+  try
+    while S.Next(T) do
+      if T.Kind = ptDirective then
+      begin
+        if StartsStr('{', T.Text) then
+          Body := Copy(T.Text, 3, Length(T.Text) - 3)        // {$ ... }
+        else
+          Body := Copy(T.Text, 4, Length(T.Text) - 5);       // (*$ ... *)
+        if IncludeNameOfDirective(Body) <> '' then Exit(True);
+      end;
+  finally
+    S.Free;
+  end;
 end;
 
 function ResolveIncludeFile(const AName, ABaseDir: string): string;

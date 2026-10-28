@@ -216,6 +216,8 @@ begin
     uaInProject: Result := 'in_project';
     uaOnSearchPath: Result := 'search_path';
     uaDcuAvailable: Result := 'dcu';
+    uaViaPackage: Result := 'via_package';
+    uaPackageMissing: Result := 'package_missing';
   else
     Result := 'browsing_only';
   end;
@@ -259,7 +261,11 @@ begin
   Res.AddPair('hits', Arr);
   Res.AddPair('note', 'The index holds top-level INTERFACE declarations of ' +
     'the library/browsing paths and the project (class members are not ' +
-    'indexed). availability browsing_only = the compiler cannot see the unit.');
+    'indexed). availability: in_project / search_path / dcu / via_package ' +
+    '(shipped inside a package this project REQUIRES - reachable) are fine; ' +
+    'package_missing (shipped inside a package the project does not require, ' +
+    'and no .dcu exists - the requires clause is the only way in) and ' +
+    'browsing_only mean the compiler cannot see the unit.');
   Result := McpOk(Res);
 end;
 
@@ -296,10 +302,18 @@ begin
       end;
       var Snap := TUnitIndex.Instance.Snapshot;
       if (Snap <> nil) and Snap.TryGetUnitPath(U, Path) and
-         (CheckUnitAvailability(U, Path) = uaBrowsingOnly) then
+         (CheckUnitAvailability(U, Path) in UnitNotReachable) then
       begin
-        Msg := U + ' is only on the IDE''s browsing path (' + Path + ') - the ' +
-          'compiler would not find it. Add it in the IDE (project or search path).';
+        var Pkg := PackageShippingUnit(Path, FindBdsRoot);
+        if Pkg <> '' then
+          Msg := Format('%s is shipped compiled inside the %s package and this '
+            + 'project does not require it - there is no .dcu for it anywhere, '
+            + 'so no search path can make the compiler see it. Add '
+            + '"requires %s;" to the package source (or build with that '
+            + 'runtime package), then the uses entry compiles.', [U, Pkg, Pkg])
+        else
+          Msg := U + ' is only on the IDE''s browsing path (' + Path + ') - the ' +
+            'compiler would not find it. Add it in the IDE (project or search path).';
         Exit;
       end;
       var Section := usInterface;

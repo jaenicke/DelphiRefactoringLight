@@ -475,6 +475,8 @@ begin
     uaInProject: Result := 'in_project';
     uaOnSearchPath: Result := 'search_path';
     uaDcuAvailable: Result := 'dcu';
+    uaViaPackage: Result := 'via_package';
+    uaPackageMissing: Result := 'package_missing';
     uaBrowsingOnly: Result := 'browsing_only';
   end;
 end;
@@ -914,12 +916,23 @@ begin
         var U := Fix.UnitNames[UnitIdx];
         var Snap := TUnitIndex.Instance.Snapshot;
         if (Snap <> nil) and Snap.TryGetUnitPath(U, Path) and
-           (CheckUnitAvailability(U, Path) = uaBrowsingOnly) then
+           (CheckUnitAvailability(U, Path) in UnitNotReachable) then
         begin
-          Msg := Format('%s is only on the IDE''s BROWSING path (%s) - the ' +
-            'compiler would not find it. Add it in the IDE (the quick-fix popup ' +
-            'offers to add the file to the project or its folder to the search ' +
-            'path) or pick another candidate.', [U, Path]);
+          // ...and a unit that is shipped INSIDE a package is not a question
+          // the dialog can answer either: neither the file nor the folder is
+          // a way in, the package's requires clause is (user report).
+          var Pkg := PackageShippingUnit(Path, FindBdsRoot);
+          if Pkg <> '' then
+            Msg := Format('%s is shipped compiled inside the %s package and ' +
+              'this project does not require it - there is no .dcu for it ' +
+              'anywhere, so no search path can make the compiler see it. Add ' +
+              '"requires %s;" to the package source (or build with that ' +
+              'runtime package).', [U, Pkg, Pkg])
+          else
+            Msg := Format('%s is only on the IDE''s BROWSING path (%s) - the ' +
+              'compiler would not find it. Add it in the IDE (the quick-fix popup ' +
+              'offers to add the file to the project or its folder to the search ' +
+              'path) or pick another candidate.', [U, Path]);
           Exit;
         end;
       end;
@@ -1067,9 +1080,17 @@ begin
           begin
             var Snap := TUnitIndex.Instance.Snapshot;
             if (Snap <> nil) and Snap.TryGetUnitPath(AFix.UnitNames[0], Path) and
-               (CheckUnitAvailability(AFix.UnitNames[0], Path) = uaBrowsingOnly) then
-              Exit(AFix.UnitNames[0] + ' is only on the BROWSING path - the compiler ' +
-                'would not find it');
+               (CheckUnitAvailability(AFix.UnitNames[0], Path) in UnitNotReachable) then
+            begin
+              var Pkg := PackageShippingUnit(Path, FindBdsRoot);
+              if Pkg <> '' then
+                Exit(Format('%s is shipped inside the %s package, which this '
+                  + 'project does not require - no search path reaches it',
+                  [AFix.UnitNames[0], Pkg]))
+              else
+                Exit(AFix.UnitNames[0] + ' is only on the BROWSING path - the compiler ' +
+                  'would not find it');
+            end;
           end;
         end, Report);
       var SavedToDisk := False;

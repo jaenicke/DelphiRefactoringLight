@@ -215,13 +215,23 @@ type
   ///  BODYFIRST..BODYLAST is the routine's IMPLEMENTATION, the parameter's
   ///  whole scope, and SCOPEKNOWN says whether it could be delimited at
   ///  all: without it the rename keeps its old, wider behaviour rather than
-  ///  dropping an occurrence it cannot judge.</summary>
+  ///  dropping an occurrence it cannot judge.
+  ///  BODYSELFCONTAINED additionally says that the body's TEXT is wholly in
+  ///  this file - delimited AND without an {$I}nclude. A parameter cannot be
+  ///  used outside its routine, so then no OTHER file can hold a use of it
+  ///  either, and an occurrence there is not the parameter however the
+  ///  server resolved it (Ian Branch on issue #54, measured: a call of a
+  ///  routine named like its own parameter, from another unit, was renamed
+  ///  with the parameter and the unit stopped compiling). With an include in
+  ///  the body the scope reaches into a file the plan never saw, and nothing
+  ///  outside this one is decided.</summary>
   TParamRenamePlan = record
     Pairing: TParamPairing;
     Positions: TArray<TPoint>;
     Spans: TArray<TParamSpan>;
     BodyFirst, BodyLast: Integer;
     ScopeKnown: Boolean;
+    BodySelfContained: Boolean;
     Reason: string;
   end;
 
@@ -246,19 +256,24 @@ type
 function PlanParameterRename(const ALines: TArray<string>; ALine0: Integer;
   const AName: string; ACol0: Integer = -1): TParamRenamePlan;
 
-/// <summary>What the occurrence of the parameter's name at (ALINE, ACOL) in
-///  the plan's OWN file is. A POSITION is the parameter; anything else on
-///  one of its headers is not (the routine's own name, a type, a default
-///  value); and what is left is the parameter only inside the routine's
-///  body - which is what tells a call to a routine NAMED LIKE ITS OWN
-///  PARAMETER from the parameter itself (issue #54): such a call resolves
-///  to a header LINE, and the rename's targets are line-keyed.
+/// <summary>What the occurrence of the parameter's name at (ALINE, ACOL)
+///  is. ASAMEFILE says whether that position is in the plan's OWN file -
+///  every number in the plan is a line of that file, so this is not a
+///  detail the caller may leave out.
+///  In that file: a POSITION is the parameter; anything else on one of its
+///  headers is not (the routine's own name, a type, a default value); and
+///  what is left is the parameter only inside the routine's body - which is
+///  what tells a call to a routine NAMED LIKE ITS OWN PARAMETER from the
+///  parameter itself (issue #54): such a call resolves to a header LINE,
+///  and the rename's targets are line-keyed.
+///  In ANOTHER file the same question is answered by BodySelfContained - see
+///  there - and not by the ranges, which mean nothing there.
 ///  poUndecided when the body could not be delimited; a caller must then
 ///  keep the occurrence, never drop it.
 ///  AWHY carries the reason for poNotTheParameter, for the trace - a drop
 ///  nobody can see is the one thing this must not be.</summary>
 function ClassifyParamOccurrence(const APlan: TParamRenamePlan;
-  ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
+  ASameFile: Boolean; ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
 
 /// <summary>The line in the routine's OTHER header on which the SAME
 ///  parameter stands - the projection of PlanParameterRename that older
@@ -286,7 +301,7 @@ implementation
 uses
   System.Classes, System.StrUtils, System.Math, System.Generics.Collections,
   Expert.AutoImport, Expert.UnitIndex, Expert.PascalScanner,
-  Expert.InterfaceLinks, Expert.SignatureEdit;
+  Expert.InterfaceLinks, Expert.SignatureEdit, Expert.IncludeExpansion;
 
 // ---- a parameter is declared TWICE, and only the names count ------------
 
@@ -924,27 +939,52 @@ begin
       // renamed with the active one, or the unit stops compiling in that
       // configuration.
       var Conditional := False;
+      var BodyText := '';
       for var L := BF to Min(BL, High(ALines)) do
       begin
         var U := UpperCase(ALines[L]);
         if U.Contains('{$IF') or U.Contains('{$ELSE') or U.Contains('{$ENDIF')
           or U.Contains('(*$IF') then Conditional := True;
+        BodyText := BodyText + ALines[L] + #10;
       end;
       if Conditional then Break;
       Plan.BodyFirst := BF;
       Plan.BodyLast := BL;
       Plan.ScopeKnown := True;
+      // AND whether the body's text is wholly HERE. An {$I}nclude in it
+      // means the parameter may be used in a file this plan never read, so
+      // nothing outside this file can be decided then (Ian Branch on #54).
+      Plan.BodySelfContained := not TextHasIncludeDirective(BodyText);
       Break;
     end;
   Result := Plan;
 end;
 
 function ClassifyParamOccurrence(const APlan: TParamRenamePlan;
-  ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
+  ASameFile: Boolean; ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
 begin
   AWhy := '';
   Result := poUndecided;
   if (APlan.Pairing = ppUnknown) or (Length(APlan.Spans) = 0) then Exit;
+  // ANOTHER FILE IS ITS OWN QUESTION, and it is answered before the ranges:
+  // every line in the plan belongs to the plan's file, so comparing them
+  // with a position elsewhere would decide by a number that means nothing
+  // there. What decides is that a parameter cannot be used outside its
+  // routine - so when the routine's text is wholly in its own file, no
+  // other file can hold a use of it, whatever the server resolved the
+  // occurrence to.
+  if not ASameFile then
+  begin
+    if APlan.BodySelfContained then
+    begin
+      AWhy := Format('in another file, while the routine the parameter '
+        + 'belongs to is wholly in its own unit (lines %d-%d) - a parameter '
+        + 'cannot be used outside its routine',
+        [APlan.BodyFirst + 1, APlan.BodyLast + 1]);
+      Exit(poNotTheParameter);
+    end;
+    Exit;   // the body reaches into an {$I}ncluded file: not decided
+  end;
   // it IS declared here
   for var Pt in APlan.Positions do
     if (Pt.Y = ALine) and (Pt.X = ACol) then Exit(poParameter);

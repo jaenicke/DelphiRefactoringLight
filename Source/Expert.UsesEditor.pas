@@ -60,6 +60,14 @@ function UnitInUsesText(const AContent, AUnit: string): Boolean;
 function UnitInUsesSection(const AContent, AUnit: string;
   ASection: TUsesSection): Boolean;
 
+/// <summary>The packages a PACKAGE source (.dpk) names in its REQUIRES
+///  clause. Read off the MASKED text, so a commented-out entry does not
+///  count, and only where 'requires' is the FIRST word of its line - which
+///  is the rule ClauseOpener already follows, because 'requires' is a
+///  reserved word in a package only and 'List.Requires(X)' must not open a
+///  clause. Empty for a unit or a program: only a package has one.</summary>
+function PackageRequiresNames(const AContent: string): TArray<string>;
+
 /// <summary>Adds AUnit to the requested section's uses clause of AFilePath
 ///  (creating the clause if the section has none). Returns True if the file
 ///  was changed; False if AUnit was already reachable or on error.
@@ -468,6 +476,50 @@ begin
       end;
       if TokenEquals(M[I], AUnit) then Exit(True);
       if Pos(';', M[I]) > 0 then InUses := False;
+    end;
+  finally
+    M.Free;
+  end;
+end;
+
+function PackageRequiresNames(const AContent: string): TArray<string>;
+var
+  M: TStringList;
+  L, T, Item: string;
+  InClause: Boolean;
+  Stop, P: Integer;
+begin
+  Result := [];
+  M := MaskText(AContent);
+  try
+    InClause := False;
+    for var I := 0 to M.Count - 1 do
+    begin
+      L := M[I];
+      if not InClause then
+      begin
+        T := TrimLeft(L);
+        if not SameText(Copy(T, 1, 8), 'requires') then Continue;
+        // ...and 'requires' must be the whole word, not the start of one
+        if (Length(T) > 8) and IsIdentChar(T[9]) then Continue;
+        InClause := True;
+        L := Copy(T, 9, MaxInt);
+      end;
+      Stop := Pos(';', L);
+      if Stop > 0 then L := Copy(L, 1, Stop - 1);
+      for var Part in L.Split([',']) do
+      begin
+        T := Trim(Part);
+        Item := '';
+        P := 1;
+        if (T <> '') and IsIdentStart(T[1]) then
+        begin
+          while (P <= Length(T)) and (IsIdentChar(T[P]) or (T[P] = '.')) do Inc(P);
+          Item := Copy(T, 1, P - 1);
+        end;
+        if Item <> '' then Result := Result + [Item];
+      end;
+      if Stop > 0 then Break;
     end;
   finally
     M.Free;

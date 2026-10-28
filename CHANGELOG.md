@@ -6,6 +6,37 @@ development builds and were never released.
 
 ---
 
+## 2.9.6 - 2026-10-29
+
+### A parameter cannot be used in another unit (issue #54, Ian Branch)
+
+The scope rule of 2.9.4 told a call of a routine from the parameter of the
+same name - but only inside the routine's own unit: outside it the rule had
+no opinion, while the rename's targets are line-keyed, so a call from
+ANOTHER unit resolved to a header line and was renamed with the parameter.
+Measured live on 2.9.5 with his two-unit fixture: `Title('x')` in unit B
+became `ATitle('x')`, which is E2003. A parameter cannot be used outside its
+routine, so once the body is delimited and holds no `{$I}`nclude, no other
+unit can hold a use of it either - and with an include in the body nothing
+outside the plan's own file is decided at all.
+
+### A unit that only a package can bring in
+
+Adding `DesignIntf` reported that the unit is not on the path and offered to
+add its file to the project or its folder to the search path. Neither is a
+way in: the units of `source\ToolsAPI` are shipped compiled inside
+designide.dcp and no `.dcu` for them exists, so what makes the compiler see
+them is the package - a package project's `requires` clause, and nothing
+else is shipped to do it with. The check now reads that clause: a project
+that already requires the package is not warned at all, and one that does
+not is told which clause to add instead of being sent to a path. Measured
+with dcc32 37.0, which is also what bounds the rule: all 42 units of
+`source\ToolsAPI` resolve with `-LUdesignide` alone, while the 67 of
+`SOURCE\PROPERTY EDITORS` are in no `.dcp` at all - for those the search
+path really is the way, and it keeps being offered.
+
+---
+
 ## 2.9.5 - 2026-10-28
 
 ### Two things the live install of 2.9.4 showed

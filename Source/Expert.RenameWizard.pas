@@ -1549,8 +1549,15 @@ begin
         if PPlan.ScopeKnown then
           FDiagLog := FDiagLog + Format('Parameter scope: lines %d-%d of %s - '
             + 'an occurrence outside it is not the parameter, whatever line '
-            + 'the answer names.%s', [PPlan.BodyFirst + 1, PPlan.BodyLast + 1,
-            ExtractFileName(AnchorFile), sLineBreak])
+            + 'the answer names. In another file: %s.%s',
+            [PPlan.BodyFirst + 1, PPlan.BodyLast + 1,
+            ExtractFileName(AnchorFile),
+            IfThen(PPlan.BodySelfContained,
+              'not the parameter either - the body holds no {$I}nclude, so '
+              + 'its scope cannot reach another file',
+              'NOT decided - the body holds an {$I}nclude, so the parameter '
+              + 'may be used in a file this plan never read'),
+            sLineBreak])
         else
           FDiagLog := FDiagLog + 'Parameter scope: the routine''s body could '
             + 'not be delimited (a one-line body, or more than one '
@@ -2110,12 +2117,13 @@ begin
   AWhy := '';
   Result := False;
   if (FParamFile = '') or (Length(FParamPlan.Spans) = 0) then Exit;
-  // THE FILE TEST IS THE OUTER EXIT, never a clause of the rule: outside
-  // the plan's own file this has no opinion at all - the routine's body may
-  // live in an {$I}ncluded file, which the plan never saw.
-  if not SameText(ExpandFileName(AFile), ExpandFileName(FParamFile)) then Exit;
-  Result := ClassifyParamOccurrence(FParamPlan, ALine, ACol, AWhy)
-    = poNotTheParameter;
+  // WHICH FILE THIS IS, is part of the question and not an exit in front of
+  // it: a call of the routine from ANOTHER unit resolves to a header LINE
+  // of this one, so it matched and was renamed with the parameter while the
+  // rule above it had no opinion (Ian Branch on issue #54).
+  Result := ClassifyParamOccurrence(FParamPlan,
+    SameText(ExpandFileName(AFile), ExpandFileName(FParamFile)),
+    ALine, ACol, AWhy) = poNotTheParameter;
 end;
 
 function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>;

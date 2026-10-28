@@ -74,6 +74,14 @@ type
     ///  sibling type further down a false outer level and a top-level
     ///  routine a container it has not got.</summary>
     [Test] procedure ATypeDeclaredInTwoBranchesIsOneType;
+    /// <summary>The cross-unit half of #54.B, which 2.9.5 still renamed
+    ///  (Ian Branch, measured live before the fix:
+    ///  "[5] XuB.pas:14:3 => XuA.pas:9 -> MATCH" and the preview answered
+    ///  "ATitle('x');"). A parameter cannot be used outside its routine, so
+    ///  once the body is delimited and holds no {$I}nclude, no other file
+    ///  can hold a use of it - and with an include nothing outside this
+    ///  file is decided at all.</summary>
+    [Test] procedure ACallFromAnotherUnitIsNotTheParameterEither;
   end;
 
 implementation
@@ -362,22 +370,22 @@ begin
   // parameter - E2003, measured
   Assert.AreEqual('poNotTheParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 11, 2, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 11, 2, Why))),
     'the CALL Title(''x'') is not the parameter');
   Assert.AreNotEqual('', Why, 'and the drop says why');
   // what must still be renamed
   Assert.AreEqual('poParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 7, 5, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 7, 5, Why))),
     'the use INSIDE the body is the parameter');
   Assert.AreEqual('poParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 2, 22, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 2, 22, Why))),
     'and so is the declaration itself');
   // ...while the routine's own name on that very line is not
   Assert.AreEqual('poNotTheParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 2, 10, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 2, 10, Why))),
     'the routine''s own name on the header line is not the parameter');
 end;
 
@@ -404,13 +412,13 @@ begin
   Assert.AreEqual(24, Plan.Spans[1].EndCol, 'the span ends at the '';''');
   Assert.AreEqual('poParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 4, 13, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 4, 13, Why))),
     'the parameter itself');
   // THE REPORTED DAMAGE: this was "on the header but not a position" and
   // was dropped, so the body kept the old name - E2003
   Assert.AreNotEqual('poNotTheParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 4, 35, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 4, 35, Why))),
     'the body''s use is NOT on the header - it must not be dropped');
 end;
 
@@ -448,7 +456,7 @@ begin
   // rename changed three places of the wrong routine (issue #54.D).
   Assert.AreEqual('poNotTheParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 4, 19, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 4, 19, Why))),
     'SetA''s parameter is another symbol');
 
   // the caret on SetA's parameter picks the OTHER header
@@ -527,11 +535,11 @@ begin
   Assert.IsTrue(Plan.ScopeKnown, 'and its body is where the parameter is used');
   Assert.AreEqual('poParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 9, 5, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 9, 5, Why))),
     'the body''s use is the parameter');
   Assert.AreEqual('poNotTheParameter',
     GetEnumName(TypeInfo(TParamOccurrence),
-      Ord(ClassifyParamOccurrence(Plan, 7, 15, Why))),
+      Ord(ClassifyParamOccurrence(Plan, True, 7, 15, Why))),
     'the routine''s own name on the listless header is not');
 
   // Delphi forbids omitting the list for an overload, so the parameterless
@@ -679,6 +687,92 @@ begin
   // ...and neither does a default value naming a constant
   Assert.IsFalse(HeaderDeclaresParameter(L(Src), 4, 'Title'),
     'a default value naming it does not declare it');
+end;
+
+procedure TParameterRenameShapeTests.ACallFromAnotherUnitIsNotTheParameterEither;
+const
+  // his two-unit fixture's declaring half, verbatim
+  OwnUnit =
+    'unit A;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'procedure Title(const Title: string);'#13#10 +          // 2
+    'implementation'#13#10 +                                 // 3
+    'procedure Title(const Title: string);'#13#10 +          // 4
+    'begin'#13#10 +                                          // 5
+    '  if Title = '''' then ;'#13#10 +                       // 6
+    'end;'#13#10 +                                           // 7
+    'end.'#13#10;
+  // ...and the one case in which the body's text is NOT wholly here
+  WithInclude =
+    'unit A;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'procedure Title(const Title: string);'#13#10 +          // 2
+    'implementation'#13#10 +                                 // 3
+    'procedure Title(const Title: string);'#13#10 +          // 4
+    'begin'#13#10 +                                          // 5
+    '  {$I TitleBody.inc}'#13#10 +                           // 6
+    'end;'#13#10 +                                           // 7
+    'end.'#13#10;
+  // {$I+} is the IO-check switch and no include at all - the directive the
+  // rule must NOT fall for
+  WithSwitch =
+    'unit A;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'procedure Title(const Title: string);'#13#10 +          // 2
+    'implementation'#13#10 +                                 // 3
+    'procedure Title(const Title: string);'#13#10 +          // 4
+    'begin'#13#10 +                                          // 5
+    '  {$I+} if Title = '''' then ;'#13#10 +                 // 6
+    'end;'#13#10 +                                           // 7
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+  Why: string;
+begin
+  Plan := PlanParameterRename(L(OwnUnit), 2, 'Title');
+  Assert.IsTrue(Plan.ScopeKnown, 'the body is delimited');
+  Assert.IsTrue(Plan.BodySelfContained,
+    'and its text is wholly in this unit - no include in it');
+
+  // THE REPORTED DAMAGE: unit B's "Title('x')" resolves to a header LINE of
+  // THIS unit, so it matched; the rule had no opinion outside this file and
+  // the call was renamed.
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, False, 13, 2, Why))),
+    'a call from ANOTHER unit is not the parameter');
+  Assert.IsTrue(Why.Contains('another file'), 'and the drop says why: ' + Why);
+  // the line number there means nothing - any position in another file is
+  // answered the same way, including one that would be inside the body range
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, False, 6, 5, Why))),
+    'a line INSIDE this unit''s body range is not the parameter elsewhere');
+  // ...while this file is judged exactly as before
+  Assert.AreEqual('poParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, True, 6, 5, Why))),
+    'the body''s own use is still the parameter');
+
+  // An {$I} in the body: the scope reaches into a file this plan never read,
+  // so nothing outside this one is decided - the occurrence is KEPT.
+  Plan := PlanParameterRename(L(WithInclude), 2, 'Title');
+  Assert.IsTrue(Plan.ScopeKnown, 'the body is still delimited');
+  Assert.IsFalse(Plan.BodySelfContained,
+    'but its text is not wholly here');
+  Assert.AreEqual('poUndecided',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, False, 13, 2, Why))),
+    'so another file is not decided, and nothing there is dropped');
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, True, 2, 10, Why))),
+    'while THIS file is judged as before - the routine''s own name');
+
+  // and the switch that begins like an include is none
+  Plan := PlanParameterRename(L(WithSwitch), 2, 'Title');
+  Assert.IsTrue(Plan.BodySelfContained,
+    '{$I+} is the IO-check switch, not an include');
 end;
 
 initialization

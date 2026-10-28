@@ -889,6 +889,28 @@ type
   end;
 
   [TestFixture]
+  /// <summary>A unit that no path can reach because it is shipped COMPILED
+  ///  inside a package - DesignIntf and the rest of source\ToolsAPI
+  ///  (user report, 2026-10-28: "wird darauf hingewiesen, dass die Unit
+  ///  nicht im Pfad ist. In dem Fall reicht aber designide in requires,
+  ///  etwas anderes ist gar nicht moeglich, da nichts weiter mitgeliefert
+  ///  wird").</summary>
+  TUnitFromPackageTests = class
+  public
+    /// <summary>Which package ships a unit, and the measurement that
+    ///  bounds the claim: all 42 units of source\ToolsAPI resolve with
+    ///  -LUdesignide alone, while the 67 of SOURCE\PROPERTY EDITORS are in
+    ///  no .dcp at all - for those the search path really is the way, so
+    ///  the rule must not answer for them.</summary>
+    [Test] procedure OnlyWhereThePackageIsMeasuredIsItNamed;
+    /// <summary>...and whether the project already requires it, which is
+    ///  what decides between "nothing to warn about" and "the requires
+    ///  clause is the way in". Read off the MASKED text, and 'requires'
+    ///  opens a clause only as the first word of its line.</summary>
+    [Test] procedure TheRequiresClauseIsRead;
+  end;
+
+  [TestFixture]
   TCheckScopeTests = class
   public
     [Test] procedure ADuplicateUnitNameIsReportedAsSkipped;
@@ -8162,6 +8184,113 @@ begin
     'an unknown type decides nothing');
 end;
 
+{ TUnitFromPackageTests }
+
+procedure TUnitFromPackageTests.OnlyWhereThePackageIsMeasuredIsItNamed;
+const
+  Root = 'C:\Program Files (x86)\Embarcadero\Studio\37.0';
+begin
+  // the reported case
+  Assert.AreEqual('designide', PackageShippingUnit(
+    Root + '\source\ToolsAPI\DesignIntf.pas', Root),
+    'DesignIntf is shipped inside designide.dcp - measured with dcc32');
+  // the folder, however it is spelled, and whatever the unit
+  Assert.AreEqual('designide', PackageShippingUnit(
+    Root + '\SOURCE\TOOLSAPI\DesignEditors.pas', Root),
+    'the same folder in another spelling');
+  Assert.AreEqual('designide', PackageShippingUnit(
+    Root + '\source\ToolsAPI\ToolsAPI.pas', Root),
+    'and every other unit of it - 42 of 42 resolve with -LUdesignide');
+
+  // ...and NOT where the measurement says otherwise: those units are in no
+  // .dcp, so adding their folder to the search path is the only way and
+  // must keep being offered
+  Assert.AreEqual('', PackageShippingUnit(
+    Root + '\SOURCE\PROPERTY EDITORS\ActnRes.pas', Root),
+    'the property editors are shipped as SOURCE, not inside a package');
+  // a unit of the user's own code is never one of these
+  Assert.AreEqual('', PackageShippingUnit('C:\Work\MyApp\Unit1.pas', Root),
+    'a project unit is no installation unit');
+  // and without a root there is no claim to make
+  Assert.AreEqual('', PackageShippingUnit(
+    Root + '\source\ToolsAPI\DesignIntf.pas', ''),
+    'no installation root, no answer');
+end;
+
+procedure TUnitFromPackageTests.TheRequiresClauseIsRead;
+const
+  // his own Package1.dpk, verbatim
+  Dpk =
+    'package Package1;'#13#10 +
+    #13#10 +
+    '{$R *.res}'#13#10 +
+    '{$IMPLICITBUILD ON}'#13#10 +
+    #13#10 +
+    'requires'#13#10 +
+    '  designide,'#13#10 +
+    '  rtl;'#13#10 +
+    #13#10 +
+    'contains'#13#10 +
+    '  DockFrame in ''DockFrame.pas'' {MyDockFrame: TFrame};'#13#10 +
+    #13#10 +
+    'end.'#13#10;
+  // a commented-out entry is not in the clause
+  Commented =
+    'package P;'#13#10 +
+    'requires rtl, { designide, } vcl;'#13#10 +
+    'end.'#13#10;
+  // 'requires' is reserved in a package only, so neither a call of that
+  // name nor a name that BEGINS with it may open a clause. Only the SECOND
+  // of the two is a rule a fixture can isolate: after a method call's
+  // "Requires" comes a '(' or an operator, and nothing is collected
+  // whatever the rule does, while "RequiresDesignide := True" would hand
+  // out "Designide" as a required package. The first-word half stays
+  // because ClauseOpener states the same rule for every clause - it is
+  // defence, and its mutation cannot go red (see neg.py).
+  NotAClause =
+    'unit U;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'procedure Go;'#13#10 +
+    'begin'#13#10 +
+    '  if List.Requires(designide) then Exit;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  // ...and a NAME that begins with it. Its own fixture, because the clause
+  // scan stops at the first ';' it reaches: in one text the line above
+  // would end the scan before this one is read, and the test would pass
+  // for that reason instead of for the rule.
+  NameStartsWithRequires =
+    'unit U;'#13#10 +
+    'implementation'#13#10 +
+    'procedure Go;'#13#10 +
+    'begin'#13#10 +
+    '  RequiresDesignide := True;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+var
+  Names: TArray<string>;
+begin
+  Names := PackageRequiresNames(Dpk);
+  Assert.AreEqual(2, Integer(Length(Names)), 'two packages are required');
+  Assert.AreEqual('designide', Names[0], 'and this is the one that matters');
+  Assert.AreEqual('rtl', Names[1], 'the clause ends at its own semicolon - '
+    + 'nothing of "contains" is in it');
+
+  Names := PackageRequiresNames(Commented);
+  Assert.AreEqual(2, Integer(Length(Names)), 'rtl and vcl');
+  for var N in Names do
+    Assert.AreNotEqual('designide', N,
+      'a commented-out entry does not make it required');
+
+  Assert.AreEqual(0, Integer(Length(PackageRequiresNames(NotAClause))),
+    'List.Requires( is a call, not a clause');
+  Assert.AreEqual(0, Integer(Length(PackageRequiresNames(NameStartsWithRequires))),
+    'and RequiresDesignide is a name, not the clause plus a package');
+  Assert.AreEqual(0, Integer(Length(PackageRequiresNames(''))),
+    'and an empty text has no clause either');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -8197,6 +8326,7 @@ initialization
   TDUnitX.RegisterTestFixture(TInstallOutputRootTests);
   TDUnitX.RegisterTestFixture(TDeclareConstantTests);
   TDUnitX.RegisterTestFixture(TFileEncodingCheckTests);
+  TDUnitX.RegisterTestFixture(TUnitFromPackageTests);
   TDUnitX.RegisterTestFixture(TCheckScopeTests);
   TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
 

@@ -244,6 +244,22 @@ function ComposeUnitSnapshots(const AProject, AGlobal: IUnitSnapshot): IUnitSnap
 ///  (audit #37, L3c).</summary>
 function FindBdsRoot: string;
 
+/// <summary>The package that ships the unit whose source is APASPATH, or
+///  '' when we know of none - then the usual remedies (add the file to the
+///  project, add its directory to the search path) are the right ones.
+///  MEASURED with dcc32 37.0 (2026-10-28): all 42 units under
+///  AINSTALLROOT\source\ToolsAPI resolve with '-LUdesignide' and the library
+///  path alone, while that path WITHOUT the package answers F2613 - they are
+///  shipped compiled inside designide.dcp and no .dcu for them exists
+///  anywhere. So a search path cannot make the compiler see them; a package
+///  project's REQUIRES clause can, and nothing else is shipped to do it with
+///  (user report).
+///  DELIBERATELY NOTHING ELSE: the same measurement says the 67 units of
+///  AINSTALLROOT\SOURCE\PROPERTY EDITORS are in NO .dcp (designide, vclide
+///  and dclstd all answer F2613), so for those the search path IS the only
+///  way - a wider guess would take the right advice away from them.</summary>
+function PackageShippingUnit(const APasPath, AInstallRoot: string): string;
+
 /// <summary>The registry version key of the IDE we run in -
 ///  'Software\Embarcadero\BDS\37.0' - taken from the IDE itself; when
 ///  it cannot be asked, the newest installed version.</summary>
@@ -1081,6 +1097,19 @@ begin
         Reg.Free;
       end;
     end);
+end;
+
+function PackageShippingUnit(const APasPath, AInstallRoot: string): string;
+var
+  Dir, ToolsApi: string;
+begin
+  Result := '';
+  if (APasPath = '') or (AInstallRoot = '') then Exit;
+  Dir := ExcludeTrailingPathDelimiter(ExtractFilePath(ExpandFileName(APasPath)));
+  ToolsApi := ExcludeTrailingPathDelimiter(
+    TPath.Combine(TPath.Combine(AInstallRoot, 'source'), 'ToolsAPI'));
+  if SameText(Dir, ExpandFileName(ToolsApi)) then
+    Result := 'designide';
 end;
 
 function FindBdsRoot: string;

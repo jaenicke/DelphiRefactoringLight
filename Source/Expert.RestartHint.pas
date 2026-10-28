@@ -26,6 +26,47 @@ type
   ///  among its owner's components, so it is what finds the same live form
   ///  again after our package was unloaded and loaded into the same
   ///  process.</summary>
+  /// <summary>One OTHER client of the host that held our window - its tab
+  ///  SIBLING, and the thing a place alone cannot express.
+  ///
+  ///  WHY A PLACE IS NOT ENOUGH (user, 2026-10-28): after the reload the
+  ///  window came back docked "rechts daneben" instead of as a TAB beside the
+  ///  Messages view. The chain had done exactly what it promises - the
+  ///  drag-created host was gone, so the restore used the next link, the
+  ///  panel that host sat in - and that is the right PLACE. Being a tab is a
+  ///  RELATION to another client, and a panel cannot express it: measured,
+  ///  Vcl.Controls TDockTree.InsertControl opens its non-empty case with
+  ///  "// Default to right-side docking / if InsertAt in [alClient, alNone]
+  ///  then InsertAt := alRight", and designide's own TPercentageDockTree only
+  ///  adds a dictionary entry before tail-calling it - no tab set anywhere.
+  ///  So the sibling travels too, and it is the STRONGER half of the two: a
+  ///  sibling is an IDE window that SURVIVES our unload, so unlike our own
+  ///  host its identity still means something afterwards.</summary>
+  TDockClientRef = record
+    /// <summary>TDesktopForm.DeskSection - THE key. It is bound to the class
+    ///  REGISTRATION rather than to streaming, and it is what the IDE itself
+    ///  writes into TabDockClients / ActiveTabID, so it is the one name that
+    ///  still means this window after our package was unloaded and loaded
+    ///  again. '' means "not usable as a key" (see Known).</summary>
+    Section: string;
+    /// <summary>The component name: report and WEAK confirmation, never the
+    ///  key - it is the DFM default, which is the very reason
+    ///  TDockLink.Transient exists.</summary>
+    FormName: string;
+    /// <summary>Confirmation, and the "is it dockable at all" test at restore
+    ///  time: only a TDockableForm can be spliced into a tab host.</summary>
+    FormClass: string;
+    /// <summary>Index in the host's DockClients, i.e. DOCK ORDER - which is
+    ///  what says whether our own window was the first tab.</summary>
+    Ordinal: Integer;
+    /// <summary>Our own window. The list carries it on purpose: without it
+    ///  "were we the first tab" could not be answered, and a restore has to
+    ///  know which entries are the OTHERS.</summary>
+    IsSelf: Boolean;
+    /// <summary>Usable as a lookup key - see Section.</summary>
+    function Known: Boolean;
+  end;
+
   TDockLink = record
     /// <summary>The host FORM's component name - "DockSite5",
     ///  "TabDockHostForm", "AppBuilder".</summary>
@@ -67,10 +108,22 @@ type
     ///  A host with three or more clients stays, and then its name does
     ///  identify it.</summary>
     Transient: Boolean;
+    /// <summary>The host's clients, ours among them (TDockClientRef.IsSelf) -
+    ///  filled only for a link that IS a host, which is what carries the tab
+    ///  RELATION across the reload. Empty for every other link and for a
+    ///  marker older than 2.9.0, where the restore behaves as it did.</summary>
+    Clients: TArray<TDockClientRef>;
     /// <summary>Enough to look this host up again.</summary>
     function Known: Boolean;
     /// <summary>For the status row and the report.</summary>
     function Describe: string;
+    /// <summary>The siblings - every recorded client that is not our own
+    ///  window, in dock order.</summary>
+    function Siblings: TArray<TDockClientRef>;
+    /// <summary>Our own window's place in the tab order, -1 when the list
+    ///  does not say. DERIVED, not stored: a stored second field for it could
+    ///  disagree with the list it describes.</summary>
+    function OwnOrdinal: Integer;
   end;
 
   /// <summary>WHERE A WINDOW WAS DOCKED - as the CHAIN it really is, from the
@@ -214,6 +267,26 @@ type
     ///  nothing to put it back into and the box has to say so.</summary>
     rwaDockedUnknownHost);
 
+  /// <summary>WHAT THE CALLER ACHIEVED, and it has three values because the
+  ///  reported defect lives in the gap between the last two: the window came
+  ///  back INSIDE its old dock site and the restore reported success, because
+  ///  the verification asks about containment - while the user could see that
+  ///  it was no longer a TAB beside the Messages view but a pane next to it.
+  ///  A Boolean cannot carry that difference, so it said nothing at all, and
+  ///  "the user had to discover the loss by looking" is the one thing this
+  ///  project does not accept of an answer.</summary>
+  TReloadWindowOutcome = (
+    /// <summary>Not put back at all - there was nothing left to put it into,
+    ///  or the attempt failed.</summary>
+    rwoNotDone,
+    /// <summary>Back in its old PLACE, but not in its old RELATION: it is a
+    ///  client of the right dock site and no longer a tab beside the window
+    ///  it shared a tab group with.</summary>
+    rwoPlaceOnly,
+    /// <summary>Back the way it was - the place, and the tab relation when
+    ///  there was one to restore.</summary>
+    rwoRestored);
+
 /// <summary>What to do with the status window after a reload. PURE - the
 ///  caller performs it, and reports back through ReloadReportText whether it
 ///  worked.</summary>
@@ -222,13 +295,14 @@ function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;
 /// <summary>WHAT A RELOAD HAS TO TELL THE USER. PURE, and deliberately apart
 ///  from the doing: the catch-up itself needs ToolsAPI and a live IDE, this
 ///  decision does not.
-///  AWindowRestored is what the caller ACHIEVED - so the window is mentioned
-///  only when it could not be put back, which is the whole point of this
-///  round: a sentence that sends the user to the desktop menu must not appear
-///  when the window is already sitting where it was.
+///  AOutcome is what the caller ACHIEVED - so the window is mentioned only
+///  when something about it is still missing, which is the whole point: a
+///  sentence that sends the user to the desktop menu must not appear when the
+///  window is already sitting where it was, and silence must not cover a
+///  window that came back in the wrong RELATION (user, 2026-10-28).
 ///  '' means there is nothing to report, which is the normal outcome.</summary>
 function ReloadReportText(const AFacts: TReloadFacts;
-  AWindowRestored: Boolean): string;
+  AOutcome: TReloadWindowOutcome): string;
 
 /// <summary>A chain of ONE link, named by its section - which is all the
 ///  saved desktop file can say, and all a marker written by 2.8.x carries.
@@ -313,6 +387,15 @@ const
   ///  dockat=&lt;form name&gt;|&lt;form class&gt;|&lt;section&gt;|&lt;site name&gt;.
   ///  Its OWN key rather than more fields on dock=, so a marker written by
   ///  2.8.x still parses as exactly what it is - one link, section only.</summary>
+  /// <summary>One line per recorded client of a host link:
+  ///  dockclient=&lt;ordinal&gt;|&lt;is self&gt;|&lt;section&gt;|&lt;form name&gt;|&lt;form class&gt;.
+  ///  ITS OWN KEY, because a variable-length list on a fixed '|' field line
+  ///  is what breaks readers - and written INTERLEAVED, directly after the
+  ///  dockat= line it belongs to, so the reader attaches it to the last link
+  ///  it saw and no index has to agree with anything. The prefixes are
+  ///  disjoint ("dockclient=" does not start with "dock="), so an older
+  ///  reader skips these lines and loses only the relation.</summary>
+  KeyDockClient = 'dockclient=';
   KeyDockAt = 'dockat=';
   DockChainSep = '|';
 
@@ -444,6 +527,34 @@ begin
     Result := rwaDockedUnknownHost;
 end;
 
+function TDockClientRef.Known: Boolean;
+begin
+  // THE SECTION AND NOTHING ELSE, and that is the opposite polarity from
+  // TDockLink.Known on purpose. A link may be looked up by its component
+  // name because a host that is still there answers for it; a SIBLING is
+  // looked up in order to be DOCKED INTO, so a wrong answer would splice our
+  // window into a stranger's tab group and report a restore. DeskSection is
+  // bound to the class registration rather than to streaming, which is why
+  // it survives where a component name does not (see TDockLink.Transient).
+  Result := Section <> '';
+end;
+
+function TDockLink.Siblings: TArray<TDockClientRef>;
+begin
+  Result := [];
+  for var C in Clients do
+    if not C.IsSelf then
+      Result := Result + [C];
+end;
+
+function TDockLink.OwnOrdinal: Integer;
+begin
+  Result := -1;
+  for var C in Clients do
+    if C.IsSelf then
+      Exit(C.Ordinal);
+end;
+
 function TDockLink.Known: Boolean;
 begin
   // ANY of the three answers, and the third one is not a convenience: the
@@ -538,7 +649,7 @@ end;
 function DesktopDockPlace(const ALines: TArray<string>;
   const AIdentifier: string): TDockPlace;
 var
-  HostSection, Panel: string;
+  HostSection, Panel, Clients: string;
   Link: TDockLink;
 begin
   Result := Default(TDockPlace);
@@ -554,6 +665,28 @@ begin
   // made the lookup search the wrong form - the one fallback that has to
   // carry the first install of every version. A site name alone is a link the
   // lookup can resolve; a wrong owner is not.
+  // AND THE TAB GROUP, which this file states OUTRIGHT - it is the very key
+  // FindDockHostSection searched by: "TabDockClients=MessageView,
+  // RefactoringLightStatus". Those are DeskSections, i.e. exactly the key a
+  // sibling lookup needs, so the saved desktop can restore the RELATION and
+  // not only the place.
+  // THAT IS WHAT MAKES THE FIRST INSTALL OF THIS VERSION WORK: it reads the
+  // marker the PREVIOUS version wrote, which carries no clients at all - the
+  // gap that cost 2.8.1 and 2.8.2 each a round ("expect it once more, exactly
+  // as predicted for its own first install").
+  Clients := DeskValueIn(ALines, HostSection, 'TabDockClients');
+  if Clients <> '' then
+    for var Name in SplitString(Clients, ',') do
+    begin
+      var N := Trim(Name);
+      if N = '' then Continue;
+      var Ref := Default(TDockClientRef);
+      Ref.Section := N;
+      Ref.Ordinal := Length(Result.Links[0].Clients);
+      Ref.IsSelf := SameText(N, AIdentifier);
+      Result.Links[0].Clients := Result.Links[0].Clients + [Ref];
+    end;
+
   Panel := DeskValueIn(ALines, HostSection, 'HostDockSite');
   if Panel = '' then Exit;
   Link := Default(TDockLink);
@@ -604,9 +737,10 @@ begin
 end;
 
 function ReloadReportText(const AFacts: TReloadFacts;
-  AWindowRestored: Boolean): string;
+  AOutcome: TReloadWindowOutcome): string;
 var
   Lines: TArray<string>;
+  Sibling: string;
 begin
   Result := '';
   // A fresh IDE start has nothing to catch up and nothing to report: every
@@ -621,7 +755,29 @@ begin
   // the defect that round was about: a host the user created by dragging has
   // no DeskSection at all.) Only a restore that did NOT work is worth a
   // sentence, and then it names what the user can do.
-  if AFacts.DockWasOpen and not AWindowRestored then
+  // AND THE RELATION, which is the half 2.8.2 could not report: a window
+  // that came back INSIDE its old dock site but no longer as a tab beside
+  // its old neighbour was reported as a restore, because the verification
+  // asks about containment. The user saw it and we said nothing.
+  if (AOutcome = rwoPlaceOnly) and AFacts.DockWasOpen then
+  begin
+    Sibling := '';
+    for var C in AFacts.DockPlace.Links do
+      for var S in C.Siblings do
+        if (Sibling = '') and (S.Section <> '') then
+          Sibling := S.Section;
+    if Sibling <> '' then
+      Lines := Lines + [Format('The status window is back in its dock site, ' +
+        'but no longer as a TAB beside %s - it sits next to it instead. ' +
+        'Dragging it onto that tab bar once puts it back, and the IDE ' +
+        'remembers it with your desktop.', [Sibling])]
+    else
+      Lines := Lines + ['The status window is back in its dock site, but ' +
+        'not in the tab group it was in. Dragging it onto that tab bar ' +
+        'once puts it back.'];
+  end;
+
+  if AFacts.DockWasOpen and (AOutcome = rwoNotDone) then
     if AFacts.DockWasDocked then
       // NOT "open it from the menu": the caller falls back to the window's
       // old bounds, so after a failed re-dock it is usually ON SCREEN and
@@ -769,6 +925,32 @@ begin
         if Link.Known then
           FFacts.DockPlace.Links := FFacts.DockPlace.Links + [Link];
       end
+      else if StartsText(KeyDockClient, L) then
+      begin
+        // dockclient=<ordinal>|<is self>|<section>|<form name>|<form class>,
+        // attached to the LAST link read - the writer puts these lines
+        // directly after the dockat= line they belong to, so no index has to
+        // agree with anything, and a line that arrives before any link is
+        // dropped rather than inventing one.
+        if Length(FFacts.DockPlace.Links) > 0 then
+        begin
+          var Q := SplitString(Copy(L, Length(KeyDockClient) + 1, MaxInt),
+            DockChainSep);
+          var Ref := Default(TDockClientRef);
+          Ref.Ordinal := -1;
+          if Length(Q) >= 1 then Ref.Ordinal := StrToIntDef(Trim(Q[0]), -1);
+          if Length(Q) >= 2 then Ref.IsSelf := Trim(Q[1]) = '-1';
+          if Length(Q) >= 3 then Ref.Section := Trim(Q[2]);
+          if Length(Q) >= 4 then Ref.FormName := Trim(Q[3]);
+          if Length(Q) >= 5 then Ref.FormClass := Trim(Q[4]);
+          if Ref.Known or (Ref.FormName <> '') then
+          begin
+            var Idx := High(FFacts.DockPlace.Links);
+            FFacts.DockPlace.Links[Idx].Clients :=
+              FFacts.DockPlace.Links[Idx].Clients + [Ref];
+          end;
+        end;
+      end
       else if StartsText(KeyDock, L) then
       begin
         // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>
@@ -877,10 +1059,22 @@ begin
         // site THAT host was docked in.
         for var Link in ADockPlace.Links do
           if Link.Known then
+          begin
             SL.Add(KeyDockAt + string.Join(DockChainSep,
               [NoSeparators(Link.FormName), NoSeparators(Link.FormClass),
                NoSeparators(Link.Section), NoSeparators(Link.SiteName),
                BoolToStr(Link.Transient, False)]));
+            // AND ITS CLIENTS, right behind it - the tab RELATION, which the
+            // place alone cannot carry (see TDockClientRef). Interleaved on
+            // purpose: the reader attaches them to the last link it saw, so
+            // the two keys cannot disagree about which host they describe.
+            for var C in Link.Clients do
+              if C.Known or (C.FormName <> '') then
+                SL.Add(KeyDockClient + string.Join(DockChainSep,
+                  [IntToStr(C.Ordinal), BoolToStr(C.IsSelf, False),
+                   NoSeparators(C.Section), NoSeparators(C.FormName),
+                   NoSeparators(C.FormClass)]));
+          end;
       end;
       SL.SaveToFile(GetMarkerFilePath, TEncoding.UTF8);
     finally

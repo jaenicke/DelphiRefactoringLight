@@ -110,8 +110,13 @@ function ShowStatusWindowAt(const ABounds: TRect): Boolean;
 ///  second entry point rather than an argument: putting a window at a
 ///  remembered rectangle and docking it into a site are two different
 ///  outcomes, and only the second one is a restore. The caller does the
-///  first one afterwards, on purpose, when this answered False.</summary>
-function ShowStatusWindowDocked(const APlace: TDockPlace): Boolean;
+///  first one afterwards, on purpose, when this answered anything but
+///  rwoRestored.
+///  AND THE ANSWER IS THREE-VALUED since 2.9.0: rwoPlaceOnly means the window
+///  is a client of the right dock site and no longer a TAB beside the window
+///  it shared a tab group with - the state a user reported on 2026-10-28 and
+///  which the old Boolean reported as a success.</summary>
+function ShowStatusWindowDocked(const APlace: TDockPlace): TReloadWindowOutcome;
 
 /// <summary>Menu entry point: shows (and focuses) the status window.</summary>
 procedure ShowStatusWindow;
@@ -933,10 +938,12 @@ begin
   // - the saved desktop is asked next, and a remembered rectangle after that.
   Row('this window', StatusDockWindowStateText,
     'when the package is installed again, a docked window goes back into the ' +
-    'host that held it, or - when that host is gone - into the site that ' +
-    'host was docked in, or where the saved desktop says; failing all of ' +
-    'those it comes back free-standing over the place it occupied. A ' +
-    'free-standing one goes back to its bounds (see "Installieren")');
+    'host that held it; when that host is gone - a tab host the user made by ' +
+    'dragging dissolves - the TAB GROUP is rebuilt beside the neighbour named ' +
+    'here, and failing that the site that host was docked in, or where the ' +
+    'saved desktop says, or free-standing over the place it occupied. The ' +
+    'report after an install names it when only the place came back (see ' +
+    '"Installieren")');
 
   // Line endings at file open: the check corrects files on disk, so what it
   // did (and whether it is asking at all) must be readable somewhere - this
@@ -1491,6 +1498,10 @@ const
   ///  further - this is the runaway guard, not a limit anybody should
   ///  meet.</summary>
   MaxDockChainLinks = 8;
+  /// <summary>How many clients of one host are recorded - a runaway guard in
+  ///  the spirit of MaxDockChainLinks, not a limit: the biggest tab group in
+  ///  the desktop files on this machine holds six.</summary>
+  MaxDockClients = 16;
 
 function ScreenBoundsOf(AForm: TCustomForm): TRect;
 var
@@ -1591,6 +1602,29 @@ begin
       // even include our own window is not something to trust either, so 0
       // counts as transient too.
       Link.Transient := (Link.Section = '') and (Host.DockClientCount <= 2);
+      // AND WHO ELSE IS IN THIS HOST - the tab SIBLINGS, which is the half a
+      // place cannot carry (user, 2026-10-28: the window came back docked
+      // "rechts daneben" instead of as a tab beside the Messages view).
+      // DockClientCount / DockClients are the public, VCL-maintained pair and
+      // are asked of the dock SITE - the control the clients really
+      // registered with, whichever of the two HostDockSite is - and the list
+      // is in DOCK ORDER, ours among them. The cap is a runaway guard in the
+      // spirit of MaxDockChainLinks: the biggest tab group in the desktop
+      // files on this machine holds six clients.
+      for var CI := 0 to Host.DockClientCount - 1 do
+      begin
+        if Length(Link.Clients) >= MaxDockClients then Break;
+        var C := Host.DockClients[CI];
+        if not (C is TCustomForm) then Continue;   // a client need not be one
+        var Ref := Default(TDockClientRef);
+        Ref.Ordinal := CI;
+        Ref.IsSelf := (C = AForm);
+        Ref.FormName := TCustomForm(C).Name;
+        Ref.FormClass := C.ClassName;
+        if C is TDesktopForm then
+          Ref.Section := TDesktopForm(C).DeskSection;
+        Link.Clients := Link.Clients + [Ref];
+      end;
       if Link.Known then
         Result.Links := Result.Links + [Link];
       Walk := HostForm;
@@ -1736,6 +1770,139 @@ begin
   end;
 end;
 
+function FindSiblingForm(const ARef: TDockClientRef): TCustomForm;
+begin
+  // BY DESKSECTION, and by nothing else - the opposite of FindDockHostForm,
+  // which may use a component name because a host that answers for one is
+  // still that host. A sibling is looked up in order to be DOCKED INTO, so a
+  // wrong answer would splice the status window into a stranger's tab group
+  // AND report a restore; the component name is the DFM default (see
+  // TDockLink.Transient), so it cannot carry that weight.
+  Result := nil;
+  if not ARef.Known then Exit;
+  try
+    for var I := 0 to Screen.FormCount - 1 do
+    begin
+      var F := Screen.Forms[I];
+      if not (F is TDesktopForm) then Continue;
+      if not SameText(TDesktopForm(F).DeskSection, ARef.Section) then Continue;
+      if (ARef.FormClass <> '') and
+         not SameText(F.ClassName, ARef.FormClass) then Continue;
+      // ONLY A DOCKABLE FORM CAN BE SPLICED INTO A TAB HOST: the host takes
+      // the sibling's own dock zone, which a form that is not docked through
+      // the IDE's dockable-form machinery does not have. Found and then
+      // refused is the safe direction - the relation is simply not restored.
+      if not (F is TDockableForm) then Continue;
+      Exit(F);
+    end;
+  except
+    Result := nil;
+  end;
+end;
+
+function MakeTabBeside(AForm: TCustomForm; ASibling: TCustomForm): Boolean;
+var
+  Site: TWinControl;
+  Host: TTabDockHostForm;
+begin
+  // A TAB IS A RELATION, AND THIS IS THE ONLY WAY TO BUILD ONE: there is no
+  // single API call for "make these two a tab group", and the IDE has no
+  // helper for it either. TDockableForm.CreateDockParent is the one routine
+  // in designide that creates a TTabDockHostForm at run time, and this IS its
+  // body - measured byte for byte (research pass plus a skeptic over the same
+  // bytes, 2026-10-28): construct the host with Application as its owner, set
+  // its Parent to the dock site, make it visible, then call its own public
+  // ManualDockClient TWICE - once for the client that is already docked with
+  // Replace = True, once for the newcomer with False - and finish with Show +
+  // FocusWindow.
+  //
+  // WHY THE SIBLING AND NOT WE ARE THE REPLACE PARTNER, and this is structural
+  // rather than a preference: ManualDockClient(C, D, A, True) decodes to
+  // Host.ReplaceDockedControl(Control := C, NewDockSite := Host, ...), and
+  // Vcl.Controls.TControl.ReplaceDockedControl runs ManualDock on SELF - the
+  // HOST - with the REPLACED control's old site. So it is the host that takes
+  // the sibling's zone in the dock tree, which is exactly the inverse of the
+  // UMFinalUndock that dissolved our old host and handed its zone to that same
+  // sibling. With the arguments the other way round - our own window, whose
+  // HostDockSite is nil after a reload - ManualDock(nil, ...) would FLOAT the
+  // host instead, carrying every client it already holds. (CLAUDE.md recorded
+  // that hazard with the wrong mechanism until this round: it said ManualDock
+  // runs on the control being replaced. It does not; it runs on Self.)
+  //
+  // THE GUARD IS THE SAFETY RULE: ReplaceDockedControl only takes the branch
+  // above when the replaced control's host has a dock MANAGER - otherwise it
+  // ends in TWinControl.DockReplaceDockClient, which is a do-nothing that
+  // returns False. Asking for it up front is what keeps a sibling that is not
+  // really docked from floating the new host.
+  //
+  // NOT DONE, and named rather than forgotten: TEditorDockPanel
+  // .ResizeSuspended, which CreateDockParent sets around the two calls. It
+  // would avoid one re-layout and costs a dependency on IDEDockPanel; a
+  // flicker is not a defect.
+  Result := False;
+  if (AForm = nil) or (ASibling = nil) or (AForm = ASibling) then Exit;
+  Site := ASibling.HostDockSite;
+  if (Site = nil) or not Site.UseDockManager or (Site.DockManager = nil) then
+    Exit;
+  try
+    Host := TTabDockHostForm.Create(Application);
+    Host.Parent := Site;
+    // VISIBLE BEFORE DOCKED, the rule DockIntoLink states: TDockTree
+    // .InsertControl opens with "if not Control.Visible then Exit" AFTER
+    // CM_DOCKCLIENT has already re-parented the control.
+    Host.Visible := True;
+    if not AForm.Visible then
+      try AForm.Show; except end;
+    Host.ManualDockClient(ASibling, nil, alNone, True);
+    Host.ManualDockClient(AForm, nil, alNone, False);
+    Host.Show;
+    // VERIFIED BY READING IT BACK, and here the test really is the RELATION:
+    // both windows have to be clients of the same new host, which is what a
+    // tab group IS. Containment in the old site would be true for the state
+    // the user reported as a defect.
+    Result := (AForm.HostDockSite <> nil) and not AForm.Floating and
+      (GetParentForm(AForm.HostDockSite, False) = Host) and
+      (ASibling.HostDockSite <> nil) and
+      (GetParentForm(ASibling.HostDockSite, False) = Host);
+    if Result then
+      try
+        Host.ShowDockClient(AForm);
+        FocusWindow(Host);
+      except
+      end
+    else
+      // AND A HOST THAT DID NOT TAKE ITS CLIENTS MUST NOT STAY ON SCREEN.
+      // Found by reading this routine rather than by a report: every exit
+      // above leaves a constructed, VISIBLE TTabDockHostForm behind, and if
+      // the dock did not happen it is an empty tab window the user never
+      // asked for. Release and not Free, because this can run from inside
+      // message handling - and only while it really is empty, so a half-done
+      // dock that DID take the sibling is left for the IDE's own rule to
+      // settle (DoRemoveDockClient -> UMFinalUndock hands the zone back).
+      try
+        if Host.DockClientCount = 0 then
+          Host.Release;
+      except
+      end;
+  except
+    Result := False;
+  end;
+end;
+
+function TabBesideRecorded(AForm: TCustomForm;
+  const ASiblings: TArray<TDockClientRef>): Boolean;
+begin
+  // IN DOCK ORDER, and the first sibling that is still there wins: they were
+  // all in one tab group, so any of them puts the window back into it.
+  Result := False;
+  for var Ref in ASiblings do
+  begin
+    var F := FindSiblingForm(Ref);
+    if (F <> nil) and MakeTabBeside(AForm, F) then
+      Exit(True);
+  end;
+end;
+
 function DockIntoLink(AForm: TCustomForm; const ALink: TDockLink): Boolean;
 var
   HostForm: TCustomForm;
@@ -1819,7 +1986,10 @@ begin
   end;
 end;
 
-function RedockFormInto(AForm: TCustomForm; const APlace: TDockPlace): Boolean;
+function RedockFormInto(AForm: TCustomForm;
+  const APlace: TDockPlace): TReloadWindowOutcome;
+var
+  HadRelation: Boolean;
 begin
   // THE DEEPEST LINK THAT STILL EXISTS. The host that held the window is the
   // first try, and for a host the desktop file created (DockSite0..N, kept
@@ -1852,10 +2022,37 @@ begin
   // then even picks the tab's position. So this link restores the PLACE and
   // not the tab relation; the restore verifies by containment, and the
   // status row says where the window ended up.
-  Result := False;
+  // AND THE ANSWER IS THREE-VALUED, because the reported defect lives between
+  // its last two values: the window came back INSIDE its old dock site and
+  // the restore said "restored", while the user could see it was no longer a
+  // TAB beside the Messages view. A Boolean cannot carry that, so the box
+  // said nothing and he had to find it by looking.
+  Result := rwoNotDone;
+  HadRelation := False;
   for var Link in APlace.Links do
-    if DockIntoLink(AForm, Link) then
-      Exit(True);
+    if Length(Link.Siblings) > 0 then
+      HadRelation := True;
+
+  for var I := 0 to High(APlace.Links) do
+  begin
+    if DockIntoLink(AForm, APlace.Links[I]) then
+    begin
+      // THE INNERMOST LINK IS THE HOST THAT HELD THE WINDOW, so landing
+      // there restores the place and every tab with it. Any link further out
+      // is the place ALONE - and only worth saying when there was a relation
+      // to lose: a marker older than 2.9.0 records no clients, and then
+      // "place" is all we can check, which is exactly the old behaviour.
+      if (I = 0) or not HadRelation then
+        Exit(rwoRestored);
+      Exit(rwoPlaceOnly);
+    end;
+    // THIS link's host is gone - a drag-created one dissolves when our client
+    // leaves it. Its tab GROUP can still be rebuilt, and that beats falling
+    // through to the next link, which can only give the place back.
+    if (Length(APlace.Links[I].Siblings) > 0) and
+       TabBesideRecorded(AForm, APlace.Links[I].Siblings) then
+      Exit(rwoRestored);
+  end;
 end;
 
 procedure ShowFormDockAware(AForm: TCustomForm; const AFallback: TDockPlace);
@@ -1905,6 +2102,9 @@ begin
   // completion popup established).
   if (not WasOnScreen) and AFallback.Known and
      ((AForm.HostDockSite = nil) or AForm.Floating) then
+    // The outcome is not read here: this path repairs a window the IDE handed
+    // back undocked, and whatever it achieves is better than leaving it
+    // floating. The reload REPORT asks the same function and does read it.
     RedockFormInto(AForm, AFallback);
 end;
 
@@ -2056,6 +2256,7 @@ end;
 function StatusDockWindowStateText: string;
 var
   S: TRlDockState;
+  Names: string;
 begin
   S := StatusDockWindowState;
   if not S.Open then
@@ -2068,6 +2269,22 @@ begin
     // read. Then a reload really has nothing to put the window back into.
     Exit('open and docked, host unknown');
   Result := 'open and docked in ' + S.Host.Describe;
+  // AND WITH WHOM, which is the half THREE rounds of this defect were about:
+  // 2.8.1 and 2.8.2 were each diagnosed in one call because this row named
+  // the host, and the round after each of them was about the window coming
+  // back in the wrong RELATION - something the row could not say. A tab is a
+  // relation to another client, so the row names the clients.
+  Names := '';
+  for var C in S.Host.Innermost.Siblings do
+  begin
+    if Names <> '' then Names := Names + ', ';
+    if C.Section <> '' then
+      Names := Names + C.Section
+    else
+      Names := Names + C.FormName;
+  end;
+  if Names <> '' then
+    Result := Result + ', as a tab beside ' + Names;
 end;
 
 function ShowStatusWindowAt(const ABounds: TRect): Boolean;
@@ -2090,13 +2307,17 @@ begin
     end;
 end;
 
-function ShowStatusWindowDocked(const APlace: TDockPlace): Boolean;
+function ShowStatusWindowDocked(const APlace: TDockPlace): TReloadWindowOutcome;
 begin
   ShowStatusWindow;
-  // AND A DOCK THAT WAS ASKED FOR AND DID NOT HAPPEN IS NOT A RESTORE: the
-  // answer stays False and the box says so. Reporting True here would be the
-  // one thing this round is against.
-  Result := (GForm <> nil) and RedockFormInto(GForm, APlace);
+  // AND A DOCK THAT WAS ASKED FOR AND DID NOT HAPPEN IS NOT A RESTORE, nor is
+  // one that got the place but lost the tab - that distinction IS this
+  // round's defect. Reporting more than happened would be the one thing this
+  // project is against.
+  if GForm = nil then
+    Result := rwoNotDone
+  else
+    Result := RedockFormInto(GForm, APlace);
 end;
 
 procedure ShowStatusWindow;

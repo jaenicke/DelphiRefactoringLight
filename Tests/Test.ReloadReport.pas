@@ -12,9 +12,14 @@
   live IDE, the DECISION does not, so it is checkable here.
 
   The docked window used to be the one thing that was only SAID. It is done
-  now: the dock HOST is the IDE's own form and survives our unload, so it can
-  be found again by its DeskSection - which the desktop file is also keyed on
-  ("[DockSite5] TabDockClients=MessageView,RefactoringLightStatus"). }
+  now, because the dock sites belong to the IDE and survive our unload - but
+  not "by its DeskSection", which is what this comment claimed until 2.9.0
+  and which 2.8.2 had already refuted: a host the user created by dragging
+  has no DeskSection at all, so the lookup is a name / section / site ladder.
+  AND A PLACE IS NOT THE WHOLE STATE: being a tab is a RELATION to another
+  client, so the host's other clients travel too ("[DockSite5]
+  TabDockClients=MessageView,RefactoringLightStatus" is the same list, which
+  is why the saved desktop can restore the relation as well). }
 
 interface
 
@@ -46,6 +51,7 @@ type
     ///  window back into. Its component NAME is there either way, and the
     ///  chain carries the site that host was itself docked in.</summary>
     [Test] procedure ARunTimeDockHostIsStillAHost;
+    [Test] procedure APlaceWithoutItsTabIsNotARestore;
   end;
 
 implementation
@@ -186,7 +192,8 @@ begin
   F := Default(TReloadFacts);
   F.DockWasOpen := True;
   F.Problems := ['something'];
-  Assert.AreEqual('', ReloadReportText(F, False), 'a fresh start says nothing');
+  Assert.AreEqual('', ReloadReportText(F, rwoNotDone),
+    'a fresh start says nothing');
 
   // A RESTORED WINDOW IS NOT MENTIONED, docked or not. This is the sentence
   // the user objected to: it must not appear once the window is back.
@@ -195,19 +202,19 @@ begin
   F.DockWasOpen := True;
   F.DockWasDocked := True;
   F.DockPlace := MeasuredPlace;
-  Assert.AreEqual('', ReloadReportText(F, True),
+  Assert.AreEqual('', ReloadReportText(F, rwoRestored),
     'the window is back in its dock - there is nothing to report');
 
   // ONLY A RESTORE THAT FAILED is worth a sentence, and then it names what
   // the user can do.
-  S := ReloadReportText(F, False);
+  S := ReloadReportText(F, rwoNotDone);
   Assert.IsTrue(S.Contains('docked'), 'a docked window that stayed away is said: ' + S);
   Assert.IsTrue(S.Contains('desktop'), 'and it names what can still do it: ' + S);
 
   // A FREE-STANDING one that could not be reopened gets its own, different
   // sentence - telling someone to re-select a desktop would be nonsense.
   F.DockWasDocked := False;
-  S := ReloadReportText(F, False);
+  S := ReloadReportText(F, rwoNotDone);
   Assert.IsTrue(S.Contains('menu'), 'the free-standing case points at the menu: ' + S);
   Assert.IsFalse(S.Contains('desktop'),
     'and does NOT send the user to the desktop menu: ' + S);
@@ -218,7 +225,7 @@ begin
   F.Reloaded := True;
   F.Problems := ['A blame worker did not finish in time.',
     'Another add-on chained its editor context menu onto ours.'];
-  S := ReloadReportText(F, True);
+  S := ReloadReportText(F, rwoRestored);
   for var P in F.Problems do
     Assert.IsTrue(S.Contains(P), 'every problem is named: ' + P);
 end;
@@ -592,6 +599,115 @@ begin
   // than a live case.
   Assert.AreEqual('A (s)', PlaceOf([DockLinkOf('A', 'TA', '', 's'),
     Default(TDockLink)]).Describe, 'and never a dangling " in "');
+end;
+
+function MakeClient(AOrdinal: Integer; AIsSelf: Boolean;
+  const ASection, AFormName, AFormClass: string): TDockClientRef;
+begin
+  Result := Default(TDockClientRef);
+  Result.Ordinal := AOrdinal;
+  Result.IsSelf := AIsSelf;
+  Result.Section := ASection;
+  Result.FormName := AFormName;
+  Result.FormClass := AFormClass;
+end;
+
+procedure TReloadReportTests.APlaceWithoutItsTabIsNotARestore;
+var
+  F: TReloadFacts;
+  Place: TDockPlace;
+  Link: TDockLink;
+  S: string;
+begin
+  // THE REPORTED STATE (2026-10-28): the window came back INSIDE its old dock
+  // site and was no longer a TAB beside the Messages view. The old Boolean
+  // could not carry that difference, so the box said nothing at all and the
+  // user had to discover the loss by looking. rwoPlaceOnly IS that state.
+  Link := DockLinkOf('TabDockHostForm', 'TTabDockHostForm', '', 'DockPanel');
+  Link.Clients := [
+    MakeClient(0, False, 'MessageView', 'MessageViewForm', 'TMessageViewForm'),
+    MakeClient(1, True, 'RefactoringLightStatus', 'OTADockForm_1', 'TOTADockForm')];
+  Place := PlaceOf([Link]);
+
+  // The list answers both derived questions, and they are DERIVED rather than
+  // stored on purpose: a stored second field could disagree with the list.
+  Assert.AreEqual<Integer>(1, Length(Link.Siblings),
+    'the siblings are the clients that are not ours');
+  Assert.AreEqual('MessageView', Link.Siblings[0].Section,
+    'and a sibling is named by its DeskSection, which is the lookup key');
+  Assert.AreEqual(1, Link.OwnOrdinal, 'we were the second tab');
+
+  F := Default(TReloadFacts);
+  F.Reloaded := True;
+  F.DockWasOpen := True;
+  F.DockWasDocked := True;
+  F.DockPlace := Place;
+
+  // RESTORED says nothing, as before - the window is where it was.
+  Assert.AreEqual('', ReloadReportText(F, rwoRestored),
+    'a full restore is not worth a sentence');
+
+  // PLACE ONLY says what is missing AND names the neighbour: "it is not a tab
+  // any more" is only actionable with the window it should be a tab beside.
+  S := ReloadReportText(F, rwoPlaceOnly);
+  Assert.IsTrue(S.Contains('MessageView'),
+    'the place-only sentence names the sibling: ' + S);
+  Assert.IsTrue(S.Contains('tab') or S.Contains('TAB'),
+    'and says what was lost: ' + S);
+  Assert.IsFalse(S.Contains('could not be put back'),
+    'it is NOT the sentence a failed restore gets: ' + S);
+
+  // AND WITHOUT A RECORDED SIBLING it says the half it knows instead of
+  // naming a window it cannot name - a marker older than 2.9.0 carries no
+  // clients at all, and that must not produce a sentence about nothing.
+  // A FRESH PLACE, not Place with its list emptied: TDockPlace.Links is a
+  // dynamic array, so assigning the record SHARES it and clearing it through
+  // one name clears it for the other. (That is what this assertion caught on
+  // its first run, in the test rather than in the code.)
+  F.DockPlace := PlaceOf([DockLinkOf('TabDockHostForm', 'TTabDockHostForm',
+    '', 'DockPanel')]);
+  S := ReloadReportText(F, rwoPlaceOnly);
+  Assert.IsTrue(S.Contains('tab') or S.Contains('TAB'),
+    'the generic form still names the loss: ' + S);
+  Assert.IsFalse(S.Contains('beside '),
+    'and it does not pretend to know the neighbour: ' + S);
+
+  // THE MARKER CARRIES THE LIST - without that none of it survives the
+  // reload. Written interleaved behind its own dockat= line, so the reader
+  // attaches it to the last link it saw and no index has to agree.
+  if TFile.Exists(TRestartHint.GetMarkerFilePath) then
+    TFile.Delete(TRestartHint.GetMarkerFilePath);
+  try
+    TRestartHint.RecordUnload(nil, nil, True, True,
+      TRect.Create(0, 0, 0, 0), Place);
+    F := TRestartHint.ReadFacts;
+    Assert.AreEqual<Integer>(1, Length(F.DockPlace.Links), 'one link went in');
+    Assert.AreEqual<Integer>(2, Length(F.DockPlace.Links[0].Clients),
+      'and both of its clients came back');
+    Assert.AreEqual('MessageView', F.DockPlace.Links[0].Siblings[0].Section,
+      'the sibling survives the round trip by its section');
+    Assert.IsTrue(F.DockPlace.Links[0].Siblings[0].Known,
+      'and a section IS what makes it usable as a key');
+    Assert.AreEqual(1, F.DockPlace.Links[0].OwnOrdinal,
+      'our own ordinal survives too, so "were we the first tab" is answerable');
+  finally
+    if TFile.Exists(TRestartHint.GetMarkerFilePath) then
+      TFile.Delete(TRestartHint.GetMarkerFilePath);
+  end;
+
+  // AND THE SAVED DESKTOP NAMES THE SAME GROUP, which is what carries the
+  // FIRST install of this version: the marker it reads was written by a
+  // version that recorded no clients at all.
+  Place := DesktopDockPlace(DeskLines([
+    '[DockSite5]',
+    'HostDockSite=DockBottomCenterPanel',
+    'TabDockClients=MessageView,RefactoringLightStatus']),
+    'RefactoringLightStatus');
+  Assert.IsTrue(Place.Known, 'the file still names the host');
+  Assert.AreEqual<Integer>(1, Length(Place.Innermost.Siblings),
+    'and it names the tab group: the one client that is not us');
+  Assert.AreEqual('MessageView', Place.Innermost.Siblings[0].Section,
+    'by the section the lookup needs');
 end;
 
 initialization

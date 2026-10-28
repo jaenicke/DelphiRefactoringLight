@@ -196,7 +196,7 @@ begin
     var
       Facts: TReloadFacts;
       Action: TReloadWindowAction;
-      Restored: Boolean;
+      Outcome, FromDesk: TReloadWindowOutcome;
       Place: TDockPlace;
       Proj: string;
     begin
@@ -230,15 +230,21 @@ begin
       //    was itself docked in, which is the same place on screen. Those
       //    sites belong to the IDE, which is why any of this can work at
       //    all; our own form is the only thing a reload really loses.
-      Restored := False;
+      // THE OUTCOME IS THREE-VALUED since 2.9.0: a window that came back
+      // INSIDE its old dock site but no longer as a TAB beside its old
+      // neighbour used to report a restore, so the box said nothing and the
+      // user had to notice the loss himself (2026-10-28).
+      Outcome := rwoNotDone;
       Action := ReloadWindowAction(Facts);
       case Action of
         rwaFloating:
-          Restored := ShowStatusWindowAt(Facts.DockBounds);
+          if ShowStatusWindowAt(Facts.DockBounds) then
+            Outcome := rwoRestored;
         rwaRedock:
-          Restored := ShowStatusWindowDocked(Facts.DockPlace);
+          Outcome := ShowStatusWindowDocked(Facts.DockPlace);
       end;
-      if not Restored and (Action in [rwaRedock, rwaDockedUnknownHost]) then
+      if (Outcome <> rwoRestored) and
+         (Action in [rwaRedock, rwaDockedUnknownHost]) then
       begin
         // THE SAVED DESKTOP, and only now that the live hand-over did not
         // work: that file reflects the last desktop the user SAVED, so a
@@ -251,13 +257,26 @@ begin
         // is the link that is still there when the host is not - and that is
         // what carries the FIRST install of any version, because it reads the
         // marker the version it replaced wrote.
+        // AND IT IS WORTH ASKING EVEN FOR THE HOST WE JUST TRIED, when the
+        // file knows something the marker did not: its TabDockClients line
+        // names the tab GROUP, which a marker written before 2.9.0 does not
+        // carry at all. That is what carries the FIRST install of this
+        // version instead of making it the sacrificial one, which is what
+        // 2.8.1 and 2.8.2 each had to accept for themselves.
         Place := DockPlaceFromDesktopFile;
         if Place.Known and
-           not SameText(Place.Innermost.Section,
-                        Facts.DockPlace.Innermost.Section) then
-          Restored := ShowStatusWindowDocked(Place);
+           (not SameText(Place.Innermost.Section,
+                         Facts.DockPlace.Innermost.Section) or
+            ((Length(Place.Innermost.Siblings) > 0) and
+             (Length(Facts.DockPlace.Innermost.Siblings) = 0))) then
+        begin
+          FromDesk := ShowStatusWindowDocked(Place);
+          if Ord(FromDesk) > Ord(Outcome) then
+            Outcome := FromDesk;
+        end;
       end;
-      if not Restored and (Action in [rwaRedock, rwaDockedUnknownHost]) and
+      if (Outcome = rwoNotDone) and
+         (Action in [rwaRedock, rwaDockedUnknownHost]) and
          (Facts.DockBounds.Width > 0) and (Facts.DockBounds.Height > 0) then
         // AND IF NO DOCK SITE OF THE CHAIN IS LEFT, at least not in the
         // middle of the screen - which is what a user got on 2026-10-28 and
@@ -265,13 +284,13 @@ begin
         // occupied (converted through its parent, see ScreenBoundsOf), so
         // the window comes back over its own place, free-standing.
         // THE ANSWER IS DISCARDED ON PURPOSE: that is a position, not a
-        // layout, so Restored stays False and the box still says the dock
-        // site could not be restored. Reporting it as a restore would be
-        // the one thing this round is against.
+        // layout, so the outcome stays rwoNotDone and the box still says
+        // the dock site could not be restored. Reporting it as a restore
+        // would be the one thing this project is against.
         ShowStatusWindowAt(Facts.DockBounds);
 
       // 4. AND ONLY WHAT IS LEFT OVER IS SAID. The rule is pure and tested.
-      Result := ReloadReportText(Facts, Restored);
+      Result := ReloadReportText(Facts, Outcome);
     end;
   // Arms that tick. FILE I/O AND STATE ONLY in here: Register runs inside
   // the IDE's install transaction, and a window there wedges it (2.6.11).

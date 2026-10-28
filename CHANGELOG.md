@@ -6,6 +6,40 @@ development builds and were never released.
 
 ---
 
+## 2.9.0 - 2026-10-28
+
+### The status window comes back as a TAB, not just in the right place
+
+Report on 2.8.2: the window was docked again after installing the package,
+"allerdings nicht in der korrekten Schachtelung. Eigentlich war es ein Tab
+neben Meldungen, jetzt ist es rechts daneben angedockt." Being a tab is a
+RELATION to another window, and the restore only ever carried a PLACE.
+
+- **The tab group is restored, not just the dock site.** The host that holds a
+  tab group dissolves when its last-but-one client leaves, so after a reload
+  there is nothing left to re-enter - the restore used the panel that host sat
+  in, and docking into a panel puts a window BESIDE its old neighbour, never
+  into a tab with it (measured: the IDE's dock tree turns "client" into
+  "right" in a non-empty tree, and has no tab concept at all). So the other
+  clients of the host are now remembered when the package unloads, and the
+  tab group is rebuilt with the one that is still there - the same way the IDE
+  itself builds one when you drag a window onto another.
+- **The saved desktop can do it too**, which is what makes this work on the
+  FIRST install rather than the second: its own "TabDockClients" line names
+  the tab group, so a marker written by an older version does not have to.
+- **And a restore that lost the tab says so.** The old check asked whether the
+  window is inside the right dock site, which was true for the reported state -
+  so it reported a success and the box stayed silent, leaving the user to
+  notice. It now distinguishes "back the way it was" from "back in its dock
+  site but no longer a tab beside <window>", and only the second one is worth
+  a sentence.
+- **The status window row names the relation**: "open and docked in
+  TabDockHostForm (DockPanel) in Main Window (DockBottomCenterPanel), as a tab
+  beside MessageView". That row is what diagnosed each of the last two rounds
+  in a single look.
+
+---
+
 ## 2.8.2 - 2026-10-28
 
 ### The docked window came back in the middle of the screen

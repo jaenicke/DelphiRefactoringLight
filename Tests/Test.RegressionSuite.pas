@@ -870,6 +870,13 @@ type
     ///  replacing anything - which is how a stale MCP bridge survived four
     ///  versions (1.22.1).</summary>
     [Test] procedure AFileInUseIsMovedAsideAndReplaced;
+    /// <summary>Issue #52: 2.6.9 gated only the artefact copy on the
+    ///  build, so after a failed build the packages and experts were still
+    ///  registered and the post events still verified the previous build's
+    ///  file. This pins the policy InstallEntry gates those steps on:
+    ///  nothing after a failed build - and everything after a good one, or
+    ///  an entry without a build would stop installing.</summary>
+    [Test] procedure NothingFollowsAFailedBuild;
   end;
 
   [TestFixture]
@@ -927,7 +934,7 @@ uses
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
   Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
   Expert.SignatureEdit, Expert.MethodEdit, System.StrUtils,
-  Expert.DebugConsistency, DIH.Placeholders, DIH.FileOps, DIH.Builder,
+  Expert.DebugConsistency, DIH.Types, DIH.Placeholders, DIH.FileOps, DIH.Builder,
   // Generics.Collections: TJSONObject.GetPair is inline and the
   // doubled-note test calls it (H2443 without this entry).
   System.DateUtils, System.Generics.Collections;
@@ -7696,6 +7703,16 @@ begin
   finally
     TDirectory.Delete(Dir, True);
   end;
+end;
+
+procedure TInstallOutputRootTests.NothingFollowsAFailedBuild;
+begin
+  Assert.IsTrue(AfterBuildSteps(False) = [],
+    'after a failed build no step may run - not the copy, not a ' +
+    'registration, not a post event');
+  Assert.IsTrue(AfterBuildSteps(True) =
+    [abCopyArtefacts, abRegisterPackages, abRegisterExperts, abPostEvents],
+    'after a good build (or none) every step runs');
 end;
 
 procedure TInstallOutputRootTests.TheBuildIsToldWhereItMayCreateDirectories;

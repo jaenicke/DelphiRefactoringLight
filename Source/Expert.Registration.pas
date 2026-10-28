@@ -29,25 +29,26 @@ uses
   Expert.DialogHelper, Expert.ResourceMonitor, Expert.McpServer,
   Expert.PluginInfo, Expert.WorkerLatch, Expert.LspManager;
 
-/// <summary>Where the SAVED desktop says our status window was docked.
-///  The project desktop sits next to the .dproj as <project>.dsk; the rule
-///  that reads it is pure and tested (FindDockHostSection), this only finds
-///  the file. '' when there is no project, no file or no entry - and then the
-///  caller has nothing to put the window into, which it says.</summary>
-function DockHostFromDesktopFile: string;
+/// <summary>Where the SAVED desktop says our status window was docked - the
+///  dock host that lists it, and the site that host itself sits in.
+///  The project desktop sits next to the .dproj as &lt;project&gt;.dsk; the
+///  rule that reads it is pure and tested (DesktopDockPlace), this only finds
+///  the file. An empty place when there is no project, no file or no entry -
+///  and then the caller has nothing to put the window into, which it
+///  says.</summary>
+function DockPlaceFromDesktopFile: TDockPlace;
 var
   Dproj: string;
 begin
-  Result := '';
+  Result := Default(TDockPlace);
   try
     Dproj := Editor.GetCurrentProjectDproj;
     if Dproj = '' then Exit;
     var Dsk := TPath.ChangeExtension(Dproj, '.dsk');
     if not TFile.Exists(Dsk) then Exit;
-    Result := FindDockHostSection(TFile.ReadAllLines(Dsk),
-      StatusWindowIdentifier);
+    Result := DesktopDockPlace(TFile.ReadAllLines(Dsk), StatusWindowIdentifier);
   except
-    Result := '';
+    Result := Default(TDockPlace);
   end;
 end;
 
@@ -196,7 +197,8 @@ begin
       Facts: TReloadFacts;
       Action: TReloadWindowAction;
       Restored: Boolean;
-      Proj, Host: string;
+      Place: TDockPlace;
+      Proj: string;
     begin
       Facts := TRestartHint.Facts;
       if Facts.Reloaded then
@@ -223,19 +225,18 @@ begin
 
       // 3. THE WINDOW. Both cases are DONE now, not just reported: a
       //    free-standing one goes back to its bounds, and a DOCKED one is
-      //    handed to the dock SITE that held it - that site belongs to the
-      //    IDE and survives our unload, so it can be found again from the
-      //    two names the hand-over carries: the DeskSection of the form that
-      //    owns it ("DockSite5", "Main Window") and the site control's own
-      //    name ("DockPanel", "DockBottomCenterPanel").
+      //    handed back to the dock CHAIN it sat in - the host that held it
+      //    while that host is still there, and otherwise the site that host
+      //    was itself docked in, which is the same place on screen. Those
+      //    sites belong to the IDE, which is why any of this can work at
+      //    all; our own form is the only thing a reload really loses.
       Restored := False;
       Action := ReloadWindowAction(Facts);
       case Action of
         rwaFloating:
           Restored := ShowStatusWindowAt(Facts.DockBounds);
         rwaRedock:
-          Restored := ShowStatusWindowDocked(Facts.DockHostSection,
-            Facts.DockSiteName);
+          Restored := ShowStatusWindowDocked(Facts.DockPlace);
       end;
       if not Restored and (Action in [rwaRedock, rwaDockedUnknownHost]) then
       begin
@@ -246,12 +247,28 @@ begin
         // that knows where the window sat when the hand-over names a host
         // the IDE does not offer, and that is not a rare case: an install
         // over an older version reads a marker that older version wrote.
-        // The file names the tab host, never a site control inside it -
-        // enough, because a tab host is docked into through its own form.
-        Host := DockHostFromDesktopFile;
-        if (Host <> '') and not SameText(Host, Facts.DockHostSection) then
-          Restored := ShowStatusWindowDocked(Host, '');
+        // The file names the tab host and the panel that host sits in, which
+        // is the link that is still there when the host is not - and that is
+        // what carries the FIRST install of any version, because it reads the
+        // marker the version it replaced wrote.
+        Place := DockPlaceFromDesktopFile;
+        if Place.Known and
+           not SameText(Place.Innermost.Section,
+                        Facts.DockPlace.Innermost.Section) then
+          Restored := ShowStatusWindowDocked(Place);
       end;
+      if not Restored and (Action in [rwaRedock, rwaDockedUnknownHost]) and
+         (Facts.DockBounds.Width > 0) and (Facts.DockBounds.Height > 0) then
+        // AND IF NO DOCK SITE OF THE CHAIN IS LEFT, at least not in the
+        // middle of the screen - which is what a user got on 2026-10-28 and
+        // is what he reported. The rectangle is the one the window really
+        // occupied (converted through its parent, see ScreenBoundsOf), so
+        // the window comes back over its own place, free-standing.
+        // THE ANSWER IS DISCARDED ON PURPOSE: that is a position, not a
+        // layout, so Restored stays False and the box still says the dock
+        // site could not be restored. Reporting it as a restore would be
+        // the one thing this round is against.
+        ShowStatusWindowAt(Facts.DockBounds);
 
       // 4. AND ONLY WHAT IS LEFT OVER IS SAID. The rule is pure and tested.
       Result := ReloadReportText(Facts, Restored);
@@ -324,5 +341,5 @@ finalization
   // one that knows is the one that is going away.
   TRestartHint.RecordUnload(ShutdownProblems, GHeadlessAtUnload,
     GDockAtUnload.Open, GDockAtUnload.Docked, GDockAtUnload.Bounds,
-    GDockAtUnload.Host.Section, GDockAtUnload.Host.SiteName);
+    GDockAtUnload.Host);
 end.

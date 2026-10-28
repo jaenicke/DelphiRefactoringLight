@@ -13,6 +13,96 @@ uses
   System.Types, System.SysUtils;
 
 type
+  /// <summary>ONE LINK of a dock chain: a dock SITE control and the form that
+  ///  owns it.
+  ///
+  ///  THE NAME IS THE KEY, and that is measured rather than chosen. 2.8.1
+  ///  identified a host by its DeskSection, which is what the desktop file
+  ///  uses - and a host the IDE creates when the user DRAGS a window to dock
+  ///  it has none: on 2026-10-28 the status window sat in a TTabDockHostForm
+  ///  named "TabDockHostForm" (ide_introspect), beside DockSite0..DockSite4
+  ///  from the saved desktop, and our own row read "docked, host unknown".
+  ///  The component NAME is there in both cases, and a form's name is unique
+  ///  among its owner's components, so it is what finds the same live form
+  ///  again after our package was unloaded and loaded into the same
+  ///  process.</summary>
+  TDockLink = record
+    /// <summary>The host FORM's component name - "DockSite5",
+    ///  "TabDockHostForm", "AppBuilder".</summary>
+    FormName: string;
+    /// <summary>Its class name. A WEAK confirmation, and this doc said
+    ///  more than it can keep until 2.8.2: it only ever rejects a name that
+    ///  was recycled by a form of ANOTHER class, and a run-time dock host is
+    ///  always a TTabDockHostForm. What rejects a recycled name of the same
+    ///  class is Transient, below.</summary>
+    FormClass: string;
+    /// <summary>Its DeskSection, i.e. the name the desktop file uses
+    ///  ("DockSite5", "Main Window"). EMPTY for a host created at run time,
+    ///  which is why it cannot be the key - but it is the readable name, and
+    ///  it is what the saved desktop can answer with.</summary>
+    Section: string;
+    /// <summary>The dock SITE control inside that form - "DockPanel" inside
+    ///  a tab host, "DockBottomCenterPanel" inside the main window. The form
+    ///  alone is not enough: a window docked straight into one of the main
+    ///  window's own panels has the IDE's main form as its host, and there
+    ///  the panel is the only thing that says WHERE.</summary>
+    SiteName: string;
+    /// <summary>This host's NAME is not an identity, so it must not be looked
+    ///  up by name again.
+    ///
+    ///  MEASURED, and it took an adversarial pass over the live IDE plus the
+    ///  shipped RTL to see it: "TabDockHostForm" is the design-time DFM name
+    ///  that EVERY TTabDockHostForm carries - ide_introspect returns the same
+    ///  17 components for TabDockHostForm and for DockSite4 - and DockSite0..N
+    ///  are the ones the desktop loader renamed. System.Classes
+    ///  TReader.ReadRootComponent assigns FindUniqueName(ReadStr), whose
+    ///  counter restarts at 0 and whose uniqueness test asks only for LIVE
+    ///  components, so the bare name is taken again by the next form the IDE
+    ///  streams once it is free. And free it becomes: a drag-created host
+    ///  dissolves when our window leaves it (UMFinalUndock), which is
+    ///  precisely when this name stops meaning that host.
+    ///  So a link that will dissolve is kept for the report but refused by
+    ///  the lookup, and the restore falls through to the next link - the site
+    ///  THAT host sat in, which is where its surviving client goes anyway.
+    ///  A host with three or more clients stays, and then its name does
+    ///  identify it.</summary>
+    Transient: Boolean;
+    /// <summary>Enough to look this host up again.</summary>
+    function Known: Boolean;
+    /// <summary>For the status row and the report.</summary>
+    function Describe: string;
+  end;
+
+  /// <summary>WHERE A WINDOW WAS DOCKED - as the CHAIN it really is, from the
+  ///  host that held it outwards to the form that is not itself docked (the
+  ///  IDE's main window).
+  ///
+  ///  WHY A CHAIN AND NOT ONE HOST: whether the host survives our unload
+  ///  depends on how the USER made it, and the restore must not care which.
+  ///  MEASURED in designide370.bpl, by a research pass and then a skeptic over
+  ///  the same bytes: TTabDockHostForm.DoRemoveDockClient posts $506 to itself
+  ///  as soon as at most one client is left, $506 is UMFinalUndock in the
+  ///  class's own message table, and that hands the dock place to the
+  ///  remaining client and calls TCustomForm.Release. BUT a one-byte flag
+  ///  gates it, written in exactly one place - TDesktopForm.LoadDockStream -
+  ///  so a host the DESKTOP LOADER created (DockSite0..N) is exempt and stays,
+  ///  while one created by a DRAG dissolves. Live corroboration: DockSite0..4
+  ///  are still there, and the DockSite5 of the saved desktop is not.
+  ///  So the chain: the host when it is still there, and otherwise the site
+  ///  THAT host was docked in - which is also where UMFinalUndock puts the
+  ///  surviving client, so it is the same place on screen either way.
+  ///  So the restore walks the chain and takes the DEEPEST link that still
+  ///  exists; the status row then says which one it was, which is also how
+  ///  the host's lifetime gets measured instead of assumed.</summary>
+  TDockPlace = record
+    /// <summary>Innermost (the host that held the window) first.</summary>
+    Links: TArray<TDockLink>;
+    function Known: Boolean;
+    /// <summary>The host that held the window, or an empty link.</summary>
+    function Innermost: TDockLink;
+    function Describe: string;
+  end;
+
   /// <summary>What the PREVIOUS instance of this package left behind in THIS
   ///  process - read at load from the marker file, which is the only channel
   ///  there is: the instance that knows is the one that is going away.</summary>
@@ -26,23 +116,14 @@ type
     DockWasOpen: Boolean;
     DockWasDocked: Boolean;
     DockBounds: TRect;
-    /// <summary>The DeskSection of the DOCK HOST that held the window, e.g.
-    ///  "DockSite5" - measured from the live form before the unload
-    ///  (HostDockSite -> the form that OWNS that site, which is its
-    ///  IMMEDIATE parent form and not the top-level one -> DeskSection).
-    ///  That host
-    ///  belongs to the IDE and survives our unload, so this string is what
-    ///  makes a docked restore possible at all: the desktop file records the
-    ///  membership with the SITE ("[DockSite5] TabDockClients=MessageView,
-    ///  RefactoringLightStatus"), never with our own window.</summary>
-    DockHostSection: string;
-    /// <summary>The NAME of the dock SITE itself - "DockPanel" inside a tab
-    ///  host, "DockBottomCenterPanel" inside the main window. The section
-    ///  above names the FORM that owns the site, and on its own that is not
-    ///  enough: a window docked straight into one of the main window's own
-    ///  panels has the IDE's main form as its host, and there the panel is
-    ///  the only thing that says WHERE.</summary>
-    DockSiteName: string;
+    /// <summary>WHERE IT WAS DOCKED - read from the live form before the
+    ///  unload (HostDockSite -> the form that owns that site -> ITS
+    ///  HostDockSite -> ...), because the desktop file cannot say: it records
+    ///  the membership with the SITE ("[DockSite5] TabDockClients=
+    ///  MessageView,RefactoringLightStatus"), never with our own window.
+    ///  Empty when the window was free-standing, or when nothing of the chain
+    ///  could be read.</summary>
+    DockPlace: TDockPlace;
     /// <summary>Files the MCP bridge had opened without an editor tab and
     ///  that were still loaded at the unload.</summary>
     Headless: TArray<string>;
@@ -95,7 +176,7 @@ type
     ///  package's finalization, when every shutdown has had its say.</summary>
     class procedure RecordUnload(const AProblems, AHeadless: TArray<string>;
       ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
-      const ADockHostSection, ADockSiteName: string); static;
+      const ADockPlace: TDockPlace); static;
     /// <summary>The MCP server had to pin this module: it can never be
     ///  unmapped now, so there is no next load and no marker to hand over to -
     ///  THIS instance has to say it. Measured (scratchpad pinprobe): after a
@@ -115,19 +196,21 @@ type
 
 type
   /// <summary>What the caller should DO about the status window after a
-  ///  reload. The docked case is no longer a dead end: the dock host belongs
-  ///  to the IDE and survives our unload, so it can be found again by its
-  ///  DeskSection and asked to take the window back.</summary>
+  ///  reload. The docked case is no longer a dead end: the dock sites belong
+  ///  to the IDE, so the chain the window sat in can be looked up again and
+  ///  asked to take it back - the host itself when it is still there, and
+  ///  otherwise the site that host was docked in.</summary>
   TReloadWindowAction = (
     /// <summary>Nothing - it was not open, or this is a fresh IDE start.</summary>
     rwaNothing,
     /// <summary>It was free-standing: create it and put it at its bounds.</summary>
     rwaFloating,
-    /// <summary>It was docked and we know the host section: create it and ask
-    ///  that host to show it again.</summary>
+    /// <summary>It was docked and the chain it sat in is known: create it and
+    ///  hand it back to the deepest link that still exists.</summary>
     rwaRedock,
-    /// <summary>It was docked but the host is unknown (a marker written before
-    ///  2.8.0, or a window whose host we could not read) - then there is
+    /// <summary>It was docked but the chain is unknown (a marker written
+    ///  before 2.8.0, one written by 2.8.0/2.8.1 for a host whose DeskSection
+    ///  was empty, or a window whose host we could not read) - then there is
     ///  nothing to put it back into and the box has to say so.</summary>
     rwaDockedUnknownHost);
 
@@ -146,6 +229,52 @@ function ReloadWindowAction(const AFacts: TReloadFacts): TReloadWindowAction;
 ///  '' means there is nothing to report, which is the normal outcome.</summary>
 function ReloadReportText(const AFacts: TReloadFacts;
   AWindowRestored: Boolean): string;
+
+/// <summary>A chain of ONE link, named by its section - which is all the
+///  saved desktop file can say, and all a marker written by 2.8.x carries.
+///  The lookup tries the component name first and the section second, so a
+///  place built this way still finds a host the desktop created (there the
+///  two strings are the same, "DockSite5").</summary>
+function DockPlaceOfSection(const ASection: string): TDockPlace;
+
+/// <summary>The value of one key inside one section of an ini-shaped file, or
+///  '' - the .dsk reader needs exactly this and nothing more. Exported as a
+///  test seam: it decides which section a HostDockSite= line is read from,
+///  and reading it from the wrong one would be invisible.</summary>
+function DeskValueIn(const ALines: TArray<string>; const ASection,
+  AKey: string): string;
+
+/// <summary>THE WHOLE CHAIN a desktop file can give, for the window with this
+///  identifier: the dock host that lists it, and the site THAT host is docked
+///  in. PURE text work on the lines of a .dsk.
+///
+///  WHY THE SECOND LINK MATTERS MORE THAN IT LOOKS: the file is the fallback
+///  for exactly the case where the live hand-over could not say anything - and
+///  the first install of any version is such a case, because it reads the
+///  marker the version it replaced wrote. For 2.8.1 that marker says "docked,
+///  host unknown" and carries no bounds, so without this the window would
+///  come back in the middle of the screen once more. The host section it names
+///  ("DockSite5") may well be gone from the session - the IDE numbers those
+///  forms as it loads a desktop, and a host created by a drag releases itself
+///  when its clients leave - while the panel behind it
+///  ("HostDockSite=DockBottomCenterPanel") is a control of the IDE's own
+///  window chrome and stays.
+///  AND THE SECOND LINK NAMES NO OWNER, which is a correction of this
+///  function's own first version: it wrote Section = 'Main Window' there,
+///  reasoning that a main-window panel is what such a value names. MEASURED
+///  on the live IDE (2026-10-28), DockBottomCenterPanel is a component of
+///  EditWindow_0, a TEditWindow, and the main window has no child of that
+///  name at all - so the lookup searched the wrong form and the fallback that
+///  has to carry the first install of every version could never work. The
+///  file records a site name without an owner, so that is what the link
+///  carries, and TDockLink.Known accepts it: the lookup finds the form that
+///  OWNS a control of that name, and refuses when two forms do.
+///  What the sweep over all 17 desktop files on this machine really says is
+///  only which NAMES appear (DockRightPanel, DockBottomCenterPanel,
+///  DockBottomPanel, DockLeftPanel, RightTabDock, LeftDockTabSet) - not whose
+///  they are.</summary>
+function DesktopDockPlace(const ALines: TArray<string>;
+  const AIdentifier: string): TDockPlace;
 
 /// <summary>Which DOCK HOST section of a desktop file lists this window, e.g.
 ///  "DockSite5" for "RefactoringLightStatus". PURE text work on the lines of a
@@ -180,6 +309,12 @@ const
   KeyProblem = 'problem=';
   KeyHeadless = 'headless=';
   KeyDock = 'dock=';
+  /// <summary>One line per link of the dock chain, innermost first:
+  ///  dockat=&lt;form name&gt;|&lt;form class&gt;|&lt;section&gt;|&lt;site name&gt;.
+  ///  Its OWN key rather than more fields on dock=, so a marker written by
+  ///  2.8.x still parses as exactly what it is - one link, section only.</summary>
+  KeyDockAt = 'dockat=';
+  DockChainSep = '|';
 
 type
   /// <summary>Opens the hint from a plain WM_TIMER tick.
@@ -303,10 +438,138 @@ begin
   if not AFacts.Reloaded then Exit;
   if not AFacts.DockWasOpen then Exit;
   if not AFacts.DockWasDocked then Exit(rwaFloating);
-  if AFacts.DockHostSection <> '' then
+  if AFacts.DockPlace.Known then
     Result := rwaRedock
   else
     Result := rwaDockedUnknownHost;
+end;
+
+function TDockLink.Known: Boolean;
+begin
+  // ANY of the three answers, and the third one is not a convenience: the
+  // SAVED DESKTOP records a dock place as a site name with NO owner at all
+  // ("HostDockSite=DockBottomCenterPanel"), and MEASURED on the live IDE
+  // (2026-10-28) that panel belongs to EditWindow_0, a TEditWindow - not to
+  // the main window, which has no child of that name. So a link that carries
+  // only a site name is exactly what the file can give, and the lookup
+  // answers it by finding the form that OWNS a control of that name. Naming
+  // an owner we did not read would be a guess, and it was: 2.8.2 first wrote
+  // "Main Window" here, which made the desktop fallback look for that panel
+  // in the wrong form and never find it.
+  Result := (FormName <> '') or (Section <> '') or (SiteName <> '');
+end;
+
+function TDockLink.Describe: string;
+begin
+  // The SECTION is the readable name where there is one ("Main Window"), and
+  // for a host the desktop file created the two are the same string anyway
+  // ("DockSite5"). A host created by a drag has no section, and then its
+  // component name is what there is - which is exactly the case that read
+  // "host unknown" before.
+  if Section <> '' then
+    Result := Section
+  else if FormName <> '' then
+    Result := FormName
+  else
+    // A SITE NAME WITH NO OWNER is what the saved desktop gives, and it is
+    // the whole description there is: naming an owner would invent one.
+    Exit(SiteName);
+  // THE HOST FORM CAN BE ITS OWN DOCK SITE, and then the name is already
+  // there: TControl.Dock sets FHostDockSite to whatever it docks into, and for
+  // a tab host that is the form (TBaseDockHostForm.GetDockSiteControl answers
+  // Self). Printing it twice would read as two different things.
+  if (SiteName <> '') and not SameText(SiteName, FormName) then
+    Result := Result + ' (' + SiteName + ')';
+end;
+
+function TDockPlace.Known: Boolean;
+begin
+  Result := (Length(Links) > 0) and Links[0].Known;
+end;
+
+function TDockPlace.Innermost: TDockLink;
+begin
+  if Length(Links) > 0 then
+    Result := Links[0]
+  else
+    Result := Default(TDockLink);
+end;
+
+function TDockPlace.Describe: string;
+begin
+  // "TabDockHostForm (DockPanel) in Main Window (DockBottomCenterPanel)" -
+  // the host, and then what it is itself docked in, which is where the window
+  // goes when the host did not survive. One row, and it names both outcomes
+  // before either of them happens.
+  Result := '';
+  for var L in Links do
+  begin
+    if not L.Known then Continue;
+    if Result <> '' then
+      Result := Result + ' in ';
+    Result := Result + L.Describe;
+  end;
+end;
+
+function DeskValueIn(const ALines: TArray<string>; const ASection,
+  AKey: string): string;
+var
+  Section: string;
+begin
+  Result := '';
+  Section := '';
+  for var Raw in ALines do
+  begin
+    var L := Trim(Raw);
+    if L = '' then Continue;
+    if (L[1] = '[') and (L[Length(L)] = ']') then
+    begin
+      Section := Copy(L, 2, Length(L) - 2);
+      Continue;
+    end;
+    if not SameText(Section, ASection) then Continue;
+    var Eq := Pos('=', L);
+    if Eq <= 1 then Continue;
+    if SameText(Trim(Copy(L, 1, Eq - 1)), AKey) then
+      Exit(Trim(Copy(L, Eq + 1, MaxInt)));
+  end;
+end;
+
+function DesktopDockPlace(const ALines: TArray<string>;
+  const AIdentifier: string): TDockPlace;
+var
+  HostSection, Panel: string;
+  Link: TDockLink;
+begin
+  Result := Default(TDockPlace);
+  HostSection := FindDockHostSection(ALines, AIdentifier);
+  if HostSection = '' then Exit;
+  Result := DockPlaceOfSection(HostSection);
+  // The panel that host sits in - the link that is still there when the host
+  // itself is not. ITS OWNER IS NOT RECORDED and is not guessed: the file
+  // says "HostDockSite=DockBottomCenterPanel" and nothing else, and measured
+  // on the live IDE that panel belongs to EditWindow_0 (TEditWindow), while
+  // the main window has no child of that name. 2.8.2 first wrote
+  // Section = 'Main Window' here from a plausible reading of the name, which
+  // made the lookup search the wrong form - the one fallback that has to
+  // carry the first install of every version. A site name alone is a link the
+  // lookup can resolve; a wrong owner is not.
+  Panel := DeskValueIn(ALines, HostSection, 'HostDockSite');
+  if Panel = '' then Exit;
+  Link := Default(TDockLink);
+  Link.SiteName := Panel;
+  Result.Links := Result.Links + [Link];
+end;
+
+function DockPlaceOfSection(const ASection: string): TDockPlace;
+var
+  Link: TDockLink;
+begin
+  Result := Default(TDockPlace);
+  if ASection = '' then Exit;
+  Link := Default(TDockLink);
+  Link.Section := ASection;
+  Result.Links := [Link];
 end;
 
 function FindDockHostSection(const ALines: TArray<string>;
@@ -351,10 +614,13 @@ begin
   if not AFacts.Reloaded then Exit;
 
   // THE STATUS WINDOW. Both cases are DONE by the caller now - a
-  // free-standing one goes back to its bounds, a docked one is handed to the
-  // dock host that held it (that host is the IDE's own form and survives our
-  // unload, so it can be found again by its DeskSection). Only a restore that
-  // did NOT work is worth a sentence, and then it names what the user can do.
+  // free-standing one goes back to its bounds, a docked one into the deepest
+  // link of its dock chain that still exists: the host that held it while
+  // that host is there, and otherwise the site THAT host was docked in. (Not
+  // "by its DeskSection", which is what this comment said until 2.8.2 and is
+  // the defect that round was about: a host the user created by dragging has
+  // no DeskSection at all.) Only a restore that did NOT work is worth a
+  // sentence, and then it names what the user can do.
   if AFacts.DockWasOpen and not AWindowRestored then
     if AFacts.DockWasDocked then
       // NOT "open it from the menu": the caller falls back to the window's
@@ -463,11 +729,13 @@ end;
 class function TRestartHint.ReadFacts: TReloadFacts;
 var
   Lines: TArray<string>;
-  Stamp, L: string;
+  Stamp, L, OldSection, OldSite: string;
 begin
   PruneDeadMarkers;
   Stamp := ProcessStamp;
   FFacts := Default(TReloadFacts);
+  OldSection := '';
+  OldSite := '';
 
   // A marker whose FIRST line is this process's own start stamp was written
   // by an earlier instance of this package IN THIS PROCESS - that, and only
@@ -484,6 +752,23 @@ begin
         FFacts.Problems := FFacts.Problems + [Copy(L, Length(KeyProblem) + 1, MaxInt)]
       else if StartsText(KeyHeadless, L) then
         FFacts.Headless := FFacts.Headless + [Copy(L, Length(KeyHeadless) + 1, MaxInt)]
+      else if StartsText(KeyDockAt, L) then
+      begin
+        // dockat=<form name>|<form class>|<section>|<site name>|<transient>,
+        // one line per link, innermost first - and they arrive in the order
+        // they were written, so the chain needs no index. The fifth field
+        // arrived with 2.8.2; a line without it is a link whose name was
+        // trusted, which is what every version before it did.
+        var Q := SplitString(Copy(L, Length(KeyDockAt) + 1, MaxInt), DockChainSep);
+        var Link := Default(TDockLink);
+        if Length(Q) >= 1 then Link.FormName := Trim(Q[0]);
+        if Length(Q) >= 2 then Link.FormClass := Trim(Q[1]);
+        if Length(Q) >= 3 then Link.Section := Trim(Q[2]);
+        if Length(Q) >= 4 then Link.SiteName := Trim(Q[3]);
+        if Length(Q) >= 5 then Link.Transient := Trim(Q[4]) = '-1';
+        if Link.Known then
+          FFacts.DockPlace.Links := FFacts.DockPlace.Links + [Link];
+      end
       else if StartsText(KeyDock, L) then
       begin
         // dock=<open>,<docked>,<left>,<top>,<right>,<bottom>
@@ -502,11 +787,25 @@ begin
           FFacts.DockBounds := TRect.Create(StrToIntDef(P[2], 0),
             StrToIntDef(P[3], 0), StrToIntDef(P[4], 0), StrToIntDef(P[5], 0));
           if Length(P) >= 7 then
-            FFacts.DockHostSection := Trim(P[6]);
+            OldSection := Trim(P[6]);
           if Length(P) >= 8 then
-            FFacts.DockSiteName := Trim(P[7]);
+            OldSite := Trim(P[7]);
         end;
       end;
+    end;
+
+    // A MARKER FROM 2.8.0 / 2.8.1 carries no chain, only the section and site
+    // of the one host it knew - and that is the shape the FIRST load after
+    // this change meets, every time, because the install reads what the
+    // version it replaced wrote. One link, found by section.
+    if (Length(FFacts.DockPlace.Links) = 0) and
+       ((OldSection <> '') or (OldSite <> '')) then
+    begin
+      var Link := Default(TDockLink);
+      Link.Section := OldSection;
+      Link.SiteName := OldSite;
+      if Link.Known then
+        FFacts.DockPlace.Links := [Link];
     end;
   end;
 
@@ -531,20 +830,21 @@ begin
   Arm;
 end;
 
-function NoComma(const S: string): string;
+function NoSeparators(const S: string): string;
 begin
-  // The marker line is a comma list, so a name that carries one would move
-  // every field behind it - and a mis-parsed list hands the next instance a
-  // name that points at ANOTHER window. A control name cannot contain a
-  // comma, but the host section is an ini section the IDE writes, so this is
-  // measured rather than assumed: a stripped name is simply not found again,
-  // which is the honest failure.
+  // The marker lines are separated lists, so a name that carries a separator
+  // would move every field behind it - and a mis-parsed list hands the next
+  // instance a name that points at ANOTHER window. A component name cannot
+  // contain either character, but the host section is an ini section the IDE
+  // writes, so this is measured rather than assumed: a stripped name is
+  // simply not found again, which is the honest failure.
   Result := StringReplace(S, ',', ' ', [rfReplaceAll]);
+  Result := StringReplace(Result, DockChainSep, ' ', [rfReplaceAll]);
 end;
 
 class procedure TRestartHint.RecordUnload(const AProblems, AHeadless: TArray<string>;
   ADockOpen, ADockDocked: Boolean; const ADockBounds: TRect;
-  const ADockHostSection, ADockSiteName: string);
+  const ADockPlace: TDockPlace);
 var
   SL: TStringList;
 begin
@@ -559,9 +859,29 @@ begin
       for var S in AHeadless do
         if S <> '' then SL.Add(KeyHeadless + S);
       if ADockOpen then
+      begin
+        // THE 7TH AND 8TH FIELD ARE FOR SOMEBODY ELSE, and nothing in this
+        // version reads them: every link that fills them has its own dockat=
+        // line, which is what ReadFacts prefers. They are what an OLDER build
+        // loaded into this same process would find - a downgrade install -
+        // because it skips every dockat= line (that key does not start with
+        // "dock="). Writing them costs two strings and keeps that reader
+        // working; the test asserts they are still there.
         SL.Add(Format('%s%d,%d,%d,%d,%d,%d,%s,%s', [KeyDock, 1, Ord(ADockDocked),
           ADockBounds.Left, ADockBounds.Top, ADockBounds.Right, ADockBounds.Bottom,
-          NoComma(ADockHostSection), NoComma(ADockSiteName)]));
+          NoSeparators(ADockPlace.Innermost.Section),
+          NoSeparators(ADockPlace.Innermost.SiteName)]));
+        // AND THE WHOLE CHAIN, which is what a restore really needs: the
+        // host that held the window may be gone by then - a drag-created one
+        // dissolves when our window leaves it - and the next link is the
+        // site THAT host was docked in.
+        for var Link in ADockPlace.Links do
+          if Link.Known then
+            SL.Add(KeyDockAt + string.Join(DockChainSep,
+              [NoSeparators(Link.FormName), NoSeparators(Link.FormClass),
+               NoSeparators(Link.Section), NoSeparators(Link.SiteName),
+               BoolToStr(Link.Transient, False)]));
+      end;
       SL.SaveToFile(GetMarkerFilePath, TEncoding.UTF8);
     finally
       SL.Free;

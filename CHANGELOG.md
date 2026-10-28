@@ -6,6 +6,71 @@ development builds and were never released.
 
 ---
 
+## 2.8.2 - 2026-10-28
+
+### The docked window came back in the middle of the screen
+
+Report on 2.8.1: closing the status window and reopening it from the menu
+works, but after installing the package again it reappeared free-standing in
+the middle of the screen - "and that is what the status window says too".
+It did: the row read **"open and docked, host unknown"** while the IDE's own
+object tree showed the window sitting in a dock host. That is the defect, and
+the row named it.
+
+- **A dock host is identified by its NAME now, not by its DeskSection.** The
+  section is what the desktop file uses, and a host the IDE creates when you
+  DRAG a window to dock it has none - it is called "TabDockHostForm", beside
+  the "DockSite0..4" the saved desktop created. So everything that keyed on
+  the section called that host unknown, and a reload had nothing to put the
+  window back into. A form's component name is there in both cases.
+- **The whole dock CHAIN is carried over, not just the host.** Whether the host
+  is still there when the next instance looks depends on how it was made.
+  Measured in the IDE's own binaries: a tab dock host posts itself a message as
+  soon as one client is left, hands that client its own dock place and then
+  releases itself - but one flag exempts a host the saved desktop created, so
+  those stay and a host you made by dragging dissolves. The restore therefore
+  takes the deepest link of the chain that still exists: the host while it is
+  there, and otherwise the site that host was docked in - which is where the
+  remaining client goes too, so the window comes back in the same place either
+  way.
+- **A docked window has a screen rectangle again, as the last resort.** 2.8.1
+  recorded no bounds for a docked window, because the raw rectangle of one is
+  its dock site's client coordinates - which is what had put the window in the
+  top left corner. Converted through the parent it is true in both states, so
+  when no dock site of the chain is left the window comes back over the place
+  it occupied instead of in the middle of the screen. That is a position and
+  not a layout, so the box still says the dock site could not be restored.
+- **A dock host's name is only an identity while that host lives.** Found by
+  reviewing this very change set: "TabDockHostForm" is the design-time name
+  that EVERY tab dock host carries - the "DockSite0..4" of a saved desktop are
+  the ones the IDE renamed - and the RTL hands a freed name straight back to
+  the next form it streams. So a host that dissolves when the status window
+  leaves it gives its name away, and anything matching on that name could have
+  docked the window into a stranger's tab group and called it a restore. The
+  unload now records whether the host will survive at all (its client count
+  decides it), and the name of one that will not is not looked up again - the
+  restore takes the next link instead, which is where that host's own
+  remaining client goes too.
+- **A window you floated yourself stays where you put it.** The remembered dock
+  place is never cleared, so pressing the menu entry for a window that is open
+  and free-standing used to dock it again - undoing the user's own drag. The
+  fallback now applies only to a window that was not already on screen, which
+  is the case it was written for: one the IDE has just handed back.
+- **And the restore no longer uses the IDE wrapper's "replace" form.** Read in
+  the shipped VCL source: for a client that is not docked anywhere - which is
+  every window after a package reload - that path floats the control it is
+  replacing out of its dock site first. Against a tab host that also held the
+  Messages window, a restore would have moved something else out of the user's
+  layout and then reported success. A tab host is docked into through its own
+  form now, with the wrapper's non-replacing form - that is where the IDE
+  keeps its tab bookkeeping - and every other host through its site control.
+
+The status row reads "open and docked in TabDockHostForm (DockPanel) in Main
+Window (DockBottomCenterPanel)" from now on - the host, and the place the
+window falls back to, both named before either of them happens.
+
+---
+
 ## 2.8.1 - 2026-10-27
 
 ### The docked window came back at the top left corner

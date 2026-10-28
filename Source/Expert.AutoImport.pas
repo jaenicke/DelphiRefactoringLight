@@ -423,7 +423,13 @@ function JoinContentLines(const ALines: TArray<string>;
 /// <summary>0-based line of the 'implementation' keyword, or MaxInt when none.</summary>
 function ImplementationLineOf(const ALines: TArray<string>): Integer;
 /// <summary>S is a routine header: procedure / function / constructor /
-///  destructor, optionally with 'class '.</summary>
+///  destructor, optionally with 'class ' - and 'class operator', which is
+///  the ONLY spelling an operator overload has. A BARE 'operator' is
+///  deliberately NOT accepted: it is a legal Delphi identifier
+///  (System.VarCmplx declares a parameter named Operator) and two callers
+///  act on this answer without parsing the header afterwards. The
+///  indentation does not matter, and neither does a name - an anonymous
+///  'procedure (Sender: TObject)' is accepted too.</summary>
 function IsHeaderLine(const S: string; out AKind: string;
   out AIsClassMethod: Boolean): Boolean;
 /// <summary>Joins lines from AStart up to the first ';' outside brackets
@@ -450,8 +456,32 @@ function FindImplementationOfDecl(const ALines: TArray<string>; ADeclLine0: Inte
 ///  align) or nothing would change.</summary>
 function PlanDeclToImplAlign(const ALines: TArray<string>; ADeclLine0, AImplLine0: Integer;
   out ANewLines: TArray<string>): Boolean;
+/// <summary>The type body opener "&lt;Name&gt; = class / record / object /
+///  interface / dispinterface" with its KEYWORD - the ONE place that
+///  question is answered, after three parsers had disagreed about it
+///  ('packed', a leading 'type', generic arguments). A one-line alias, a
+///  forward declaration ("TFoo = class;") and a metaclass ("= class of X")
+///  open no body; 'class helper', 'class abstract' and 'class sealed' do.
+///  The generic signature STAYS part of the name ('TFoo&lt;T&gt;'), which is
+///  what a qualified implementation header needs.</summary>
+function TypeOpenerName(const ATrimmed: string; out AKeyword: string): string;
+/// <summary>The nesting path of the type bodies that enclose ALINE0 -
+///  'TOuter.TInner' - with the keyword of the INNERMOST one; '' when none.
+///  Reads the MASKED text, so an 'end; { TFoo }' really is counted and an
+///  opener inside a block comment is not. Counts ALL FIVE kinds of body:
+///  a nested interface's 'end;' used to close the class around it, which
+///  is what made the rename of a parameter answer "this routine has one
+///  header" for a method of that class and change one of two names Delphi
+///  requires to be identical (issue #54). A second opener of the name
+///  already found is the other branch of a CONDITIONAL declaration
+///  ({$IF} TControl = class(TComponent, IControl) {$ELSE} TControl =
+///  class(TComponent)), not a container of it.</summary>
+function EnclosingTypePath(const AMasked: TArray<string>; ALine0: Integer;
+  out AInnerKeyword: string): string;
 /// <summary>'TFoo' for a trimmed "TFoo = class(...)" / "= record" opener that
-///  opens a BODY; '' for anything else (forward, metaclass, alias).</summary>
+///  opens a BODY; '' for anything else (forward, metaclass, alias). The
+///  CLASS/RECORD half of TypeOpenerName - what this function's callers
+///  mean by a container.</summary>
 function ClassOpenerName(const ATrimmed: string): string;
 /// <summary>The (possibly nested, then qualified 'TOuter.TInner') class or
 ///  record whose declaration body encloses ALine0; '' = none.</summary>
@@ -643,8 +673,9 @@ begin
   T := Trim(S);
   AIsClassMethod := StartsText('class ', T);
   if AIsClassMethod then T := Trim(Copy(T, 7, MaxInt));
-  for var KW in ['procedure', 'function', 'constructor', 'destructor'] do
-    if StartsText(KW + ' ', T) then
+  for var KW in ['procedure', 'function', 'constructor', 'destructor',
+    'operator'] do
+    if StartsText(KW + ' ', T) and ((KW <> 'operator') or AIsClassMethod) then
     begin
       AKind := KW;
       Exit(True);
@@ -2757,76 +2788,122 @@ begin
   Result := True;
 end;
 
-// "<Name> = class..." / "<Name> = record..." opener that starts a type BODY
-// (forward declarations, metaclasses and one-line aliases excluded).
-// Handles 'class abstract'/'class sealed'/'class helper' and generic names
-// ('TFoo<T>' - the generic signature stays part of the returned name, which
-// is exactly what the qualified implementation header needs).
-// Returns the type name, or ''.
-function ClassOpenerName(const ATrimmed: string): string;
+function TypeOpenerName(const ATrimmed: string; out AKeyword: string): string;
 var
-  EqP: Integer;
-  Name, Rest: string;
+  EqP, K: Integer;
+  T, Name, Rest, Kw, After: string;
 begin
   Result := '';
-  EqP := Pos('=', ATrimmed);
+  AKeyword := '';
+  T := ATrimmed;
+  // a nested declaration may carry its section keyword on the same line
+  if StartsText('type ', T) then T := TrimLeft(Copy(T, 6, MaxInt));
+  EqP := Pos('=', T);
   if EqP <= 1 then Exit;
-  Name := Trim(Copy(ATrimmed, 1, EqP - 1));
+  Name := Trim(Copy(T, 1, EqP - 1));
   if (Name = '') or not CharInSet(Name[1], ['A'..'Z', 'a'..'z', '_']) then Exit;
   for var I := 1 to Length(Name) do
     if not CharInSet(Name[I], ['A'..'Z', 'a'..'z', '0'..'9', '_', '<', '>', ',', ' ', ':']) then Exit;
-  Rest := Trim(Copy(ATrimmed, EqP + 1, MaxInt));
-  if not (StartsText('class', Rest) or StartsText('record', Rest)) then Exit;
-  var After := '';
-  if StartsText('class', Rest) then After := Trim(Copy(Rest, 6, MaxInt))
-  else After := Trim(Copy(Rest, 7, MaxInt));
+  Rest := Trim(Copy(T, EqP + 1, MaxInt));
+  if StartsText('packed ', Rest) then Rest := TrimLeft(Copy(Rest, 8, MaxInt));
+  K := 1;
+  while (K <= Length(Rest)) and CharInSet(Rest[K], ['A'..'Z', 'a'..'z']) do Inc(K);
+  Kw := LowerCase(Copy(Rest, 1, K - 1));
+  if (Kw <> 'class') and (Kw <> 'record') and (Kw <> 'object')
+    and (Kw <> 'interface') and (Kw <> 'dispinterface') then Exit;
+  After := TrimLeft(Copy(Rest, K, MaxInt));
   if (After <> '') and CharInSet(After[1], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
   begin
     if StartsText('of ', After) then Exit;   // metaclass '= class of X'
     if not (StartsText('helper', After) or StartsText('abstract', After)
       or StartsText('sealed', After)) then Exit;
   end;
-  if Rest.EndsWith(';') then Exit;   // forward decl or one-line alias
+  if Rest.EndsWith(';') then Exit;   // forward decl, alias, or a one-line body
   Result := Name;
+  AKeyword := Kw;
 end;
 
-// The (possibly nested) class/record whose declaration body encloses
-// ALine0, FULLY QUALIFIED ('TOuter.TInner'); '' = none. Walks upward
-// counting 'end;' terminators against type-body openers, then keeps
-// walking to pick up enclosing containers of the container.
-function EnclosingContainerName(const ALines: TArray<string>; ALine0: Integer): string;
+function EnclosingTypePath(const AMasked: TArray<string>; ALine0: Integer;
+  out AInnerKeyword: string): string;
+
+  // 'end;', and the spellings masking leaves behind - 'end; { TFoo }'
+  // becomes 'end;' but 'end { TFoo };' becomes 'end        ;'
+  function IsEndLine(const AText: string): Boolean;
+  begin
+    Result := SameText(AText.Replace(' ', '').Replace(#9, ''), 'end;');
+  end;
+
 var
   I, Depth: Integer;
-  T, Name: string;
+  T, Name, Kw, Prev: string;
 begin
   Result := '';
+  AInnerKeyword := '';
   Depth := 0;
-  for I := ALine0 - 1 downto 0 do
+  Prev := '';
+  for I := Min(ALine0, Length(AMasked)) - 1 downto 0 do
   begin
-    T := Trim(StripLineComment(ALines[I]));
-    if SameText(T, 'end;') then
+    T := Trim(AMasked[I]);
+    if IsEndLine(T) then
       Inc(Depth)
     else
     begin
-      Name := ClassOpenerName(T);
+      Name := TypeOpenerName(T, Kw);
       if Name <> '' then
       begin
+        // A SECOND opener of the name just seen is the other branch of a
+        // conditional declaration - '{$IF} TControl = class(TComponent,
+        // IControl) {$ELSE} TControl = class(TComponent) {$ENDIF}' and the
+        // same shape in Vcl.ActnMan - and it has no 'end;' of its own. Left
+        // alone it answered 'TControl.TControl' for every member of the
+        // biggest classes in the VCL, and - because the extra opener also
+        // leaves the depth one too low - gave a SIBLING type declared
+        // further down a false outer level, or a top-level routine a
+        // container it has not got. Delphi has no type nested in one of its
+        // own name, so the comparison with the previous opener is safe.
+        if SameText(Name, Prev) then Continue;
+        Prev := Name;
         if Depth > 0 then
           Dec(Depth)
-        else
+        else if Result = '' then
         begin
-          // Found the innermost container; prepend any outer ones.
-          if Result = '' then
-            Result := Name
-          else
-            Result := Name + '.' + Result;
-          // continue the walk for a possible enclosing type
-        end;
+          Result := Name;
+          AInnerKeyword := Kw;
+        end
+        else
+          Result := Name + '.' + Result;
       end
       else if SameText(T, 'implementation') or SameText(T, 'interface') then
         Exit;
     end;
   end;
+end;
+
+// A class or record body only - what the callers of THIS function mean:
+// every one of them either generates, finds or inserts an implementation,
+// and an interface method has none anywhere. The five kinds are told apart
+// by TypeOpenerName; the filter is here.
+function ClassOpenerName(const ATrimmed: string): string;
+var
+  Kw: string;
+begin
+  Result := TypeOpenerName(ATrimmed, Kw);
+  if not (SameText(Kw, 'class') or SameText(Kw, 'record')) then Result := '';
+end;
+
+// The (possibly nested) class/record whose declaration body encloses
+// ALine0, FULLY QUALIFIED ('TOuter.TInner'); '' = none. The nesting is
+// EnclosingTypePath's answer - which counts an interface, an object and a
+// 'packed record' body as well, so their 'end;' no longer closes the type
+// around them - and what is RETURNED is filtered to a body that can have
+// an implementation: CreateImplStub qualifies a GENERATED stub with this,
+// so an interface here would write 'procedure IFoo.Bar;'.
+function EnclosingContainerName(const ALines: TArray<string>; ALine0: Integer): string;
+var
+  Kw: string;
+begin
+  Result := EnclosingTypePath(MaskCommentsAndStrings(ALines), ALine0, Kw);
+  if not (SameText(Kw, 'class') or SameText(Kw, 'record')) then Result := '';
 end;
 
 // The 0-based line an implementation block should be inserted BEFORE:

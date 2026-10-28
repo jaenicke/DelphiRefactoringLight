@@ -255,18 +255,10 @@ type
 ///  declaration the same way the DFM auto-fix does.</summary>
 function MergeParamNames(const ACurrent, AExpected: string): string;
 
-/// <summary>Every position (1-based) in ALINE at which a member
-///  declaration starts: the line's first token, and every token that
-///  follows a ';' at bracket depth 0. Delphi allows several declarations
-///  on one line, and a forum report showed exactly that shape -
-///  "b_Cancel: TButton;procedure FormCreate(Sender: TObject);" - where the
-///  scan saw only the field, reported both handlers as MISSING and would
-///  have generated a second declaration of each. Comments and strings are
-///  skipped; a 'procedure' inside a parameter list (a procedural
-///  parameter) sits at depth > 0 and is not a start. Recognises the same
-///  two keywords the old line-start scan did - procedure and function,
-///  'class' prefix allowed - so only the POSITION is new.</summary>
-function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
+// DeclarationStartsOnLine moved to Expert.PascalScanner (issue #54):
+// the parameter rename asks the same question - which of two headers on
+// one line the caret is on - and this unit's interface pulls the LSP
+// client, so a pure planner cannot reach it here.
 
 /// <summary>The directories of ALIBRARYDIRS the signature index may read:
 ///  all of them except the Studio's own source tree below ABDSROOT (RTL,
@@ -677,92 +669,6 @@ end;
 // but takes each parameter's modifier and TYPE from the expected signature.
 // Falls back to AExpected unchanged when the arities differ (a real change of
 // parameter count, where names cannot be mapped positionally).
-function DeclarationStartsOnLine(const ALine: string): TArray<Integer>;
-var
-  I, Depth: Integer;
-  InStr: Boolean;
-  Expect: Boolean;
-
-  function WordAt(APos: Integer): string;
-  var
-    K: Integer;
-  begin
-    K := APos;
-    while (K <= Length(ALine)) and CharInSet(ALine[K], ['A'..'Z', 'a'..'z', '_']) do
-      Inc(K);
-    Result := UpperCase(Copy(ALine, APos, K - APos));
-  end;
-
-  // Deliberately the same two keywords the line-start scan recognised
-  // before this fix - only their POSITION is new. 'class procedure X' keeps
-  // answering with the position of 'procedure', so the name extraction
-  // downstream is unchanged.
-  function StartAt(APos: Integer; out AStart: Integer): Boolean;
-  var
-    W: string;
-    K: Integer;
-  begin
-    AStart := APos;
-    W := WordAt(APos);
-    if W = 'CLASS' then
-    begin
-      K := APos + 5;
-      while (K <= Length(ALine)) and CharInSet(ALine[K], [' ', #9]) do Inc(K);
-      AStart := K;
-      W := WordAt(K);
-    end;
-    Result := (W = 'PROCEDURE') or (W = 'FUNCTION');
-  end;
-
-begin
-  Result := nil;
-  Depth := 0;
-  InStr := False;
-  Expect := True;          // the line's first token is a candidate
-  I := 1;
-  while I <= Length(ALine) do
-  begin
-    var C := ALine[I];
-    if InStr then
-    begin
-      if C = '''' then InStr := False;
-      Inc(I);
-      Continue;
-    end;
-    case C of
-      '''': begin InStr := True; Inc(I); Continue; end;
-      '/': if (I < Length(ALine)) and (ALine[I + 1] = '/') then Break;   // comment
-      '{':
-        begin
-          while (I <= Length(ALine)) and (ALine[I] <> '}') do Inc(I);
-          Inc(I);
-          Continue;
-        end;
-      '(':
-        if (I < Length(ALine)) and (ALine[I + 1] = '*') then
-        begin
-          Inc(I, 2);
-          while (I < Length(ALine)) and not ((ALine[I] = '*') and (ALine[I + 1] = ')')) do
-            Inc(I);
-          Inc(I, 2);
-          Continue;
-        end
-        else
-          Inc(Depth);
-      '[': Inc(Depth);
-      ')', ']': if Depth > 0 then Dec(Depth);
-      ';': if Depth = 0 then Expect := True;
-    end;
-    if Expect and not CharInSet(C, [' ', #9, ';']) then
-    begin
-      Expect := False;
-      var St: Integer;
-      if StartAt(I, St) then Result := Result + [St];
-    end;
-    Inc(I);
-  end;
-end;
-
 function SignatureLibraryDirs(const ALibraryDirs: TArray<string>;
   const ABdsRoot: string): TArray<string>;
 var

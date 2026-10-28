@@ -1991,8 +1991,15 @@ begin
   if not IsHeaderLine(Trim(StripLineComment(ALines[AHeaderLine0])), Kind,
     IsClassMethod) then Exit;
   // Only a function has a Result of its own; a constructor's Result is the
-  // instance and must never be handed to another routine.
-  if not SameText(Kind, 'function') then Exit;
+  // instance and must never be handed to another routine. An OPERATOR is a
+  // function too ('class operator Add(...): TFoo'), and since IsHeaderLine
+  // reads such a header (issue #54) the walk that looks for the enclosing
+  // routine stops AT it now instead of running on to the previous one - so
+  // its result type has to be answered here, or the 1.18.4 Result rule
+  // would be decided from another routine's type. A management operator
+  // (Initialize / Finalize / Assign) has no result and answers '' through
+  // ParseHeader, like any other kind without one.
+  if not (SameText(Kind, 'function') or SameText(Kind, 'operator')) then Exit;
   Hdr := CollectHeader(ALines, AHeaderLine0, HdrEnd);
   if Hdr = '' then Exit;
   if not ParseHeader(Hdr, Kind, Qual, Params, Ret) then Exit;

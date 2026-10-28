@@ -180,9 +180,12 @@ function SafeDeleteKindText(AKind: TSafeDeleteKind): string;
 /// <summary>The routine header at ALine0 declares AName as one of its
 ///  PARAMETERS (its own name is not one). DelphiLSP answers nothing at a
 ///  parameter in a declaration, so a rename started there had no anchor
-///  at all and was refused (issue #49).</summary>
+///  at all and was refused (issue #49).
+///  ACOL0 is the caret's 0-based column and picks ONE of several headers on
+///  that line, exactly as PlanParameterRename does - without it the two
+///  could disagree about which header is meant (issue #54).</summary>
 function HeaderDeclaresParameter(const ALines: TArray<string>;
-  ALine0: Integer; const AName: string): Boolean;
+  ALine0: Integer; const AName: string; ACol0: Integer = -1): Boolean;
 
 type
   /// <summary>What could be established about the two headers a parameter
@@ -194,30 +197,68 @@ type
     ppPaired,         // both headers are known
     ppSingleHeader);  // the routine has exactly one header
 
+  /// <summary>One header of the routine, with COLUMNS. A LINE is not the
+  ///  unit of a header: a body may start after the ';' on the header's own
+  ///  line, and Delphi allows a second header there - both are OUTSIDE
+  ///  this span (issue #54). All four numbers are 0-based.</summary>
+  TParamSpan = record
+    First, FirstCol: Integer;      // where the keyword stands
+    Last, EndCol: Integer;         // ...and the ';' that ends the signature
+  end;
+
   /// <summary>Everything the rename of a PARAMETER needs. POSITIONS are the
   ///  places at which the name is really declared (0-based, X = column,
-  ///  Y = line), sorted; SPANS are the header spans they live in (Y = first
-  ///  line, X = last). The spans are what makes a line-based target safe: on
-  ///  a header line only the positions are the parameter - the routine's own
-  ///  name, a type or a default value spelled like it are not (issue
-  ///  #50).</summary>
+  ///  Y = line), sorted; SPANS are the headers they live in. The spans are
+  ///  what makes a line-based target safe: on a header line only the
+  ///  positions are the parameter - the routine's own name, a type or a
+  ///  default value spelled like it are not (issue #50).
+  ///  BODYFIRST..BODYLAST is the routine's IMPLEMENTATION, the parameter's
+  ///  whole scope, and SCOPEKNOWN says whether it could be delimited at
+  ///  all: without it the rename keeps its old, wider behaviour rather than
+  ///  dropping an occurrence it cannot judge.</summary>
   TParamRenamePlan = record
     Pairing: TParamPairing;
     Positions: TArray<TPoint>;
-    Spans: TArray<TPoint>;
+    Spans: TArray<TParamSpan>;
+    BodyFirst, BodyLast: Integer;
+    ScopeKnown: Boolean;
     Reason: string;
   end;
+
+  /// <summary>What an occurrence of the name IS, as far as the sources can
+  ///  say: the parameter, something else, or undecidable.</summary>
+  TParamOccurrence = (poParameter, poNotTheParameter, poUndecided);
 
 /// <summary>The plan for renaming the parameter ANAME of the routine whose
 ///  header ALINE0 belongs to. Parsed on the MASKED text over the header's
 ///  own span, so a comment in the parameter list, a header longer than
 ///  twelve lines and "const [ref]" are read like any other header; a shape
-///  that cannot be read at all (an operator header, a list that is never
-///  closed) answers ppUnknown WITH the reason, because renaming one of two
-///  names Delphi requires to be identical is a broken unit, not a smaller
-///  change (issue #50).</summary>
+///  that cannot be read at all (a parameter list that is never closed)
+///  answers ppUnknown WITH the reason, because renaming one of two names
+///  Delphi requires to be identical is a broken unit, not a smaller change
+///  (issue #50).
+///  ACOL0 is the caret's 0-based column and is what tells TWO headers on
+///  one line apart (issue #54); -1 means "unknown", and then a line that
+///  carries more than one header is refused rather than guessed. It may
+///  only be passed when ALINE0 really is the caret's own line - an anchor
+///  DelphiLSP answered may be another line, where a column means
+///  nothing.</summary>
 function PlanParameterRename(const ALines: TArray<string>; ALine0: Integer;
-  const AName: string): TParamRenamePlan;
+  const AName: string; ACol0: Integer = -1): TParamRenamePlan;
+
+/// <summary>What the occurrence of the parameter's name at (ALINE, ACOL) in
+///  the plan's OWN file is. A POSITION is the parameter; anything else on
+///  one of its headers is not (the routine's own name, a type, a default
+///  value); and what is left is the parameter only inside the routine's
+///  body - which is what tells a call to a routine NAMED LIKE ITS OWN
+///  PARAMETER from the parameter itself (issue #54): such a call resolves
+///  to a header LINE, and the rename's targets are line-keyed.
+///  poUndecided when the body could not be delimited; a caller must then
+///  keep the occurrence, never drop it.
+///  AWHY carries the reason for poNotTheParameter, for the trace - a drop
+///  nobody can see is the one thing this must not be.</summary>
+function ClassifyParamOccurrence(const APlan: TParamRenamePlan;
+  ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
 
 /// <summary>The line in the routine's OTHER header on which the SAME
 ///  parameter stands - the projection of PlanParameterRename that older
@@ -255,6 +296,7 @@ type
   // lines is still one header, and the positions are the real ones.
   THeaderSpan = record
     First, Last: Integer;          // 0-based lines; Last carries the ';'
+    FirstCol: Integer;             // 1-based column the keyword starts at
     EndCol: Integer;               // 1-based column of that ';'
     HasList: Boolean;
     Qualified: string;             // 'Foo' or 'TFoo.Foo'
@@ -274,13 +316,16 @@ begin
     or SameText(AWord, 'out') or SameText(AWord, 'constref');
 end;
 
-// ALine0 must BE a header line of AMASKED. Walks its span and collects the
-// positions at which parameter NAMES are declared: at bracket depth 1, in
-// the part of a group before its ':'. So never the routine's own name (it
-// stands before the '('), never a type, never a default value, and never
-// the parameters of a procedural parameter's own list (depth 2).
-function ReadHeaderSpanAt(const AMasked: TArray<string>; ALine0: Integer;
-  out ASpan: THeaderSpan): Boolean;
+// A header STARTING at (ALine0, AStartCol1) of AMASKED - AStartCol1 = 1 is
+// the line's own first token, which is the only shape there was before
+// Delphi's "several declarations on one line" reached this planner (issue
+// #54). Walks its span and collects the positions at which parameter NAMES
+// are declared: at bracket depth 1, in the part of a group before its ':'.
+// So never the routine's own name (it stands before the '('), never a type,
+// never a default value, and never the parameters of a procedural
+// parameter's own list (depth 2).
+function ReadHeaderSpanFrom(const AMasked: TArray<string>; ALine0,
+  AStartCol1: Integer; out ASpan: THeaderSpan): Boolean;
 var
   Kind, Joined, Q, P, Rt: string;
   IsCM: Boolean;
@@ -290,8 +335,11 @@ begin
   Result := False;
   ASpan := Default(THeaderSpan);
   if (ALine0 < 0) or (ALine0 > High(AMasked)) then Exit;
-  if not IsHeaderLine(Trim(AMasked[ALine0]), Kind, IsCM) then Exit;
+  if AStartCol1 < 1 then AStartCol1 := 1;
+  if not IsHeaderLine(Trim(Copy(AMasked[ALine0], AStartCol1, MaxInt)),
+    Kind, IsCM) then Exit;
   ASpan.First := ALine0;
+  ASpan.FirstCol := AStartCol1;
   ASpan.Last := -1;
   Depth := 0;
   Angle := 0;
@@ -300,7 +348,7 @@ begin
   for I := ALine0 to Min(ALine0 + MaxHeaderSpanLines, High(AMasked)) do
   begin
     var S := AMasked[I];
-    J := 1;
+    if I = ALine0 then J := AStartCol1 else J := 1;
     while (J <= Length(S)) and (ASpan.Last < 0) do
     begin
       var C := S[J];
@@ -354,12 +402,49 @@ begin
   // INSIDE the parameter list as soon as there is more than one group.
   Joined := '';
   for I := ASpan.First to ASpan.Last - 1 do
-    Joined := Joined + ' ' + AMasked[I];
-  Joined := Joined + ' ' + Copy(AMasked[ASpan.Last], 1, ASpan.EndCol);
+    if I = ASpan.First then
+      Joined := Joined + ' ' + Copy(AMasked[I], AStartCol1, MaxInt)
+    else
+      Joined := Joined + ' ' + AMasked[I];
+  if ASpan.Last = ASpan.First then
+    Joined := Joined + ' ' + Copy(AMasked[ASpan.Last], AStartCol1,
+      ASpan.EndCol - AStartCol1 + 1)
+  else
+    Joined := Joined + ' ' + Copy(AMasked[ASpan.Last], 1, ASpan.EndCol);
   if not ParseHeader(Trim(Joined), Kind, Q, P, Rt) then Exit;
   ASpan.Qualified := Q;
   ASpan.Params := P;
   Result := True;
+end;
+
+function ReadHeaderSpanAt(const AMasked: TArray<string>; ALine0: Integer;
+  out ASpan: THeaderSpan): Boolean;
+begin
+  Result := ReadHeaderSpanFrom(AMasked, ALine0, 1, ASpan);
+end;
+
+// Every routine header that STARTS on ALine0 - usually one, and the reason
+// this exists is that it need not be. DeclarationStartsOnLine is the one
+// place that knows where a declaration begins on a line.
+function HeaderSpansOnLine(const AMasked: TArray<string>;
+  ALine0: Integer): TArray<THeaderSpan>;
+var
+  Span: THeaderSpan;
+begin
+  Result := nil;
+  if (ALine0 < 0) or (ALine0 > High(AMasked)) then Exit;
+  for var St in DeclarationStartsOnLine(AMasked[ALine0], True) do
+    if ReadHeaderSpanFrom(AMasked, ALine0, St, Span) then
+      Result := Result + [Span];
+end;
+
+// Does ASPAN cover the 0-based position (ALine, ACol)?
+function SpanCovers(const ASpan: THeaderSpan; ALine, ACol: Integer): Boolean;
+begin
+  Result := ((ALine > ASpan.First)
+      or ((ALine = ASpan.First) and (ACol >= ASpan.FirstCol - 1)))
+    and ((ALine < ASpan.Last)
+      or ((ALine = ASpan.Last) and (ACol <= ASpan.EndCol - 1)));
 end;
 
 // The line the routine header covering ALine0 STARTS on - ALine0 itself
@@ -410,12 +495,26 @@ begin
 end;
 
 function HeaderDeclaresParameter(const ALines: TArray<string>;
-  ALine0: Integer; const AName: string): Boolean;
+  ALine0: Integer; const AName: string; ACol0: Integer): Boolean;
 var
+  Masked: TArray<string>;
+  Span: THeaderSpan;
   Q: string;
 begin
   Result := False;
   if AName = '' then Exit;
+  if ACol0 >= 0 then
+  begin
+    Masked := MaskCommentsAndStrings(ALines);
+    for var S in HeaderSpansOnLine(Masked, ALine0) do
+      if SpanCovers(S, ALine0, ACol0) then
+      begin
+        Span := S;
+        for var N in Span.NameTexts do
+          if SameText(N, AName) then Exit(True);
+        Exit(False);
+      end;
+  end;
   for var N in RoutineParameterNamesOf(ALines, ALine0, Q) do
     if SameText(N, AName) then Exit(True);
 end;
@@ -542,8 +641,38 @@ begin
   end;
 end;
 
+// Every member declaration named ANAME whose nesting path is APATH. The
+// shared FindMemberDeclarationLines answers by the type's bare NAME, and a
+// nested type's implementation header carries the whole path - so with two
+// outer classes declaring a same-named nested type it would hand back the
+// FIRST one's member: pairing TOuterB.TInner.Go with TOuterA's declaration
+// (renaming a foreign class), or, once that is refused, with nothing at all
+// - and "nothing" is not a refusal, it reads as "this routine has one
+// header" and renames half of the two names Delphi requires to be equal
+// (issue #54.G). The path is exact, and EnclosingTypePath is what answers
+// it.
+function MemberHeadersInPath(const AMasked: TArray<string>;
+  const APath, AName: string): TArray<Integer>;
+var
+  Span: THeaderSpan;
+  Kw: string;
+begin
+  Result := nil;
+  if (APath = '') or (AName = '') then Exit;
+  for var I := 0 to High(AMasked) do
+  begin
+    // the cheap test first: without it this would read a span for every
+    // line of the unit
+    if not HasWholeWordCI(AMasked[I], AName) then Continue;
+    if not ReadHeaderSpanAt(AMasked, I, Span) then Continue;
+    if not SameRoutineName(Span.Qualified, AName) then Continue;
+    if SameRoutineName(EnclosingTypePath(AMasked, I, Kw), APath) then
+      Result := Result + [I];
+  end;
+end;
+
 function PlanParameterRename(const ALines: TArray<string>; ALine0: Integer;
-  const AName: string): TParamRenamePlan;
+  const AName: string; ACol0: Integer): TParamRenamePlan;
 var
   Masked: TArray<string>;
   Span, Other: THeaderSpan;
@@ -551,34 +680,69 @@ var
   Plan: TParamRenamePlan;
 
   procedure Take(const ASpan: THeaderSpan);
+  var
+    S: TParamSpan;
   begin
     for var I := 0 to High(ASpan.NameTexts) do
       if SameText(ASpan.NameTexts[I], AName) then
         Plan.Positions := Plan.Positions + [ASpan.Names[I]];
-    Plan.Spans := Plan.Spans + [Point(ASpan.Last, ASpan.First)];
+    S.First := ASpan.First;
+    S.FirstCol := ASpan.FirstCol - 1;      // 0-based, like the positions
+    S.Last := ASpan.Last;
+    S.EndCol := ASpan.EndCol - 1;
+    Plan.Spans := Plan.Spans + [S];
   end;
 
 begin
   Plan := Default(TParamRenamePlan);
   Plan.Pairing := ppUnknown;
+  Plan.BodyFirst := -1;
+  Plan.BodyLast := -1;
   Result := Plan;
   if (AName = '') or (Length(ALines) = 0) then Exit;
   Masked := MaskCommentsAndStrings(ALines);
-  var H := HeaderLineOfMasked(Masked, ALine0);
-  if H < 0 then
+  // WHICH header? Delphi allows several on one line, and then only the
+  // caret's COLUMN can say which one the rename means (issue #54). A column
+  // that is inside none of them belongs to a wrapped header's continuation
+  // line, which the line walk answers.
+  var H: Integer;
+  var Have := False;
+  var OnLine := HeaderSpansOnLine(Masked, ALine0);
+  if ACol0 >= 0 then
+    for var S in OnLine do
+      if SpanCovers(S, ALine0, ACol0) then
+      begin
+        Span := S;
+        Have := True;
+        Break;
+      end;
+  if not Have and (Length(OnLine) > 1) then
   begin
-    Plan.Reason := 'that line does not belong to a routine header';
+    Plan.Reason := Format('%d routine headers stand on that line, and '
+      + 'without the caret''s column it cannot be said which of them the '
+      + 'rename means', [Length(OnLine)]);
     Result := Plan;
     Exit;
   end;
-  if not ReadHeaderSpanAt(Masked, H, Span) then
+  if not Have then
   begin
-    Plan.Reason := 'this routine header cannot be read (an operator header, '
-      + 'or a parameter list that is never closed), so the other place the '
-      + 'parameter is declared in cannot be found either';
-    Result := Plan;
-    Exit;
+    H := HeaderLineOfMasked(Masked, ALine0);
+    if H < 0 then
+    begin
+      Plan.Reason := 'that line does not belong to a routine header';
+      Result := Plan;
+      Exit;
+    end;
+    if not ReadHeaderSpanAt(Masked, H, Span) then
+    begin
+      Plan.Reason := 'this routine header cannot be read (a parameter list '
+        + 'that is never closed, or one longer than sixty lines), so the '
+        + 'other place the parameter is declared in cannot be found either';
+      Result := Plan;
+      Exit;
+    end;
   end;
+  H := Span.First;
   Take(Span);
   if Length(Plan.Positions) = 0 then
   begin
@@ -595,13 +759,15 @@ begin
   var Dot := LastDelimiter('.', Span.Qualified);
   if Dot > 0 then
   begin
-    // a method's IMPLEMENTATION header -> its declaration in the class
-    var Owner := OwnerTypeOfImplHeader(ALines[H]);
+    // a method's IMPLEMENTATION header -> its declaration in the class. The
+    // qualifier names the whole PATH ('TOuter.TInner.Go'), and that is what
+    // decides: the innermost type name alone cannot tell two outer classes
+    // with a same-named nested type apart.
     var Member := Copy(Span.Qualified, Dot + 1, MaxInt);
     var Lt := Pos('<', Member);
     if Lt > 0 then Member := Copy(Member, 1, Lt - 1);
-    if (Owner <> '') and (Member <> '') then
-      Cands := FindMemberDeclarationLines(string.Join(#10, ALines), Owner, Member);
+    Cands := MemberHeadersInPath(Masked, Copy(Span.Qualified, 1, Dot - 1),
+      Member);
   end
   else if not ((ALines[H] <> '') and CharInSet(ALines[H][1], [' ', #9])) then
     // a TOP-LEVEL routine: its interface declaration, a 'forward' one and
@@ -628,8 +794,18 @@ begin
       Cands := NestedHeadersNamed(Masked, H, Span.Qualified)
     else
     begin
-      var TName, TKw: string;
-      if not NearestTypeOpenerAbove(ALines, H, TName, TKw) then
+      // The owner is the NESTING, not the nearest opener above: a nested
+      // interface, record or object between the class header and this
+      // declaration used to end the search at ITSELF, which answered "this
+      // routine has ONE header" for a perfectly ordinary class method and
+      // renamed one of two names Delphi requires to be identical (issue
+      // #54). EnclosingTypePath counts all five kinds of body, so their
+      // 'end;' no longer closes the type around them, and it answers the
+      // whole path - which is what a nested type's implementation header
+      // carries ('TOuter.TInner.Go').
+      var TKw: string;
+      var TName := EnclosingTypePath(Masked, H, TKw);
+      if TName = '' then
       begin
         Plan.Reason := 'the type this declaration belongs to could not be '
           + 'identified, so the implementation header that carries the same '
@@ -637,7 +813,7 @@ begin
         Result := Plan;
         Exit;
       end;
-      var Dirs := HeaderDirectives(ALines, Span.First, Span.Last);
+      var Dirs := HeaderDirectives(Masked, Span.First, Span.Last);
       if (TKw = 'interface') or (TKw = 'dispinterface')
         or HasWholeWordCI(Dirs, 'abstract') or HasWholeWordCI(Dirs, 'external') then
       begin
@@ -674,6 +850,31 @@ begin
     Matches := Matches + [P0];
   end;
 
+  // An implementation header WITHOUT a parameter list is legal Delphi and
+  // fits ANY declaration of that name - PlanDeclToImplAlign carries the
+  // same rule for the align fix. It declares no parameter, so there is
+  // nothing to rename there; but it IS the routine's other header, and its
+  // body is where the parameter is used. Only when nothing matched by list,
+  // so a parameterless OVERLOAD is never paired with its sibling.
+  if (Length(Matches) = 0) and Span.HasList then
+  begin
+    var Listless: TArray<Integer> := nil;
+    for var P0 in Cands do
+      if ReadHeaderSpanAt(Masked, P0, Other) and not Other.HasList then
+        Listless := Listless + [P0];
+    if Length(Listless) = 1 then
+    begin
+      ReadHeaderSpanAt(Masked, Listless[0], Other);
+      Take(Other);
+      Plan.Pairing := ppSingleHeader;
+      Plan.Reason := Format('the implementation header of %s carries no '
+        + 'parameter list, so the parameter is declared once',
+        [Span.Qualified]);
+      Cands := nil;
+      Matches := nil;
+    end;
+  end;
+
   if Length(Matches) = 1 then
   begin
     ReadHeaderSpanAt(Masked, Matches[0], Other);
@@ -700,10 +901,73 @@ begin
     // nothing else carries that name: a nested routine, or a routine that
     // is only defined in the implementation section
     Plan.Pairing := ppSingleHeader
-  else
+  else if Plan.Pairing = ppUnknown then
     Plan.Reason := Format('the other header of %s does not carry the same '
       + 'parameter list, so the two cannot be paired', [Span.Qualified]);
+
+  // THE PARAMETER'S SCOPE is its routine's body, and only the
+  // IMPLEMENTATION header has one - which of the spans that is, the walker
+  // itself decides: it answers a range only for a header that really has a
+  // body (a declaration inside a class, an interface method and a free
+  // routine's interface declaration all answer False, measured).
+  if Plan.Pairing <> ppUnknown then
+    for var S in Plan.Spans do
+    begin
+      var BF, BL: Integer;
+      if not FindEnclosingRoutineRangeIn(ALines, S.First, BF, BL) then Continue;
+      if BF <> S.First then Continue;      // that is another routine's body
+      // A routine with MORE THAN ONE conditional body - '{$IFDEF PUREPASCAL}
+      // begin ... end; {$ELSE} asm ... end; {$ENDIF}', which the RTL is full
+      // of - is delimited by its FIRST branch alone, so every use in the
+      // other one would fall OUTSIDE the range and be dropped. The rule is
+      // then switched off rather than shortened: an inactive branch must be
+      // renamed with the active one, or the unit stops compiling in that
+      // configuration.
+      var Conditional := False;
+      for var L := BF to Min(BL, High(ALines)) do
+      begin
+        var U := UpperCase(ALines[L]);
+        if U.Contains('{$IF') or U.Contains('{$ELSE') or U.Contains('{$ENDIF')
+          or U.Contains('(*$IF') then Conditional := True;
+      end;
+      if Conditional then Break;
+      Plan.BodyFirst := BF;
+      Plan.BodyLast := BL;
+      Plan.ScopeKnown := True;
+      Break;
+    end;
   Result := Plan;
+end;
+
+function ClassifyParamOccurrence(const APlan: TParamRenamePlan;
+  ALine, ACol: Integer; out AWhy: string): TParamOccurrence;
+begin
+  AWhy := '';
+  Result := poUndecided;
+  if (APlan.Pairing = ppUnknown) or (Length(APlan.Spans) = 0) then Exit;
+  // it IS declared here
+  for var Pt in APlan.Positions do
+    if (Pt.Y = ALine) and (Pt.X = ACol) then Exit(poParameter);
+  // on one of its headers, but not where it is declared: the routine's own
+  // name, a type, a default value - or, since Delphi allows two headers on
+  // one line, another routine's parameter
+  for var S in APlan.Spans do
+    if ((ALine > S.First) or ((ALine = S.First) and (ACol >= S.FirstCol)))
+      and ((ALine < S.Last) or ((ALine = S.Last) and (ACol <= S.EndCol))) then
+    begin
+      AWhy := 'on the parameter''s own header, but not where it is declared';
+      Exit(poNotTheParameter);
+    end;
+  if not APlan.ScopeKnown then Exit;
+  // A position inside one of the spans was already decided above, so the
+  // range may be read as whole LINES here - the header's own line is part
+  // of it and carries nothing else that could be mistaken for the
+  // parameter.
+  if (ALine >= APlan.BodyFirst) and (ALine <= APlan.BodyLast) then
+    Exit(poParameter);
+  AWhy := Format('outside the routine the parameter belongs to (lines %d-%d)',
+    [APlan.BodyFirst + 1, APlan.BodyLast + 1]);
+  Result := poNotTheParameter;
 end;
 
 function FindParameterPartnerLine(const ALines: TArray<string>;
@@ -718,7 +982,7 @@ begin
   // the anchor's own span is the first one - the partner is the position
   // outside it
   for var Pt in Plan.Positions do
-    if (Pt.Y < Plan.Spans[0].Y) or (Pt.Y > Plan.Spans[0].X) then
+    if (Pt.Y < Plan.Spans[0].First) or (Pt.Y > Plan.Spans[0].Last) then
     begin
       APartnerLine0 := Pt.Y;
       Exit(True);
@@ -1309,7 +1573,25 @@ begin
         end;
       end;
     end;
-    // what may reach a method WITHOUT a textual call
+    // what may reach a method WITHOUT a textual call - and an OPERATOR is
+    // reached through its SYMBOL ('A + B'), so the whole-word name scan
+    // that is this plan's only evidence of disuse finds nothing at all and
+    // would report it deletable. It gets this far because IsHeaderLine
+    // reads such a header now (issue #54). The 'overload' entry below does
+    // not help either: not ONE 'class operator' line in the shipped RTL
+    // carries that directive, while System.pas declares two 'class
+    // operator Explicit' in a single record - so the protection an
+    // ordinary same-named pair has is absent, and a name-only lookup would
+    // pair declaration #1 with body #2.
+    begin
+      var OKind: string;
+      var OIsCM: Boolean;
+      if IsHeaderLine(Code(ALines[DeclLine]), OKind, OIsCM)
+        and SameText(OKind, 'operator') then
+        Veto(ASym, 'it is an operator, which is reached through its SYMBOL '
+          + 'rather than by its name - a name scan is no evidence that it is '
+          + 'unused');
+    end;
     for var W in ['overload', 'virtual', 'dynamic', 'abstract', 'override', 'message'] do
       if HasWholeWordCI(Dirs, W) then
         Veto(ASym, Format('the %s is declared "%s" - %s', [SafeDeleteKindText(ASym.Kind), W,

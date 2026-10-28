@@ -109,11 +109,13 @@ type
     FUnitRenameMode: Boolean;
     // A PARAMETER is declared at POSITIONS, not on lines: on one of its
     // two header lines the routine's own name, a type or a default value
-    // spelled like it must not be renamed with it (issue #50.4). Filled
-    // per run by the parameter plan, empty for every other rename.
+    // spelled like it must not be renamed with it (issue #50.4), and
+    // outside them it is the parameter only inside its own routine - which
+    // is what tells a call to a routine NAMED LIKE ITS PARAMETER from the
+    // parameter itself (issue #54). The whole plan travels, because the
+    // rule that reads it is pure and lives beside it.
     FParamFile: string;
-    FParamPositions: TArray<TPoint>;
-    FParamSpans: TArray<TPoint>;
+    FParamPlan: TParamRenamePlan;
     procedure CollectFormEdits(const AFiles: TArray<string>;
       const ADefFile: string; ADefLine: Integer; const AOwnerType,
       AOldName, ANewName: string);
@@ -131,10 +133,13 @@ type
     /// <summary>'' or a report of places where ANewName already exists
     ///  (files of the edit, a member of the owner type, a used unit).</summary>
     function NameConflictNote(const ANewName, AOwnerType, ADefFile: string): string;
-    /// <summary>The candidate sits on one of the parameter's header lines
-    ///  but is NOT one of the places that declare it.</summary>
-    function ParamHeaderButNotTheParameter(const AFile: string;
-      ALine, ACol: Integer): Boolean;
+    /// <summary>The candidate is, from the sources alone, NOT the
+    ///  parameter: on one of its headers but not where it is declared, or
+    ///  outside the routine it belongs to. DROP-ONLY - everything else,
+    ///  including every other file and everything the plan cannot judge,
+    ///  is left to DelphiLSP. AWHY carries the reason for the trace.</summary>
+    function ParamOccurrenceToSkip(const AFile: string;
+      ALine, ACol: Integer; out AWhy: string): Boolean;
     function VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>; const AOldName, ANewName: string;
       AIncludes: TLspIncludeContext;
       const ATargets: TLspSymbolTargets; AClient: TLspClient;
@@ -1127,13 +1132,19 @@ begin
     // Deliberately only the parameter: a caret on a method DECLARATION is
     // answered when it overrides one, and that answer (the ancestor) is
     // what makes the rename reach the whole family.
+    // The IDE's Column is the TAB-EXPANDED display column, and everything
+    // below indexes a string with it, so it goes through the editor's own
+    // converter (audit #39, M36a - it returns at once for a line without a
+    // tab).
+    var CaretCol0 := Editor.RawColumn(FContext.FileName, FContext.Line,
+      FContext.Column) - 1;
     var CaretOnParameter := False;
     begin
       var CaretText: string;
       if EditorOrDiskReader()(FContext.FileName, CaretText) then
         CaretOnParameter := HeaderDeclaresParameter(
           CaretText.Replace(#13#10, #10).Split([#10]),
-          FContext.Line - 1, FContext.WordAtCursor);
+          FContext.Line - 1, FContext.WordAtCursor, CaretCol0);
       if CaretOnParameter then
         FDiagLog := FDiagLog + 'The caret is on a PARAMETER - DelphiLSP ' +
           'answers nothing at one, so the declaration probe is skipped: it ' +
@@ -1267,7 +1278,7 @@ begin
           // (issue #49).
           if not CaretDeclares then
             CaretDeclares := HeaderDeclaresParameter(CL, LspLine,
-              FContext.WordAtCursor);
+              FContext.WordAtCursor, CaretCol0);
           if (Length(DefLocs) > 0) and DeclarationAnswerIsForeign(CL[LspLine],
             FContext.WordAtCursor, FContext.FileName, TLspUri.FileUriToPath(DefLocs[0].Uri)) then
           begin
@@ -1479,14 +1490,22 @@ begin
       // partner can only come from the sources; without it the rename changed
       // one of the two and left a unit that does not compile (issue #49).
       FParamFile := '';
-      FParamPositions := nil;
-      FParamSpans := nil;
+      FParamPlan := Default(TParamRenamePlan);
       if CaretOnParameter then
       begin
         var PPlan := Default(TParamRenamePlan);
+        // THE CARET'S COLUMN, and only where it means something: the anchor
+        // is DelphiLSP's answer whenever it gave one, which may be another
+        // file and another line - a column from here would then pick a
+        // header by a number that says nothing there, which for two headers
+        // on one line is the WRONG one deterministically (issue #54).
+        var PCol := -1;
+        if SameText(ExpandFileName(AnchorFile),
+             ExpandFileName(FContext.FileName)) and (AnchorLine = LspLine) then
+          PCol := CaretCol0;
         try
           PPlan := PlanParameterRename(ReadDelphiFileLines(AnchorFile),
-            AnchorLine, FContext.WordAtCursor);
+            AnchorLine, FContext.WordAtCursor, PCol);
         except
           on E: Exception do
           begin
@@ -1513,19 +1532,30 @@ begin
           Exit;
         end;
         FParamFile := AnchorFile;
-        FParamPositions := PPlan.Positions;
-        FParamSpans := PPlan.Spans;
+        FParamPlan := PPlan;
         for var Pt in PPlan.Positions do Targets.Add(AnchorFile, Pt.Y);
         if PPlan.Pairing = ppPaired then
           FDiagLog := FDiagLog + Format('Parameter: declared at %d place(s) in '
             + '%s - both headers, which Delphi requires to carry the same '
             + 'name.%s', [Length(PPlan.Positions), ExtractFileName(AnchorFile),
             sLineBreak])
+        else if PPlan.Reason <> '' then
+          FDiagLog := FDiagLog + 'Parameter: ' + PPlan.Reason + '.' + sLineBreak
         else
           FDiagLog := FDiagLog + 'Parameter: this routine has ONE header (an '
             + 'interface or abstract method, a nested routine, or a routine '
             + 'only defined in the implementation section), so there is no '
             + 'second place to change.' + sLineBreak;
+        if PPlan.ScopeKnown then
+          FDiagLog := FDiagLog + Format('Parameter scope: lines %d-%d of %s - '
+            + 'an occurrence outside it is not the parameter, whatever line '
+            + 'the answer names.%s', [PPlan.BodyFirst + 1, PPlan.BodyLast + 1,
+            ExtractFileName(AnchorFile), sLineBreak])
+        else
+          FDiagLog := FDiagLog + 'Parameter scope: the routine''s body could '
+            + 'not be delimited (a one-line body, or more than one '
+            + 'conditional body), so nothing is dropped on that ground.'
+            + sLineBreak;
       end;
       // The implementation scan is for OTHER types (interface implementers,
       // overrides in descendants). A header of the OWNER type itself that is
@@ -2074,21 +2104,18 @@ end;
 
 { LSP verification }
 
-function TLspRenameWizard.ParamHeaderButNotTheParameter(const AFile: string;
-  ALine, ACol: Integer): Boolean;
-var
-  InSpan: Boolean;
+function TLspRenameWizard.ParamOccurrenceToSkip(const AFile: string;
+  ALine, ACol: Integer; out AWhy: string): Boolean;
 begin
+  AWhy := '';
   Result := False;
-  if (FParamFile = '') or (Length(FParamSpans) = 0) then Exit;
+  if (FParamFile = '') or (Length(FParamPlan.Spans) = 0) then Exit;
+  // THE FILE TEST IS THE OUTER EXIT, never a clause of the rule: outside
+  // the plan's own file this has no opinion at all - the routine's body may
+  // live in an {$I}ncluded file, which the plan never saw.
   if not SameText(ExpandFileName(AFile), ExpandFileName(FParamFile)) then Exit;
-  InSpan := False;
-  for var S in FParamSpans do
-    if (ALine >= S.Y) and (ALine <= S.X) then InSpan := True;
-  if not InSpan then Exit;
-  for var Pt in FParamPositions do
-    if (Pt.Y = ALine) and (Pt.X = ACol) then Exit;   // it IS the parameter
-  Result := True;
+  Result := ClassifyParamOccurrence(FParamPlan, ALine, ACol, AWhy)
+    = poNotTheParameter;
 end;
 
 function TLspRenameWizard.VerifyWithLsp(const ACandidates: TArray<TRenameCandidate>;
@@ -2208,13 +2235,18 @@ begin
 
       // A PARAMETER is declared at a POSITION. On its header lines only
       // those positions are the parameter: the routine's own name may be
-      // spelled like it, so may a type or a default value (issue #50.4).
-      if ParamHeaderButNotTheParameter(C.FilePath, C.Line, C.Col) then
+      // spelled like it, so may a type or a default value (issue #50.4) -
+      // and outside them it is the parameter only inside its own routine
+      // (issue #54). Every drop carries its reason: this is a decided drop,
+      // not an unverified occurrence, and one nobody can see is the one
+      // thing it must not be.
+      var ParamWhy := '';
+      if ParamOccurrenceToSkip(C.FilePath, C.Line, C.Col, ParamWhy) then
       begin
         Inc(SkippedCount);
-        FDiagLog := FDiagLog + Format('  [%d] %s:%d:%d => on the parameter''s '
-          + 'own header, but not where it is declared -> SKIP' + sLineBreak,
-          [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1]);
+        FDiagLog := FDiagLog + Format('  [%d] %s:%d:%d => %s -> SKIP (the '
+          + 'sources decide this, no request)' + sLineBreak,
+          [I, ExtractFileName(C.FilePath), C.Line + 1, C.Col + 1, ParamWhy]);
         Continue;
       end;
 

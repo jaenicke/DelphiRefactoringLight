@@ -1572,8 +1572,12 @@ var
     Rest: string;
   begin
     Rest := '';
-    for var W in ['CLASS PROCEDURE', 'CLASS FUNCTION', 'PROCEDURE', 'FUNCTION',
-      'CONSTRUCTOR', 'DESTRUCTOR', 'OPERATOR'] do
+    // 'CLASS OPERATOR' is what a real operator header starts with - the
+    // bare 'OPERATOR' entry can never match one (issue #54), and it is kept
+    // only because a line that really begins with the IDENTIFIER Operator
+    // fails the name test below anyway.
+    for var W in ['CLASS PROCEDURE', 'CLASS FUNCTION', 'CLASS OPERATOR',
+      'PROCEDURE', 'FUNCTION', 'CONSTRUCTOR', 'DESTRUCTOR', 'OPERATOR'] do
       if StartsWithWord(AUpper, W) then
       begin
         Rest := TrimLeft(Copy(AUpper, Length(W) + 1, MaxInt));

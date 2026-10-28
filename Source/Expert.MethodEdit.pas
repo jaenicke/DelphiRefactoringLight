@@ -39,10 +39,14 @@ type
     Name: string;
     DeclLine: Integer;      // 0-based
     Kind: string;           // procedure / function / constructor /
-                            // destructor - ONLY routines: ClassMembersOf
-                            // collects what IsHeaderLine answers for, so a
-                            // field or a property is never listed (asked by
-                            // a reviewing model, 2026-10-19)
+                            // destructor / operator - ONLY routines:
+                            // ClassMembersOf collects what IsHeaderLine
+                            // answers for, so a field or a property is
+                            // never listed (asked by a reviewing model,
+                            // 2026-10-19). An operator is listed since
+                            // 2.9.4 (issue #54) and is never Movable: the
+                            // plan vetoes it, because moving it changes
+                            // which type overloads the operator.
     Directives: string;     // what follows the first ';' of the declaration
     Movable: Boolean;
     Why: string;            // why not, when Movable is False

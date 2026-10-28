@@ -6,6 +6,45 @@ development builds and were never released.
 
 ---
 
+## 2.9.4 - 2026-10-28
+
+### Renaming a parameter: eight shapes (issue #54)
+
+**Ian Branch** audited the parameter pairing of 2.6.1 / 2.6.8 a second time
+and found eight shapes. Four of them wrote code that does not compile, which
+dcc32 37.0 confirms for each: a parameter whose two headers disagree is E2037
+plus an undeclared identifier for every use in the body.
+
+- **A method declared after a nested type** - an interface, a record or a
+  class inside the class - was attributed to THAT type. For a nested
+  interface the answer was even "this routine has one header", so the
+  declaration was renamed and the implementation header was not. The owner is
+  now the NESTING: one walk counts all five kinds of type body, so their
+  `end;` no longer closes the type around them, and it answers the whole path
+  a nested type's implementation header carries.
+- **A parameter spelled like its own routine** (`procedure Title(const
+  Title: string)`): a CALL to the routine resolves to a header line, the
+  rename's targets are line-keyed, and the call was renamed with the
+  parameter. The parameter's scope is its routine's body, and that is what
+  tells the two apart now.
+- **A body written after the `;` on the header's own line** made the body's
+  use of the parameter look like part of the header, and it was silently
+  dropped. A header span carries COLUMNS now.
+- **Two headers on one line** (Delphi allows it): the first one was read, so
+  the wrong parameter was renamed - in both of its headers, which compiles.
+  The caret's column picks the header, and without a column such a line is
+  refused with the count instead of guessed.
+- **A `class operator`**, a method after a nested record, a method of a
+  nested class and an **implementation header without a parameter list**
+  (legal Delphi, it fits any declaration of that name) were refused; all four
+  pair now.
+- Found on the way: safe delete, edit methods and change signature would have
+  offered an operator for deletion, for a move and for a signature change -
+  an operator is reached through its SYMBOL, so a name scan is no evidence
+  that it is unused, and not one in the shipped RTL carries `overload`.
+
+---
+
 ## 2.9.3 - 2026-10-28
 
 ### Nothing follows a failed build - and no post event verifies a file the install did not write

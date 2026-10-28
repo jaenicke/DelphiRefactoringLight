@@ -33,11 +33,55 @@ type
     [Test] procedure OnlyTheParameterItselfIsAPosition;
   end;
 
+  [TestFixture]
+  TParameterRenameShapeTests = class
+  public
+    /// <summary>#54.A/F/G: the owner of a member declaration is the
+    ///  NESTING. A nested interface, record or class between the class
+    ///  header and the declaration ended the search at ITSELF - for a
+    ///  nested interface that even answered "this routine has ONE header",
+    ///  which the wizard ACCEPTS, so the declaration was renamed and the
+    ///  implementation header was not: E2037 plus an undeclared identifier
+    ///  for every use in the body, measured with dcc32 37.0.</summary>
+    [Test] procedure AMemberAfterANestedTypeIsPaired;
+    /// <summary>#54.B: a parameter spelled like its own routine. The
+    ///  rename's targets are line-keyed, so a CALL to the routine resolves
+    ///  to a header line and was renamed with the parameter (E2003). The
+    ///  parameter's scope is its routine's body, and that is what tells the
+    ///  two apart.</summary>
+    [Test] procedure AParameterOfItsOwnNameLeavesTheCallersAlone;
+    /// <summary>#54.C: a header span is not a LINE. With the body written
+    ///  after the ';' on the header's own line, the body's use of the
+    ///  parameter sat "on the header" and was silently dropped -
+    ///  E2003.</summary>
+    [Test] procedure ABodyOnTheHeaderLineIsNotTheHeader;
+    /// <summary>#54.D: Delphi allows TWO headers on one line, and then only
+    ///  the caret's column says which one the rename means. Without it the
+    ///  first header was read - the wrong parameter renamed in both of ITS
+    ///  headers, which compiles.</summary>
+    [Test] procedure TheCaretColumnPicksTheHeader;
+    /// <summary>#54.E/H: a 'class operator' is a routine header like any
+    ///  other, and an implementation header WITHOUT a parameter list is
+    ///  legal Delphi that fits any declaration of that name - both were
+    ///  refused.</summary>
+    [Test] procedure AnOperatorAndAnOmittedListArePaired;
+    /// <summary>What the old-vs-new sweep over the RAD Studio sources
+    ///  found in the walk #54.A needed: a type declared in TWO {$IF}
+    ///  branches has two openers and ONE 'end;', so it answered
+    ///  'TControl.TControl' for every member of the biggest classes in the
+    ///  VCL - which CreateImplStub was WRITING as a stub's qualifier - and
+    ///  the extra opener also left the depth one too low, which gave a
+    ///  sibling type further down a false outer level and a top-level
+    ///  routine a container it has not got.</summary>
+    [Test] procedure ATypeDeclaredInTwoBranchesIsOneType;
+  end;
+
 implementation
 
 uses
   System.SysUtils, System.Types, System.Classes, System.TypInfo,
-  Expert.SafeDeletePlan, Expert.AutoImport, Expert.SignatureEdit;
+  Expert.SafeDeletePlan, Expert.AutoImport, Expert.SignatureEdit,
+  Expert.PascalScanner;
 
 function L(const AText: string): TArray<string>;
 begin
@@ -127,13 +171,16 @@ const
     '  end;'#13#10 +                                         // 8
     'implementation'#13#10 +                                 // 9
     'end.'#13#10;
-  // a shape nothing here can read: an operator header (#50.3)
+  // a shape nothing here can read: a parameter list that is never closed
+  // (#50.3). It used to be an operator header - 2.9.4 reads those (issue
+  // #54.E), and an assertion that keeps passing for another reason is no
+  // assertion, so the shape was replaced rather than the expectation.
   Oper =
     'unit U;'#13#10 +                                        // 0
     'interface'#13#10 +                                      // 1
     'type'#13#10 +                                           // 2
     '  TRec = record'#13#10 +                                // 3
-    '    class operator Add(const Title: TRec; B: TRec): TRec;'#13#10 + // 4
+    '    procedure Go(const Title: string'#13#10 +           // 4
     '  end;'#13#10 +                                         // 5
     'implementation'#13#10 +                                 // 6
     'end.'#13#10;
@@ -167,8 +214,374 @@ begin
   // of half the places
   Plan := PlanParameterRename(L(Oper), 4, 'Title');
   Assert.AreEqual('ppUnknown', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
-    'an operator header is not read here - refuse instead of guessing');
+    'a header that cannot be read is a refusal, not a rename of half the '
+    + 'places');
   Assert.AreNotEqual('', Plan.Reason, 'and it says why');
+end;
+
+{ TParameterRenameShapeTests }
+
+procedure TParameterRenameShapeTests.AMemberAfterANestedTypeIsPaired;
+const
+  // #54.A, his fixture verbatim
+  NestedIntf =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TOuter = class'#13#10 +                               // 3
+    '  public type'#13#10 +                                  // 4
+    '    IInner = interface'#13#10 +                         // 5
+    '      procedure X;'#13#10 +                             // 6
+    '    end;'#13#10 +                                       // 7
+    '  public'#13#10 +                                       // 8
+    '    procedure Go(A: Integer);'#13#10 +                  // 9
+    '  end;'#13#10 +                                         // 10
+    'implementation'#13#10 +                                 // 11
+    'procedure TOuter.Go(A: Integer);'#13#10 +               // 12
+    'begin'#13#10 +                                          // 13
+    '  if A > 0 then ;'#13#10 +                              // 14
+    'end;'#13#10 +                                           // 15
+    'end.'#13#10;
+  // #54.F - a nested RECORD, which was refused
+  NestedRec =
+    'unit U;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TOuter = class'#13#10 +
+    '  public type'#13#10 +
+    '    TInner = record'#13#10 +
+    '      V: Integer;'#13#10 +
+    '    end;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Go(A: Integer);'#13#10 +                  // 9
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TOuter.Go(A: Integer);'#13#10 +               // 12
+    'begin'#13#10 +
+    '  if A > 0 then ;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  // #54.G - a method OF a nested class, and a SECOND outer class with a
+  // nested type of the same name: the qualifier names the whole path, so
+  // the two must not be mixed up
+  Nested2 =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TOuterA = class'#13#10 +                              // 3
+    '  public type'#13#10 +                                  // 4
+    '    TInner = class'#13#10 +                             // 5
+    '      procedure Go(A: Integer);'#13#10 +                // 6
+    '    end;'#13#10 +                                       // 7
+    '  end;'#13#10 +                                         // 8
+    '  TOuterB = class'#13#10 +                              // 9
+    '  public type'#13#10 +                                  // 10
+    '    TInner = class'#13#10 +                             // 11
+    '      procedure Go(A: Integer);'#13#10 +                // 12
+    '    end;'#13#10 +                                       // 13
+    '  end;'#13#10 +                                         // 14
+    'implementation'#13#10 +                                 // 15
+    'procedure TOuterA.TInner.Go(A: Integer);'#13#10 +       // 16
+    'begin'#13#10 +                                          // 17
+    'end;'#13#10 +                                           // 18
+    'procedure TOuterB.TInner.Go(A: Integer);'#13#10 +       // 19
+    'begin'#13#10 +                                          // 20
+    'end;'#13#10 +                                           // 21
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+begin
+  Plan := PlanParameterRename(L(NestedIntf), 9, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'the nested interface is nested, not the owner - the reported case');
+  Assert.AreEqual(2, Integer(Length(Plan.Positions)), 'both headers');
+  Assert.AreEqual(9, Plan.Positions[0].Y, 'the declaration');
+  Assert.AreEqual(12, Plan.Positions[1].Y, 'and the implementation header');
+  // ...and the same answer from the other side
+  Plan := PlanParameterRename(L(NestedIntf), 12, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'started on the implementation header');
+
+  Plan := PlanParameterRename(L(NestedRec), 9, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'a nested record is no owner either');
+
+  Plan := PlanParameterRename(L(Nested2), 12, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'a method OF a nested class pairs with its own implementation');
+  Assert.AreEqual(19, Plan.Positions[High(Plan.Positions)].Y,
+    'TOuterB.TInner.Go - not TOuterA''s, which carries the same names');
+  // and from the implementation side the qualifier decides, not the
+  // innermost name: 'TOuterA.TInner.Go' may only pair with TOuterA's
+  Plan := PlanParameterRename(L(Nested2), 16, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'and back again');
+  Assert.AreEqual(6, Plan.Positions[0].Y, 'TOuterA''s declaration');
+  // ...and the SECOND one must find its own, which the innermost type NAME
+  // cannot say: pairing it with TOuterA's renames a foreign class, and
+  // refusing that candidate leaves "one header", which renames half of the
+  // two names Delphi requires to be equal.
+  Plan := PlanParameterRename(L(Nested2), 19, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'TOuterB.TInner.Go has a declaration of its own');
+  Assert.AreEqual(12, Plan.Positions[0].Y,
+    'TOuterB''s - not TOuterA''s, whose nested type carries the same name');
+end;
+
+procedure TParameterRenameShapeTests.AParameterOfItsOwnNameLeavesTheCallersAlone;
+const
+  // #54.B, his fixture verbatim
+  SelfNamed =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'procedure Title(const Title: string);'#13#10 +          // 2
+    'procedure Caller;'#13#10 +                              // 3
+    'implementation'#13#10 +                                 // 4
+    'procedure Title(const Title: string);'#13#10 +          // 5
+    'begin'#13#10 +                                          // 6
+    '  if Title = '''' then ;'#13#10 +                       // 7
+    'end;'#13#10 +                                           // 8
+    'procedure Caller;'#13#10 +                              // 9
+    'begin'#13#10 +                                          // 10
+    '  Title(''x'');'#13#10 +                                // 11
+    'end;'#13#10 +                                           // 12
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+  Why: string;
+begin
+  Plan := PlanParameterRename(L(SelfNamed), 2, 'Title');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'both headers, as before - the defect was downstream');
+  Assert.IsTrue(Plan.ScopeKnown, 'and the routine''s body is delimited');
+  Assert.AreEqual(5, Plan.BodyFirst, 'from its implementation header');
+  Assert.AreEqual(8, Plan.BodyLast, 'to its end');
+
+  // THE REPORTED DAMAGE: the call resolves to the implementation header's
+  // LINE, which is one of the rename's targets, so it was renamed with the
+  // parameter - E2003, measured
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 11, 2, Why))),
+    'the CALL Title(''x'') is not the parameter');
+  Assert.AreNotEqual('', Why, 'and the drop says why');
+  // what must still be renamed
+  Assert.AreEqual('poParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 7, 5, Why))),
+    'the use INSIDE the body is the parameter');
+  Assert.AreEqual('poParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 2, 22, Why))),
+    'and so is the declaration itself');
+  // ...while the routine's own name on that very line is not
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 2, 10, Why))),
+    'the routine''s own name on the header line is not the parameter');
+end;
+
+procedure TParameterRenameShapeTests.ABodyOnTheHeaderLineIsNotTheHeader;
+const
+  // #54.C, his fixture verbatim
+  OneLine =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'procedure Go(A: Integer);'#13#10 +                      // 2
+    'implementation'#13#10 +                                 // 3
+    'procedure Go(A: Integer); begin if A > 0 then ; end;'#13#10 + // 4
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+  Why: string;
+begin
+  Plan := PlanParameterRename(L(OneLine), 2, 'A');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'both headers');
+  Assert.AreEqual(2, Integer(Length(Plan.Spans)), 'and both spans');
+  // the ';' at column 24 ends the signature - everything after it is the
+  // BODY and must not be read as "on the header"
+  Assert.AreEqual(24, Plan.Spans[1].EndCol, 'the span ends at the '';''');
+  Assert.AreEqual('poParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 4, 13, Why))),
+    'the parameter itself');
+  // THE REPORTED DAMAGE: this was "on the header but not a position" and
+  // was dropped, so the body kept the old name - E2003
+  Assert.AreNotEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 4, 35, Why))),
+    'the body''s use is NOT on the header - it must not be dropped');
+end;
+
+procedure TParameterRenameShapeTests.TheCaretColumnPicksTheHeader;
+const
+  // #54.D, his fixture verbatim
+  Two =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TFoo = class'#13#10 +                                 // 3
+    '    procedure SetA(A: Integer); procedure SetB(A: Integer);'#13#10 + // 4
+    '  end;'#13#10 +                                         // 5
+    'implementation'#13#10 +                                 // 6
+    'procedure TFoo.SetA(A: Integer);'#13#10 +               // 7
+    'begin'#13#10 +                                          // 8
+    '  if A > 0 then ;'#13#10 +                              // 9
+    'end;'#13#10 +                                           // 10
+    'procedure TFoo.SetB(A: Integer);'#13#10 +               // 11
+    'begin'#13#10 +                                          // 12
+    '  if A > 0 then ;'#13#10 +                              // 13
+    'end;'#13#10 +                                           // 14
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+  Why: string;
+begin
+  // the caret on SetB's parameter (column 47)
+  Plan := PlanParameterRename(L(Two), 4, 'A', 47);
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'SetB''s parameter');
+  Assert.AreEqual(47, Plan.Positions[0].X, 'the one under the caret');
+  Assert.AreEqual(11, Plan.Positions[1].Y, 'and SetB''s implementation header');
+  // ...and SetA's parameter on the SAME line is not it. Without this the
+  // rename changed three places of the wrong routine (issue #54.D).
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 4, 19, Why))),
+    'SetA''s parameter is another symbol');
+
+  // the caret on SetA's parameter picks the OTHER header
+  Plan := PlanParameterRename(L(Two), 4, 'A', 19);
+  Assert.AreEqual(19, Plan.Positions[0].X, 'SetA''s parameter');
+  Assert.AreEqual(7, Plan.Positions[1].Y, 'and SetA''s implementation header');
+
+  // and without a column the line is ambiguous - refuse, do not guess
+  Plan := PlanParameterRename(L(Two), 4, 'A');
+  Assert.AreEqual('ppUnknown', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'two headers on one line and no column: refuse');
+  Assert.IsTrue(Plan.Reason.Contains('2 routine headers'),
+    'and the reason says how many: ' + Plan.Reason);
+end;
+
+procedure TParameterRenameShapeTests.AnOperatorAndAnOmittedListArePaired;
+const
+  // #54.E - his fixture, with the implementation it needs to pair
+  Oper =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TRec = record'#13#10 +                                // 3
+    '    class operator Add(const Title: TRec; B: TRec): TRec;'#13#10 + // 4
+    '  end;'#13#10 +                                         // 5
+    'implementation'#13#10 +                                 // 6
+    'class operator TRec.Add(const Title: TRec; B: TRec): TRec;'#13#10 + // 7
+    'begin'#13#10 +                                          // 8
+    '  Result := Title;'#13#10 +                             // 9
+    'end;'#13#10 +                                           // 10
+    'end.'#13#10;
+  // #54.H - the implementation header leaves the list out, which is legal
+  NoList =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TFoo = class'#13#10 +                                 // 3
+    '    procedure Go(A: Integer);'#13#10 +                  // 4
+    '  end;'#13#10 +                                         // 5
+    'implementation'#13#10 +                                 // 6
+    'procedure TFoo.Go;'#13#10 +                             // 7
+    'begin'#13#10 +                                          // 8
+    '  if A > 0 then ;'#13#10 +                              // 9
+    'end;'#13#10 +                                           // 10
+    'end.'#13#10;
+  // ...but a parameterless OVERLOAD is not the other header of this one
+  Overl =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '  TFoo = class'#13#10 +                                 // 3
+    '    procedure Go(A: Integer); overload;'#13#10 +         // 4
+    '    procedure Go; overload;'#13#10 +                     // 5
+    '  end;'#13#10 +                                         // 6
+    'implementation'#13#10 +                                 // 7
+    'procedure TFoo.Go;'#13#10 +                             // 8
+    'begin'#13#10 +                                          // 9
+    'end;'#13#10 +                                           // 10
+    'end.'#13#10;
+var
+  Plan: TParamRenamePlan;
+  Why: string;
+begin
+  Plan := PlanParameterRename(L(Oper), 4, 'Title');
+  Assert.AreEqual('ppPaired', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'an operator header is read like any other');
+  Assert.AreEqual(2, Integer(Length(Plan.Positions)), 'both headers');
+  Assert.AreEqual(7, Plan.Positions[1].Y, 'the implementation at column 1');
+
+  Plan := PlanParameterRename(L(NoList), 4, 'A');
+  Assert.AreEqual('ppSingleHeader', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'the parameter is declared ONCE - the other header carries no list');
+  Assert.AreEqual(1, Integer(Length(Plan.Positions)), 'so one position');
+  Assert.AreEqual(2, Integer(Length(Plan.Spans)),
+    'but both headers are spans - nothing on the listless one is the parameter');
+  Assert.IsTrue(Plan.ScopeKnown, 'and its body is where the parameter is used');
+  Assert.AreEqual('poParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 9, 5, Why))),
+    'the body''s use is the parameter');
+  Assert.AreEqual('poNotTheParameter',
+    GetEnumName(TypeInfo(TParamOccurrence),
+      Ord(ClassifyParamOccurrence(Plan, 7, 15, Why))),
+    'the routine''s own name on the listless header is not');
+
+  // Delphi forbids omitting the list for an overload, so the parameterless
+  // sibling must not be taken for the other header of this one
+  Plan := PlanParameterRename(L(Overl), 4, 'A');
+  Assert.AreEqual('ppSingleHeader', GetEnumName(TypeInfo(TParamPairing), Ord(Plan.Pairing)),
+    'the body of the OTHER overload is not this one''s header');
+  Assert.AreEqual(1, Integer(Length(Plan.Positions)), 'one position');
+  Assert.AreEqual(4, Plan.Positions[0].Y, 'its own declaration');
+end;
+
+procedure TParameterRenameShapeTests.ATypeDeclaredInTwoBranchesIsOneType;
+const
+  // Vcl.Controls' TControl / TWinControl and Vcl.ActnMan's
+  // TActionDragBaseClass have exactly this shape
+  Src =
+    'unit U;'#13#10 +                                        // 0
+    'interface'#13#10 +                                      // 1
+    'type'#13#10 +                                           // 2
+    '{$IF Defined(CLR)}'#13#10 +                             // 3
+    '  TBase = class(TA)'#13#10 +                            // 4
+    '{$ELSE}'#13#10 +                                        // 5
+    '  TBase = class(TB)'#13#10 +                            // 6
+    '{$ENDIF}'#13#10 +                                       // 7
+    '    procedure Go(A: Integer);'#13#10 +                   // 8
+    '  end;'#13#10 +                                         // 9
+    '  TOther = class'#13#10 +                               // 10
+    '    procedure Also(B: Integer);'#13#10 +                 // 11
+    '  end;'#13#10 +                                         // 12
+    'procedure Top(C: Integer);'#13#10 +                      // 13
+    'implementation'#13#10 +                                 // 14
+    'end.'#13#10;
+var
+  Kw: string;
+begin
+  var Lines := L(Src);
+  // the member of the type that is declared twice
+  Assert.AreEqual('TBase', EnclosingContainerName(Lines, 8),
+    'two branches are ONE type, not a type nested in itself');
+  // the SIBLING below it - the extra opener used to make TBase its outer
+  // level
+  Assert.AreEqual('TOther', EnclosingContainerName(Lines, 11),
+    'the next type is a sibling, not a nested one');
+  // ...and a top-level routine has no container at all
+  Assert.AreEqual('', EnclosingContainerName(Lines, 13),
+    'a routine declared beside the types is in none of them');
+  // the path answers the same, with the keyword the filter above needs
+  Assert.AreEqual('TBase', EnclosingTypePath(MaskCommentsAndStrings(Lines), 8, Kw),
+    'the path says the same');
+  Assert.AreEqual('class', Kw, 'and what kind of body it is');
 end;
 
 procedure TParameterRenameAuditTests.TheHeaderShapesThatUsedToFail;
@@ -270,5 +683,6 @@ end;
 
 initialization
   TDUnitX.RegisterTestFixture(TParameterRenameAuditTests);
+  TDUnitX.RegisterTestFixture(TParameterRenameShapeTests);
 
 end.

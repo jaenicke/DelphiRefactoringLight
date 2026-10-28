@@ -82,6 +82,24 @@ type
 function IsIdentStart(C: Char): Boolean;
 function IsIdentChar(C: Char): Boolean;
 
+/// <summary>Every position (1-based) in ALINE at which a declaration
+///  starts: the line's first token, and every token that follows a ';' at
+///  bracket depth 0. Delphi allows several declarations on one line, and a
+///  forum report showed exactly that shape -
+///  "b_Cancel: TButton;procedure FormCreate(Sender: TObject);" - where a
+///  line-start scan saw only the field (1.14.1). Comments and strings are
+///  skipped; a 'procedure' inside a parameter list (a procedural parameter)
+///  sits at depth > 0 and is not a start. By default the two keywords the
+///  DFM check asks about - procedure and function, 'class' prefix allowed,
+///  the answer being the position of the KEYWORD. AALLROUTINEKINDS adds
+///  constructor, destructor and 'class operator', i.e. everything
+///  IsHeaderLine accepts: that is what the parameter rename needs to tell
+///  TWO headers on one line apart (issue #54). Lives here rather than in
+///  Expert.DfmEventCheck, whose interface pulls the LSP client while the
+///  second caller is a pure planner.</summary>
+function DeclarationStartsOnLine(const ALine: string;
+  AAllRoutineKinds: Boolean = False): TArray<Integer>;
+
 /// <summary>S is a single identifier (no dots, not empty).</summary>
 function IsIdentifier(const S: string): Boolean;
 
@@ -209,6 +227,99 @@ begin
     Result := CharInSet(C, ['A'..'Z', 'a'..'z', '0'..'9', '_'])
   else
     Result := C.IsLetterOrDigit;
+end;
+
+function DeclarationStartsOnLine(const ALine: string;
+  AAllRoutineKinds: Boolean): TArray<Integer>;
+var
+  I, Depth: Integer;
+  InStr: Boolean;
+  Expect: Boolean;
+
+  function WordAt(APos: Integer): string;
+  var
+    K: Integer;
+  begin
+    K := APos;
+    while (K <= Length(ALine)) and CharInSet(ALine[K], ['A'..'Z', 'a'..'z', '_']) do
+      Inc(K);
+    Result := UpperCase(Copy(ALine, APos, K - APos));
+  end;
+
+  // 'class procedure X' answers with the position of 'procedure', so the
+  // name extraction downstream is unchanged - and 'class operator X' with
+  // that of 'operator'. A BARE 'operator' is never a start: it is a legal
+  // Delphi identifier (System.VarCmplx declares a parameter named
+  // Operator), while an operator overload is always a CLASS operator.
+  function StartAt(APos: Integer; out AStart: Integer): Boolean;
+  var
+    W: string;
+    K: Integer;
+    WasClass: Boolean;
+  begin
+    AStart := APos;
+    W := WordAt(APos);
+    WasClass := W = 'CLASS';
+    if WasClass then
+    begin
+      K := APos + 5;
+      while (K <= Length(ALine)) and CharInSet(ALine[K], [' ', #9]) do Inc(K);
+      AStart := K;
+      W := WordAt(K);
+    end;
+    Result := (W = 'PROCEDURE') or (W = 'FUNCTION');
+    if not Result and AAllRoutineKinds then
+      Result := (W = 'CONSTRUCTOR') or (W = 'DESTRUCTOR')
+        or (WasClass and (W = 'OPERATOR'));
+  end;
+
+begin
+  Result := nil;
+  Depth := 0;
+  InStr := False;
+  Expect := True;          // the line's first token is a candidate
+  I := 1;
+  while I <= Length(ALine) do
+  begin
+    var C := ALine[I];
+    if InStr then
+    begin
+      if C = '''' then InStr := False;
+      Inc(I);
+      Continue;
+    end;
+    case C of
+      '''': begin InStr := True; Inc(I); Continue; end;
+      '/': if (I < Length(ALine)) and (ALine[I + 1] = '/') then Break;   // comment
+      '{':
+        begin
+          while (I <= Length(ALine)) and (ALine[I] <> '}') do Inc(I);
+          Inc(I);
+          Continue;
+        end;
+      '(':
+        if (I < Length(ALine)) and (ALine[I + 1] = '*') then
+        begin
+          Inc(I, 2);
+          while (I < Length(ALine)) and not ((ALine[I] = '*') and (ALine[I + 1] = ')')) do
+            Inc(I);
+          Inc(I, 2);
+          Continue;
+        end
+        else
+          Inc(Depth);
+      '[': Inc(Depth);
+      ')', ']': if Depth > 0 then Dec(Depth);
+      ';': if Depth = 0 then Expect := True;
+    end;
+    if Expect and not CharInSet(C, [' ', #9, ';']) then
+    begin
+      Expect := False;
+      var St: Integer;
+      if StartAt(I, St) then Result := Result + [St];
+    end;
+    Inc(I);
+  end;
 end;
 
 function IsIdentifier(const S: string): Boolean;

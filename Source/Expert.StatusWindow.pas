@@ -1839,10 +1839,19 @@ begin
   // HostDockSite= and no TabDockClients= at all. MMXCodeExplorer's form is
   // OTADockForm_2 - a TOTADockForm, exactly our own kind. So a plain window
   // IS a normal direct client of a main-window panel, and docking into one
-  // needs no apology. What stays unmeasured is only whether the IDE wraps
-  // such a drop in a fresh tab host; the restore verifies by containment, so
-  // it reads as a restore either way, and the status row says where the
-  // window ended up.
+  // needs no apology. AND WHAT SUCH A DROP PRODUCES IS MEASURED now (the
+  // user named the rule on 2026-10-28, and the binaries agree): a panel is
+  // never wrapped in a fresh tab host. TPercentageDockTree.InsertControl -
+  // the DefaultDockTreeClass designide installs - only adds a dictionary
+  // entry and tail-calls the inherited one, with no tab set anywhere in it,
+  // so Vcl.Controls' "if InsertAt in [alClient, alNone] then InsertAt :=
+  // alRight" stands and the window lands BESIDE its old neighbour. A tab
+  // needs a dockable FORM as the target (TDockableForm.CreateDockParent,
+  // selected by a point inside GetTabDockRect's middle zone), or - when the
+  // target is a tab host whose bar is visible - a point ON THAT BAR, which
+  // then even picks the tab's position. So this link restores the PLACE and
+  // not the tab relation; the restore verifies by containment, and the
+  // status row says where the window ended up.
   Result := False;
   for var Link in APlace.Links do
     if DockIntoLink(AForm, Link) then

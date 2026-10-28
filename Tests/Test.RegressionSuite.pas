@@ -877,6 +877,15 @@ type
     ///  nothing after a failed build - and everything after a good one, or
     ///  an entry without a build would stop installing.</summary>
     [Test] procedure NothingFollowsAFailedBuild;
+    /// <summary>...and the other half of that question, found while
+    ///  reviewing #52: the build can succeed while its artefact does not
+    ///  reach the target (a missing source file, a target nobody may
+    ///  write). The post event then answers for the file that was already
+    ///  there and the install reports it as verified - how a nine-day-old
+    ///  MCP bridge survived (1.15.2). A failed copy withdraws the post
+    ///  events and NOTHING else: a package is registered where the BUILD
+    ///  writes its BPL.</summary>
+    [Test] procedure APostEventNeverVerifiesAFileTheInstallDidNotWrite;
   end;
 
   [TestFixture]
@@ -7713,6 +7722,24 @@ begin
   Assert.IsTrue(AfterBuildSteps(True) =
     [abCopyArtefacts, abRegisterPackages, abRegisterExperts, abPostEvents],
     'after a good build (or none) every step runs');
+end;
+
+procedure TInstallOutputRootTests.APostEventNeverVerifiesAFileTheInstallDidNotWrite;
+begin
+  Assert.IsTrue(WithdrawnByCopy(True) = [abPostEvents],
+    'a failed artefact copy withdraws the post events - they would answer ' +
+    'for the file the target already had');
+  Assert.IsTrue(WithdrawnByCopy(False) = [],
+    'a copy that arrived withdraws nothing');
+  // The registrations are deliberately NOT withdrawn, and that is the half
+  // a blanket "nothing follows a failed copy" would get wrong: the BPL the
+  // IDE loads is written by the BUILD (DCC_BplOutput), not by the file
+  // copy, so it is there and registering it is right.
+  Assert.IsTrue(AfterBuildSteps(True) - WithdrawnByCopy(True) =
+    [abCopyArtefacts, abRegisterPackages, abRegisterExperts],
+    'a failed copy leaves the registrations alone');
+  Assert.IsTrue(AfterBuildSteps(False) - WithdrawnByCopy(True) = [],
+    'and after a failed build there is nothing left to withdraw');
 end;
 
 procedure TInstallOutputRootTests.TheBuildIsToldWhereItMayCreateDirectories;

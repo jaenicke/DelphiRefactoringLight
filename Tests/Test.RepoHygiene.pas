@@ -129,6 +129,13 @@ type
     ///  LIMIT: this reads the closure's own text, so a callback that opens
     ///  a dialog through a routine one level down is not found here.</summary>
     [Test] procedure NoQueuedCallbackOpensAModalWindow;
+    /// <summary>Issue #52 was ONE ungated step block in InstallEntry, and
+    ///  the next one would look exactly the same: a block appended after
+    ///  the policy is asked, with its own "if AEntry.X.Count > 0 then" and
+    ///  no "in Steps" inside it. So the rule is read off the BLOCKS rather
+    ///  than off the number of gates - counting gates stays green when a
+    ///  fifth block is added.</summary>
+    [Test] procedure EveryStepAfterTheBuildIsGated;
   end;
 
 implementation
@@ -803,6 +810,74 @@ begin
     if Pos(N, ASpan) > 0 then
       Exit(N);
   Result := '';
+end;
+
+procedure TRepoHygieneTests.EveryStepAfterTheBuildIsGated;
+var
+  Offenders: TStringList;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository root must be found');
+  var F := TPath.Combine(Root, 'dih\DIH.Engine.pas');
+  Assert.IsTrue(TFile.Exists(F), 'DIH.Engine.pas must be there: ' + F);
+  // CODE only - the routine's comments name the steps and the policy.
+  var Lines := MaskCommentsAndStrings(TFile.ReadAllLines(F));
+
+  var First := -1;
+  var Last := -1;
+  for var I := 0 to High(Lines) do
+  begin
+    var T := Trim(Lines[I]);
+    if (First < 0) and T.StartsWith('procedure TDIHEngine.InstallEntry') then
+      First := I
+    else if (First >= 0) and (Last < 0) and T.Contains('AfterBuildSteps(') then
+      First := I                      // the blocks AFTER the policy is asked
+    else if (First >= 0) and (Last < 0) and (T = 'end;') and
+            (Lines[I] = 'end;') then  // column 1: the routine's own end
+      Last := I;
+  end;
+  Assert.IsTrue(First >= 0, 'InstallEntry and its AfterBuildSteps call must be found');
+  Assert.IsTrue(Last > First, 'the end of InstallEntry must be found');
+
+  Offenders := TStringList.Create;
+  try
+    var Blocks := 0;
+    var I := First + 1;
+    while I < Last do
+    begin
+      var T := Trim(Lines[I]);
+      if T.StartsWith('if AEntry.') and T.Contains('.Count > 0 then') then
+      begin
+        Inc(Blocks);
+        // the block runs up to the next one, or to the end of the routine
+        var J := I + 1;
+        var Gated := False;
+        while J < Last do
+        begin
+          var U := Trim(Lines[J]);
+          if U.StartsWith('if AEntry.') and U.Contains('.Count > 0 then') then Break;
+          if U.Contains('in Steps') then Gated := True;
+          Inc(J);
+        end;
+        if not Gated then
+          Offenders.Add(Format('DIH.Engine.pas(%d): %s - this block stands ' +
+            'after the build and is not gated on "in Steps", which is ' +
+            'issue #52''s own shape', [I + 1, T]));
+        I := J;
+      end
+      else
+        Inc(I);
+    end;
+    // Four blocks today (artefacts, packages, experts, post events). The
+    // count is asserted so a renamed step or a changed spelling cannot make
+    // the sweep pass without looking at anything.
+    Assert.IsTrue(Blocks >= 4, Format('the step blocks must be found (saw %d)',
+      [Blocks]));
+    Assert.AreEqual('', Offenders.Text.Trim,
+      'every step after the build is gated on the one policy answer');
+  finally
+    Offenders.Free;
+  end;
 end;
 
 procedure TRepoHygieneTests.NoQueuedCallbackOpensAModalWindow;

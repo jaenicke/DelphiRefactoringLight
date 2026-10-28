@@ -6,6 +6,32 @@ development builds and were never released.
 
 ---
 
+## 2.9.3 - 2026-10-28
+
+### Nothing follows a failed build - and no post event verifies a file the install did not write
+
+Issue #52, reported and fixed by **Ian Branch** (PR #53): 2.6.9 gated only the
+artefact copy on the build, so after a FAILED build the entry still registered
+its packages and experts - the previous BPL, as if it were new - and its post
+events still ran, verifying the file that was already there. `AfterBuildSteps`
+is now the one policy the installer asks once, and every step it withholds
+logs what did not happen.
+
+- **The other half of that question**, found while reviewing the PR: the build
+  can succeed while its artefact does not reach the target (a missing source
+  file, a target nobody may write). The post event then answers for the file
+  the target already had and the install reports it as verified - which is how
+  a nine-day-old MCP bridge once survived. A failed copy now withholds the
+  post events, and nothing else: a package is registered where the BUILD
+  writes its BPL, not where a file copy puts it.
+- The gate reads an explicit outcome instead of the copy's `out` parameter,
+  which is never written for an entry that has no files at all.
+- A hygiene test reads the rule off the step BLOCKS rather than off the number
+  of gates: issue #52 was one ungated block, and counting gates stays green
+  when a fifth one is appended.
+
+---
+
 ## 2.9.2 - 2026-10-28
 
 ### The reload report is readable after the box is gone

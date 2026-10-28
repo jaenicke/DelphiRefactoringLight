@@ -373,7 +373,7 @@ end;
 procedure TDIHEngine.InstallEntry(AEntry: TDIHEntry; APlatform: TDIHPlatform; const ABuildConfig: string);
 var
   FileCount, Failed, Pending: Integer;
-  Built: Boolean;
+  Built, CopyFailed: Boolean;
   Steps: TDIHAfterBuildSteps;
   F: TDIHFileEntry;
   K: TDIHPackageEntry;
@@ -421,6 +421,11 @@ begin
 
   // 4. Build projects
   Built := True;
+  // Whether an artefact copy FAILED is its own fact, written on every
+  // path below: Failed is an out parameter of CopyFiles and stays
+  // uninitialised for an entry that has no files at all, so the gate may
+  // not read it.
+  CopyFailed := False;
   if AEntry.BuildProjects.Count > 0 then
     Built := BuildProjectsOf(AEntry, APlatform, ABuildConfig);
 
@@ -446,6 +451,7 @@ begin
         Inc(FSuccessCount);
       end;
       Inc(FErrorCount, Failed);
+      CopyFailed := Failed > 0;
     end
     else
     begin
@@ -464,6 +470,10 @@ begin
           'installed, so the target keeps the file it had', [Pending]);
     end;
   end;
+
+  // The build was good but its artefact did not reach the target: the
+  // same question again, with the outcome that did not exist above.
+  Steps := Steps - WithdrawnByCopy(CopyFailed);
 
   // 5. Register packages - after a failed build that would register the
   // previous BPL as installed. The registration the IDE had stays: on the
@@ -512,7 +522,8 @@ begin
   end;
 
   // Post-events - they check what was installed, and after a failed build
-  // that is nothing: they would verify the old file.
+  // that is nothing: they would verify the old file. Same when the build
+  // was good and its artefact did not arrive.
   if AEntry.PostEvents.Count > 0 then
   begin
     if abPostEvents in Steps then
@@ -524,8 +535,13 @@ begin
         if APlatform in E.Platforms then
           Inc(Pending);
       if Pending > 0 then
-        FLogger.Warning('Build failed - %d post-install event(s) skipped',
-          [Pending]);
+        if Built then
+          FLogger.Warning('Artefact copy failed - %d post-install event(s) ' +
+            'skipped: they would answer for the file the target already had',
+            [Pending])
+        else
+          FLogger.Warning('Build failed - %d post-install event(s) skipped',
+            [Pending]);
     end;
   end;
 end;

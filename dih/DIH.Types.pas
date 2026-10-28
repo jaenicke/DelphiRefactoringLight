@@ -144,6 +144,18 @@ function PlatformsToStr(APlatforms: TDIHPlatforms): string;
 ///  registered does not depend on a build.</summary>
 function AfterBuildSteps(ABuilt: Boolean): TDIHAfterBuildSteps;
 
+/// <summary>What a FAILED artefact copy takes back out of that answer.
+///  Only the post events: they check what was INSTALLED, and when the
+///  copy did not arrive the target still holds the file it had - an event
+///  that answers there reports the stale one as installed, which is how a
+///  nine-day-old MCP bridge survived (1.15.2). The registrations are NOT
+///  withdrawn: a package is registered where the BUILD writes its BPL,
+///  not where a file copy puts it. Asked as a second question instead of
+///  taking the copy's outcome into AfterBuildSteps, because the copy
+///  happens AFTER that answer is needed - and moving the call below it is
+///  how a per-step "if Built" comes back (#52).</summary>
+function WithdrawnByCopy(ACopyFailed: Boolean): TDIHAfterBuildSteps;
+
 const
   AllPlatforms: TDIHPlatforms = [dpWin32, dpWin64];
 
@@ -211,6 +223,14 @@ function AfterBuildSteps(ABuilt: Boolean): TDIHAfterBuildSteps;
 begin
   if ABuilt then
     Result := [Low(TDIHAfterBuildStep)..High(TDIHAfterBuildStep)]
+  else
+    Result := [];
+end;
+
+function WithdrawnByCopy(ACopyFailed: Boolean): TDIHAfterBuildSteps;
+begin
+  if ACopyFailed then
+    Result := [abPostEvents]
   else
     Result := [];
 end;

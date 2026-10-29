@@ -220,20 +220,39 @@ type
 // group, every following name belongs to it until the next one does.
 function GroupsOfSpan(const AMasked: TArray<string>;
   const ASpan: THeaderSpan): TArray<TParamGroup>;
+
+  // The last code character BEFORE the name, ACROSS LINE BREAKS. A wrapped
+  // parameter list carries the group's ';' at the end of the previous line,
+  // so a walk that stops at column 1 reads the first parameter of every
+  // continuation line as a continuation of the group above it - measured
+  // live on "function ReadCachedLines(AFile: string;" / "  ACache: ...",
+  // where it merged the two and the group was then no candidate at all.
+  function CodeCharBefore(ALine, ACol: Integer): Char;
+  begin
+    Result := #0;
+    while ALine >= ASpan.First do
+    begin
+      var S := '';
+      if (ALine >= 0) and (ALine <= High(AMasked)) then S := AMasked[ALine];
+      var J := ACol;
+      if J > Length(S) then J := Length(S);
+      while J >= 1 do
+      begin
+        if S[J] > ' ' then Exit(S[J]);
+        Dec(J);
+      end;
+      Dec(ALine);
+      ACol := MaxInt;
+    end;
+  end;
+
 begin
   Result := nil;
   for var I := 0 to High(ASpan.Names) do
   begin
     var P := ASpan.Names[I];
-    var Opens := True;
-    if (P.Y >= 0) and (P.Y <= High(AMasked)) then
-    begin
-      var S := AMasked[P.Y];
-      var J := P.X;                    // 1-based index of the char before it
-      while (J > 0) and (J <= Length(S)) and (S[J] = ' ') do Dec(J);
-      Opens := (J < 1) or not CharInSet(S[J], ['(', ';']);
-      Opens := not Opens;
-    end;
+    // '(' opens the list, ';' ends a group, ',' continues one.
+    var Opens := CharInSet(CodeCharBefore(P.Y, P.X), ['(', ';']);
     if Opens or (Length(Result) = 0) then
     begin
       var G: TParamGroup;

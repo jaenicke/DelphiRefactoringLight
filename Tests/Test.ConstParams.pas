@@ -42,6 +42,11 @@ type
     ///  argument it does not list is dropped before the handler sees it and
     ///  nobody is told (1.16.11).</summary>
     [Test] procedure TheConstToolDeclaresWhatItTakes;
+    /// <summary>A WRAPPED parameter list: the group's ';' stands at the end
+    ///  of the previous LINE, so the continuation line opens a new group.
+    ///  Measured live - every fixture here had a one-line list, and the
+    ///  check answered 0 findings AND 0 refusals for 113 real files.</summary>
+    [Test] procedure AWrappedParameterListStillHasItsGroups;
   end;
 
 implementation
@@ -303,6 +308,57 @@ begin
   Assert.IsTrue(Declares('include_refused'), 'include_refused is declared');
   Assert.IsTrue(Declares('max'), 'max is declared');
   Assert.IsFalse(Declares('file'), 'and nothing it does not read');
+end;
+
+procedure TConstParamTests.AWrappedParameterListStillHasItsGroups;
+const
+  // The real header of TLspFindUnitReferencesWizard.ReadCachedLines, which
+  // is the candidate the live run lost: AFile ends its group with the ';'
+  // at the end of its line, and ACache - no string - starts a new one.
+  Src =
+    'unit U;'#13#10 +
+    'interface'#13#10 +
+    'uses System.Generics.Collections;'#13#10 +
+    'type'#13#10 +
+    '  TFoo = class'#13#10 +
+    '  private'#13#10 +
+    '    FH: string;'#13#10 +
+    '    function ReadCachedLines(AFile: string;'#13#10 +
+    '      ACache: TDictionary<string, Integer>): Integer;'#13#10 +
+    '    procedure Pair(AFirst,'#13#10 +
+    '      ASecond: string);'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'function TFoo.ReadCachedLines(AFile: string;'#13#10 +
+    '  ACache: TDictionary<string, Integer>): Integer;'#13#10 +
+    'begin'#13#10 +
+    '  FH := AFile;'#13#10 +
+    '  Result := ACache.Count;'#13#10 +
+    'end;'#13#10 +
+    'procedure TFoo.Pair(AFirst,'#13#10 +
+    '  ASecond: string);'#13#10 +
+    'begin'#13#10 +
+    '  FH := AFirst + ASecond;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+begin
+  var L := Lines(Src);
+  var Found := CollectConstParamCandidates('U.pas', L, nil, True);
+
+  var Read := FindingOf(Found, 'TFoo.ReadCachedLines');
+  Assert.AreEqual('AFile', string.Join(',', Read.ParamNames),
+    'AFile ends its group at the ";" of its own line - ACache, which is no ' +
+    'string, must NOT be swallowed into that group (the live defect)');
+  Assert.AreEqual(cprNone, Read.Refusal, Read.Reason);
+  Assert.AreEqual(2, Integer(Length(Read.Positions)),
+    'both headers of the wrapped routine carry the position');
+
+  // ...and the other direction still holds: a group really does continue
+  // across the line break when the previous line ends in a comma.
+  var Pair := FindingOf(Found, 'TFoo.Pair');
+  Assert.AreEqual('AFirst,ASecond', string.Join(',', Pair.ParamNames),
+    'one modifier serves "AFirst," / "ASecond: string" - it is ONE group ' +
+    'although it is written on two lines');
 end;
 
 initialization

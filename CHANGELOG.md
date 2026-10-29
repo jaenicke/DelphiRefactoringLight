@@ -6,6 +6,28 @@ development builds and were never released.
 
 ---
 
+## 2.11.1 - 2026-10-29
+
+### The check found nothing at all
+
+The first live call of "Missing const (string parameters)" answered 0
+proposals AND 0 refusals for 113 project files - so nothing had been looked
+at, rather than nothing being there.
+
+A parameter group ends at a `;`, and in a WRAPPED parameter list that `;`
+stands at the end of the PREVIOUS line. The group scan walked back only
+within the name's own line, so the first parameter of every continuation
+line was merged into the group above it: `AFile: string;` and the next
+line's `ACache: TDictionary<...>` became one group, which is then no
+candidate at all because ACache is no string - and a group that is not a
+candidate is skipped before any reason is recorded, which is why there were
+no refusals either.
+
+Every fixture of the suite had its parameter list on one line, which is how
+four green tests sat over a check that answered nothing. The new one carries
+the real shape, in both directions: a `;` at the end of a line ends the
+group, a `,` continues it.
+
 ## 2.11.0 - 2026-10-29
 
 ### Project check "Missing const (string parameters)"

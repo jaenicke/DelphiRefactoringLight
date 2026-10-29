@@ -215,6 +215,20 @@ type
 ///  initialization).</summary>
 function Editor: IEditorHelper;
 
+type
+  TEditorTokenEdit = record
+    Line, Column: Integer; // 0-based UTF-16 coordinates
+    OldText, NewText: string;
+  end;
+
+  /// <summary>Optional capability: one file's token edits form one Undo step.
+  ///  Existing IEditorHelper implementations keep their original contract.</summary>
+  IEditorTokenEditBatch = interface
+    ['{6793D4F7-8220-4234-91B0-051E0124E7BA}']
+    function ApplyTokenEdits(const AFilePath: string;
+      const AEdits: TArray<TEditorTokenEdit>): Boolean;
+  end;
+
 /// <summary>Installs the active implementation. Pass nil to clear (used
 ///  by tests).</summary>
 procedure SetEditorImpl(const AImpl: IEditorHelper);

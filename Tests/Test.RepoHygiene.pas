@@ -142,7 +142,7 @@ implementation
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types,
-  Expert.PascalScanner;
+  System.Generics.Collections, System.Generics.Defaults, Expert.PascalScanner;
 
 const
   SourceDirs: array[0..5] of string = ('Source', 'Packages', 'Standalone', 'Tests', 'Mcp', 'dih');
@@ -251,10 +251,29 @@ begin
   Assert.IsTrue(Pos('*.res        binary', Rules) > 0, '.res files must be binary');
 end;
 
-const
-  // every batch script of the repository that uses labels
-  ScriptFiles: array[0..4] of string = ('install.cmd', 'uninstall.cmd',
-    'rebuild.cmd', 'release.cmd', 'dih\builddih.cmd');
+/// <summary>Every batch script of the repository, found rather than
+///  listed: a hand-kept list is what left Standalone\build.bat out of both
+///  sweeps below and would leave the next script out too (the lesson of
+///  1.16.30 - the LIST is the defect). Build output is skipped, and the
+///  callers assert how many they saw, so a renamed folder cannot make a
+///  sweep pass by finding nothing.</summary>
+function ScriptFiles: TArray<string>;
+begin
+  Result := nil;
+  var Root := RepoRoot;
+  if Root = '' then Exit;
+  for var F in TDirectory.GetFiles(Root, '*.*', TSearchOption.soAllDirectories) do
+  begin
+    var Ext := LowerCase(ExtractFileExt(F));
+    if (Ext <> '.cmd') and (Ext <> '.bat') then Continue;
+    var Rel := F.Substring(Length(Root) + 1);
+    if Rel.Contains('\__history\') or Rel.Contains('\Win32\')
+      or Rel.Contains('\Win64\') or Rel.Contains('\Output\')
+      or Rel.Contains('\Release\') or Rel.Contains('\DCU\') then Continue;
+    Result := Result + [Rel];
+  end;
+  TArray.Sort<string>(Result);
+end;
 
 // A label line is ':name' - ':: text' is a comment, which is why the second
 // character decides.
@@ -678,6 +697,9 @@ begin
     end;
     Assert.IsTrue(Checked >= 20,
       Format('the sweep must see the scripts'' assignments, found %d', [Checked]));
+    Assert.IsTrue(Length(ScriptFiles) >= 8,
+      Format('and it must have found the scripts themselves, got %d',
+        [Length(ScriptFiles)]));
     Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
   finally
     SL.Free;

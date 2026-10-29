@@ -100,5 +100,11 @@ Tests/Win32/
 Tests/Win64/
 /Packages/DelphiRefactoringLight.res
 
+# Compiler-specific package builds and validation logs
+/Output/
+/Standalone/Output/
+*.vrc
+*.$manifest
+
 # Build output of release.cmd (the .bpl files attached to a release)
 /Release/

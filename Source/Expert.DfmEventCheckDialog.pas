@@ -106,6 +106,7 @@ end;
 procedure TBufferedListView.CNNotify(var Message: TWMNotify);
 var
   Cd: PNMLVCustomDraw;
+  Buf: array[0..511] of Char;
 begin
   if Message.NMHdr.code = NM_CUSTOMDRAW then
   begin
@@ -118,7 +119,6 @@ begin
       and (Cd.dwItemType = LVCDI_GROUP) then
     begin
       var Grp: TLVGroup;
-      var Buf: array[0..511] of Char;
       FillChar(Grp, SizeOf(Grp), 0);
       FillChar(Buf, SizeOf(Buf), 0);
       Grp.cbSize := SizeOf(Grp);

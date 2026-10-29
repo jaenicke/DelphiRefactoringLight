@@ -31,6 +31,17 @@ procedure DecideBuildOutputRoot(const ACommonDir, ABDSVersion,
   ALocalAppData: string; const ACanWrite: TDIHWriteProbe;
   out ARoot, ANote: string);
 
+/// <summary>What {$LIBSUFFIX AUTO} appends to a package's file name, read
+///  from the INSTALLATION rather than from the IDE version: the digits of
+///  the RTL package the IDE ships (bin\rtl370.bpl -> '370'). Delphi 13 is
+///  the one version where the registry version and the suffix agree
+///  ("37.0" -> 370); Delphi 11 registers as 22.0 while its packages carry
+///  280, and Delphi 12 is 23.0 with 290 - so a config that names a built
+///  BPL cannot derive the suffix from the version. Falls back to the
+///  version without its dot, which is what this resolver did before and
+///  what Delphi 13 needs, so nothing changes there.</summary>
+function ProductLibSuffix(const ARootDir, ABDSVersion: string): string;
+
 type
   TDIHPlaceholderResolver = class
   private
@@ -79,6 +90,33 @@ implementation
 uses
   Winapi.Windows, System.IOUtils, System.Win.Registry;
 
+function ProductLibSuffix(const ARootDir, ABDSVersion: string): string;
+var
+  SR: TSearchRec;
+  Digits: string;
+begin
+  // The fallback first, so every exit path has an answer.
+  Result := StringReplace(ABDSVersion, '.', '', [rfReplaceAll]);
+  if ARootDir = '' then Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(ARootDir) + 'bin\rtl*.bpl',
+    faAnyFile, SR) <> 0 then Exit;
+  try
+    repeat
+      Digits := ChangeFileExt(SR.Name, '');
+      Delete(Digits, 1, 3);                       // 'rtl'
+      if (Digits <> '') and (Length(Digits) <= 4) then
+      begin
+        var AllDigits := True;
+        for var C in Digits do
+          if not CharInSet(C, ['0'..'9']) then AllDigits := False;
+        if AllDigits then Exit(Digits);
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    System.SysUtils.FindClose(SR);
+  end;
+end;
+
 { TDIHPlaceholderResolver }
 
 constructor TDIHPlaceholderResolver.Create(const ABaseDir, ABDSVersion, ABDSProfile: string);
@@ -97,11 +135,11 @@ begin
   // packaged (MSIX) host's redirected view is what a target resolves to -
   // the same folder that host's own processes see.
   FValues.AddOrSetValue('LocalAppData', GetEnvironmentVariable('LOCALAPPDATA'));
-  // {$LIBSUFFIX AUTO} appends the product version without the dot
-  // ("37.0" -> "370"), so a config can name the built BPL without
-  // hard-coding the IDE version.
+  // {$LIBSUFFIX AUTO} appends the PRODUCT suffix, which is the IDE
+  // version without its dot for Delphi 13 and something else before it -
+  // so it is read from the installation (see ProductLibSuffix).
   FValues.AddOrSetValue('LibSuffix',
-    StringReplace(FBDSVersion, '.', '', [rfReplaceAll]));
+    ProductLibSuffix(FBDSRootDir, FBDSVersion));
   FValues.AddOrSetValue('BDSProfileName', FBDSProfile);
   FValues.AddOrSetValue('BDS', 'Software\Embarcadero\' + FBDSProfile + '\' + FBDSVersion);
 end;

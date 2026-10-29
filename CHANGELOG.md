@@ -6,6 +6,65 @@ development builds and were never released.
 
 ---
 
+## 2.10.0 - 2026-10-29
+
+### One install script per Delphi version (PR #55, alexeydott)
+
+`install.cmd` takes the version its registry branch is named after and
+stays Delphi 13 without an argument, so `install_D11.cmd` and
+`install_D12.cmd` do nothing but pass theirs - and there is one install to
+keep working rather than three. The same for `uninstall` and `rebuild`, and
+`Standalone\build.bat [config] [version] [directory]` follows the rule.
+The PR's own scripts hard-coded Delphi 12 instead, which is what made them
+unusable for a Delphi 13 install.
+
+What a registration points at can no longer be derived from the version
+either: `{$LIBSUFFIX AUTO}` appends the PRODUCT suffix, and only Delphi 13
+has it equal to its registry number. It is read from the TARGET
+installation now - the suffix of the `rtl*.bpl` that IDE ships - so it is
+right whatever the two numbers are, and on Delphi 13 it is the 370 it
+always was.
+
+### Delphi 11 and 12: contributed compatibility code
+
+The `{$IF CompilerVersion < 36.0}` branches of PR #55 are in: the older
+line-editing API, no `INTAEditorLocalMenu`, a paint state without
+`CharWidth`, the `PrivateUsge` typo of the older `Winapi.PsAPI`, and the
+async code-insight manager behind `{$IF Declared(...)}`. None of it is
+tested here - no Delphi 11 or 12 is installed - and none of it can affect a
+Delphi 13 build: for the five units whose only change is such a branch, the
+text the 37.0 compiler reads is byte-for-byte what it read before
+(measured with a preprocessor that evaluates exactly those directives).
+
+### One Undo step per file after a rename
+
+A rename used to write one editor operation per occurrence, so taking a
+30-occurrence rename back needed 30 times Ctrl+Z. The token edits of one
+file go through a single undoable writer now, validated as a batch against
+one snapshot of the buffer before anything is written - so a file is
+renamed completely or not at all, and one Undo takes it back.
+
+### Tests
+
+Two fixtures built their own input through `TEncoding.ANSI`, which means
+the fixture loses characters before the test runs on a Windows whose ANSI
+code page is not the one that was assumed - the bytes are explicit now.
+Two new cases for `DecodeVcsOutput` (a last line without a newline, and
+that the byte COUNT rather than the buffer capacity decides) pass as they
+are. And the two script sweeps of the hygiene tests DISCOVER the scripts
+instead of walking a list of five, which had left `Standalone\build.bat`
+out of both rules and would have left this round's new scripts out as well.
+
+### Not taken from the PR
+
+Its project-file changes: the package's `DCC_UnitSearchPath`, the dropped
+Win64x configuration group, the flipped `IMPLICITBUILDING` options and the
+standalone's own `.dproj`. The build needs none of them (every unit is
+referenced with its path), and a project file is the one place where a
+change nobody needs can quietly cost a platform.
+
+---
+
 ## 2.9.6 - 2026-10-29
 
 ### A parameter cannot be used in another unit (issue #54, Ian Branch)

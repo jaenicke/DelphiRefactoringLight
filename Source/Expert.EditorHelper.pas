@@ -22,8 +22,10 @@ type
   ///  as the default in this unit's initialization section. The
   ///  standalone executable installs a different implementation via
   ///  SetEditorImpl before any wizard runs.</summary>
-  TIDEEditorHelper = class(TInterfacedObject, IEditorHelper)
+  TIDEEditorHelper = class(TInterfacedObject, IEditorHelper, IEditorTokenEditBatch)
   public
+    function ApplyTokenEdits(const AFilePath: string;
+      const AEdits: TArray<TEditorTokenEdit>): Boolean;
     function GetCurrentContext: TEditorContext;
     function GetActiveFileName: string;
     function GetCaretLineCol(out ALine, ACol: Integer): Boolean;
@@ -142,7 +144,7 @@ type
 implementation
 
 uses
-  DesignEditors, Expert.PascalScanner;
+  DesignEditors, Expert.PascalScanner, System.Generics.Defaults;
 
 function TIDEEditorHelper.GetActiveFileName: string;
 var
@@ -330,6 +332,17 @@ begin
   Result := '';
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     Exit;
+
+  // In Delphi 11 the main project group need not occur in Modules[].
+  // Use the module service's authoritative group before enumerating modules.
+  ProjectGroup := ModuleServices.MainProjectGroup;
+  if ProjectGroup <> nil then
+  begin
+    Project := ProjectGroup.ActiveProject;
+    if Project <> nil then Exit(Project.FileName);
+  end;
+  Project := ModuleServices.GetActiveProject;
+  if Project <> nil then Exit(Project.FileName);
 
   // Aktives Projekt suchen
   for I := 0 to ModuleServices.ModuleCount - 1 do
@@ -684,6 +697,91 @@ begin
     Writer := nil; // Flush + Release
   end;
 
+  Result := True;
+end;
+
+function TIDEEditorHelper.ApplyTokenEdits(const AFilePath: string;
+  const AEdits: TArray<TEditorTokenEdit>): Boolean;
+type
+  TByteEdit = record
+    Offset, OldLength: Integer;
+    NewText: UTF8String;
+  end;
+var
+  Services: IOTAModuleServices;
+  Module: IOTAModule;
+  Source: IOTASourceEditor;
+  Buf: TBytes;
+  Count, Offset, Beyond, N, LastEnd: Integer;
+  Edits: TArray<TByteEdit>;
+  Writer: IOTAEditWriter;
+begin
+  RequireMainThread('ApplyTokenEdits');
+  Result := False;
+  if Length(AEdits) = 0 then Exit(True);
+  if not Supports(BorlandIDEServices, IOTAModuleServices, Services) then Exit;
+  Module := Services.FindModule(AFilePath);
+  if Module = nil then Module := OpenModuleSafe(Services, AFilePath);
+  Source := SourceEditorFor(Module, AFilePath);
+  if Source = nil then Exit;
+  Count := ReadWholeEditorBuffer(Source, Buf); // releases reader before writer
+  if Count < 0 then Exit;
+  SetLength(Edits, Length(AEdits));
+  N := 0;
+  // Validate the complete batch against one snapshot before changing anything.
+  for var Edit in AEdits do
+  begin
+    if (Edit.Line < 0) or (Edit.Column < 0) or (Edit.OldText = '') then Exit;
+    if not BufferOffsetOf(Buf, Count, Edit.Line, Edit.Column, Offset, Beyond)
+      or (Beyond <> 0) then Exit;
+    if not Utf8BufferHoldsAt(Buf, Count, Offset, Edit.OldText, True) then
+    begin
+      if (Edit.NewText <> '') and
+        Utf8BufferHoldsAt(Buf, Count, Offset, Edit.NewText, True) then Continue;
+      Exit;
+    end;
+    Edits[N].Offset := Offset;
+    Edits[N].OldLength := Length(UTF8Encode(Edit.OldText));
+    Edits[N].NewText := UTF8Encode(Edit.NewText);
+    Inc(N);
+  end;
+  SetLength(Edits, N);
+  if N = 0 then Exit(True);
+  // IOTAEditWriter positions refer to the ORIGINAL buffer and may only advance.
+  TArray.Sort<TByteEdit>(Edits, TComparer<TByteEdit>.Construct(
+    function(const L, R: TByteEdit): Integer
+    begin
+      Result := L.Offset - R.Offset;
+    end));
+  LastEnd := -1;
+  for var I := 0 to High(Edits) do
+  begin
+    // The same position twice is the same occurrence, listed twice - the
+    // loop this replaces applied the first and saw the new text at the
+    // second. Only a real overlap refuses the file, and then NOTHING of
+    // it is written: half a rename does not compile either way.
+    if (I > 0) and (Edits[I].Offset = Edits[I - 1].Offset)
+      and (Edits[I].OldLength = Edits[I - 1].OldLength) then
+    begin
+      Edits[I].OldLength := -1;
+      Continue;
+    end;
+    if Edits[I].Offset < LastEnd then Exit;
+    LastEnd := Edits[I].Offset + Edits[I].OldLength;
+  end;
+  Writer := Source.CreateUndoableWriter;
+  if Writer = nil then Exit;
+  try
+    for var Edit in Edits do
+    begin
+      if Edit.OldLength < 0 then Continue;   // the duplicate dropped above
+      Writer.CopyTo(Edit.Offset);
+      Writer.DeleteTo(Edit.Offset + Edit.OldLength);
+      Writer.Insert(PAnsiChar(Edit.NewText));
+    end;
+  finally
+    Writer := nil;
+  end;
   Result := True;
 end;
 
@@ -1169,6 +1267,42 @@ begin
   end;
 end;
 
+{$IF CompilerVersion < 36.0}
+// Delphi 11 has only the byte-oriented writer API. Release the reader
+// before opening an undoable writer, and keep the original line ending.
+function EditLineCompat(const AEditor: IOTASourceEditor; ALine: Integer;
+  const AContent: string; ADelete: Boolean): Boolean;
+var
+  Buf: TBytes;
+  Count, StartPos, EndPos, Beyond: Integer;
+  Writer: IOTAEditWriter;
+begin
+  Result := False;
+  if ALine < 1 then Exit;
+  Count := ReadWholeEditorBuffer(AEditor, Buf);
+  if Count < 0 then Exit;
+  if not BufferOffsetOf(Buf, Count, ALine - 1, 0, StartPos, Beyond) then Exit;
+  EndPos := StartPos;
+  while (EndPos < Count) and (Buf[EndPos] <> 13) and (Buf[EndPos] <> 10) do
+    Inc(EndPos);
+  if ADelete then
+  begin
+    if (EndPos < Count) and (Buf[EndPos] = 13) then Inc(EndPos);
+    if (EndPos < Count) and (Buf[EndPos] = 10) then Inc(EndPos);
+  end;
+  Writer := AEditor.CreateUndoableWriter;
+  if Writer = nil then Exit;
+  try
+    Writer.CopyTo(StartPos);
+    Writer.DeleteTo(EndPos);
+    if not ADelete then Writer.Insert(PAnsiChar(UTF8Encode(AContent)));
+  finally
+    Writer := nil;
+  end;
+  Result := True;
+end;
+{$ENDIF}
+
 function TIDEEditorHelper.ReplaceLineAt(const AFilePath: string;
   ALine: Integer; const ANewContent: string): Boolean;
 var
@@ -1198,6 +1332,9 @@ begin
     end;
   if SourceEditor = nil then Exit;
 
+{$IF CompilerVersion < 36.0}
+  Exit(EditLineCompat(SourceEditor, ALine, ANewContent, False));
+{$ELSE}
   Writer := SourceEditor.CreateUndoableWriter;
   if Writer = nil then Exit;
   try
@@ -1206,6 +1343,7 @@ begin
     Writer := nil;
   end;
   Result := True;
+{$ENDIF}
 end;
 
 function TIDEEditorHelper.DeleteLineAt(const AFilePath: string;
@@ -1237,6 +1375,9 @@ begin
     end;
   if SourceEditor = nil then Exit;
 
+{$IF CompilerVersion < 36.0}
+  Exit(EditLineCompat(SourceEditor, ALine, '', True));
+{$ELSE}
   Writer := SourceEditor.CreateUndoableWriter;
   if Writer = nil then Exit;
   try
@@ -1245,6 +1386,7 @@ begin
     Writer := nil;
   end;
   Result := True;
+{$ENDIF}
 end;
 
 function TIDEEditorHelper.ReadEditorContent(const AFilePath: string;
@@ -1388,13 +1530,20 @@ begin
       Exit(nil);
 
     // Aktives Projekt finden
-    Project := nil;
-    for I := 0 to ModuleServices.ModuleCount - 1 do
-    begin
-      if Supports(ModuleServices.Modules[I], IOTAProjectGroup, ProjectGroup) then
-      begin
+    Project := ModuleServices.GetActiveProject;
+    ProjectGroup := ModuleServices.MainProjectGroup;
+    if ProjectGroup <> nil then
+      if ProjectGroup.ActiveProject <> nil then
         Project := ProjectGroup.ActiveProject;
-        Break;
+    if Project = nil then
+    begin
+      for I := 0 to ModuleServices.ModuleCount - 1 do
+      begin
+        if Supports(ModuleServices.Modules[I], IOTAProjectGroup, ProjectGroup) then
+        begin
+          Project := ProjectGroup.ActiveProject;
+          Break;
+        end;
       end;
     end;
 

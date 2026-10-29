@@ -89,7 +89,11 @@ begin
     if (Canvas = nil) or (Context.LineState = nil) or (Context.EditorState = nil) then Exit;
 
     CodeRect := Context.LineState.CodeRect;
+{$IF CompilerVersion < 36.0}
+    CharW := Max(1, Context.Canvas.TextWidth('M'));
+{$ELSE}
     CharW := Max(1, Context.EditorState.CharWidth);
+{$ENDIF}
     LeftCol := Max(1, Context.EditorState.LeftColumn);
     Y := CodeRect.Bottom - 2;
 

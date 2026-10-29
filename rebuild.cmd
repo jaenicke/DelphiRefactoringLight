@@ -6,7 +6,17 @@ setlocal
 :: Builds delinst.exe (DIH), then builds the package without modifying the IDE
 :: ============================================================================
 
-set BDSVER=37.0
+:: The Delphi version to install into, named as its registry branch is
+:: (Delphi 13 = 37.0, Delphi 12 = 23.0, Delphi 11 = 22.0). The _D11 /
+:: _D12 scripts beside this one pass theirs and change nothing else;
+:: without an argument it stays Delphi 13.
+set BDSVER=%~1
+if not defined BDSVER set BDSVER=37.0
+:: Which IDEs get a BPL. Delphi 12 was the first with a 64-bit IDE
+:: (bin64ds.exe) and its own " x64" registry branch, so Delphi 11
+:: is Win32 alone - its wrapper passes that.
+set PLATFORMS=%~2
+if not defined PLATFORMS set PLATFORMS=Win32,Win64
 set DELINST=%~dp0delinst.exe
 set DIHCONFIG=%~dp0DelphiRefactoringLight.xml
 set USEBDS=
@@ -24,7 +34,7 @@ echo  Delphi Refactoring Light - Build Only (BDS %BDSVER%)
 echo ============================================
 echo.
 
-"%DELINST%" %BDSVER% -config "%DIHCONFIG%" -platforms Win32,Win64 -configs Release -entries DelphiRefactoringLight -action build -verbose log %USEBDS%
+"%DELINST%" %BDSVER% -config "%DIHCONFIG%" -platforms %PLATFORMS% -configs Release -entries DelphiRefactoringLight -action build -verbose log %USEBDS%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

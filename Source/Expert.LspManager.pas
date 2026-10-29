@@ -221,7 +221,14 @@ var
   {$ENDIF}
   BaseKey, RootDir, Candidate: string;
 begin
-  // 1. Get the registry base-key via ToolsAPI (e.g. "Software\Embarcadero\BDS\37.0")
+  {$IFDEF STANDALONE_BUILD}
+  // 1. The path is explicitly specified via an environment variable
+  Candidate := GetEnvironmentVariable('delphilsp_path');
+  if not Candidate.IsEmpty and FileExists(Candidate) then
+    Exit(Candidate);
+  {$ENDIF}
+
+  // 2. Get the registry base-key via ToolsAPI (e.g. "Software\Embarcadero\BDS\37.0")
   BaseKey := '';
   {$IFNDEF STANDALONE_BUILD}
   if Supports(BorlandIDEServices, IOTAServices, Services) then
@@ -232,14 +239,18 @@ begin
   end;
   {$ENDIF}
 
-  // 1a. If ToolsAPI gives no key (or this is the standalone build), try a
+  // 2a. If ToolsAPI gives no key (or this is the standalone build), try a
   //     sensible registry probe (descending so newer BDS versions win).
   if BaseKey = '' then
   begin
     for var Ver in TArray<string>.Create('37.0', '23.0', '22.0', '21.0', '20.0') do
     begin
       RootDir := ReadBdsRootDirFromRegistry('Software\Embarcadero\BDS\' + Ver);
-      if RootDir <> '' then Break;
+      if not DirectoryExists(RootDir) then
+        RootDir := '';
+
+      if (RootDir <> '') then
+        Break;
     end;
   end
   else
@@ -253,7 +264,7 @@ begin
   end;
 
   {$IFNDEF STANDALONE_BUILD}
-  // 2. Ask ToolsAPI directly.
+  // 3. Ask ToolsAPI directly.
   if Supports(BorlandIDEServices, IOTAServices, Services) then
   try
     RootDir := Services.GetRootDirectory;

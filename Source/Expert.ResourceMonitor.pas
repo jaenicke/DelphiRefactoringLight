@@ -130,7 +130,12 @@ begin
   FillChar(C, SizeOf(C), 0);
   C.cb := SizeOf(C);
   if GetProcessMemoryInfo(GetCurrentProcess, @C, SizeOf(C)) then
+{$IF CompilerVersion < 36.0}
+    // Older Winapi.PsAPI headers misspell the Windows PrivateUsage field.
+    Result := Integer(C.PrivateUsge div (1024 * 1024))
+{$ELSE}
     Result := Integer(C.PrivateUsage div (1024 * 1024))
+{$ENDIF}
   else
     Result := -1;
 end;

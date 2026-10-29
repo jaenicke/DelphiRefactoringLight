@@ -13,8 +13,8 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.Types, System.UITypes, System.Math, System.Generics.Collections,
   Vcl.Forms, Vcl.Dialogs, {$IFNDEF STANDALONE_BUILD}ToolsAPI,{$ENDIF}  Expert.EditorHelperIntf, Expert.FindReferencesDialog, Expert.LspManager, Lsp.Uri, Lsp.Protocol,
   Lsp.Client, Delphi.FileEncoding, Expert.ScopeFiles, Expert.UnitIndex,
-  Expert.IncludeExpansion, Expert.InterfaceLinks, Expert.ImplementationFinder,
-  System.StrUtils, Expert.Version;
+  Expert.IncludeExpansion, Expert.InterfaceLinks, Expert.ImplementationFinder, Expert.Version,
+  System.StrUtils;
 
 type
   TLspFindReferencesWizard = class{$IFNDEF STANDALONE_BUILD}(TNotifierObject, IOTAWizard, IOTAMenuWizard){$ENDIF}

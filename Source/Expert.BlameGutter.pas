@@ -496,7 +496,12 @@ begin
     if (Canvas = nil) or (Context.LineState = nil) or (Context.EditorState = nil) then
       Exit;
     CodeRect := Context.LineState.CodeRect;
+{$IF CompilerVersion < 36.0}
+    // Delphi 11's paint state has no CharWidth; use the editor canvas font.
+    CharW := Max(1, Canvas.TextWidth('M'));
+{$ELSE}
     CharW := Max(1, Context.EditorState.CharWidth);
+{$ENDIF}
 
     // Three columns of air after the code, so the annotation cannot be
     // mistaken for part of the line.

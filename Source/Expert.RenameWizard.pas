@@ -441,6 +441,24 @@ begin
               Result := R.Range.Start.Character - L.Range.Start.Character;
           end));
 
+      var Batch: IEditorTokenEditBatch;
+      if Supports(Editor, IEditorTokenEditBatch, Batch) then
+      begin
+        var TokenEdits: TArray<TEditorTokenEdit>;
+        SetLength(TokenEdits, Length(SortedEdits));
+        for var J := 0 to High(SortedEdits) do
+        begin
+          TokenEdits[J].Line := SortedEdits[J].Range.Start.Line;
+          TokenEdits[J].Column := SortedEdits[J].Range.Start.Character;
+          TokenEdits[J].OldText := FContext.WordAtCursor;
+          TokenEdits[J].NewText := SortedEdits[J].NewText;
+        end;
+        if Batch.ApplyTokenEdits(FE.FilePath, TokenEdits) then
+          Inc(AppliedCount, Length(TokenEdits))
+        else
+          Inc(FailedCount, Length(TokenEdits));
+      end
+      else
       for var Edit in SortedEdits do
       begin
         if Editor.ApplyEditViaEditor(FE.FilePath, Edit.Range.Start.Line, Edit.Range.Start.Character,

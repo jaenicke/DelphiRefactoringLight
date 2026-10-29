@@ -91,6 +91,8 @@ type
     [Test] procedure LspUri_DrivePathWithUmlautRoundTrips;
     [Test] procedure BackupPath_MirrorsTheFullPath;
     [Test] procedure VcsOutput_MixedUtf8AndAnsiLines;
+    [Test] procedure VcsOutput_MixedUtf8AndAnsiLastLine;
+    [Test] procedure VcsOutput_Utf8RespectsByteCount;
     [Test] procedure WorkerLatch_WaitsAndRefusesAfterShutdown;
     /// <summary>Audit #38, L1g: the worker COUNT drops in the closure's
     ///  finally - before the closure epilogue releases what it captured and
@@ -864,6 +866,13 @@ type
     ///  do not reach, so the build still died with MSB3191 on folders it
     ///  never writes to. The ROOT has to move with them.</summary>
     [Test] procedure TheBuildIsToldWhereItMayCreateDirectories;
+    /// <summary>What a config may name as the built BPL. {$LIBSUFFIX AUTO}
+    ///  appends the PRODUCT suffix, and only Delphi 13 has it equal to its
+    ///  registry version ("37.0" -> 370): Delphi 11 registers as 22.0 with
+    ///  280, Delphi 12 as 23.0 with 290. So the suffix is read from the
+    ///  installation, or installing into either of them would register a
+    ///  file name that does not exist.</summary>
+    [Test] procedure TheLibSuffixComesFromTheInstallation;
     /// <summary>Installing over a file somebody is RUNNING. Windows
     ///  refuses to overwrite such a file but allows renaming it, and an
     ///  installer that does not know this reports success without
@@ -1293,15 +1302,46 @@ end;
 
 procedure TMiscRegressionTests.VcsOutput_MixedUtf8AndAnsiLines;
 var
-  All: TBytes;
+  All, AnsiLine: TBytes;
 begin
-  // a diff reproduces the BYTES of the files - a cp1252 source inside UTF-8
-  // git output raised EEncodingError
+  // A diff reproduces source BYTES. Do not encode German text through ANSI:
+  // on a cp1251 Windows installation that loses characters before the test.
+  // These bytes are invalid UTF-8; their ANSI meaning depends on Windows.
+  AnsiLine := TBytes.Create($2B, $20, $20, $47, $72, $F6, $DF, $65,
+    $20, $3A, $3D, $20, $31, $3B, $0A);
   All := TEncoding.UTF8.GetBytes('Author: J' + #$00E4 + 'nicke' + #10) +
-    TEncoding.ANSI.GetBytes('+  Gr' + #$00F6 + #$00DF + 'e := 1;' + #10) +
+    AnsiLine +
     TEncoding.UTF8.GetBytes('@@ ' + #$00FC + ' @@');
-  Assert.AreEqual('Author: J' + #$00E4 + 'nicke' + #10 + '+  Gr' + #$00F6 + #$00DF +
-    'e := 1;' + #10 + '@@ ' + #$00FC + ' @@', DecodeVcsOutput(All, Length(All)));
+  Assert.AreEqual('Author: J' + #$00E4 + 'nicke' + #10 +
+    TEncoding.ANSI.GetString(AnsiLine) + '@@ ' + #$00FC + ' @@',
+    DecodeVcsOutput(All, Length(All)));
+end;
+
+procedure TMiscRegressionTests.VcsOutput_MixedUtf8AndAnsiLastLine;
+var
+  All, AnsiLine: TBytes;
+  Header: string;
+begin
+  Header := 'Author: ' + #$0410 + #$043B + #$0435 + #$043A + #$0441 + #13#10;
+  AnsiLine := TBytes.Create($2B, $20, $E0, $FF); // no final newline
+  All := TEncoding.UTF8.GetBytes(Header) + AnsiLine;
+  Assert.AreEqual(Header + TEncoding.ANSI.GetString(AnsiLine),
+    DecodeVcsOutput(All, Length(All)));
+end;
+
+procedure TMiscRegressionTests.VcsOutput_Utf8RespectsByteCount;
+var
+  All: TBytes;
+  Text: string;
+  Count: Integer;
+begin
+  Text := #$041F + #$0440 + #$0438 + #$0432 + #$0435 + #$0442 +
+    ' ' + #$D83D + #$DE80 + #13#10;
+  All := TEncoding.UTF8.GetBytes(Text);
+  Count := Length(All);
+  All := All + TBytes.Create($FF, $FE); // unread buffer capacity is not output
+  Assert.AreEqual(Text, DecodeVcsOutput(All, Count));
+  Assert.AreEqual('', DecodeVcsOutput(All, 0));
 end;
 
 procedure TMiscRegressionTests.WorkerLatch_WaitsAndRefusesAfterShutdown;
@@ -1973,7 +2013,7 @@ begin
     for var N in ['Unit1.pas', 'Unit2.pas', 'Demo.dpr', 'Main.dfm'] do
       TFile.WriteAllText(TPath.Combine(Dir, N), 'unit ' + N + ';');
     TFile.WriteAllText(TPath.Combine(Far, 'Hidden.pas'), 'unit Hidden;');
-    var Sources := [TPath.Combine(Dir, 'Unit1.pas'), TPath.Combine(Dir, 'Unit2.pas'),
+    var Sources: TArray<string> := [TPath.Combine(Dir, 'Unit1.pas'), TPath.Combine(Dir, 'Unit2.pas'),
                     TPath.Combine(Dir, 'Demo.dpr'), TPath.Combine(Dir, 'Main.dfm'),
                     TPath.Combine(Far, 'Hidden.pas')];
     // Unit1 + Hidden built, Unit2 not - and a .dcu of a unit the project
@@ -7606,6 +7646,7 @@ procedure TFileEncodingCheckTests.NoCheckRewritesTheInstallation;
 var
   Root, Own, Shipped: string;
   Reader: TEncodingReader;
+  LineReader: TLineEndingReader;
 begin
   // The two files of the reported shape: one of the project, one under
   // the RAD Studio root the user had open in the editor.
@@ -7614,10 +7655,12 @@ begin
   // A non-ASCII character, or the bytes are pure ASCII and the file is
   // not an ANSI finding at all - the first run of this test said so.
   Own := WriteRawEnc('Own.pas',
-    TEncoding.ANSI.GetBytes('unit Own; // Gr' + #$00F6 + 'sse'#13#10));
+    TEncoding.ASCII.GetBytes('unit Own; // Gr') + TBytes.Create($F6) +
+    TEncoding.ASCII.GetBytes('sse'#13#10));
   Shipped := TPath.Combine(Root, 'source\IdHTTP.pas');
   TFile.WriteAllBytes(Shipped,
-    TEncoding.ANSI.GetBytes('unit IdHTTP; // Gr' + #$00F6 + 'sse'#13#10));
+    TEncoding.ASCII.GetBytes('unit IdHTTP; // Gr') + TBytes.Create($F6) +
+    TEncoding.ASCII.GetBytes('sse'#13#10));
 
   Reader :=
     function(const AFile: string; out ABytes: TBytes): Boolean
@@ -7641,14 +7684,19 @@ begin
     'and the project''s own file still is');
 
   // The same gate, same rule, for the line-ending check.
+  LineReader :=
+    function(const AFile: string; out ABytes: TBytes): Boolean
+    begin
+      Result := Reader(AFile, ABytes);
+    end;
   var Ends := CollectLineEndingIssues(
     [WriteRawEnc('Lf.pas', TEncoding.UTF8.GetBytes('unit Lf;'#10)),
-     TPath.Combine(Root, 'source\Lf2.pas')], Reader, nil, Root);
+     TPath.Combine(Root, 'source\Lf2.pas')], LineReader, nil, Root);
   TFile.WriteAllBytes(TPath.Combine(Root, 'source\Lf2.pas'),
     TEncoding.UTF8.GetBytes('unit Lf2;'#10));
   Ends := CollectLineEndingIssues(
     [TPath.Combine(FDir, 'Lf.pas'), TPath.Combine(Root, 'source\Lf2.pas')],
-    Reader, nil, Root);
+    LineReader, nil, Root);
   Assert.AreEqual(1, Integer(Length(Ends)),
     'the line-ending check applies the same rule');
   Assert.IsFalse(Ends[0].FileName.Contains('Studio'),
@@ -7706,7 +7754,7 @@ begin
     H := CreateFile(PChar(Target), GENERIC_READ,
       FILE_SHARE_READ or FILE_SHARE_DELETE, nil, OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL, 0);
-    Assert.AreNotEqual(INVALID_HANDLE_VALUE, H, 'the probe must hold the file');
+    Assert.IsTrue(H <> INVALID_HANDLE_VALUE, 'the probe must hold the file');
     try
       // The plain copy has to fail, or the test proves nothing.
       Failed := False;
@@ -7818,6 +7866,57 @@ begin
   Assert.IsTrue(Cmd.Contains('/p:DCC_BplOutput="C:\o\bpl"'),
     'and the outputs still say where the artefacts really go');
   Assert.IsTrue(Cmd.EndsWith('/v:d'), 'extra parameters stay at the end');
+end;
+
+procedure TInstallOutputRootTests.TheLibSuffixComesFromTheInstallation;
+
+  function FakeIde(const AVer, ARtl: string): string;
+  begin
+    Result := TPath.Combine(TPath.GetTempPath,
+      'rl-libsuffix-' + AVer + '-' + ARtl);
+    TDirectory.CreateDirectory(TPath.Combine(Result, 'bin'));
+    if ARtl <> '' then
+      TFile.WriteAllText(TPath.Combine(Result, 'bin\rtl' + ARtl + '.bpl'), 'x');
+  end;
+
+var
+  Dirs: TArray<string>;
+begin
+  try
+    // Delphi 11 and 12: the installation says 280 / 290 while the registry
+    // branch says 22.0 / 23.0 - the version is exactly what must NOT decide.
+    Dirs := Dirs + [FakeIde('22.0', '280')];
+    Assert.AreEqual('280', ProductLibSuffix(Dirs[0], '22.0'),
+      'Delphi 11 registers as 22.0 and its packages carry 280');
+    Dirs := Dirs + [FakeIde('23.0', '290')];
+    Assert.AreEqual('290', ProductLibSuffix(Dirs[1], '23.0'),
+      'Delphi 12 registers as 23.0 and its packages carry 290');
+
+    // No installation to read: the version without its dot, which is what
+    // this answered before and what Delphi 13 needs - so nothing moves.
+    Dirs := Dirs + [FakeIde('37.0', '')];
+    Assert.AreEqual('370', ProductLibSuffix(Dirs[2], '37.0'),
+      'the fallback is the old rule');
+    Assert.AreEqual('220', ProductLibSuffix('', '22.0'),
+      'and it is also what an unknown root answers');
+
+    // A name that is not rtl<digits>.bpl decides nothing.
+    Dirs := Dirs + [FakeIde('x', 'proxy')];
+    Assert.AreEqual('370', ProductLibSuffix(Dirs[3], '37.0'),
+      'rtlproxy.bpl is no product suffix');
+
+    // And the REAL installation this runs on: Delphi 13 ships rtl370.bpl,
+    // so the measured answer and the fallback agree here. That agreement
+    // is the whole reason a D13 install cannot change behaviour.
+    var Root := FindBdsRoot;
+    if Root <> '' then
+      Assert.AreEqual(StringReplace(ExtractFileName(ExcludeTrailingPathDelimiter(Root)),
+        '.', '', [rfReplaceAll]), ProductLibSuffix(Root, '37.0'),
+        'the installed IDE: its own rtl*.bpl and its version agree');
+  finally
+    for var D in Dirs do
+      if TDirectory.Exists(D) then TDirectory.Delete(D, True);
+  end;
 end;
 
 procedure TInstallOutputRootTests.ABuildNeverWritesWhereItMayNot;

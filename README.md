@@ -1,8 +1,8 @@
 ﻿# Delphi Refactoring Light
 
-**Version 2.9.6** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 2.10.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
-A design-time package for **Delphi 13** that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
+A design-time package for **Delphi 13** (and, through contributed compatibility code, **Delphi 11 and 12** - see Requirements) that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
 | Shortcut               | Feature                                                                                                                                              |
 |------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -491,7 +491,8 @@ The same wizards also ship as a self-contained Windows `.exe` that runs without 
 
 ## Requirements
 
-- **Delphi 13** (BDS 37.0) &mdash; tested with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
+- **Delphi 13** (BDS 37.0) &mdash; what this is developed and tested on, with the bundled `DelphiLSP.exe`. The LSP executable path is read from the registry (`HKCU\Software\Embarcadero\BDS\<version>\RootDir`) with a fallback via `IOTAServices.GetRootDirectory`, so the package works with any standard RAD Studio installation path.
+- **Delphi 11 (BDS 22.0) and 12 (BDS 23.0)**: the compatibility code for them was contributed in PR #55 and is NOT tested here - no such IDE is installed on the development machine. It is compiled out on Delphi 13 (`{$IF CompilerVersion < 36.0}`), so it cannot affect a Delphi 13 build; what it does on 11 and 12 is what their users report. Delphi 11 has no `INTAEditorLocalMenu`, so the editor menu takes the older popup-hook path there.
 - One `*.delphilsp.json` per project next to the `.dpr`/`.dpk` (see `DelphiRefactoringLight.delphilsp.json` for an example). The package hands this file to the LSP via `workspace/didChangeConfiguration`.
 
 ## Installation
@@ -507,6 +508,34 @@ The script:
 2. reads `DelphiRefactoringLight.xml`,
 3. builds `Packages\DelphiRefactoringLight.dproj` **for both IDEs** (Win32 and Win64, Release), and
 4. registers each BPL in the matching registry branch.
+
+### Another Delphi version
+
+`install.cmd` takes the version as its argument, named the way its registry
+branch is - without one it stays Delphi 13:
+
+```cmd
+install_D12.cmd      :: = install.cmd 23.0
+install_D11.cmd      :: = install.cmd 22.0
+```
+
+Those two do nothing but pass the version, so there is one install to keep
+working; `uninstall_D11/D12.cmd` and `rebuild_D11/D12.cmd` are the same for
+the other two actions. The BPL name a registration points at comes from the
+TARGET installation (the suffix of the `rtl*.bpl` the IDE ships, which is
+what `{$LIBSUFFIX AUTO}` appends), so it is right for a version whose
+registry number and package suffix differ.
+
+`Standalone\build.bat [config] [version] [directory]` follows the same rule
+for the standalone executable.
+
+### One Undo step per file after a rename
+
+Rename applies all token changes of one source file through a single
+undoable writer, so one **Edit > Undo** takes that file's whole rename back;
+each file has its own Undo history. A file that only an MCP call had to open
+may be saved and closed by the bridge - the answer to `rename_apply` says
+which files that was.
 
 ### 32-bit and 64-bit IDE
 

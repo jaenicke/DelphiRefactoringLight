@@ -1286,7 +1286,8 @@ const
     '{"name":"find_original_symbol","description":"Where the identifier at a position is ' +
     'DECLARED - DelphiLSP first, then the type of its qualifier, then the identifier index. ' +
     'Answers in cases lsp_definition does not: a private/public overload pair (Delphi 13.1 ' +
-    'RSS-5463) or a symbol whose DECLARING unit the session has not analysed - only the unit you ask about is sent to DelphiLSP, so a declaration elsewhere can stay invisible to it while the identifier index knows it. Read-only.","inputSchema":{"type":"object",' +
+    'RSS-5463) or a symbol whose DECLARING unit the session has not analysed - only the unit you ask about is sent to DelphiLSP, so a declaration elsewhere can stay invisible to it while the identifier index knows it. Read-on' +
+    'ly.","inputSchema":{"type":"object",' +
     '"properties":{"file":{"type":"string","description":"Absolute path of the unit."},"line":{"type":"integer","description":' +
     '"1-based."},"column":{"type":"integer","description":"1-based. Characters of the line as stored - a tab counts as ONE, not as its width on screen."},' + InstanceProp +
     '},"required":["file","line","column"]}}' +
@@ -1375,7 +1376,11 @@ const
     'previous call - the declarations that get a new GUID. Required for apply."},' +
     ApplyIdsProp + ',' + InstanceProp + '}}}' +
     ',' +
-    '{"name":"declare_constant","description":"Declares a number or a string literal as a const or a resourcestring and puts the name in its place. Pass literal (or column + end_column) to replace something that is there, or neither plus value to define one from scratch - the line is then only the anchor that says which routine or class local and class mean. The value must be a literal or an expression of literals; a name in it is refused, because it need not be in scope where the declaration goes."' + ',"inputSchema":{"type":"object","properties":' +
+    '{"name":"declare_constant","description":"Declares a number or a string literal as a const or a resourcestring and'+
+    ' puts the name in its place. Pass literal (or column + end_column) to replace something that is there, or neither plus '+
+    'value to define one from scratch - the line is then only the anchor that says which routine or class local and class mean. '+
+    'The value must be a literal or an expression of literals; a name in it is refused, because it need not be in scope where the declaration goes."' +
+    ',"inputSchema":{"type":"object","properties":' +
     '{"file":{"type":"string","description":"The unit."},' +
     '"line":{"type":"integer","description":"1-based line of the literal, or of the caret."},' +
     '"literal":{"type":"string","description":"The literal to replace, located on that line as code."},' +
@@ -1389,14 +1394,21 @@ const
     '"replace_all":{"type":"boolean","description":"Also replace the other occurrences of the literal - the routine for local, the unit otherwise. Ignored without a literal."},' +
     ApplyTokenProp + ',' + TokenProp + ',' + InstanceProp + '},"required":["file","line"]}}' +
     ',' +
-    '{"name":"file_encoding","description":"Project sources whose ENCODING is not the one you want, and the conversion for them. The default pair is the one that fixes a real defect: a unit that is valid UTF-8 but carries NO BOM is read by the compiler as ANSI, so every non-ASCII character in it silently becomes two (measured). Pure ASCII is never a finding unless you ask for it - its bytes are the same in every encoding - and form files and anything binary are never touched. Every finding carries an id; apply=true with fix_ids rewrites exactly those files, keeping every character."' + ',"inputSchema":{"type":"object","properties":' +
+    '{"name":"file_encoding","description":"Project sources whose ENCODING is not the one you want,'+
+    ' and the conversion for them. The default pair is the one that fixes a real defect: a unit that is valid UTF-8 '+
+    'but carries NO BOM is read by the compiler as ANSI, so every non-ASCII character in it silently becomes two (measured). '+
+    'Pure ASCII is never a finding unless you ask for it - its bytes are the same in every encoding - and form files and anything binary are never touched. '+
+    'Every finding carries an id; apply=true with fix_ids rewrites exactly those files, keeping every character."' + ',"inputSchema":{"type":"object","properties":' +
     '{"from":{"type":"array","items":{"type":"string"},"description":"Which encodings to convert: ansi, utf8_no_bom, ascii, utf16. Default: ansi + utf8_no_bom."},' +
     '"to":{"type":"string","description":"utf8_bom (default), utf8_no_bom or ansi. A file whose text the target cannot hold is refused, never written with replacement characters."},' +
     '"fix_ids":{"type":"array","items":{"type":"string"},"description":"Ids from a previous call - the files to convert. Required for apply."},' +
     '"max":{"type":"integer","description":"Most rows to return (default 200)."},' +
     ApplyIdsProp + ',' + InstanceProp + '}}}' +
     ',' +
-    '{"name":"unused_units","description":"Units the PROJECT FILE lists although nothing in the project names them any more - they still get compiled and still clutter the project tree. A unit counts as used when any other unit uses it (units on the search path included, not only project ones) or when the project body names one of its identifiers, which is how a form reached only through Application.CreateForm is used; the project''s own uses clause is its unit LIST and never counts. Two kinds: unused, and unused_with_init_code - the latter is a HINT, because such a unit is often in the project exactly to register itself. READ-ONLY: it never touches the project file. Only ONE layer is reported, since two unused units that use each other keep each other alive. Packages are refused - the units a package contains are what it exists for."' +
+    '{"name":"unused_units","description":"Units the PROJECT FILE lists although nothing in the project names them any more - they still get compiled and still clutter the project tree. A unit counts as used when any other un' +
+    'it uses it (units on the search path included, not only project ones) or when the project body names one of its identifiers, which is how a form reached only through Application.CreateForm is used; the project''s own uses' +
+    ' clause is its unit LIST and never counts. Two kinds: unused, and unused_with_init_code - the latter is a HINT, because such a unit is often in the project exactly to register itself. READ-ONLY: it never touches the proj' +
+    'ect file. Only ONE layer is reported, since two unused units that use each other keep each other alive. Packages are refused - the units a package contains are what it exists for."' +
     ',"inputSchema":{"type":"object","properties":' +
     '{"max":{"type":"integer","description":"Most rows to return (default 200). The counts are always complete."},' +
     InstanceProp + '}}}' +
@@ -1522,7 +1534,8 @@ const
     'el alone (an overload, a virtual / override / abstract / message member, a published one) ' +
     'is refused with the reason. Without members/target_class it only reports the class, its me' +
     'mbers with movability and the occurrences. A parameter list is changed by change_signature' +
-    ', which verifies and rewrites every call. It edits the ROUTINES a class declares - procedure, function, constructor, destructor. A field or a property is never listed and never moves, so a method that uses one leaves it behind; the answer names what stays.","inputSchema":{"type":"object","properties":{"f' +
+    ', which verifies and rewrites every call. It edits the ROUTINES a class declares - procedure, function, constructor, destructor. A field or a property is never listed and never moves, so a method that uses one leaves it ' +
+    'behind; the answer names what stays.","inputSchema":{"type":"object","properties":{"f' +
     'ile":{"type":"string","description":"Absolute path of the unit."},"line":{"type":"integer"' +
     ',"description":"1-based line inside the class, or on one of its members or method bodies."' +
     '},"column":{"type":"integer","description":"1-based column (optional; it only preselects t' +
@@ -1557,7 +1570,8 @@ const
     'ordinary file tool."' +
     ',"inputSchema":{"type":"object","properties":{"files":{"type":"array","items":{"type":"str' +
     'ing"},"description":"Units to process (default: all project units)."},"apply":{"type":"boo' +
-    'lean","description":"Replace (default false = report). There is no token and no earlier preview to carry over: every call re-runs the scan and the DelphiLSP verification, and apply only decides whether the result is written."},"include_unverified":{"type":"boo' +
+    'lean","description":"Replace (default false = report). There is no token and no earlier preview to carry over: every call re-runs the scan and the DelphiLSP verification, and apply only decides whether the result is writ' +
+    'ten."},"include_unverified":{"type":"boo' +
     'lean","description":"Also replace matches DelphiLSP gave no answer for (default false)."},' +
     '"max":{"type":"integer","description":"Max match rows in the result (default 100)."},"inst' +
     'ance":{"type":"integer","description":"Process id of the IDE to use. Normally omitted - th' +
@@ -1586,7 +1600,8 @@ const
     'es ON DISK - revert with version control. Pass file, files, directory (recursive, .pas/.dp' +
     'r/.dpk) or project=true. apply=false (the default) only reports what would be expanded.","' +
     'inputSchema":{"type":"object","properties":{"file":{"type":"st' +
-    'ring","description":"Absolute path of the unit."},"files":{"type":"array","items":{"type":"string"},"description":"Several units (absolute paths)."},"directory":{"type":"string","description":"Every .pas, .dpr and .dpk below this directory, recursively."},"p' +
+    'ring","description":"Absolute path of the unit."},"files":{"type":"array","items":{"type":"string"},"description":"Several units (absolute paths)."},"directory":{"type":"string","description":"Every .pas, .dpr and .dpk b' +
+    'elow this directory, recursively."},"p' +
     'roject":{"type":"boolean","description":"Every unit of the project (default false). Pass exactly one of file, files, directory or project."},' + ApplyFreshProp + ',' +
     '"instance":{"type":"integer","description":"Process id of the I' +
     'DE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}}}}' +
@@ -1600,7 +1615,8 @@ const
     ' buffer (not saved).","inputSchema":{"type":"object","properties":{"file":{"type":"string' +
     '","description":"Absolute path of the unit."},"from_line":{"type":"integer","description":"1-based."},"to_line":{"type":"integer","description":"Last line of the range (default: from_line)."},"d' +
     'irection":{"type":"string","enum":["to_accessors","to_fields"],"description":"to_accessors (default) or to_fields."},"getter":{"type":"boolean"' +
-    ',"description":"Create a getter (default true)."},"setter":{"type":"boolean","description":"Create a setter (default true)."},"apply":{"type":"boolean","description":"Default false: nothing is written and the answer shows the plan. true makes the change. There is no token: apply re-runs the plan on the file as it is now, in the same call."},"instance":{"type":"integer","des' +
+    ',"description":"Create a getter (default true)."},"setter":{"type":"boolean","description":"Create a setter (default true)."},"apply":{"type":"boolean","description":"Default false: nothing is written and the answer show' +
+    's the plan. true makes the change. There is no token: apply re-runs the plan on the file as it is now, in the same call."},"instance":{"type":"integer","des' +
     'cription":"Process id of the IDE to use. Normally omitted - the IDE is chosen automaticall' +
     'y (see ide_instances)."}},"required":["file","from_line"]}}' +
     ',' +
@@ -1622,7 +1638,8 @@ const
     'subdirectory of its own folder (never deletes it); run lsp_restart ' +
     'afterwards.","inputSchema":{"type":"object","properties"' +
     ':{"max":{"type":"integer","description":"Rows to list, 0 = all."},' +
-    '"fix_ids":{"type":"array","items":{"type":"string"},"description":"Ids from a previous call - the stale .dcu files to move aside. Only a finding the answer marks as fixable has that cure; for anything else the call says so and changes nothing. Required for apply."},' +
+    '"fix_ids":{"type":"array","items":{"type":"string"},"description":"Ids from a previous call - the stale .dcu files to move aside. Only a finding the answer marks as fixable has that cure; for anything else the call says ' +
+    'so and changes nothing. Required for apply."},' +
     ApplyIdsProp + ',"instance":{"type":"integer","description":"Process id of the IDE to use. Normally omitt' +
     'ed - the IDE is chosen automatically (see ide_instances)."}}}}' +
     ',' +
@@ -1648,7 +1665,8 @@ const
     '"file":{"type":"string","description":"Absolute path of the unit."},"line":{"type":"intege' +
     'r","description":"1-based line."},"column":{"type":"integer","description":"1-based column' +
     ' (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"new_name":{"type":"string","description":"The new name."},"scope":{"type":"string","en' +
-    'um":["project","unit","method"],"description":"How far the scan reaches: project (the default), unit or method. Anything else is read as project."},"include_open_units":{"type":"boolean","description":"Besides the project files, the units open in the editor (default: the setting on the options page)."},"include_used_uni' +
+    'um":["project","unit","method"],"description":"How far the scan reaches: project (the default), unit or method. Anything else is read as project."},"include_open_units":{"type":"boolean","description":"Besides the projec' +
+    't files, the units open in the editor (default: the setting on the options page)."},"include_used_uni' +
     'ts":{"type":"boolean","description":"Besides the project files, the units reachable through uses clauses (default: the setting on the options page)."},"instance":{"type":"integer","description":"Process id of the IDE t' +
     'o use. Normally omitted - the IDE is chosen automatically (see ide_instances)."}},"require' +
     'd":["file","line","column","new_name"]}}' +
@@ -1660,14 +1678,18 @@ const
     '"required":["token"]}}' +
     ',' +
     '{"name":"lsp_hover","description":"DelphiLSP hover text at a position (type / declaration ' +
-    'info). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","description"' +
+    'info). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP reso' +
+    'lve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","descri' +
+    'ption"' +
     ':"Absolute path of the unit."},"line":{"type":"integer","description":"1-based line."},"co' +
     'lumn":{"type":"integer","description":"1-based column (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"ins' +
     'tance":{"type":"integer","description":"Process id of the IDE to use. Normally omitted - t' +
     'he IDE is chosen automatically (see ide_instances)."}},"required":["file","line","column"]' +
     '}}' +
     ',' +
-    '{"name":"lsp_definition","description":"DelphiLSP go-to-definition for a position. The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","input' +
+    '{"name":"lsp_definition","description":"DelphiLSP go-to-definition for a position. The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and wa' +
+    'its for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.",' +
+    '"input' +
     'Schema":{"type":"object","properties":{"file":{"type":"string","description":"Absolute pat' +
     'h of the unit."},"line":{"type":"integer","description":"1-based line."},"column":{"type":' +
     '"integer","description":"1-based column (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"instance":{"type"' +
@@ -1675,14 +1697,18 @@ const
     'en automatically (see ide_instances)."}},"required":["file","line","column"]}}' +
     ',' +
     '{"name":"lsp_implementation","description":"DelphiLSP go-to-implementation for a position.' +
-    ' The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","description":"Abso' +
+    ' The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a ' +
+    'unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","description"' +
+    ':"Abso' +
     'lute path of the unit."},"line":{"type":"integer","description":"1-based line."},"column":' +
     '{"type":"integer","description":"1-based column (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"instance"' +
     ':{"type":"integer","description":"Process id of the IDE to use. Normally omitted - the IDE' +
     ' is chosen automatically (see ide_instances)."}},"required":["file","line","column"]}}' +
     ',' +
     '{"name":"lsp_references","description":"DelphiLSP textDocument/references for a position (' +
-    'when the server supports it). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type"' +
+    'when the server supports it). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do' +
+    ' is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{' +
+    '"type"' +
     ':"string","description":"Absolute path of the unit."},"line":{"type":"integer","descriptio' +
     'n":"1-based line."},"column":{"type":"integer","description":"1-based column (anywhere on ' +
     'the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"include_declaration":{"type":"boolean","description":"Include the declaration itself (default true)."},"instance":{"type":"integer","' +
@@ -1690,13 +1716,17 @@ const
     'ally (see ide_instances)."}},"required":["file","line","column"]}}' +
     ',' +
     '{"name":"lsp_document_symbols","description":"DelphiLSP document symbols of a unit (raw LS' +
-    'P JSON, 0-based ranges). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"str' +
+    'P JSON, 0-based ranges). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is m' +
+    'ake DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type' +
+    '":"str' +
     'ing","description":"Absolute path of the unit."},"instance":{"type":"integer","description' +
     '":"Process id of the IDE to use. Normally omitted - the IDE is chosen automatically (see i' +
     'de_instances)."}},"required":["file"]}}' +
     ',' +
     '{"name":"lsp_signature_help","description":"DelphiLSP signature help inside a call (raw LS' +
-    'P JSON). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","descriptio' +
+    'P JSON). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP re' +
+    'solve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","properties":{"file":{"type":"string","desc' +
+    'riptio' +
     'n":"Absolute path of the unit."},"line":{"type":"integer","description":"1-based line."},"' +
     'column":{"type":"integer","description":"1-based column (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"i' +
     'nstance":{"type":"integer","description":"Process id of the IDE to use. Normally omitted -' +
@@ -1704,7 +1734,9 @@ const
     '"]}}' +
     ',' +
     '{"name":"lsp_completion","description":"DelphiLSP completion items at a position (label, d' +
-    'etail, kind); prefix filters, max limits (default 100). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"object","p' +
+    'etail, kind); prefix filters, max limits (default 100). The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before' +
+    ' asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"type":"obje' +
+    'ct","p' +
     'roperties":{"file":{"type":"string","description":"Absolute path of the unit."},"line":{"t' +
     'ype":"integer","description":"1-based line."},"column":{"type":"integer","description":"1-' +
     'based column (anywhere on the identifier). Characters of the line as stored - a tab counts as ONE, not as its width on screen."},"prefix":{"type":"string","description":"Only items whose label starts with this (case-insensitive)."},"max":{"type":"int' +
@@ -1714,8 +1746,11 @@ const
     ',' +
     '{"name":"lsp_request","description":"Sends any request to the plugin''s DelphiLSP session a' +
     'nd returns the raw result (LSP conventions: 0-based positions, file URIs). \"file\" syncs ' +
-    'that document first. Lifecycle and document-sync methods are refused. The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its analysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema":{"typ' +
-    'e":"object","properties":{"method":{"type":"string","description":"The LSP method, e.g. textDocument/documentHighlight. Lifecycle, did* and $/ methods are refused."},"params":{"type":"object","description":"The params of the request as JSON - sent as they are."},"file":{"t' +
+    'that document first. Lifecycle and document-sync methods are refused. The unit you ASK ABOUT need not be OPEN in the IDE: this reads it (editor buffer first, else disk), sends that text to the session and waits for its a' +
+    'nalysis before asking. What it cannot do is make DelphiLSP resolve a unit its own compile does not reach - the answer is empty then, and find_original_symbol is the fallback that asks the identifier index.","inputSchema"' +
+    ':{"typ' +
+    'e":"object","properties":{"method":{"type":"string","description":"The LSP method, e.g. textDocument/documentHighlight. Lifecycle, did* and $/ methods are refused."},"params":{"type":"object","description":"The params of' +
+    ' the request as JSON - sent as they are."},"file":{"t' +
     'ype":"string","description":"Optional: sync this file''s current content before the request' +
     '."},"timeout_ms":{"type":"integer","description":"How long to wait for the answer (default 20000)."},"instance":{"type":"integer","description":"Process id' +
     ' of the IDE to use. Normally omitted - the IDE is chosen automatically (see ide_instances)' +

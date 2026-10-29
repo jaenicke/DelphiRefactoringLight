@@ -153,7 +153,9 @@ class function TIdeCodeInsight.GotoDefinition(const AFileName: string; ALine, AC
 var
   CIServices: IOTACodeInsightServices;
   CIManager: IOTACodeInsightManager;
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
   AsyncMgr290: IOTAAsyncCodeInsightManager290;
+{$ENDIF}
   AsyncMgr: IOTAAsyncCodeInsightManager;
   I: Integer;
 begin
@@ -168,30 +170,36 @@ begin
 
   // Find a suitable async manager
   AsyncMgr := nil;
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
   AsyncMgr290 := nil;
+{$ENDIF}
 
   CIServices.GetCurrentCodeInsightManager(CIManager);
   if CIManager <> nil then
   begin
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
     Supports(CIManager, IOTAAsyncCodeInsightManager290, AsyncMgr290);
     if AsyncMgr290 = nil then
+{$ENDIF}
       Supports(CIManager, IOTAAsyncCodeInsightManager, AsyncMgr);
   end;
 
   // Fallback: search all managers
-  if (AsyncMgr290 = nil) and (AsyncMgr = nil) then
+  if {$IF Declared(IOTAAsyncCodeInsightManager290)}(AsyncMgr290 = nil) and {$ENDIF}(AsyncMgr = nil) then
   begin
     for I := 0 to CIServices.CodeInsightManagerCount - 1 do
     begin
       CIManager := CIServices.CodeInsightManager[I];
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
       if Supports(CIManager, IOTAAsyncCodeInsightManager290, AsyncMgr290) then
         Break;
+{$ENDIF}
       if Supports(CIManager, IOTAAsyncCodeInsightManager, AsyncMgr) then
         Break;
     end;
   end;
 
-  if (AsyncMgr290 = nil) and (AsyncMgr = nil) then
+  if {$IF Declared(IOTAAsyncCodeInsightManager290)}(AsyncMgr290 = nil) and {$ENDIF}(AsyncMgr = nil) then
   begin
     Result.ErrorMessage := 'Kein AsyncCodeInsightManager gefunden';
     Exit;
@@ -204,9 +212,11 @@ begin
     FResult := Default(TDefinitionResult);
 
     // Start async call
+{$IF Declared(IOTAAsyncCodeInsightManager290)}
     if AsyncMgr290 <> nil then
       AsyncMgr290.AsyncGotoDefinitionEx(AFileName, ALine, ACol, GotoDefCallback)
     else
+{$ENDIF}
       AsyncMgr.AsyncGotoDefinition(AFileName, ALine, ACol, GotoDefCallbackLegacy);
 
     // Run the message pump until the callback arrives or timeout

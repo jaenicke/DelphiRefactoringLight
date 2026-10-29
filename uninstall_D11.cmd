@@ -1,6 +1,6 @@
 @echo off
 :: Delphi 11 Alexandria is BDS 22.0 in the registry. Everything this does is
-:: uninstall.cmd's - this passes the version and, because Delphi 11 has no
-:: 64-bit IDE, Win32 alone. There is one install to keep working.
-call "%~dp0uninstall.cmd" 22.0 Win32
+:: uninstall.cmd's - the version is the only difference, and which platforms
+:: that installation can take is read from the installation itself.
+call "%~dp0uninstall.cmd" 22.0
 exit /b %ERRORLEVEL%

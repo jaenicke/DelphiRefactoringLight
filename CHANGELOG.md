@@ -6,6 +6,31 @@ development builds and were never released.
 
 ---
 
+## 2.10.1 - 2026-10-29
+
+### Which platforms an install builds comes from the installation
+
+The Delphi 12 install failed because it tried to build a Win64 package.
+`install.cmd` decided that from the version number, on the claim that Delphi
+12 was the first with a 64-bit IDE - which was wrong, so Delphi 11 got
+`Win32` and everything newer got both.
+
+A design-time package is built for the IDE it is loaded INTO, so Win64 is
+only worth a round when that installation HAS a 64-bit IDE, and it is only
+possible when it also ships the Win64 `designide.dcp` the package requires -
+without it the Win64 round fails at the compiler. The new `platforms.cmd`
+probes both and answers per installation, so a Delphi 12 that ships them is
+served just as a Delphi 13 is, and one that does not is built for Win32
+alone with the reason printed. `install_D11.cmd` and its siblings pass their
+version and nothing else now; a second argument still pins the list by hand.
+
+### Also
+
+`install.cmd` carried a BACKSPACE character in a comment ("bin64<BS>ds.exe")
+- a backslash eaten by a shell heredoc while the script was written. Nothing
+shipped may carry such a byte, and a test now sweeps every script, source and
+.md file for them.
+
 ## 2.10.0 - 2026-10-29
 
 ### One install script per Delphi version (PR #55, alexeydott)

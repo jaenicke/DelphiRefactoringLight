@@ -136,6 +136,20 @@ type
     ///  than off the number of gates - counting gates stays green when a
     ///  fifth block is added.</summary>
     [Test] procedure EveryStepAfterTheBuildIsGated;
+    /// <summary>Which platforms a design-time package is built for is a
+    ///  property of the INSTALLATION, not of its version number: "Delphi
+    ///  12 was the first with a 64-bit IDE" was a remembered claim, it was
+    ///  wrong, and the Win64 round it caused is what broke the Delphi 12
+    ///  install (2.10.1). So platforms.cmd probes that installation, and
+    ///  no other script may answer the question from a version again.</summary>
+    [Test] procedure TheInstallPlatformsComeFromTheInstallation;
+    /// <summary>A python patch script sent through a bash heredoc loses
+    ///  its backslashes, and a backslash before b or v becomes a real
+    ///  BACKSPACE or vertical tab. That has damaged CLAUDE.md three times
+    ///  and, until 2.10.1, a SHIPPED script: install.cmd read
+    ///  "bin64<BS>ds.exe" where it meant bin64\bds.exe. Nothing a user
+    ///  reads may carry such a byte, and nothing but this notices.</summary>
+    [Test] procedure NoShippedFileCarriesAControlCharacter;
   end;
 
 implementation
@@ -957,6 +971,110 @@ begin
     // make it pass vacuously.
     Assert.IsTrue(Checked >= 8,
       Format('the sweep must find the queued call sites, found %d', [Checked]));
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    Offenders.Free;
+  end;
+end;
+
+procedure TRepoHygieneTests.TheInstallPlatformsComeFromTheInstallation;
+var
+  Offenders: TStringList;
+  Derivers: Integer;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository must be reachable from ' + ParamStr(0));
+  // platforms.cmd IS the one place that may name a platform list.
+  Assert.IsTrue(TFile.Exists(TPath.Combine(Root, 'platforms.cmd')),
+    'platforms.cmd is what derives the list - without it every script would ' +
+    'have to answer from the version again');
+  Offenders := TStringList.Create;
+  var SL := TStringList.Create;
+  try
+    Derivers := 0;
+    for var Rel in ScriptFiles do
+    begin
+      if SameText(Rel, 'platforms.cmd') then Continue;
+      // dih\builddih.cmd pins Platform=Win32 for delinst.exe itself, which is
+      // a console exe and a different question (1.23.3) - only the install
+      // scripts of the PACKAGE are judged here.
+      var Name := LowerCase(ExtractFileName(Rel));
+      var IsMain := (Name = 'install.cmd') or (Name = 'rebuild.cmd')
+        or (Name = 'uninstall.cmd');
+      var IsWrapper := Name.StartsWith('install_') or Name.StartsWith('rebuild_')
+        or Name.StartsWith('uninstall_');
+      if not (IsMain or IsWrapper) then Continue;
+      SL.Text := TEncoding.ANSI.GetString(TFile.ReadAllBytes(TPath.Combine(Root, Rel)));
+      var CallsDeriver := False;
+      for var I := 0 to SL.Count - 1 do
+      begin
+        var L := Trim(SL[I]);
+        if L.StartsWith('::') or L.StartsWith('rem ', True) then Continue;
+        if UpperCase(L).Contains('PLATFORMS.CMD') then CallsDeriver := True;
+        // A list of platforms spelled out in a script is the defect itself.
+        if L.Contains('Win32,Win64') or UpperCase(L).Contains('WIN32,WIN64') then
+          Offenders.Add(Format('%s(%d): %s - the list belongs in platforms.cmd, ' +
+            'which reads it off the installation', [Rel, I + 1, L]));
+        // And a wrapper that passes one hands its main script a platform its
+        // installation may not have.
+        if IsWrapper and UpperCase(L).StartsWith('CALL ')
+          and (UpperCase(L).Contains(' WIN32') or UpperCase(L).Contains(' WIN64')) then
+          Offenders.Add(Format('%s(%d): %s - a wrapper passes the version and ' +
+            'nothing else', [Rel, I + 1, L]));
+      end;
+      if IsMain then
+      begin
+        if CallsDeriver then Inc(Derivers)
+        else
+          Offenders.Add(Rel + ': calls platforms.cmd nowhere, so its platform ' +
+            'list cannot come from the installation');
+      end;
+    end;
+    Assert.AreEqual(3, Derivers,
+      'install, rebuild and uninstall all derive the list');
+    Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
+  finally
+    SL.Free;
+    Offenders.Free;
+  end;
+end;
+
+procedure TRepoHygieneTests.NoShippedFileCarriesAControlCharacter;
+const
+  // What the trap produces, and what no text of ours ever contains on purpose:
+  // backspace, vertical tab, form feed, escape, unit separator. Tab (9), CR
+  // and LF are left out - they are legitimate.
+  CBad: array[0..4] of Byte = (8, 11, 12, 27, 31);
+var
+  Offenders: TStringList;
+  Checked: Integer;
+begin
+  var Root := RepoRoot;
+  Assert.IsTrue(Root <> '', 'the repository must be reachable from ' + ParamStr(0));
+  Offenders := TStringList.Create;
+  try
+    var List := Files(['*.pas', '*.inc', '*.dpr', '*.dpk', '*.md']);
+    for var Rel in ScriptFiles do
+      List := List + [TPath.Combine(Root, Rel)];
+    Checked := 0;
+    for var F in List do
+    begin
+      if not TFile.Exists(F) then Continue;
+      Inc(Checked);
+      var B := TFile.ReadAllBytes(F);
+      for var I := 0 to High(B) do
+        for var C in CBad do
+          if B[I] = C then
+          begin
+            Offenders.Add(Format('%s: byte $%.2x at offset %d - a backslash ' +
+              'eaten by a shell heredoc (\b became a BACKSPACE); build such ' +
+              'text with the Write tool',
+              [ExtractRelativePath(Root + '\', F), C, I]));
+            Break;
+          end;
+    end;
+    Assert.IsTrue(Checked > 60,
+      Format('the sweep must see the shipped files, found %d', [Checked]));
     Assert.AreEqual('', Offenders.Text.Trim, Offenders.Text);
   finally
     Offenders.Free;

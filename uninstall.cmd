@@ -12,11 +12,10 @@ setlocal
 :: without an argument it stays Delphi 13.
 set BDSVER=%~1
 if not defined BDSVER set BDSVER=37.0
-:: Which IDEs get a BPL. Delphi 12 was the first with a 64-bit IDE
-:: (bin64ds.exe) and its own " x64" registry branch, so Delphi 11
-:: is Win32 alone - its wrapper passes that.
+:: Which IDEs get a BPL. A second argument pins it ("Win32"); with none
+:: it is DERIVED from that installation below - see platforms.cmd, which
+:: says why a version number cannot answer this.
 set PLATFORMS=%~2
-if not defined PLATFORMS set PLATFORMS=Win32,Win64
 set DELINST=%~dp0delinst.exe
 set DIHCONFIG=%~dp0DelphiRefactoringLight.xml
 set USEBDS=
@@ -28,9 +27,14 @@ if %ERRORLEVEL% NEQ 0 goto :error
 :: builddih.cmd creates .dih_usebds marker if bds.exe was used
 if exist "%~dp0.dih_usebds" set USEBDS=-usebds
 
+:: Now that the version is known to be installed, ask it which platforms
+:: it can take. A pinned list is left alone.
+if not defined PLATFORMS call "%~dp0platforms.cmd" %BDSVER%
+if defined PLATFORMNOTE echo Note: %PLATFORMNOTE%
+
 echo.
 echo ============================================
-echo  Delphi Refactoring Light - Uninstall (BDS %BDSVER%)
+echo  Delphi Refactoring Light - Uninstall (BDS %BDSVER%, %PLATFORMS%)
 echo ============================================
 echo.
 

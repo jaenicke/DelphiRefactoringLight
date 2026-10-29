@@ -8,6 +8,37 @@ development builds and were never released.
 
 ## 2.11.1 - 2026-10-29
 
+The first release since 2.0.1, so it carries everything from 2.0.2 on. The
+notes below cover 2.10.0 to 2.11.1; the per-version entries for 2.0.2 to
+2.9.6 are in
+[CHANGELOG.md](https://github.com/jaenicke/DelphiRefactoringLight/blob/2.11.1/CHANGELOG.md).
+
+**What is new since 2.0.1**
+
+- **Delphi 11 and 12** are supported (PR #55 by alexeydott), with one
+  install script per version - `install_D11.cmd` / `install_D12.cmd` pass
+  their version and nothing else, and which platforms are built is probed
+  on the installation rather than derived from the version number.
+- **A rename is ONE undo step** again, for every file it touches.
+- **New project check "Missing const (string parameters)"**: string
+  parameters passed by value although the routine only reads them. A list
+  of proposals with a reason each, never a sweep.
+- **New tools for the MCP bridge**: `guide` (what this server can do, in
+  one call), `settings` (read and write the plugin's settings, permanently
+  or for this IDE session only), `lsp_restart`, `project_open` /
+  `project_close` / `project_files`, and `const_params`.
+- **`debug_consistency` looks at the DCU output** the LSP configuration
+  names: a directory that does not match the sources is what makes a
+  cross-unit "go to definition" answer nothing.
+- **"Move to unit" and "Move to new unit" are one entry** with one dialog.
+- **Renaming a parameter** changes BOTH of its declarations (issues #49,
+  #50 and #54 by stepand76 and Ian Branch) - before, the class declaration
+  could stay behind, which does not compile.
+- **Installing from inside the IDE** no longer demands a restart it does
+  not need, no longer hangs the IDE, and the status window comes back where
+  it was - docked, and as a tab beside its neighbour.
+- Plus the Extract-Method and MCP-answer fixes of 2.0.3 to 2.6.10.
+
 ### The check found nothing at all
 
 The first live call of "Missing const (string parameters)" answered 0

@@ -36,6 +36,7 @@ procedure CheckConstParams;
 ///  MAIN THREAD: it reads the project and the editor buffers.</summary>
 function GatherConstParamFindings(AWithRefused: Boolean;
   out ASummary: string; out ANotes: TArray<string>;
+  out AStats: TConstParamScanStats;
   const AProgress: TProc<Integer, Integer, string> = nil): TArray<TConstParamFinding>;
 
 /// <summary>Writes the const of ONE finding. It re-runs the check on the
@@ -94,15 +95,18 @@ end;
 
 function GatherConstParamFindings(AWithRefused: Boolean;
   out ASummary: string; out ANotes: TArray<string>;
+  out AStats: TConstParamScanStats;
   const AProgress: TProc<Integer, Integer, string>): TArray<TConstParamFinding>;
 var
   Graph: TTypeGraph;
   Extra: TScopeExtra;
   Refused, Unreadable: Integer;
+  Stats: TConstParamScanStats;
 begin
   Result := nil;
   ANotes := nil;
   ASummary := '';
+  AStats := Default(TConstParamScanStats);
   Refused := 0;
   Unreadable := 0;
 
@@ -130,7 +134,8 @@ begin
         Continue;
       end;
       try
-        for var F in CollectConstParamCandidates(Files[I], Lines, Bound, True) do
+        for var F in CollectConstParamCandidates(Files[I], Lines, Bound, True,
+          Stats) do
           if F.Refusal = cprNone then
             Result := Result + [F]
           else
@@ -143,6 +148,12 @@ begin
           ANotes := ANotes + [Format('%s could not be analysed: %s',
             [ExtractFileName(Files[I]), E.Message])];
       end;
+      // What this file's scan LOOKED at - summed even when it found
+      // nothing, because that is the number that tells "nothing there"
+      // from "nothing examined" (2.11.0 answered only the second).
+      Inc(AStats.Headers, Stats.Headers);
+      Inc(AStats.Groups, Stats.Groups);
+      Inc(AStats.StringGroups, Stats.StringGroups);
     end;
   finally
     Graph.Free;
@@ -151,9 +162,12 @@ begin
   var Candidates := 0;
   for var F in Result do
     if F.Refusal = cprNone then Inc(Candidates);
-  ASummary := Format('%d string parameter group(s) can take const. %s; %d ' +
-    'const-less string parameter(s) were refused for a named reason.',
-    [Candidates, ScopeExtraText(Length(Files), Extra), Refused]);
+  ASummary := Format('%d string parameter group(s) can take const. ' +
+    'Looked at: %s, %d routine header(s) with a parameter list, %d ' +
+    'parameter group(s), %d of them const-less string group(s); %d were ' +
+    'refused for a named reason.',
+    [Candidates, ScopeExtraText(Length(Files), Extra), AStats.Headers,
+     AStats.Groups, AStats.StringGroups, Refused]);
   if Unreadable > 0 then
     ANotes := ANotes + [Format('%d file(s) could not be read, so nothing ' +
       'about them was decided.', [Unreadable])];
@@ -533,11 +547,12 @@ var
   Findings: TArray<TConstParamFinding>;
   Notes: TArray<string>;
   Summary: string;
+  Stats: TConstParamScanStats;
 begin
   var Prog := CreateCheckProgress('Missing const (string parameters)', nil,
     'collecting the project''s units...');
   try
-    Findings := GatherConstParamFindings(False, Summary, Notes,
+    Findings := GatherConstParamFindings(False, Summary, Notes, Stats,
       procedure(ACur, ATotal: Integer; AText: string)
       begin
         Prog.Step(ACur, ATotal, AText);

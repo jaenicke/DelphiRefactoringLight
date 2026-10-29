@@ -789,6 +789,10 @@ type
     /// <summary>...and the tool declares what it reads. An argument the
     ///  schema does not list is dropped silently (1.16.11).</summary>
     [Test] procedure TheLineEndingToolDeclaresWhatItTakes;
+    /// <summary>What "compile" reads, its schema must declare - and it must
+    ///  SAY the two things a caller cannot see: that the compiler reads
+    ///  from disk, and that check writes no output file.</summary>
+    [Test] procedure TheCompileToolDeclaresWhatItTakes;
     /// <summary>Found live on 2026-10-15: one id named, three OTHER files
     ///  listed - the row that was acted on had been cut away by the row
     ///  budget, so what happened to it was invisible.</summary>
@@ -6928,6 +6932,47 @@ begin
   for var Issue in Issues do
     Assert.AreEqual(LineEndingIssueId(Issue.FileName), Issue.Id,
       'the issue carries its own id');
+end;
+
+procedure TLineEndingCheckTests.TheCompileToolDeclaresWhatItTakes;
+var
+  Args: TArray<string>;
+
+  function Declares(const AName: string): Boolean;
+  begin
+    Result := False;
+    for var A in Args do
+      if SameText(A, AName) then Exit(True);
+  end;
+
+begin
+  Args := KnownToolArguments('compile');
+  Assert.IsTrue(Length(Args) > 0, 'the tool is in the shipped definitions');
+  Assert.IsTrue(Declares('mode'), 'mode is declared');
+  Assert.IsTrue(Declares('save_modified'), 'save_modified is declared');
+  Assert.IsTrue(Declares('max'), 'max is declared');
+  Assert.IsFalse(Declares('file'), 'and nothing it does not read');
+
+  // The two facts a caller cannot check for itself, so the description
+  // has to carry them: the compiler reads the FILE, not the buffer, and
+  // the default mode leaves the build artefacts alone.
+  // McpToolDefinitions builds a TJSONArray, so the description is read
+  // back from the tool's own object rather than from the source text.
+  var Desc := '';
+  var Defs := McpToolDefinitions;
+  try
+    for var V in Defs do
+      if (V is TJSONObject) and
+         SameText(TJSONObject(V).GetValue<string>('name', ''), 'compile') then
+        Desc := TJSONObject(V).GetValue<string>('description', '');
+  finally
+    Defs.Free;
+  end;
+  Assert.IsTrue(Desc <> '', 'the description is in the definitions');
+  Assert.IsTrue(Desc.Contains('DISK'),
+    'it says that the compiler reads from disk, not from the buffer');
+  Assert.IsTrue(Desc.Contains('WITHOUT writing any output file'),
+    'and that the default mode touches no build artefact');
 end;
 
 procedure TLineEndingCheckTests.TheLineEndingToolDeclaresWhatItTakes;

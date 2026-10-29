@@ -48,9 +48,30 @@ interface
 uses
   Lsp.Protocol;
 
+type
+  /// <summary>One line of the Messages window that carries a compiler
+  ///  code. Line and column are 1-based, the way the compiler writes
+  ///  them; 0 means the line did not say.</summary>
+  TCompilerMessage = record
+    FileName: string;
+    Line: Integer;
+    Col: Integer;
+    Code: string;
+    Text: string;
+    /// <summary>1 error, 2 warning, 4 hint - from the code's letter, which
+    ///  is the only language-independent part of the message.</summary>
+    Severity: Integer;
+  end;
+
 /// <summary>Compiler messages of the last build that belong to AFile,
 ///  converted to diagnostics (code, message, 0-based line/col).</summary>
 function ReadCompilerDiagnosticsFor(const AFile: string): TArray<TLspErrorDiag>;
+
+/// <summary>EVERY compiler message currently in the Messages window, in
+///  the order they stand there. Empty when the model could not be reached -
+///  MessagesReaderProblem then says why, and an empty result must never be
+///  read as "the build had nothing to say".</summary>
+function ReadCompilerMessages: TArray<TCompilerMessage>;
 
 /// <summary>Total number of message lines currently in the Messages
 ///  window (0 when the model could not be reached) - status window.</summary>
@@ -444,6 +465,61 @@ begin
   end;
 end;
 
+// ONE conversion for both readers. False when the line is no compiler
+// message at all - that is the only thing the two callers filter on
+// differently (one of them additionally by file).
+function MessageOfLine(ALine: TObject; out AMsg: TCompilerMessage): Boolean;
+begin
+  Result := False;
+  AMsg := Default(TCompilerMessage);
+  AMsg.Text := LineText(ALine);
+  if AMsg.Text = '' then Exit;
+  AMsg.Code := ExtractCode(AMsg.Text);
+  if AMsg.Code = '' then Exit;             // not a compiler message
+  AMsg.Severity := SeverityOfCode(AMsg.Code);
+
+  // TFileMessageLine knows file/line/column exactly; plain lines
+  // only carry the text (then parse it). The line/column getters
+  // are called ONLY on such a line: the export fallback is a raw
+  // method pointer, and on a TLine / TCompilerMsgLine it would read
+  // a field the object does not have (garbage line, or an AV).
+  AMsg.FileName := LineFile(ALine);
+  if ClassIsOrDescends(ALine, 'TFileMessageLine') then
+  begin
+    if not GetIntOf(ALine, 'GetLine', SymMsgLine, AMsg.Line) then AMsg.Line := 0;
+    if not GetIntOf(ALine, 'GetColumn', SymMsgCol, AMsg.Col) then AMsg.Col := 0;
+  end;
+  if AMsg.Line <= 0 then AMsg.Line := ExtractLineNo(AMsg.Text);
+  // The message's own "<file>(<line>)" prefix decides - not any file name
+  // that happens to occur somewhere in the text.
+  if AMsg.FileName = '' then AMsg.FileName := ExtractFilePart(AMsg.Text);
+  Result := True;
+end;
+
+function ReadCompilerMessages: TArray<TCompilerMessage>;
+var
+  Res: TList<TCompilerMessage>;
+begin
+  Result := nil;
+  Res := TList<TCompilerMessage>.Create;
+  try
+    try
+      WalkMessageLines(
+        procedure(ALine: TObject)
+        var
+          M: TCompilerMessage;
+        begin
+          if MessageOfLine(ALine, M) then Res.Add(M);
+        end);
+    except
+      // never disturb the IDE
+    end;
+    Result := Res.ToArray;
+  finally
+    Res.Free;
+  end;
+end;
+
 function ReadCompilerDiagnosticsFor(const AFile: string): TArray<TLspErrorDiag>;
 var
   Res: TList<TLspErrorDiag>;
@@ -459,51 +535,28 @@ begin
         procedure(ALine: TObject)
         var
           D: TLspErrorDiag;
-          Text, FileName, Code: string;
-          LineNo, ColNo: Integer;
+          M: TCompilerMessage;
         begin
-          Text := LineText(ALine);
-          if Text = '' then Exit;
-          Code := ExtractCode(Text);
-          if Code = '' then Exit;             // not a compiler message
-
-          // TFileMessageLine knows file/line/column exactly; plain lines
-          // only carry the text (then parse it). The line/column getters
-          // are called ONLY on such a line: the export fallback is a raw
-          // method pointer, and on a TLine / TCompilerMsgLine it would read
-          // a field the object does not have (garbage line, or an AV).
-          FileName := LineFile(ALine);
-          LineNo := 0;
-          ColNo := 0;
-          if ClassIsOrDescends(ALine, 'TFileMessageLine') then
-          begin
-            if not GetIntOf(ALine, 'GetLine', SymMsgLine, LineNo) then LineNo := 0;
-            if not GetIntOf(ALine, 'GetColumn', SymMsgCol, ColNo) then ColNo := 0;
-          end;
-          if LineNo <= 0 then LineNo := ExtractLineNo(Text);
-          if LineNo <= 0 then Exit;
+          if not MessageOfLine(ALine, M) then Exit;
+          if M.Line <= 0 then Exit;
 
           // Belongs to the file we were asked about? A full path must be
           // THIS path (two Utils.pas in different folders must not mix);
-          // only a bare name can be compared by name. Without a file the
-          // message's own "<file>(<line>)" prefix decides - not any file
-          // name that happens to occur somewhere in the text.
-          if FileName = '' then
-            FileName := ExtractFilePart(Text);
-          if FileName = '' then Exit;
-          if ExtractFilePath(FileName) <> '' then
+          // only a bare name can be compared by name.
+          if M.FileName = '' then Exit;
+          if ExtractFilePath(M.FileName) <> '' then
           begin
-            if not SameText(ExpandFileName(FileName), ExpandFileName(AFile)) then Exit;
+            if not SameText(ExpandFileName(M.FileName), ExpandFileName(AFile)) then Exit;
           end
-          else if not SameText(FileName, Base) then
+          else if not SameText(M.FileName, Base) then
             Exit;
 
           D := Default(TLspErrorDiag);
-          D.Code := Code;
-          D.Message := Text;
-          D.Severity := SeverityOfCode(Code);
-          D.Range.Start.Line := LineNo - 1;            // 0-based
-          if ColNo > 0 then D.Range.Start.Character := ColNo - 1
+          D.Code := M.Code;
+          D.Message := M.Text;
+          D.Severity := M.Severity;
+          D.Range.Start.Line := M.Line - 1;            // 0-based
+          if M.Col > 0 then D.Range.Start.Character := M.Col - 1
           else D.Range.Start.Character := 0;
           D.Range.End_ := D.Range.Start;
           Res.Add(D);

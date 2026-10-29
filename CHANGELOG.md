@@ -6,6 +6,43 @@ development builds and were never released.
 
 ---
 
+## 2.12.0 - 2026-10-29
+
+Two answers an agent could not get before, both of them about what the IDE
+itself knows.
+
+### A check says how much it looked at
+
+"0 found" and "0 examined" are different answers, and until now a check
+could only give the first. The live call that produced 2.11.1's fix is the
+case: `const_params` answered 0 proposals and 0 refusals, which reads like
+"nothing to propose" and really meant "nothing was looked at". The counts
+now come from the level where the scan DECIDES - routine headers with a
+parameter list, parameter groups, and const-less string groups among them -
+so the two states can no longer be confused. Visible in the dialog's
+summary line and in the `scanned` object of the tool's answer.
+
+### The new tool `compile`
+
+The IDE compiles the active project and answers with the compiler's own
+messages, read out of the Messages window. This is the authority on whether
+an edit broke a unit: `get_diagnostics` reports an ANALYSIS (Error Insight,
+the LSP), while this is dcc itself - E2037, E2169, E2291 and their kind are
+named here and nowhere else, and every defect of the last rounds was
+defined by it.
+
+- the default `mode=check` verifies the sources WITHOUT writing any output
+  file, so asking the question cannot disturb the DCUs or the BPL the next
+  real build depends on; `make` and `build` do write;
+- the compiler reads from DISK, so a buffer with unsaved changes is not
+  what gets compiled. Such buffers are NAMED in the answer, and
+  `save_modified=true` saves them first;
+- errors are listed before warnings and hints, whatever the budget says;
+- and an answer with no messages says WHY - a build that really had nothing
+  to say is not the same as a Messages window that could not be read.
+
+---
+
 ## 2.11.1 - 2026-10-29
 
 The first release since 2.0.1, so it carries everything from 2.0.2 on. The

@@ -47,6 +47,10 @@ type
     ///  Measured live - every fixture here had a one-line list, and the
     ///  check answered 0 findings AND 0 refusals for 113 real files.</summary>
     [Test] procedure AWrappedParameterListStillHasItsGroups;
+    /// <summary>"0 found" and "0 examined" are different answers, and the
+    ///  scan has to say which one it is: the counts come from the level
+    ///  where it decides, not from the file list.</summary>
+    [Test] procedure TheScanSaysHowMuchItLookedAt;
   end;
 
 implementation
@@ -359,6 +363,63 @@ begin
   Assert.AreEqual('AFirst,ASecond', string.Join(',', Pair.ParamNames),
     'one modifier serves "AFirst," / "ASecond: string" - it is ONE group ' +
     'although it is written on two lines');
+end;
+
+procedure TConstParamTests.TheScanSaysHowMuchItLookedAt;
+const
+  // Two string groups, and NEITHER is a proposal: Virt is virtual, and
+  // Writes assigns its parameter. So the findings are 0 while the scan
+  // did see them - which is exactly the state 2.11.0 could not report.
+  Src =
+    'unit U;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TFoo = class'#13#10 +
+    '  private'#13#10 +
+    '    FH: string;'#13#10 +
+    '    procedure Virt(AName: string); virtual;'#13#10 +
+    '    procedure Writes(AName: string);'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TFoo.Virt(AName: string);'#13#10 +
+    'begin'#13#10 +
+    '  FH := AName;'#13#10 +
+    'end;'#13#10 +
+    'procedure TFoo.Writes(AName: string);'#13#10 +
+    'begin'#13#10 +
+    '  AName := AName + ''!'';'#13#10 +
+    '  FH := AName;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  Empty =
+    'unit E;'#13#10 +
+    'interface'#13#10 +
+    'const'#13#10 +
+    '  CX = 1;'#13#10 +
+    'implementation'#13#10 +
+    'end.'#13#10;
+var
+  Stats: TConstParamScanStats;
+begin
+  var Found := CollectConstParamCandidates('U.pas', Lines(Src), nil, False,
+    Stats);
+  Assert.AreEqual(0, Integer(Length(Found)),
+    'neither group is a proposal - one is virtual, the other is written to');
+  Assert.AreEqual(4, Integer(Stats.Headers),
+    'four routine headers with a parameter list: two routines, two headers '
+    + 'each');
+  Assert.AreEqual(4, Integer(Stats.StringGroups),
+    'and all four carry a const-less string group - THAT is what tells '
+    + '"nothing to propose" from "nothing examined", which is the number '
+    + 'the live call of 2.11.0 did not have');
+  Assert.IsTrue(Stats.Groups >= Stats.StringGroups,
+    'every string group is a group');
+
+  // The other end: a unit without a single routine really did look at
+  // nothing, and says so with the same numbers.
+  CollectConstParamCandidates('E.pas', Lines(Empty), nil, True, Stats);
+  Assert.AreEqual(0, Integer(Stats.Headers), 'no header, nothing looked at');
+  Assert.AreEqual(0, Integer(Stats.StringGroups), 'and no string group');
 end;
 
 initialization

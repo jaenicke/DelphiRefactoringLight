@@ -121,7 +121,7 @@ uses
   Expert.EditorHelperIntf, Expert.AutoImport, Expert.DiagStore,
   Expert.McpTools, Expert.UnitIndex, Expert.UnitAvailability, Expert.UsesEditor,
   Mcp.Protocol, Mcp.PipeServer, Expert.StatusWindow, Expert.Version,
-  Expert.RestartHint, Delphi.FileEncoding;
+  Expert.RestartHint, Delphi.FileEncoding, Expert.MessagesReader;
 
 type
   /// <summary>One answered get_quick_fixes: its generation, the buffer
@@ -1822,6 +1822,172 @@ begin
   Result := OkResult(Res);
 end;
 
+
+// ---- compile --------------------------------------------------------------
+
+// The IDE's own build, and the IDE's own Messages window as the answer.
+// WHY THIS IS NOT get_diagnostics: that reads Error Insight and the LSP,
+// which are an ANALYSIS. The compiler is the authority on whether an edit
+// broke a unit, and every defect of the last rounds was defined by it.
+function ToolCompile(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Err, Mode, Proj, Msg: string;
+  CompileMode: TOTACompileMode;
+  Modified: TArray<string>;
+  Msgs: TArray<TCompilerMessage>;
+  Ok, Ran: Boolean;
+  SaveFirst: Boolean;
+  Errors, Warnings, Hints: Integer;
+begin
+  Mode := LowerCase(Trim(AArgs.GetValue<string>('mode', 'check')));
+  SaveFirst := AArgs.GetValue<Boolean>('save_modified', False);
+  var Max := AArgs.GetValue<Integer>('max', 200);
+  if Mode = '' then Mode := 'check';
+  // cmOTACheck is the default ON PURPOSE: it answers the question without
+  // writing a single output file, so a check cannot disturb the DCUs or
+  // the BPL the user's next real build depends on.
+  if Mode = 'check' then CompileMode := cmOTACheck
+  else if Mode = 'make' then CompileMode := cmOTAMake
+  else if Mode = 'build' then CompileMode := cmOTABuild
+  else Exit(McpErr('mode must be check, make or build - "' + Mode +
+    '" is none of them'));
+
+  Ok := False;
+  Ran := False;
+  Msg := '';
+  Proj := '';
+  Modified := nil;
+  Msgs := nil;
+  if not RunOnMain(
+    procedure
+    var
+      PB: IOTAProjectBuilder;
+    begin
+      var P := ActiveProject;
+      if P = nil then
+      begin
+        Msg := 'no project is open';
+        Exit;
+      end;
+      Proj := P.FileName;
+
+      // The compiler reads from DISK. A buffer the user has not saved is
+      // therefore NOT what gets compiled, and an answer that does not say
+      // so would describe a different text than the one on screen.
+      Modified := ModifiedModuleFiles;
+      if SaveFirst and (Length(Modified) > 0) then
+      begin
+        var MS: IOTAModuleServices;
+        if Supports(BorlandIDEServices, IOTAModuleServices, MS) then
+          for var I := 0 to MS.ModuleCount - 1 do
+          try
+            var M := MS.Modules[I];
+            if (M <> nil) and ModuleIsModified(M) then M.Save(False, True);
+          except
+            // a module that refuses to save is named by the list above
+          end;
+        Modified := ModifiedModuleFiles;
+      end;
+
+      PB := P.ProjectBuilder;
+      if PB = nil then
+      begin
+        Msg := 'the project has no builder';
+        Exit;
+      end;
+      Ran := True;
+      // Wait = False: never make the compile progress dialog wait for an
+      // OK nobody can click from here. ClearMessages = True, or the
+      // Messages window would still hold the PREVIOUS build and we would
+      // answer with messages this call did not produce.
+      Ok := PB.BuildProject(CompileMode, False, True);
+      Msgs := ReadCompilerMessages;
+    end, True, AStop, Err) then Exit(McpErr(Err));
+  if Msg <> '' then Exit(McpErr(Msg));
+  if not Ran then Exit(McpErr('the project could not be built'));
+
+  Errors := 0;
+  Warnings := 0;
+  Hints := 0;
+  for var M in Msgs do
+    case M.Severity of
+      2: Inc(Warnings);
+      4: Inc(Hints);
+    else Inc(Errors);
+    end;
+
+  var Res := TJSONObject.Create;
+  try
+    Res.AddPair('project', Proj);
+    Res.AddPair('mode', Mode);
+    Res.AddPair('succeeded', TJSONBool.Create(Ok));
+    Res.AddPair('errors', TJSONNumber.Create(Errors));
+    Res.AddPair('warnings', TJSONNumber.Create(Warnings));
+    Res.AddPair('hints', TJSONNumber.Create(Hints));
+    Res.AddPair('total', TJSONNumber.Create(Length(Msgs)));
+
+    // Errors first, whatever the budget: that is what the call asked
+    // about, and a cap that drops them for a run of hints is the shape
+    // this plugin's answers have been corrected for twice.
+    var Arr := TJSONArray.Create;
+    var Listed := 0;
+    for var Pass := 0 to 1 do
+      for var M in Msgs do
+      begin
+        if (Pass = 0) <> (M.Severity = 1) then Continue;
+        if (Max > 0) and (Listed >= Max) then Break;
+        var O := TJSONObject.Create;
+        if M.FileName <> '' then O.AddPair('file', M.FileName);
+        if M.Line > 0 then O.AddPair('line', TJSONNumber.Create(M.Line));
+        if M.Col > 0 then O.AddPair('column', TJSONNumber.Create(M.Col));
+        O.AddPair('code', M.Code);
+        case M.Severity of
+          2: O.AddPair('severity', 'warning');
+          4: O.AddPair('severity', 'hint');
+        else O.AddPair('severity', 'error');
+        end;
+        O.AddPair('text', M.Text);
+        Arr.AddElement(O);
+        Inc(Listed);
+      end;
+    Res.AddPair('listed', TJSONNumber.Create(Listed));
+    Res.AddPair('messages', Arr);
+
+    if Length(Modified) > 0 then
+    begin
+      var MA := TJSONArray.Create;
+      for var F in Modified do MA.Add(F);
+      Res.AddPair('unsavedBuffers', MA);
+    end;
+
+    var Note := '';
+    if Length(Msgs) = 0 then
+    begin
+      var Why := MessagesReaderProblem;
+      if Why <> '' then
+        Note := 'The Messages window could not be read (' + Why + '), so ' +
+          'this answer carries NO messages - that is not the same as a ' +
+          'build without any. "succeeded" is the builder''s own answer and ' +
+          'still holds.'
+      else
+        Note := 'The build produced no message at all.';
+    end;
+    if Length(Modified) > 0 then
+      Note := Trim(Note + ' The compiler reads from DISK, and the buffers ' +
+        'named in "unsavedBuffers" differ from it - pass save_modified=true ' +
+        'to save them first, or this answer describes another text than ' +
+        'the one on screen.');
+    if Mode = 'check' then
+      Note := Trim(Note + ' mode=check writes no output file, so nothing ' +
+        'of the project''s own build artefacts was touched.');
+    if Note <> '' then Res.AddPair('note', Note);
+    Result := McpOk(Res);
+  except
+    Res.Free;
+    raise;
+  end;
+end;
+
 function ToolProjectFiles(AArgs: TJSONObject; AStop: THandle): string;
 var
   Err, Msg: string;
@@ -2124,11 +2290,11 @@ end;
 // ---- per-tool statistics (tools window) ----------------------------------
 
 const
-  BuiltinTools: array[0..15] of string = ('get_diagnostics', 'get_quick_fixes',
+  BuiltinTools: array[0..16] of string = ('get_diagnostics', 'get_quick_fixes',
     'apply_quick_fix', 'apply_quick_fixes', 'buffer_open', 'buffer_read', 'buffer_edit',
     'buffer_list', 'buffer_close', 'buffer_save', 'get_status',
     'scratch_analyze', 'scratch_close',
-    'project_open', 'project_close', 'project_files');
+    'project_open', 'project_close', 'project_files', 'compile');
 
 function McpHandlesTool(const AName: string): Boolean;
 begin
@@ -2385,6 +2551,7 @@ begin
     else if Tool = 'project_open' then Result := ToolProjectOpen(Args, AStop)
     else if Tool = 'project_close' then Result := ToolProjectClose(Args, AStop)
     else if Tool = 'project_files' then Result := ToolProjectFiles(Args, AStop)
+    else if Tool = 'compile' then Result := ToolCompile(Args, AStop)
     else
     begin
       var Handler: TMcpToolHandler;

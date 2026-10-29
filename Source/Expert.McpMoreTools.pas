@@ -3310,6 +3310,7 @@ var
   Notes, WantIds, Ids: TArray<string>;
   Summary, Err: string;
   DoApply: Boolean;
+  Stats: TConstParamScanStats;
 begin
   DoApply := ArgBool(AArgs, 'apply');
   var Max := ArgInt(AArgs, 'max', 200);
@@ -3334,7 +3335,7 @@ begin
     procedure
     begin
       Findings := GatherConstParamFindings(WithRefused or DoApply, Summary,
-        Notes);
+        Notes, Stats);
     end, False, AStop, Err) then Exit(McpErr(Err));
 
   var Applied := TDictionary<string, string>.Create;
@@ -3410,6 +3411,15 @@ begin
       Res.AddPair('refused', TJSONNumber.Create(Refused));
     Res.AddPair('listed', TJSONNumber.Create(Length(Rows)));
     Res.AddPair('rows', Arr);
+    // What the scan LOOKED at, at the level where it decides. "0 found"
+    // and "0 examined" are different answers, and only this says which
+    // one it is - the live call of 2.11.0 could not.
+    var Scanned := TJSONObject.Create;
+    Scanned.AddPair('routineHeaders', TJSONNumber.Create(Stats.Headers));
+    Scanned.AddPair('parameterGroups', TJSONNumber.Create(Stats.Groups));
+    Scanned.AddPair('constLessStringGroups',
+      TJSONNumber.Create(Stats.StringGroups));
+    Res.AddPair('scanned', Scanned);
     if Summary <> '' then Res.AddPair('summary', Summary);
     var NoteArr := TJSONArray.Create;
     for var N in Notes do NoteArr.Add(N);

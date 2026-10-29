@@ -128,6 +128,23 @@ type
   TConstBoundLookup = reference to function(const AOwnerType, AMember: string;
     out AWhy: string): Boolean;
 
+  /// <summary>What the scan LOOKED at, at the level where it decides.
+  ///  A check that reports only what it found cannot be told apart from
+  ///  one that examined nothing - which is exactly what happened on the
+  ///  first live call: "0 findings, 113 files", while the grouping was
+  ///  broken and not one string group was ever seen.</summary>
+  TConstParamScanStats = record
+    /// <summary>Routine headers with a parameter list. A routine is
+    ///  counted once per HEADER, so a method with a declaration and an
+    ///  implementation counts twice - that is what the scan walks.</summary>
+    Headers: Integer;
+    /// <summary>Parameter groups in them ("A, B: string" is ONE).</summary>
+    Groups: Integer;
+    /// <summary>Of those, the groups this check is about: every member a
+    ///  written-out string type and no modifier yet.</summary>
+    StringGroups: Integer;
+  end;
+
 /// <summary>FNV-1a over the lower-cased key - the same shape the other
 ///  project checks' ids have. It names the PLACE (file, routine, first
 ///  parameter of the group), never a list position.</summary>
@@ -140,7 +157,13 @@ function ConstParamIssueId(const AFile, ARoutine, AParam: string): string;
 ///  ALINES are the RAW lines; everything is decided on the masked text.</summary>
 function CollectConstParamCandidates(const AFile: string;
   const ALines: TArray<string>; const ABound: TConstBoundLookup;
-  AIncludeRefused: Boolean = False): TArray<TConstParamFinding>;
+  AIncludeRefused: Boolean = False): TArray<TConstParamFinding>; overload;
+
+/// <summary>The same scan, and what it looked at on the way.</summary>
+function CollectConstParamCandidates(const AFile: string;
+  const ALines: TArray<string>; const ABound: TConstBoundLookup;
+  AIncludeRefused: Boolean; out AStats: TConstParamScanStats)
+  : TArray<TConstParamFinding>; overload;
 
 /// <summary>ALINES with 'const ' written in at every position of AFINDING.
 ///  False with a reason when the text no longer looks the way the finding
@@ -356,6 +379,17 @@ function CollectConstParamCandidates(const AFile: string;
   const ALines: TArray<string>; const ABound: TConstBoundLookup;
   AIncludeRefused: Boolean): TArray<TConstParamFinding>;
 var
+  Ignored: TConstParamScanStats;
+begin
+  Result := CollectConstParamCandidates(AFile, ALines, ABound, AIncludeRefused,
+    Ignored);
+end;
+
+function CollectConstParamCandidates(const AFile: string;
+  const ALines: TArray<string>; const ABound: TConstBoundLookup;
+  AIncludeRefused: Boolean; out AStats: TConstParamScanStats)
+  : TArray<TConstParamFinding>;
+var
   Masked: TArray<string>;
   Seen: TList<string>;
 
@@ -429,6 +463,7 @@ var
   Span: THeaderSpan;
 begin
   Result := nil;
+  AStats := Default(TConstParamScanStats);
   if Length(ALines) = 0 then Exit;
   Masked := MaskCommentsAndStrings(ALines);
   Seen := TList<string>.Create;
@@ -440,7 +475,9 @@ begin
         if not Span.HasList then Continue;
         var Params := ParseParamList(Span.Params);
         if Length(Params) <> Length(Span.Names) then Continue;
+        Inc(AStats.Headers);
         var Groups := GroupsOfSpan(Masked, Span);
+        Inc(AStats.Groups, Length(Groups));
         for var G in Groups do
         begin
           // a candidate group: every member a string, none with a modifier
@@ -449,6 +486,7 @@ begin
             if (Trim(Params[I].Modifier) <> '')
               or not IsStringTypeName(Params[I].TypeText) then IsCand := False;
           if not IsCand then Continue;
+          Inc(AStats.StringGroups);
 
           var Names: TArray<string> := nil;
           for var I := G.First to G.Last do Names := Names + [Span.NameTexts[I]];

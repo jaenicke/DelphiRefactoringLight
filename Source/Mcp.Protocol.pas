@@ -1047,6 +1047,25 @@ const
     '"save_modified":{"type":"boolean","description":"Save every modified file first (default false = refuse while anything is unsaved)."},' +
     InstanceProp + '}}},' +
 
+    '{"name":"compile",' +
+    '"description":"Lets the IDE compile the ACTIVE project and answers with the ' +
+    'compiler''''s own messages, read out of the Messages window. ' +
+    'This is the authority on whether an edit broke something: ' +
+    'get_diagnostics reports an ANALYSIS (Error Insight, the LSP), ' +
+    'while this is dcc itself - E2037, E2169, E2291 and their kind ' +
+    'are named here and nowhere else. Default mode=check verifies ' +
+    'the sources WITHOUT writing any output file, so it cannot ' +
+    'disturb the DCUs or the BPL of the next real build; make and ' +
+    'build do write. The compiler reads from DISK, so a buffer with ' +
+    'unsaved changes is NOT what is compiled - such buffers are ' +
+    'named in \"unsavedBuffers\", and save_modified=true saves them ' +
+    'first. Errors are listed before warnings and hints, whatever ' +
+    'max says. The IDE is busy for the whole build.",' +
+    '"inputSchema":{"type":"object","properties":{' +
+    '"mode":{"type":"string","enum":["check","make","build"],"description":"check (the default): syntax only, no output file. make: compile what changed. build: everything."},' +
+    '"save_modified":{"type":"boolean","description":"Save every modified buffer before compiling (default false). Without it the compiler reads the file on disk and the answer says which buffers differ from it."},' +
+    '"max":{"type":"integer","description":"Most messages to return (default 200); the counts are always complete. Errors come first, so a cap never hides them behind hints."},' +
+    InstanceProp + '}}},' +
     '{"name":"project_files",' +
     '"description":"The files the active project lists, and adding or ' +
     'removing some. Without add / remove it only lists (unit and form ' +
@@ -2065,8 +2084,8 @@ begin
         'LSP session have caught up.'
       ]),
     Sec('Errors and quick fixes',
-      ['get_diagnostics', 'get_quick_fixes', 'apply_quick_fix', 
-       'apply_quick_fixes'],
+      ['compile', 'get_diagnostics', 'get_quick_fixes', 
+       'apply_quick_fix', 'apply_quick_fixes'],
       [
         'get_diagnostics returns the compiler diagnostics for a file, merged',
         'from the sources that are fresh for its current content (the IDE''s',
@@ -2080,7 +2099,11 @@ begin
         'reported rather than applied elsewhere).',
         'Two fixes are deliberately refused through this server: adding a unit',
         'that only the browsing path can see, and removing a private member',
-        'with a non-empty body - both need a human decision.'
+        'with a non-empty body - both need a human decision.',
+        'compile is the other kind of answer: the IDE compiles the active',
+        'project and you get dcc''s own messages. Ask it when the question is',
+        '"does this still build" - an analysis can be silent where the',
+        'compiler is not. Its default mode writes no output file.'
       ]),
     Sec('Finding where something is used',
       ['find_references', 'find_implementations', 'find_original_symbol', 

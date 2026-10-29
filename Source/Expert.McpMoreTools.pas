@@ -37,6 +37,7 @@ uses
   Expert.UsesGraph, Expert.DebugConsistency, Expert.DebugConsistencyDialog,
   Expert.LineEndingDialog, Expert.FileEncodingCheck, Expert.UnusedUnits,
   Expert.UnusedUnitsDialog, Expert.LineEndingWatcher,
+  Expert.ConstParams, Expert.ConstParamsDialog,
   Expert.VcsBlame, Expert.BlameGutter, Expert.LspPrewarmer, Expert.RenameWizard, Expert.RenameDialog, Expert.LspManager,
   Expert.PluginSettings, Expert.IncludeExpansion, Expert.InterfaceLinks,
   Expert.SemanticReplace, Expert.SemanticReplaceWizard, Expert.MoveToUnit, Expert.SafeDelete,
@@ -3303,6 +3304,138 @@ begin
   end;
 end;
 
+function ToolConstParams(AArgs: TJSONObject; AStop: THandle): string;
+var
+  Findings: TArray<TConstParamFinding>;
+  Notes, WantIds, Ids: TArray<string>;
+  Summary, Err: string;
+  DoApply: Boolean;
+begin
+  DoApply := ArgBool(AArgs, 'apply');
+  var Max := ArgInt(AArgs, 'max', 200);
+  var WithRefused := ArgBool(AArgs, 'include_refused');
+  WantIds := nil;
+  var IdArr := AArgs.GetValue<TJSONArray>('fix_ids', nil);
+  if IdArr <> nil then
+    for var V in IdArr do WantIds := WantIds + [UpperCase(Trim(V.Value))];
+  // Same contract as the three other checks that write: nothing without
+  // ids. Here it is not only "do not decide for the user" - a const string
+  // parameter aliases the caller's variable, so a sweep could introduce a
+  // dangling reference no compiler warns about (measured: EInvalidPointer).
+  if DoApply and (Length(WantIds) = 0) then
+    Exit(McpErr('apply needs "fix_ids" - list the candidates first and name ' +
+      'the ones to change. A const string parameter aliases the variable a ' +
+      'caller passes, so this is never applied wholesale.'));
+
+  // The scan reads the project's file list, the editor buffers and the type
+  // graph: all ToolsAPI, so all on the main thread.
+  Findings := nil;
+  if not McpRunOnMain(
+    procedure
+    begin
+      Findings := GatherConstParamFindings(WithRefused or DoApply, Summary,
+        Notes);
+    end, False, AStop, Err) then Exit(McpErr(Err));
+
+  var Applied := TDictionary<string, string>.Create;
+  try
+    var ActedIds: TArray<string> := nil;
+    var Done := 0;
+    var Failed := 0;
+    if DoApply then
+      for var F in Findings do
+      begin
+        var Wanted := False;
+        for var W in WantIds do
+          if W = UpperCase(F.Id) then Wanted := True;
+        if not Wanted then Continue;
+        var Outcome := '';
+        if F.Refusal <> cprNone then
+          Outcome := 'NOT changed: ' + F.Reason
+        else
+        begin
+          var Fin := F;
+          if not McpRunOnMain(
+            procedure
+            var
+              Why: string;
+            begin
+              if ApplyConstParamFinding(Fin, Why) then Outcome := 'const added'
+              else Outcome := 'NOT changed: ' + Why;
+            end, True, AStop, Err) then Outcome := 'NOT changed: ' + Err;
+        end;
+        Applied.AddOrSetValue(UpperCase(F.Id), Outcome);
+        ActedIds := ActedIds + [F.Id];
+        if Outcome = 'const added' then Inc(Done) else Inc(Failed);
+      end;
+
+    var Candidates := 0;
+    var Refused := 0;
+    Ids := nil;
+    for var F in Findings do
+    begin
+      Ids := Ids + [F.Id];
+      if F.Refusal = cprNone then Inc(Candidates) else Inc(Refused);
+    end;
+
+    // A row that was acted on is always carried, whatever "max" says
+    // (the rule the line-ending check needed live, 2026-10-15).
+    var Rows := SelectReportRows(Ids, ActedIds, Max);
+    var Arr := TJSONArray.Create;
+    for var Idx in Rows do
+    begin
+      var F := Findings[Idx];
+      var O := TJSONObject.Create;
+      O.AddPair('id', F.Id);
+      O.AddPair('file', F.FileName);
+      O.AddPair('routine', F.Routine);
+      O.AddPair('parameters', string.Join(', ', F.ParamNames));
+      O.AddPair('type', F.ParamType);
+      O.AddPair('line', TJSONNumber.Create(F.Line + 1));
+      O.AddPair('column', TJSONNumber.Create(F.Col + 1));
+      if F.Refusal = cprNone then O.AddPair('verdict', 'can take const')
+      else O.AddPair('verdict', 'refused: ' + ConstParamRefusalText(F.Refusal));
+      O.AddPair('reason', F.Reason);
+      var Outcome := '';
+      if Applied.TryGetValue(UpperCase(F.Id), Outcome) then
+        O.AddPair('result', Outcome);
+      Arr.AddElement(O);
+    end;
+
+    var Res := TJSONObject.Create;
+    Res.AddPair('applied', TJSONBool.Create(DoApply));
+    Res.AddPair('total', TJSONNumber.Create(Length(Findings)));
+    Res.AddPair('canTakeConst', TJSONNumber.Create(Candidates));
+    if WithRefused or DoApply then
+      Res.AddPair('refused', TJSONNumber.Create(Refused));
+    Res.AddPair('listed', TJSONNumber.Create(Length(Rows)));
+    Res.AddPair('rows', Arr);
+    if Summary <> '' then Res.AddPair('summary', Summary);
+    var NoteArr := TJSONArray.Create;
+    for var N in Notes do NoteArr.Add(N);
+    Res.AddPair('notes', NoteArr);
+    if DoApply then
+    begin
+      Res.AddPair('changed', TJSONNumber.Create(Done));
+      if Failed > 0 then Res.AddPair('notChanged', TJSONNumber.Create(Failed));
+      Res.AddPair('note', AppliedByIdsNote(Done, Failed,
+        Length(UnknownReportIds(Ids, WantIds)), 'parameter group',
+        'carry const now', 'both headers of each routine'));
+    end
+    else
+      Res.AddPair('note', 'Nothing was changed. Every row is a PROPOSAL: ' +
+        'the check proves that the body does not write the parameter and ' +
+        'that both of its headers are known, but not that no CALLER ' +
+        'releases the variable it passes - a const string parameter aliases ' +
+        'that reference without raising its count, so such a case dies with ' +
+        'EInvalidPointer and no compiler warning. Name the ids you want in ' +
+        '"fix_ids".');
+    Result := McpOk(Res);
+  finally
+    Applied.Free;
+  end;
+end;
+
 function ToolLineEndings(AArgs: TJSONObject; AStop: THandle): string;
 var
   Files, WantIds: TArray<string>;
@@ -4222,6 +4355,7 @@ initialization
   RegisterMcpTool('line_endings', ToolLineEndings);
   RegisterMcpTool('file_encoding', ToolFileEncoding);
   RegisterMcpTool('unused_units', ToolUnusedUnits);
+  RegisterMcpTool('const_params', ToolConstParams);
   RegisterMcpTool('dfm_events', ToolDfmEvents);
   RegisterMcpTool('find_unit_references', ToolFindUnitReferences);
   RegisterMcpTool('find_original_symbol', ToolFindOriginalSymbol);

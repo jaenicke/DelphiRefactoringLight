@@ -206,6 +206,24 @@ type
     Last, EndCol: Integer;         // ...and the ';' that ends the signature
   end;
 
+  /// <summary>One routine header, read over its OWN span on the MASKED
+  ///  text: a comment inside the parameter list is then not code, a header
+  ///  of twenty lines is still one header, and the positions are the real
+  ///  ones. NAMES carries where the parameter names are DECLARED (0-based,
+  ///  X = column, Y = line) and NAMETEXTS what they are, same order - so
+  ///  never the routine's own name, never a type, never a default value and
+  ///  never the parameters of a procedural parameter's own list.</summary>
+  THeaderSpan = record
+    First, Last: Integer;          // 0-based lines; Last carries the ';'
+    FirstCol: Integer;             // 1-based column the keyword starts at
+    EndCol: Integer;               // 1-based column of that ';'
+    HasList: Boolean;
+    Qualified: string;             // 'Foo' or 'TFoo.Foo'
+    Params: string;                // the parameter list as text
+    Names: TArray<TPoint>;         // where the parameter NAMES stand
+    NameTexts: TArray<string>;     // ...and what they are, same order
+  end;
+
   /// <summary>Everything the rename of a PARAMETER needs. POSITIONS are the
   ///  places at which the name is really declared (0-based, X = column,
   ///  Y = line), sorted; SPANS are the headers they live in. The spans are
@@ -293,6 +311,27 @@ function ClassifyParamOccurrence(const APlan: TParamRenamePlan;
 ///  routine whose only other header is a 'forward' one in the
 ///  implementation section (not searched - missing it leaves the occurrence
 ///  listed as unverified, which is the safe direction).</summary>
+
+/// <summary>Reads the routine header that STARTS at (ALINE0, ASTARTCOL1) of
+///  AMASKED - AStartCol1 = 1 is the line's own first token, which is the only
+///  shape there was before Delphi's "several declarations on one line"
+///  reached this planner (issue #54). False when no header starts there.
+///  This is the ONE place that reads a header's parameter positions; a second
+///  one would be free to disagree with the rename about what a parameter
+///  is.</summary>
+function ReadHeaderSpanFrom(const AMasked: TArray<string>; ALine0,
+  AStartCol1: Integer; out ASpan: THeaderSpan): Boolean;
+
+/// <summary>ReadHeaderSpanFrom for a header that starts at the line's own
+///  first token.</summary>
+function ReadHeaderSpanAt(const AMasked: TArray<string>; ALine0: Integer;
+  out ASpan: THeaderSpan): Boolean;
+
+const
+  // A header longer than this is pathological; the answer is then "could
+  // not be read", which refuses a rename instead of half-doing it.
+  MaxHeaderSpanLines = 60;
+
 function FindParameterPartnerLine(const ALines: TArray<string>;
   ALine0: Integer; const AName: string; out APartnerLine0: Integer): Boolean;
 
@@ -304,26 +343,6 @@ uses
   Expert.InterfaceLinks, Expert.SignatureEdit, Expert.IncludeExpansion;
 
 // ---- a parameter is declared TWICE, and only the names count ------------
-
-type
-  // One routine header, read over its OWN span on the MASKED text: a
-  // comment inside the parameter list is then not code, a header of twenty
-  // lines is still one header, and the positions are the real ones.
-  THeaderSpan = record
-    First, Last: Integer;          // 0-based lines; Last carries the ';'
-    FirstCol: Integer;             // 1-based column the keyword starts at
-    EndCol: Integer;               // 1-based column of that ';'
-    HasList: Boolean;
-    Qualified: string;             // 'Foo' or 'TFoo.Foo'
-    Params: string;                // the parameter list as text
-    Names: TArray<TPoint>;         // where the parameter NAMES stand
-    NameTexts: TArray<string>;     // ...and what they are, same order
-  end;
-
-const
-  // A header longer than this is pathological; the answer is then "could
-  // not be read", which refuses a rename instead of half-doing it.
-  MaxHeaderSpanLines = 60;
 
 function IsParamModifierWord(const AWord: string): Boolean;
 begin

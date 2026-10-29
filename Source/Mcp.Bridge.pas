@@ -186,7 +186,8 @@ begin
      (AName = 'add_iinterface') or (AName = 'get_quick_fixes') or
      (AName = 'convert_properties') or (AName = 'expand_includes') or
      (AName = 'edit_method') or (AName = 'line_endings') or
-     (AName = 'unused_units') or (AName = 'project_open') or
+     (AName = 'unused_units') or (AName = 'const_params') or
+     (AName = 'project_open') or
      (AName = 'project_close') then
     Exit(twLong);
 

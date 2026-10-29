@@ -109,6 +109,13 @@ function RemoveUnitFromUses(const AFilePath, AUnit: string): Boolean;
 function ApplyLinesMinimal(const AFilePath: string; ASL: TStringList;
   const AOriginal: string): Boolean;
 
+/// <summary>The lines of AFILE as they are NOW: the IDE's editor buffer
+///  when the file is open there, the file on disk otherwise. A check that
+///  reads only the disk reports on text the user has already changed, and
+///  one that reads only the buffer cannot see a closed file at all.
+///  Empty when neither answers.</summary>
+function ReadUnitLines(const AFilePath: string): TArray<string>;
+
 /// <summary>True when a write through ApplyLinesMinimal lands in an IDE
 ///  EDITOR BUFFER (undoable, unsaved), False when it goes straight to
 ///  DISK. It is the very probe ApplyLinesMinimal gates on, so a message
@@ -127,7 +134,8 @@ implementation
 
 uses
   System.SysUtils, System.IOUtils, System.Math,
-  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.PascalScanner;
+  Expert.EditorHelperIntf, Expert.UnitIndex, Expert.PascalScanner,
+  Delphi.FileEncoding;
 
 // Comment/string-MASKED copy of SL: same line count, same line lengths,
 // but comments ({ }, (* *), //), compiler directives and string literals
@@ -276,6 +284,21 @@ var
 begin
   Low := LowerCase(Trim(AMasked));
   Result := (Low = 'uses') or Low.StartsWith('uses ') or Low.StartsWith('uses'#9);
+end;
+
+function ReadUnitLines(const AFilePath: string): TArray<string>;
+var
+  Content: string;
+begin
+  Result := nil;
+  if (Editor <> nil) and Editor.ReadEditorContent(AFilePath, Content) then
+    Exit(SplitEditorLines(Content));
+  if not TFile.Exists(AFilePath) then Exit;
+  try
+    Result := SplitEditorLines(TDelphiFileEncoding.ReadAll(AFilePath));
+  except
+    Result := nil;
+  end;
 end;
 
 function MinimalWriteGoesToBuffer(const AFilePath: string): Boolean;

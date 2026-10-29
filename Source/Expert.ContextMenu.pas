@@ -168,6 +168,7 @@ type
     procedure OnCheckLineEndings(Sender: TObject);
     procedure OnCheckFileEncoding(Sender: TObject);
     procedure OnCheckUnusedUnits(Sender: TObject);
+    procedure OnCheckConstParams(Sender: TObject);
     procedure OnRetryTimer(Sender: TObject);
     procedure OnSyncTimer(Sender: TObject);
     procedure DoOnPopup(Sender: TObject);
@@ -232,7 +233,7 @@ uses
   Expert.SemanticReplaceWizard, Expert.DfmEventCheckDialog,
   Expert.InterfaceGuidDialog, Expert.CircularRefsDialog, Expert.StatusWindow,
   Expert.DebugConsistencyDialog, Expert.LineEndingDialog,
-  Expert.FileEncodingCheck, Expert.UnusedUnitsDialog,
+  Expert.FileEncodingCheck, Expert.UnusedUnitsDialog, Expert.ConstParamsDialog,
   Expert.BlameGutter, Expert.BlameDialogs, Expert.PluginSettings,
   Expert.FindUnitDialog, Expert.AutoImport, Expert.FindOriginalSymbolWizard,
   Expert.UsesCleanup, Expert.StatementRefactor, Expert.SafeDelete, Expert.IncludeExpander,
@@ -539,6 +540,8 @@ begin
   Plain(ChecksSub, 'Line endings...',              OnCheckLineEndings,     REQ_PROJECT);
   Plain(ChecksSub, 'File encoding...',              OnCheckFileEncoding,    REQ_PROJECT);
   Plain(ChecksSub, 'Unused project units...',       OnCheckUnusedUnits,     REQ_PROJECT);
+  Plain(ChecksSub, 'Missing const (string parameters)...', OnCheckConstParams,
+    REQ_PROJECT);
 
   Sep(Root);
   Leaf(Root, 'Code Completion',           OnCompletion,           skCompletion, REQ_EDITOR);
@@ -1789,6 +1792,11 @@ end;
 procedure TContextMenuInstaller.OnCheckUnusedUnits(Sender: TObject);
 begin
   Expert.UnusedUnitsDialog.CheckUnusedUnits;
+end;
+
+procedure TContextMenuInstaller.OnCheckConstParams(Sender: TObject);
+begin
+  Expert.ConstParamsDialog.CheckConstParams;
 end;
 
 end.

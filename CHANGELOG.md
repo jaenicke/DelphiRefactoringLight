@@ -6,6 +6,37 @@ development builds and were never released.
 
 ---
 
+## 2.11.0 - 2026-10-29
+
+### Project check "Missing const (string parameters)"
+
+TurboMagic's idea from the forum: find the string parameters a project
+passes BY VALUE although the routine only reads them. Every one of those
+copies the string on every call.
+
+It is a LIST, not a sweep, and that is the design rather than caution. What
+the check can prove is that the body does not write the parameter and that
+both of its headers are known. What it cannot prove is that no CALLER
+releases the variable it passes: a `const` string parameter aliases that
+reference without raising its count, so such a case dies with
+`EInvalidPointer` and no compiler warning - measured with dcc32 37.0 before
+a line of this was written. So each row is a proposal with its reason, and
+nothing is written until you tick it.
+
+Refused and SAID, each with its own reason instead of a silent skip: a body
+that writes or takes the address of the parameter, a `virtual` / `override`
+family (a descendant's override must keep the signature), a method an
+`interface` declares (`const` is part of it - E2291, measured), a
+`published` method a `.dfm` may bind, a routine whose name is used as a
+procedural VALUE (`procedure(S: string)` and `procedure(const S: string)`
+are incompatible types - E2009, measured), and anything whose two headers
+cannot both be read. A parameter GROUP (`A, B: string`) is the unit of work,
+because one modifier serves all of it.
+
+Reachable from *Refactoring Light -> Project checks -> Missing const (string
+parameters)...* and as the MCP tool `const_params`, which lists by default
+and writes only the ids you name.
+
 ## 2.10.1 - 2026-10-29
 
 ### Which platforms an install builds comes from the installation

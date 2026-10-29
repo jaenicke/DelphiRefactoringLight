@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 2.10.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 2.11.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** (and, through contributed compatibility code, **Delphi 11 and 12** - see Requirements) that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -466,7 +466,7 @@ has corrected in this session. For the whole project at once there is the
 
 ### Project checks (menu only)
 
-Five checks for problems the compiler does **not** catch, reachable via *Refactoring Light &rarr; Project checks*. Each opens a results dialog; double-click / **Go to** jumps to the offending location.
+Eight checks for problems the compiler does **not** catch, reachable via *Refactoring Light &rarr; Project checks*. Each opens a results dialog; double-click / **Go to** jumps to the offending location.
 
 - **DFM event handlers** &mdash; scans every form's `.dfm` for `OnXxx = Handler` references and flags two failure modes the compiler ignores (the `.dfm` binds handlers *by name*):
   - **Missing handler** &mdash; the referenced method does not exist &rarr; the form crashes with *"Method not found"* on load.
@@ -483,6 +483,35 @@ Five checks for problems the compiler does **not** catch, reachable via *Refacto
   listed &mdash; the correction works on bytes. The same check runs on a single
   file when the IDE opens it (see *Line endings at file open* above), and both
   share one implementation, so neither can rewrite what the other refuses.
+- **Missing const (string parameters)** &mdash; string parameters the
+  project passes **by value** although the routine only reads them; every
+  such call copies the string. The list is a list of **proposals**, each
+  with its reason, and nothing is written until you tick a row: a `const`
+  string parameter aliases the variable the caller passes without raising
+  its reference count, so a caller that releases that variable leaves the
+  parameter dangling &mdash; measured, and no compiler warning catches it.
+  Refused and **said** rather than silently skipped: a body that writes or
+  takes the address of the parameter, a `virtual` / `override` family, a
+  method an `interface` declares (`const` is part of the signature &mdash;
+  E2291), a `published` method a `.dfm` may bind, a routine whose name is
+  used as a procedural **value** (`procedure(S: string)` and
+  `procedure(const S: string)` are different types &mdash; E2009), and
+  anything whose two headers cannot both be read. A parameter **group**
+  (`A, B: string`) is the unit of work, because one modifier serves it.
+- **Debug consistency** &mdash; the reasons a debugger stops at the wrong
+  line or not at all: a second copy of a project unit on the search path, a
+  stray `.dcu`, `{$D-}`/`{$L-}`, a build configuration without debug
+  information, a target older than its sources, and a DCU output directory
+  that does not match the sources the LSP is given.
+- **File encoding** &mdash; sources Delphi reads wrongly, above all **UTF-8
+  without a BOM**, which the compiler reads as ANSI so one umlaut becomes
+  two characters (measured). You pick what is converted into what; a file
+  whose text the target cannot hold is refused rather than written with
+  replacement characters.
+- **Unused project units** &mdash; units the project **file** lists although
+  nothing in the project names them any more. Read-only: removing one is a
+  click in the project manager, and only one layer is reported, since two
+  unused units that use each other keep each other alive.
 - **Circular unit references** &mdash; a Tarjan strongly-connected-components analysis over the project's `uses` graph. Tabs for the cycle groups, the shortest / longest cycle lengths (how many units a cycle spans), the individual **edge levers** (ranked by how many units would leave the cyclic set if that one `uses` entry were removed), the complete list of simple cycles, and the **hotspots** (which unit appears in the most cycles, and via which `uses` entry). Double-click jumps to the exact `uses` entry.
 
 ## Standalone executable

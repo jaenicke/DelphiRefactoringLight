@@ -1413,6 +1413,32 @@ const
     '{"max":{"type":"integer","description":"Most rows to return (default 200). The counts are always complete."},' +
     InstanceProp + '}}}' +
     ',' +
+    '{"name":"const_params","description":"String parameters of the ' +
+    'project that are passed BY VALUE although the routine only reads them: ' +
+    'every one of those copies the string on every call. A row is a PROPOSAL ' +
+    'with its reason, never a sweep - a const string parameter aliases the ' +
+    'variable the caller passes without raising its reference count, so a ' +
+    'caller that releases that variable makes the parameter dangle, which no ' +
+    'compiler warning catches. Refused and SAID: a body that writes or takes ' +
+    'the address of the parameter, a virtual/override family, a method an ' +
+    'interface declares (const is part of the signature - E2291), a ' +
+    'published method, a routine whose name is used as a procedural VALUE ' +
+    '(procedure(S: string) and procedure(const S: string) are incompatible - ' +
+    'E2009), and anything whose two headers cannot both be read. A GROUP is ' +
+    'the unit of work: one modifier serves \"A, B: string\". Every finding ' +
+    'carries an id; apply=true with fix_ids writes const in front of exactly ' +
+    'those groups, in BOTH headers."' +
+    ',"inputSchema":{"type":"object","properties":' +
+    '{"fix_ids":{"type":"array","items":{"type":"string"},"description":"Ids ' +
+    'from a previous call - the parameter groups to change. Required for ' +
+    'apply."},' +
+    '"include_refused":{"type":"boolean","description":"Also list the ' +
+    'parameters that were REFUSED, with the reason (default false). ' +
+    '\"not proposed\" and \"never looked at\" must not read the same."},' +
+    '"max":{"type":"integer","description":"Most rows to return (default ' +
+    '200). The counts are always complete."},' +
+    ApplyIdsProp + ',' + InstanceProp + '}}}' +
+    ',' +
     '{"name":"line_endings","description":"Every project source (and the files ' +
     'it includes) whose line breaks are not plain CRLF - LF only, CR only, or ' +
     'MIXED, which is the one Delphi handles worst (breakpoints land on the ' +
@@ -2169,7 +2195,7 @@ begin
       ]),
     Sec('Project-wide checks',
       ['signature_check', 'dfm_events', 'interface_guids', 
-       'debug_consistency', 'unused_units', 'line_endings', 
+       'debug_consistency', 'unused_units', 'line_endings', 'const_params', 
        'file_encoding'],
       [
         'Each of these scans the project and reports findings with an id;',
@@ -2188,7 +2214,12 @@ begin
         'names them any more (read-only). line_endings and file_encoding find',
         'files Delphi reads wrongly - mixed or LF-only breaks, and above all',
         'UTF-8 without a BOM, which the compiler reads as ANSI so one umlaut',
-        'becomes two characters - and convert the ones you name.'
+        'becomes two characters - and convert the ones you name.',
+        'const_params finds string parameters passed by value although the',
+        'routine only reads them: every call copies the string. It proposes,',
+        'with a reason per row, and writes const only for the ids you name -',
+        'a const string parameter aliases the caller''s variable, which is a',
+        'decision no sweep may take.'
       ]),
     Sec('Version control',
       ['blame', 'commit_info'],

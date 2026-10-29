@@ -32,7 +32,8 @@ unit Expert.DialogHelper;
 interface
 
 uses
-  System.SysUtils, System.Classes, System.Types, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls;
+  System.SysUtils, System.Classes, System.Types, Vcl.Forms, Vcl.Controls,
+  Vcl.StdCtrls, Vcl.ComCtrls, Vcl.Graphics;   // TFont for TextHeightFor
 
 type
   /// <summary>Class for the ad-hoc progress/tool windows built with
@@ -69,6 +70,12 @@ procedure RegisterDialogClass(AClass: TCustomFormClass);
 ///  AFTER all child controls have been created so the theme reaches
 ///  them as well.</summary>
 procedure PrepareDialog(AForm: TForm; AOwner: TComponent);
+
+/// <summary>The height ATEXT needs at AWIDTH pixels in AFONT (DT_CALCRECT).
+///  A hard-coded height is how text gets cut off, so a label that carries a
+///  sentence somebody wrote asks for its own height.</summary>
+function TextHeightFor(AFont: TFont; const AText: string;
+  AWidth: Integer): Integer;
 
 /// <summary>Remembers AFORM as one of this plugin's windows, so the
 ///  package can close it before it unloads (audit #40, M31 / #37, L3s).
@@ -157,7 +164,7 @@ function FitPopup(const AWorkArea: TRect; const APt: TPoint;
 implementation
 
 uses
-  Winapi.Windows, Vcl.Graphics, System.Generics.Collections, Expert.IdeThemes,
+  Winapi.Windows, System.Generics.Collections, Expert.IdeThemes,
   Expert.AutoImport
   {$IFNDEF STANDALONE_BUILD}, ToolsAPI {$ENDIF};
 

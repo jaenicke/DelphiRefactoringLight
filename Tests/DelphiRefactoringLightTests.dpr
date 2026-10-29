@@ -90,7 +90,8 @@ uses
   Test.ExtractInterface in 'Test.ExtractInterface.pas',
   Test.EventGenPlan in 'Test.EventGenPlan.pas',
   Test.ParameterRename in 'Test.ParameterRename.pas',
-  Test.ReloadReport in 'Test.ReloadReport.pas';
+  Test.ReloadReport in 'Test.ReloadReport.pas',
+  Test.ConstParams in 'Test.ConstParams.pas';
 
 var
   Runner: ITestRunner;

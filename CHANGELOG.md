@@ -6,6 +6,25 @@ development builds and were never released.
 
 ---
 
+## 2.13.1 - 2026-10-31
+
+**What the first run of the resolver showed.** Stage 1 is pure, so the way
+to try it is a program that resolves a reference in its OWN process and
+prints what a viewer window would show - no debugger, no IDE, real RTTI.
+That probe found one thing worth fixing.
+
+- one vtable can serve an interface AND a descendant of it, at one offset -
+  so the slot a reference points at can belong to two entries at once
+  (`TVisBoth = class(TInterfacedObject, IOne, ITwo)`, and that is what
+  System.Classes does with IInterfaceList / IInterfaceListEx). The resolver
+  answered the FIRST of them as "the" interface, which is a guess dressed as
+  a fact.
+- it now names every interface the slot serves, says in its reason that the
+  bytes carry no tie-breaker, and leaves the choice to what does have one:
+  the debugger's static type name.
+
+---
+
 ## 2.13.0 - 2026-10-31
 
 **Resolving an interface reference, stage 1.** The request: a debug

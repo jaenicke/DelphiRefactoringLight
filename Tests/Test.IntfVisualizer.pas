@@ -32,6 +32,10 @@ type
     [Test] procedure EveryLevelNamesItsOwnInterfaces;
     /// <summary>What the bytes do not prove is not reported.</summary>
     [Test] procedure WhatCannotBeResolvedSaysWhy;
+    /// <summary>One vtable can serve an interface and a descendant of it,
+    ///  and then the name alone identifies nothing - so every interface the
+    ///  slot serves is named.</summary>
+    [Test] procedure ASharedSlotNamesEveryInterfaceItServes;
   end;
 
 implementation
@@ -73,6 +77,19 @@ type
     procedure Three;
   end;
 
+  // ITwo descends from IOne, so ONE class implementing both gets ONE vtable
+  // at ONE offset for the two entries - measured, and it is what
+  // System.Classes' TInterfaceList does with IInterfaceList /
+  // IInterfaceListEx. The fixture is our own so the test does not depend on
+  // what the RTL happens to declare.
+  TVisBoth = class(TInterfacedObject, IOne, ITwo)
+  public
+    procedure One;
+    procedure Two;
+  end;
+
+procedure TVisBoth.One; begin end;
+procedure TVisBoth.Two; begin end;
 procedure TVisBase.One; begin end;
 procedure TVisMiddle.Two; begin end;
 procedure TVisLeaf.Three; begin end;
@@ -228,6 +245,50 @@ begin
   Assert.IsTrue(Res.Reason <> '', 'and says why: ' + Res.Reason);
   Assert.AreEqual(0, Integer(Length(Res.Levels)),
     'and it reports no hierarchy it could not prove');
+end;
+
+procedure TIntfVisualizerTests.ASharedSlotNamesEveryInterfaceItServes;
+var
+  Ref: IOne;                       // the STATIC type is IOne ...
+  Res: TIntfRefResolution;
+  Names: TArray<string>;
+begin
+  Ref := TVisBoth.Create;          // ... and the slot serves ITwo as well
+  try
+    Res := ResolveInterfaceReference(UInt64(NativeUInt(Pointer(Ref))),
+      OwnProcessReader());
+    Assert.IsTrue(Res.Resolved, 'resolved: ' + Res.Reason);
+
+    Assert.IsTrue(Res.ReferenceIsAmbiguous,
+      'two entries share this reference''s vtable AND offset, so which of ' +
+      'them the variable was declared as is not in the bytes');
+    Names := Res.ReferenceInterfaceNames;
+    Assert.AreEqual(2, Integer(Length(Names)), 'both are reported');
+    Assert.IsTrue(string.Join(',', Names).Contains('IOne') and
+      string.Join(',', Names).Contains('ITwo'), 'and by name: ' +
+      string.Join(',', Names));
+
+    Assert.IsTrue(Res.ReferenceInterface.Contains('IOne') and
+      Res.ReferenceInterface.Contains('ITwo'),
+      'the one-line answer names every interface the slot serves rather ' +
+      'than picking one of them: ' + Res.ReferenceInterface);
+    Assert.IsTrue(Res.Reason.Contains('cannot say'),
+      'and it says why, because a caller cannot see this for itself: ' +
+      Res.Reason);
+
+    // the unambiguous case must NOT carry that note - otherwise the
+    // sentence would be noise on every resolution
+    var Leaf: IThree := TVisLeaf.Create;
+    var R2 := ResolveInterfaceReference(UInt64(NativeUInt(Pointer(Leaf))),
+      OwnProcessReader());
+    Assert.IsFalse(R2.ReferenceIsAmbiguous, 'IThree stands alone');
+    Assert.AreEqual('IThree', R2.ReferenceInterface, 'and is named plainly');
+    Assert.IsFalse(R2.Reason.Contains('cannot say'),
+      'with nothing to explain: ' + R2.Reason);
+    Leaf := nil;
+  finally
+    Ref := nil;
+  end;
 end;
 
 initialization

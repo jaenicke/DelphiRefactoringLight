@@ -99,8 +99,18 @@ type
     PointerSize: Integer;
     Levels: TArray<TIntfClassLevel>;
     /// <summary>The name of the interface the reference points at, '' when
-    ///  the entry carried no readable name.</summary>
+    ///  the entry carried no readable name. When SEVERAL entries share that
+    ///  slot - one vtable can satisfy an interface and a descendant of it,
+    ///  which is what System.Classes' IInterfaceList / IInterfaceListEx do -
+    ///  every one of them is named, separated by ' / ': a pointer to that
+    ///  slot really is each of them, and the bytes cannot say which one the
+    ///  variable was declared as. The debugger's static type name can.</summary>
     function ReferenceInterface: string;
+    /// <summary>Every entry the reference points at, in level order.</summary>
+    function ReferenceInterfaceNames: TArray<string>;
+    /// <summary>True when more than one entry shares the reference's slot,
+    ///  so the name alone is not an identification.</summary>
+    function ReferenceIsAmbiguous: Boolean;
   end;
 
 const
@@ -353,12 +363,24 @@ begin
   Result := ReadSymbolName(NameAddr, ARead);
 end;
 
-function TIntfRefResolution.ReferenceInterface: string;
+function TIntfRefResolution.ReferenceInterfaceNames: TArray<string>;
 begin
-  Result := '';
+  Result := nil;
   for var L in Levels do
     for var E in L.Interfaces do
-      if E.IsTheReference then Exit(E.Name);
+      if E.IsTheReference then Result := Result + [E.Name];
+end;
+
+function TIntfRefResolution.ReferenceIsAmbiguous: Boolean;
+begin
+  Result := Length(ReferenceInterfaceNames) > 1;
+end;
+
+function TIntfRefResolution.ReferenceInterface: string;
+begin
+  // Several names mean the slot serves several interfaces, so answering ONE
+  // of them would be a guess dressed as a fact - they are all named.
+  Result := string.Join(' / ', ReferenceInterfaceNames);
 end;
 
 function ResolveInterfaceReference(AReference: UInt64;
@@ -407,6 +429,16 @@ var
       Result := True;
       if not TryReadParentVmt(Cur, APtrSize, ARead, Cur) then Break;
     end;
+    // One vtable can serve an interface and a descendant of it, and then the
+    // slot the reference points at belongs to both. Saying so is the whole
+    // answer here: the bytes carry no tie-breaker, while the debugger's
+    // static type name does.
+    if Result and Res.ReferenceIsAmbiguous then
+      Res.Reason := Trim(Res.Reason + ' ' + IntToStr(Length(
+        Res.ReferenceInterfaceNames)) + ' entries share this reference''s ' +
+        'vtable and offset, so the bytes cannot say which of them the ' +
+        'variable was declared as: ' + string.Join(', ',
+        Res.ReferenceInterfaceNames) + '.');
   end;
 
   // One bitness: find the object by walking the field offsets back from the

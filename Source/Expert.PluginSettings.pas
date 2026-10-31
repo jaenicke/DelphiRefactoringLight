@@ -49,6 +49,8 @@ type
     class var FBlameInfo: Integer;
     class var FBlameColumnOffset: Integer;
     class var FBlameUseTortoise: Boolean;
+    class var FIntfVisualizerViewer: Boolean;
+    class var FIntfVisualizerLine: Boolean;
     class var FLspLogging: Boolean;
     class var FVerifySession: Boolean;
     class var FScopeIncludeOpenUnits: Boolean;
@@ -118,6 +120,20 @@ type
     ///  missing or refuses to start.</summary>
     class property BlameUseTortoise: Boolean
       read FBlameUseTortoise write FBlameUseTortoise;
+    /// <summary>Offer the interface visualizer in the debugger: the window
+    ///  that resolves an interface reference to its object and lists the
+    ///  class hierarchy with the interfaces each level implements. On by
+    ///  default - it is opt-in per use (the debugger offers it in its own
+    ///  list for the type) and it writes nothing.</summary>
+    class property IntfVisualizerViewer: Boolean
+      read FIntfVisualizerViewer write FIntfVisualizerViewer;
+    /// <summary>...and replace the VALUE SHOWN for an interface reference
+    ///  in every tooltip, watch, local view and inspector with one line
+    ///  naming the class behind it. OFF by default: the IDE allows only
+    ///  one such replacer per type, so this takes over the display of
+    ///  every interface variable in the debugger.</summary>
+    class property IntfVisualizerLine: Boolean
+      read FIntfVisualizerLine write FIntfVisualizerLine;
     /// <summary>Starts our own DelphiLsp.exe with '-LogModes 255', so
     ///  %TEMP%\DelphiLSP\RefactoringLight*.log records every request and
     ///  its duration. Off by default (the log grows); asked for in issue
@@ -337,6 +353,10 @@ begin
       FBlameInfo := ReadIntDef(Reg, 'BlameInfo', FBlameInfo);
       FBlameColumnOffset := ReadIntDef(Reg, 'BlameColumnOffset', FBlameColumnOffset);
       FBlameUseTortoise := ReadBoolDef(Reg, 'BlameUseTortoise', FBlameUseTortoise);
+      FIntfVisualizerViewer := ReadBoolDef(Reg, 'IntfVisualizerViewer',
+        FIntfVisualizerViewer);
+      FIntfVisualizerLine := ReadBoolDef(Reg, 'IntfVisualizerLine',
+        FIntfVisualizerLine);
       FLspLogging := ReadBoolDef(Reg, 'LspLogging', FLspLogging);
       FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
       // ALL of them (audit #37, L4e): these five were missing, so Save
@@ -388,6 +408,12 @@ begin
   // Delphi now and draws its marks at the very left of the same area.
   FBlameColumnOffset := 17;
   FBlameUseTortoise := True;
+  // The VIEWER is opt-in per use anyway (the debugger lists it for the
+  // type and the user picks it), so it may default to on. The LINE is a
+  // takeover - one replacer per type for the whole debugger - so it does
+  // not.
+  FIntfVisualizerViewer := True;
+  FIntfVisualizerLine := False;
   FLspLogging := False;
   FVerifySession := True;
   FScopeIncludeOpenUnits := True;
@@ -417,6 +443,10 @@ begin
       FBlameInfo := ReadIntDef(Reg, 'BlameInfo', FBlameInfo);
       FBlameColumnOffset := ReadIntDef(Reg, 'BlameColumnOffset', FBlameColumnOffset);
       FBlameUseTortoise := ReadBoolDef(Reg, 'BlameUseTortoise', FBlameUseTortoise);
+      FIntfVisualizerViewer := ReadBoolDef(Reg, 'IntfVisualizerViewer',
+        FIntfVisualizerViewer);
+      FIntfVisualizerLine := ReadBoolDef(Reg, 'IntfVisualizerLine',
+        FIntfVisualizerLine);
       FLspLogging := ReadBoolDef(Reg, 'LspLogging', FLspLogging);
       FVerifySession := ReadBoolDef(Reg, 'VerifySession', FVerifySession);
       FScopeIncludeOpenUnits := ReadBoolDef(Reg, 'ScopeIncludeOpenUnits', FScopeIncludeOpenUnits);
@@ -531,6 +561,18 @@ begin
       'Pixels between the start of the gutter''s data area and our column. ' +
       '17 is measured against the Parnassus Navigator, which ships with ' +
       'Delphi and draws at the very left of the same area.'),
+    B('IntfVisualizerViewer', 'True',
+      'Offer the interface visualizer while debugging: a window that ' +
+      'resolves an interface reference to the object behind it and lists ' +
+      'the class hierarchy with the interfaces each level implements, read ' +
+      'from the RTTI bytes. Opt-in per use - the debugger offers it in its ' +
+      'own list for the type.'),
+    B('IntfVisualizerLine', 'False',
+      '...and replace the value SHOWN for an interface reference in every ' +
+      'tooltip, watch, local view and inspector with one line naming the ' +
+      'class behind it. Off by default: the IDE allows only one value ' +
+      'replacer per type, so this takes over the display of every ' +
+      'interface variable in the debugger.'),
     B('BlameUseTortoise', 'True',
       'Use TortoiseGit / TortoiseSVN for the commit and blame views when ' +
       'they are installed, and fall back to the built-in ones when they ' +
@@ -574,6 +616,10 @@ begin
   else if SameText(AName, 'BlameColumnWidth') then AText := IntToStr(FBlameColumnWidth)
   else if SameText(AName, 'BlameColumnOffset') then AText := IntToStr(FBlameColumnOffset)
   else if SameText(AName, 'BlameUseTortoise') then AText := BoolToStr(FBlameUseTortoise, True)
+  else if SameText(AName, 'IntfVisualizerViewer') then
+    AText := BoolToStr(FIntfVisualizerViewer, True)
+  else if SameText(AName, 'IntfVisualizerLine') then
+    AText := BoolToStr(FIntfVisualizerLine, True)
   else
   begin
     AText := '';
@@ -649,6 +695,8 @@ begin
   else if SameText(AName, 'BlameColumnWidth') then FBlameColumnWidth := N
   else if SameText(AName, 'BlameColumnOffset') then FBlameColumnOffset := N
   else if SameText(AName, 'BlameUseTortoise') then FBlameUseTortoise := B
+  else if SameText(AName, 'IntfVisualizerViewer') then FIntfVisualizerViewer := B
+  else if SameText(AName, 'IntfVisualizerLine') then FIntfVisualizerLine := B
   else
   begin
     // FindSetting said yes, so this can only be a setting that was added

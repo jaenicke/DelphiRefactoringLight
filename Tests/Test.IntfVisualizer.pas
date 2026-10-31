@@ -36,6 +36,10 @@ type
     ///  and then the name alone identifies nothing - so every interface the
     ///  slot serves is named.</summary>
     [Test] procedure ASharedSlotNamesEveryInterfaceItServes;
+    /// <summary>The two rules the IDE half rests on and that no debug
+    ///  session is needed for: reading an address out of an evaluator's
+    ///  answer, and the one line the value replacer shows.</summary>
+    [Test] procedure WhatTheDebuggerSaysAndWhatWeSayBack;
   end;
 
 implementation
@@ -286,6 +290,60 @@ begin
     Assert.IsFalse(R2.Reason.Contains('cannot say'),
       'with nothing to explain: ' + R2.Reason);
     Leaf := nil;
+  finally
+    Ref := nil;
+  end;
+end;
+
+procedure TIntfVisualizerTests.WhatTheDebuggerSaysAndWhatWeSayBack;
+var
+  Ref: IThree;
+  Res: TIntfRefResolution;
+  Line: string;
+begin
+  // WHAT THE EVALUATOR REALLY WRITES cannot be measured without a debug
+  // session, so this pins the SHAPES the parser accepts and - which
+  // matters more - what it must not mistake for an address.
+  Assert.AreEqual(UInt64($0254F8C0), ParseEvalPointer('$0254F8C0'),
+    'the plain Delphi form');
+  Assert.AreEqual(UInt64($0254F8C0), ParseEvalPointer('($0254F8C0 as IFoo)'),
+    'and the same inside the cast the watch window shows');
+  Assert.AreEqual(UInt64($0254F8C0), ParseEvalPointer('(0x0254f8c0)'),
+    'the C++ form, lower case');
+  Assert.AreEqual(UInt64($0254F8C0), ParseEvalPointer('0254F8C0'),
+    'a bare run is the LAST resort - and it is only safe because the ' +
+    'resolver proves every candidate: a number read as an address simply ' +
+    'resolves to nothing');
+  Assert.AreEqual(UInt64(0), ParseEvalPointer('nil'), 'nil is no address');
+  Assert.AreEqual(UInt64(0), ParseEvalPointer(''), 'and neither is nothing');
+  Assert.AreEqual(UInt64(0), ParseEvalPointer('12'),
+    'a short number is a value, not an address');
+  Assert.AreEqual(UInt64(0), ParseEvalPointer('$0'),
+    'and an explicit zero is not a reference either');
+
+  // THE ONE LINE: it replaces the value the debugger would have shown in
+  // every tooltip and watch, so it has to carry the two things the
+  // original does not - which interface this slot is, and what object is
+  // behind it.
+  Ref := TVisLeaf.Create;
+  try
+    Res := ResolveInterfaceReference(UInt64(NativeUInt(Pointer(Ref))),
+      OwnProcessReader());
+    Assert.IsTrue(Res.Resolved, 'resolved: ' + Res.Reason);
+    Line := IntfOneLine(Res);
+    Assert.IsTrue(Line.Contains('IThree'), 'it names the interface: ' + Line);
+    Assert.IsTrue(Line.Contains('TVisLeaf'), 'and the class behind it: ' +
+      Line);
+    Assert.IsTrue(Line.Contains(IntToHex(Res.ObjectAddr, 0)),
+      'and the object''s address, which is what makes two references ' +
+      'comparable at a glance: ' + Line);
+    Assert.IsFalse(Line.Contains(sLineBreak),
+      'ONE line - it goes into a watch row: ' + Line);
+
+    Res := Default(TIntfRefResolution);
+    Assert.AreEqual('', IntfOneLine(Res),
+      'and an unresolved reference says NOTHING rather than something ' +
+      'wrong - the caller then keeps what the debugger itself showed');
   finally
     Ref := nil;
   end;

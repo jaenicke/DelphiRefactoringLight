@@ -75,6 +75,8 @@ contains
   Expert.LineEndingWatcher in '..\Source\Expert.LineEndingWatcher.pas',
   Expert.LineEndingDialog in '..\Source\Expert.LineEndingDialog.pas',
   Expert.FileEncodingCheck in '..\Source\Expert.FileEncodingCheck.pas',
+  Expert.IntfVisualizer in '..\Source\Expert.IntfVisualizer.pas',
+  Expert.IntfVisualizerIde in '..\Source\Expert.IntfVisualizerIde.pas',
   Expert.UnusedUnits in '..\Source\Expert.UnusedUnits.pas',
   Expert.ConstParams in '..\Source\Expert.ConstParams.pas',
   Expert.ConstParamsDialog in '..\Source\Expert.ConstParamsDialog.pas',

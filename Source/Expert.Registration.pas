@@ -20,7 +20,7 @@ uses
   Expert.FindReferencesWizard, Expert.FindImplementationsWizard,
   Expert.SignatureCheckWizard, Expert.KeyBinding, Expert.RestartHint,
   Expert.ContextMenu, Expert.UnitRenameWatcher, Expert.LspPrewarmer,
-  Expert.LineEndingWatcher,
+  Expert.LineEndingWatcher, Expert.IntfVisualizerIde,
   Expert.WithRefactorWizard,
   Expert.UnitReferencesWizard, Expert.MoveToUnitWizard,
   Expert.Shortcuts, Expert.OptionsPage, Expert.UnitIndex, Expert.AutoImport,
@@ -188,6 +188,11 @@ begin
     begin
       TLspManager.Instance.MaintainVerifySession;
     end;
+  // The debugger visualizer for an interface reference. ApplyIntfVisualizer
+  // Settings and not a plain register: the two surfaces are independent
+  // settings, and this is the ONE routine that pushes the complete set -
+  // the lesson the blame column's own "apply everything" routine wrote.
+  ApplyIntfVisualizerSettings;
   // Named pipe for the MCP bridge (RefactoringLightMcp.exe): diagnostics
   // and quick fixes for Claude Code & co, one pipe per IDE instance.
   StartMcpServer;
@@ -363,6 +368,9 @@ finalization
     NoteShutdownProblem('Background threads of the plugin did not finish in ' +
       'time. Code of the old version may still be running, which can crash ' +
       'this IDE - please restart it.');
+  // A visualizer the IDE still holds is called into unmapped code the
+  // next time somebody hovers over an interface variable.
+  UnregisterIntfVisualizers;
   ResourceTickHook := nil;   // before the timer goes, and before the BPL unloads
   StopResourceMonitor;
   UninstallBlameGutter;

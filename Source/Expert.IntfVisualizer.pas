@@ -138,9 +138,28 @@ function IsClassVmt(AAddress: UInt64; APointerSize: Integer;
 ///  answers '' when it does not read as an identifier.</summary>
 function ReadSymbolName(AAddress: UInt64; const ARead: TDebugMemReader): string;
 
-/// <summary>The whole answer for one interface reference.</summary>
+/// <summary>The hex of the first pointer-looking value in an evaluator
+///  result ('$0254F8C0', '(0x254f8c0)', '0254F8C0'), or 0. Pure, so the
+///  shapes are testable without a debugger - which is the only way to
+///  test them at all.</summary>
+function ParseEvalPointer(const AText: string): UInt64;
+
+/// <summary>The one line the value replacer shows for a resolved
+///  reference. Pure.</summary>
+function IntfOneLine(const ARes: TIntfRefResolution): string;
+
+/// <summary>The whole answer for one interface reference. AMAXOFFSET
+///  bounds the search for the object (default MaxIntfFieldOffset): a
+///  FAILED resolution reads 2 * AMaxOffset / PointerSize times from the
+///  inspected process, and a caller that runs per watch row rather than
+///  per user action pays that for every reference that is not a Delphi
+///  class interface. A success stops at the first proven hit, so the
+///  budget only shortens the hopeless case - and a reference whose object
+///  sits further back than the budget answers "not proven", never
+///  wrongly.</summary>
 function ResolveInterfaceReference(AReference: UInt64;
-  const ARead: TDebugMemReader): TIntfRefResolution;
+  const ARead: TDebugMemReader;
+  AMaxOffset: Integer = MaxIntfFieldOffset): TIntfRefResolution;
 
 implementation
 
@@ -363,6 +382,80 @@ begin
   Result := ReadSymbolName(NameAddr, ARead);
 end;
 
+function ParseEvalPointer(const AText: string): UInt64;
+
+  function IsHexCh(C: Char): Boolean;
+  begin
+    Result := CharInSet(C, ['0'..'9', 'a'..'f', 'A'..'F']);
+  end;
+
+  function RunAt(AStart: Integer): Integer;
+  begin
+    Result := 0;
+    while (AStart + Result <= Length(AText)) and
+          IsHexCh(AText[AStart + Result]) do
+      Inc(Result);
+  end;
+
+var
+  I, Start, Len, MinLen: Integer;
+begin
+  Result := 0;
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    Start := 0;
+    MinLen := 1;
+    // '$' and '0x' are what an evaluator writes for a pointer. A BARE run
+    // of hex digits is the last resort, and then it has to be long enough
+    // not to be an ordinary small number - '0' and '12' are values.
+    if AText[I] = '$' then
+      Start := I + 1
+    else if (AText[I] = '0') and (I < Length(AText)) and
+            CharInSet(AText[I + 1], ['x', 'X']) then
+      Start := I + 2
+    else if IsHexCh(AText[I]) and
+            ((I = 1) or not CharInSet(AText[I - 1], ['0'..'9', 'a'..'z',
+              'A'..'Z', '_', '$'])) then
+    begin
+      Start := I;
+      MinLen := 4;
+    end;
+
+    if Start > 0 then
+    begin
+      Len := RunAt(Start);
+      if (Len >= MinLen) and (Len <= 16) then
+        if TryStrToUInt64('$' + Copy(AText, Start, Len), Result) and
+           (Result <> 0) then
+          Exit;
+      Result := 0;
+      if Len > 0 then
+      begin
+        I := Start + Len;
+        Continue;
+      end;
+    end;
+    Inc(I);
+  end;
+end;
+
+function IntfOneLine(const ARes: TIntfRefResolution): string;
+var
+  Name: string;
+begin
+  if not ARes.Resolved then Exit('');
+  Name := ARes.ReferenceInterface;
+  if Name = '' then Name := '<unnamed entry>';
+  Result := Format('%s  of  %s', [Name, ARes.Levels[0].ClassName]);
+  if ARes.Levels[0].UnitName <> '' then
+    Result := Result + ' (' + ARes.Levels[0].UnitName + ')';
+  Result := Result + Format('  [obj $%s, %d level(s)]',
+    [IntToHex(ARes.ObjectAddr, 0), Length(ARes.Levels)]);
+  if ARes.ReferenceIsAmbiguous then
+    Result := Result + ' - the slot serves several interfaces';
+end;
+
 function TIntfRefResolution.ReferenceInterfaceNames: TArray<string>;
 begin
   Result := nil;
@@ -384,9 +477,11 @@ begin
 end;
 
 function ResolveInterfaceReference(AReference: UInt64;
-  const ARead: TDebugMemReader): TIntfRefResolution;
+  const ARead: TDebugMemReader;
+  AMaxOffset: Integer = MaxIntfFieldOffset): TIntfRefResolution;
 var
   Res: TIntfRefResolution;
+  Budget: Integer;
 
   // Walks the parent chain and fills the levels. The entry the reference
   // points at is marked on the way.
@@ -455,7 +550,7 @@ var
     if not TryReadPtr(AReference, APtrSize, ARead, VTable) then Exit;
     if VTable = 0 then Exit;
     Offset := APtrSize;
-    while Offset <= MaxIntfFieldOffset do
+    while Offset <= Budget do
     begin
       if AReference > UInt64(Offset) then
       begin
@@ -493,6 +588,9 @@ var
 begin
   Res := Default(TIntfRefResolution);
   Res.Reference := AReference;
+  Budget := AMaxOffset;
+  if Budget <= 0 then Budget := MaxIntfFieldOffset;
+  if Budget > MaxIntfFieldOffset then Budget := MaxIntfFieldOffset;
   if not Assigned(ARead) then
   begin
     Res.Reason := 'no memory reader';
@@ -534,7 +632,7 @@ begin
   Res := Default(TIntfRefResolution);
   Res.Reference := AReference;
   Res.Reason := 'no object could be proven behind this reference: within ' +
-    IntToStr(MaxIntfFieldOffset) + ' bytes before it there is no address ' +
+    IntToStr(Budget) + ' bytes before it there is no address ' +
     'that is a class and declares an entry with this reference''s VTable. ' +
     'That is what a delegating implementation looks like (the interface is ' +
     'provided by another object through an implements clause), and also ' +

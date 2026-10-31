@@ -49,11 +49,11 @@
         <SanitizedProjectName>DelphiRefactoringLight</SanitizedProjectName>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
         <VerInfo_MajorVer>2</VerInfo_MajorVer>
-        <VerInfo_MinorVer>13</VerInfo_MinorVer>
-        <VerInfo_Release>1</VerInfo_Release>
+        <VerInfo_MinorVer>14</VerInfo_MinorVer>
+        <VerInfo_Release>0</VerInfo_Release>
         <VerInfo_Build>0</VerInfo_Build>
         <VerInfo_Locale>1031</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=Sebastian Jaenicke;FileDescription=Delphi Refactoring Light;FileVersion=2.13.1.0;InternalName=DelphiRefactoringLight;LegalCopyright=Copyright (c) 2026 Sebastian Jaenicke, MPL 2.0;LegalTrademarks=;OriginalFilename=;ProductName=Delphi Refactoring Light;ProductVersion=2.13.1;Comments=https://github.com/jaenicke/DelphiRefactoringLight</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=Sebastian Jaenicke;FileDescription=Delphi Refactoring Light;FileVersion=2.14.0.0;InternalName=DelphiRefactoringLight;LegalCopyright=Copyright (c) 2026 Sebastian Jaenicke, MPL 2.0;LegalTrademarks=;OriginalFilename=;ProductName=Delphi Refactoring Light;ProductVersion=2.14.0;Comments=https://github.com/jaenicke/DelphiRefactoringLight</VerInfo_Keys>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;Vcl.Imaging;Vcl.Touch;Vcl.Samples;Vcl.Shell;$(DCC_Namespace)</DCC_Namespace>
         <GenDll>true</GenDll>
         <GenPackage>true</GenPackage>
@@ -136,6 +136,8 @@
         <DCCReference Include="..\Source\Expert.LineEndingWatcher.pas"/>
         <DCCReference Include="..\Source\Expert.LineEndingDialog.pas"/>
         <DCCReference Include="..\Source\Expert.FileEncodingCheck.pas"/>
+        <DCCReference Include="..\Source\Expert.IntfVisualizer.pas"/>
+        <DCCReference Include="..\Source\Expert.IntfVisualizerIde.pas"/>
         <DCCReference Include="..\Source\Expert.UnusedUnits.pas"/>
         <DCCReference Include="..\Source\Expert.ConstParams.pas"/>
         <DCCReference Include="..\Source\Expert.ConstParamsDialog.pas"/>

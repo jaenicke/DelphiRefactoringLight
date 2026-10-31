@@ -6,6 +6,32 @@ development builds and were never released.
 
 ---
 
+## 2.14.0 - 2026-10-31
+
+**The interface visualizer, complete.** 2.13.x resolved an interface
+reference from the RTTI bytes; this version puts it where it is used - in
+the debugger, through both surfaces the IDE has, each one switchable.
+
+- a WINDOW (on by default): the reference, the object behind it, and the
+  class hierarchy with the interfaces each level declares - name, GUID,
+  offset, and which entry the reference itself points at. The debugger
+  offers it in its own list for an interface variable, so it is opt-in per
+  use and it writes nothing.
+- ONE LINE in every tooltip, watch, local view and inspector (off by
+  default): the IDE allows only one such replacement per type, so this
+  takes over the display of every interface variable - which is a decision
+  rather than a default. When it cannot resolve a reference it hands the
+  debugger back exactly what it had.
+- both are switched IN THE WINDOW and in the options page, and the status
+  window says which of them is registered - there is nowhere else to see
+  it.
+- the address of the reference comes from the evaluator (`Evaluate` reports
+  the address OF the variable, so the reference is read from there) rather
+  than from parsing its text; when an expression has no such address the
+  text is the fallback, and the window says which route was taken.
+
+---
+
 ## 2.13.1 - 2026-10-31
 
 **What the first run of the resolver showed.** Stage 1 is pure, so the way

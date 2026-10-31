@@ -81,8 +81,14 @@ type
     FEolCheckBox: TCheckBox;
     FEolAutoBox: TCheckBox;
     FEolNote: TLabel;
+    // user request 2026-10-31: the debugger visualizer for an interface
+    FIntfGroup: TGroupBox;
+    FIntfViewerBox: TCheckBox;
+    FIntfLineBox: TCheckBox;
+    FIntfNote: TLabel;
     procedure EnsureKeepRow;
     procedure EnsureEolRow;
+    procedure EnsureIntfRow;
     procedure EnsureLspLogBox;
     procedure EnsureExtraRows;
     function EditFor(Kind: TShortcutKind): TEdit;
@@ -201,6 +207,41 @@ begin
     'form file and anything below the RAD Studio installation is never ' +
     'touched, and a unit with unsaved changes is named instead of being ' +
     'rewritten. The encoding stays as it is.)';
+end;
+
+procedure TLspOptionsFrame.EnsureIntfRow;
+begin
+  if FIntfGroup <> nil then Exit;
+  FIntfGroup := TGroupBox.Create(Self);
+  FIntfGroup.Parent := Self;
+  FIntfGroup.Caption := 'Interface visualizer (debugger)';
+  FIntfGroup.Left := grpBlame.Left;
+  FIntfGroup.Width := grpBlame.Width;
+  FIntfGroup.Anchors := grpBlame.Anchors;
+
+  FIntfViewerBox := TCheckBox.Create(Self);
+  FIntfViewerBox.Parent := FIntfGroup;
+  FIntfViewerBox.Caption := 'Offer the window for an interface reference';
+  FIntfViewerBox.Hint := 'While debugging, the debugger lists it for an ' +
+    'interface type: it resolves the reference to the object behind it and ' +
+    'shows the class hierarchy with the interfaces each level implements.';
+  FIntfViewerBox.ShowHint := True;
+
+  FIntfLineBox := TCheckBox.Create(Self);
+  FIntfLineBox.Parent := FIntfGroup;
+  FIntfLineBox.Caption := 'Also show the class in every tooltip and watch';
+  FIntfLineBox.Hint := 'Replaces the value shown for an interface ' +
+    'reference with one line naming the class behind it.';
+  FIntfLineBox.ShowHint := True;
+
+  FIntfNote := TLabel.Create(Self);
+  FIntfNote.Parent := FIntfGroup;
+  FIntfNote.WordWrap := True;
+  FIntfNote.AutoSize := False;
+  FIntfNote.Caption := '(The IDE allows only ONE such replacement per ' +
+    'type, so the second box takes over the display of every interface ' +
+    'variable in the debugger - which is why it is off by default. Both ' +
+    'read the inspected process and change nothing in it.)';
 end;
 
 procedure TLspOptionsFrame.EnsureLspLogBox;
@@ -419,8 +460,22 @@ begin
   FEolNote.SetBounds(34, Row, FEolGroup.ClientWidth - 34 - Gap, 3 * LineH);
   FEolGroup.Height := FEolNote.Top + FEolNote.Height + Gap;
 
+  // ---- the interface visualizer ---------------------------------------
+  EnsureIntfRow;
+  FIntfGroup.Top := FEolGroup.Top + FEolGroup.Height + Gap;
+  FIntfGroup.Width := FEolGroup.Width;
+  Row := 20;
+  FIntfViewerBox.SetBounds(16, Row, FIntfGroup.ClientWidth - 16 - Gap,
+    FIntfViewerBox.Height);
+  Row := Row + FIntfViewerBox.Height + 4;
+  FIntfLineBox.SetBounds(34, Row, FIntfGroup.ClientWidth - 34 - Gap,
+    FIntfLineBox.Height);
+  Row := Row + FIntfLineBox.Height + 6;
+  FIntfNote.SetBounds(34, Row, FIntfGroup.ClientWidth - 34 - Gap, 3 * LineH);
+  FIntfGroup.Height := FIntfNote.Top + FIntfNote.Height + Gap;
+
   // ---- and only THEN the button ---------------------------------------
-  btnDefaults.Top := FEolGroup.Top + FEolGroup.Height + 10;
+  btnDefaults.Top := FIntfGroup.Top + FIntfGroup.Height + 10;
 
   // THE FRAME'S OWN HEIGHT must follow the content. The options host
   // scrolls its page by that height, so a frame that stays at its
@@ -472,6 +527,9 @@ begin
   EnsureEolRow;
   FEolCheckBox.Checked := TPluginSettings.LineEndingCheck;
   FEolAutoBox.Checked := TPluginSettings.LineEndingAutoFix;
+  EnsureIntfRow;
+  FIntfViewerBox.Checked := TPluginSettings.IntfVisualizerViewer;
+  FIntfLineBox.Checked := TPluginSettings.IntfVisualizerLine;
 end;
 
 procedure TLspOptionsFrame.StoreToSettings;
@@ -510,6 +568,10 @@ begin
     TPluginSettings.LineEndingCheck := FEolCheckBox.Checked;
   if FEolAutoBox <> nil then
     TPluginSettings.LineEndingAutoFix := FEolAutoBox.Checked;
+  if FIntfViewerBox <> nil then
+    TPluginSettings.IntfVisualizerViewer := FIntfViewerBox.Checked;
+  if FIntfLineBox <> nil then
+    TPluginSettings.IntfVisualizerLine := FIntfLineBox.Checked;
   ApplyBlameSettings;
 end;
 
@@ -569,6 +631,9 @@ begin
   EnsureEolRow;
   FEolCheckBox.Checked := True;
   FEolAutoBox.Checked := False;
+  EnsureIntfRow;
+  FIntfViewerBox.Checked := True;
+  FIntfLineBox.Checked := False;
   // The keep list is the user's own data, gathered one false positive at a
   // time - "restore defaults" must not silently throw it away.
 end;

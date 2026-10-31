@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 2.13.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 2.14.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** (and, through contributed compatibility code, **Delphi 11 and 12** - see Requirements) that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -23,6 +23,7 @@ A design-time package for **Delphi 13** (and, through contributed compatibility 
 | `Ctrl+Shift+M`         | **Move identifier to another unit** &mdash; move a type / class / routine / const / var and update consumer `uses` clauses. One dialog settles the target: an existing project unit, or a new unit it creates and adds to the project |
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised. The dialog also says whether the class can implement an interface **at all**: a `TObject` descendant provides no `IInterface`, so the extracted interface would be right and the class would stop compiling. Who provides it is decided from evidence &mdash; the class's own `QueryInterface` / `_AddRef` / `_Release`, then its base class up the chain (resolved through the identifier index, so a VCL or vendor base is recognised) &mdash; and the offer follows: deriving from `TInterfacedObject` is offered right there (not pre-ticked: it makes the instance reference-counted, so explicit `Free` calls have to go), while a base whose chain must stay gets the SAME offer carried out in place (QueryInterface / _AddRef / _Release and the reference counting go into the class, its ancestor stays) &mdash; both are a combo box in the dialog and arguments of the MCP tool, so the plugin does it rather than naming another command. If the target unit **already exists**, the interface is ADDED to it and its uses clause topped up (nothing is overwritten), and the new unit only ever carries the units its own members need &mdash; an interface that names nothing but built-in types gets no uses clause at all |
 | *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
+| *(debugger)*           | **Interface visualizer** &mdash; while debugging, resolve an interface reference to the OBJECT behind it: the class, its whole hierarchy and the interfaces each level implements, with their GUIDs and offsets, read straight from the RTTI bytes of the inspected process (no code is run in it). The debugger offers it in its own list for an interface variable; a second, optional surface replaces the value shown in every tooltip, watch, local view and inspector with one line naming the class. Both are switched in the window itself and in *Tools &rarr; Options &rarr; Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the one-line replacement is off by default, because the IDE allows only one such replacement per type |
 | *(menu only)*          | **Semantic replace** &mdash; apply project-wide find / replace rules loaded from a per-project JSON file; identifier-bounded matching, comment- and string-aware, optional local-var hoisting when a rule fires multiple times in the same routine, automatic uses-clause augmentation |
 | *(menu only)*          | **Find unit for identifier** &mdash; type an identifier, see which unit(s) declare it (from a background-maintained index over the whole search path) and add the chosen unit to the current file's `uses` clause |
 | *(automatic + menu)*   | **Live quick fixes (lightbulb)** &mdash; a VS-style lightbulb appears at the caret whenever the line has an applicable fix: add the missing `uses` entry (E2003 / H2443), *"did you mean"* typo correction against the identifier index (E2003), fix or remove a broken `uses` entry (F2613), align an implementation header with its declaration (E2037). Also reachable on demand via *Add unit for identifier at cursor* / *Resolve missing units...* (batch dialog), and by double-clicking an error in the IDE's Structure view |
@@ -284,6 +285,44 @@ end;                             // I drops scope -> _Release -> FRefCount = 0 -
 - Limitations:
   - The class loses its `.Free`-managed lifecycle. Pure `TObject`-style construction with `AOwner` (`TComponent.Create(AOwner)`) becomes unsound &mdash; the owner would `Notification(opRemove).Free` the instance while interface references are still held.
   - When the class additionally implements a derived interface like `ITest = interface(IInterface)`, the compiler treats each interface as its own VMT slot and the IInterface methods generated here only fill the standalone `IInterface` slot. Adding `ITest` will require either a method-resolution clause or a separate manual implementation &mdash; this wizard does not handle that case.
+
+### Interface visualizer (debugger)
+
+An interface variable tells the debugger almost nothing: a watch row shows
+`($0254F8C0 as IConfig)`, and which class is really behind that reference -
+and what else it can do - is exactly what you wanted to know. This resolves
+it, from the bytes of the inspected process and without running any code in
+it.
+
+The way back is the one the RTL itself uses: `TObject.GetInterface` hands out
+`Pointer(Self) + Entry.IOffset`, so the object sits a known distance *before*
+the reference, and the entry the reference points at is the one whose VTable
+and offset match. Every candidate is *proven* that way (a VMT identifies
+itself through its self-pointer slot), so an unresolvable reference - a COM
+object, a delegating `implements`, a stale pointer - answers "not proven"
+rather than guessing. The interface *names* come from the `Intfs` array the
+compiler emits right behind the interface table, which is also how
+`System.Rtti` reads them.
+
+Two surfaces, because the IDE has two and they are not interchangeable:
+
+- **a window** (on by default). The debugger lists it for an interface
+  variable, so it is opt-in per use. It shows the reference, the object
+  behind it, and the class hierarchy with the interfaces each level
+  declares - name, GUID, offset, and which entry the reference itself is.
+  When a slot serves several interfaces (one VTable and offset for all of
+  them, which is what `TInterfaceList` looks like), it names every one of
+  them and says that the bytes cannot decide which the variable was declared
+  as.
+- **one line** in every tooltip, watch, local view and inspector (off by
+  default). ToolsAPI allows only one such replacement per type, so this
+  takes over the display of *every* interface variable in the debugger -
+  which is a decision rather than a default. When it cannot resolve a
+  reference it hands the debugger back exactly what it had.
+
+Both are switched in the window itself and in *Tools &rarr; Options &rarr;
+Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the status
+window says which of them is registered.
 
 ### Semantic replace (menu only)
 

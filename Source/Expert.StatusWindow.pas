@@ -148,6 +148,7 @@ implementation
 uses
   Expert.WorkerLatch,
   Expert.ResourceMonitor, Expert.CompletionWizard, Expert.LineEndingWatcher,
+  Expert.IntfVisualizerIde,
   System.SysUtils, System.Classes, System.IniFiles, System.IOUtils,
   Vcl.Forms, Vcl.Controls, Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Graphics,
   Vcl.ActnList, Vcl.ImgList, Vcl.Menus,
@@ -957,6 +958,15 @@ begin
     'LF-only or mixed line endings are reported when the IDE opens a source ' +
     'file; "Line endings" in the options page switches it and the automatic ' +
     'correction');
+
+  // The debugger visualizer: whether either surface is registered at all.
+  // There is nowhere else to see it - the window is offered by the IDE's
+  // own list for a type, and the one-line replacement is invisible until
+  // somebody hovers over an interface variable.
+  Row('interface visualizer', IntfVisualizerStatus,
+    'resolves an interface reference to the object behind it; ' +
+    '"Interface visualizer" in the options page switches the window and ' +
+    'the one-line replacement');
 
   // ---- live quick-fix checker --------------------------------------------
   LiveStatusInfo(LiveFile, Analysing, Resolving, FromLsp, Fresh, FixCount);

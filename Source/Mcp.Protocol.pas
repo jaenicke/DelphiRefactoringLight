@@ -1053,16 +1053,20 @@ const
     'This is the authority on whether an edit broke something: ' +
     'get_diagnostics reports an ANALYSIS (Error Insight, the LSP), ' +
     'while this is dcc itself - E2037, E2169, E2291 and their kind ' +
-    'are named here and nowhere else. Default mode=check verifies ' +
-    'the sources WITHOUT writing any output file, so it cannot ' +
-    'disturb the DCUs or the BPL of the next real build; make and ' +
-    'build do write. The compiler reads from DISK, so a buffer with ' +
-    'unsaved changes is NOT what is compiled - such buffers are ' +
-    'named in \"unsavedBuffers\", and save_modified=true saves them ' +
-    'first. Errors are listed before warnings and hints, whatever ' +
-    'max says. The IDE is busy for the whole build.",' +
+    'are named here and nowhere else. The default mode=check does ' +
+    'not LINK, so no .bpl and no .exe is written - but it DOES ' +
+    'write the DCUs of the active configuration; make and build ' +
+    'link as well. REFUSED for the project that builds Refactoring ' +
+    'Light itself: the IDE unloads a design-time package before ' +
+    'compiling it, which would end this very call and take the ' +
+    'plugin out of the running IDE. The compiler reads from DISK, ' +
+    'so a buffer with unsaved changes is NOT what is compiled - ' +
+    'such buffers are named in \"unsavedBuffers\", and ' +
+    'save_modified=true saves them first. Errors are listed before ' +
+    'warnings and hints, whatever max says. The call WAITS for the ' +
+    'build, and the IDE is busy for the whole of it.",' +
     '"inputSchema":{"type":"object","properties":{' +
-    '"mode":{"type":"string","enum":["check","make","build"],"description":"check (the default): syntax only, no output file. make: compile what changed. build: everything."},' +
+    '"mode":{"type":"string","enum":["check","make","build"],"description":"check (the default): compile without linking - the DCUs are written, no .bpl or .exe. make: compile what changed and link. build: everything."},' +
     '"save_modified":{"type":"boolean","description":"Save every modified buffer before compiling (default false). Without it the compiler reads the file on disk and the answer says which buffers differ from it."},' +
     '"max":{"type":"integer","description":"Most messages to return (default 200); the counts are always complete. Errors come first, so a cap never hides them behind hints."},' +
     InstanceProp + '}}},' +

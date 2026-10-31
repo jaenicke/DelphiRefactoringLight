@@ -6,6 +6,30 @@ development builds and were never released.
 
 ---
 
+## 2.12.1 - 2026-10-31
+
+What the first live call of `compile` found - three defects, all of them in
+what 2.12.0 had just added.
+
+- **It did not wait.** `BuildProject` was called with `Wait = False`, so the
+  Messages window was read before the compiler had written a single line:
+  the answer came back instantly with "0 messages, the build produced no
+  message at all" while the build was still running. It waits now, with a
+  budget that covers a real build rather than the 15 s a main-thread call
+  defaults to.
+- **It could take the plugin down.** Compiling the project that builds
+  Refactoring Light itself makes the IDE unload the package - while the
+  call still sits in its main-thread trip. The stop deadline then expires,
+  the module pins itself and the plugin is gone from the session, with the
+  answer still reporting success. That one project is refused now, and the
+  refusal says what to use instead.
+- **"Writes no output file" was wrong.** `mode=check` does not LINK - no
+  .bpl and no .exe - but it writes the DCUs of the active configuration
+  (measured: all 112 of this package). The description, the answer's note
+  and the test that had pinned the false claim all say the measured thing.
+
+---
+
 ## 2.12.0 - 2026-10-29
 
 Two answers an agent could not get before, both of them about what the IDE

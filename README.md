@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 2.12.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 2.12.1** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** (and, through contributed compatibility code, **Delphi 11 and 12** - see Requirements) that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -414,7 +414,7 @@ Quick fixes driven by real compiler diagnostics instead of guessing. Each diagno
 
 The **DFM event-handler check** also gained generation: *missing handler* rows are now auto-fixable too &mdash; the expected parameter list is resolved at check time (component source first, the built-in table with synthesized parameter names as fallback), and the fix inserts the declaration into the form class plus an empty implementation body.
 
-Hint-based fixes (H2443, H2164) never appear in the Structure view, so they ride on the plugin's own LSP session &mdash; and to make them show up in normal IDE use, **every real compile re-arms one LSP analysis** of the active buffer (`IOTAIDENotifier50.AfterCompile`, code-insight compiles excluded): compile, and the hint fixes appear. (The Messages window itself has no read API &mdash; `IOTAMessageServices` can only *add* messages &mdash; so the diagnostics are re-derived rather than scraped.)
+Hint-based fixes (H2443, H2164) never appear in the Structure view, so they ride on the plugin's own LSP session &mdash; and to make them show up in normal IDE use, **every real compile re-arms one LSP analysis** of the active buffer (`IOTAIDENotifier50.AfterCompile`, code-insight compiles excluded): compile, and the hint fixes appear. (`IOTAMessageServices` can only *add* messages, so the hint fixes are re-derived rather than scraped. The Messages window itself **is** readable &mdash; through the IDE's own `Msglines` model, which is what the third diagnostics source and the `compile` tool use &mdash; just not through ToolsAPI.)
 
 UI:
 
@@ -619,6 +619,15 @@ searches (find references, implementations, unit references, original symbol,
 unit for an identifier, uses paths and cycles, interface GUIDs, debug
 consistency, blame). What runs in the IDE and what an agent asks for is the
 same code; only the dialog is missing.
+
+**And the compiler itself**: `compile` lets the IDE build the active
+project and answers with dcc's own messages, read out of the Messages
+window. That is the authority `get_diagnostics` cannot be &mdash; the
+latter reports an analysis (Error Insight, the LSP), while E2037, E2169
+and their kind are named here and nowhere else. The default mode does not
+link, and the one project it refuses is the plugin's own package: the IDE
+unloads a design-time package before compiling it, which would end the
+call that asked.
 
 **Nothing is written without being shown first.** Every tool that changes
 code takes `apply` (default `false`): the answer then lists the changes as

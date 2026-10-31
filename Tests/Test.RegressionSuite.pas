@@ -6953,9 +6953,11 @@ begin
   Assert.IsTrue(Declares('max'), 'max is declared');
   Assert.IsFalse(Declares('file'), 'and nothing it does not read');
 
-  // The two facts a caller cannot check for itself, so the description
-  // has to carry them: the compiler reads the FILE, not the buffer, and
-  // the default mode leaves the build artefacts alone.
+  // The three facts a caller cannot check for itself, so the description
+  // has to carry them: the compiler reads the FILE, not the buffer; a
+  // check does not link but DOES write the DCUs (measured 2026-10-29,
+  // where this test pinned the opposite); and the one project this tool
+  // refuses, because compiling it would end the call that asked.
   // McpToolDefinitions builds a TJSONArray, so the description is read
   // back from the tool's own object rather than from the source text.
   var Desc := '';
@@ -6971,8 +6973,15 @@ begin
   Assert.IsTrue(Desc <> '', 'the description is in the definitions');
   Assert.IsTrue(Desc.Contains('DISK'),
     'it says that the compiler reads from disk, not from the buffer');
-  Assert.IsTrue(Desc.Contains('WITHOUT writing any output file'),
-    'and that the default mode touches no build artefact');
+  Assert.IsTrue(Desc.Contains('not LINK'),
+    'that a check does not link - no .bpl, no .exe');
+  Assert.IsTrue(Desc.Contains('write the DCUs'),
+    'and that it DOES write the DCUs: measured, all 112 of this package, ' +
+    'where the description used to promise "no output file"');
+  Assert.IsTrue(Desc.Contains('REFUSED'),
+    'and that building Refactoring Light itself is refused - the IDE ' +
+    'unloads the package, which ends the call that asked (measured: the ' +
+    'plugin was gone from the session and its BPL pinned)');
 end;
 
 procedure TLineEndingCheckTests.TheLineEndingToolDeclaresWhatItTakes;

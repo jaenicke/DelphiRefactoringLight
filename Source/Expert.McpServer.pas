@@ -1825,6 +1825,40 @@ end;
 
 // ---- compile --------------------------------------------------------------
 
+const
+  /// <summary>A real build is minutes, not the 15 s a main-thread call
+  ///  defaults to. The bridge gives `compile` the LONG wait class
+  ///  (LongToolWaitMs), so this stays below what the caller waits for.</summary>
+  CompileTimeoutMs = 300000;
+
+// Is this project the one that produces the BPL we are running in? Compared
+// by FILE, through ExpandFileName on both sides - the project may name its
+// target relatively, and a name comparison would answer for a package of
+// another IDE version (DelphiRefactoringLight370.bpl is the same name in
+// every one of them).
+function ProjectIsThisPlugin(const AProject: IOTAProject): Boolean;
+var
+  Target, Mine: string;
+  Opts: IOTAProjectOptions;
+begin
+  Result := False;
+  if AProject = nil then Exit;
+  try
+    Opts := AProject.ProjectOptions;
+    if Opts = nil then Exit;
+    Target := Opts.TargetName;
+    if Target = '' then Exit;
+    Mine := GetModuleName(HInstance);
+    if Mine = '' then Exit;
+    Result := SameText(ExpandFileName(Target), ExpandFileName(Mine));
+  except
+    // a project that cannot be asked is not provably ours - and refusing
+    // on an exception would make the tool unusable for everything else
+    Result := False;
+  end;
+end;
+
+
 // The IDE's own build, and the IDE's own Messages window as the answer.
 // WHY THIS IS NOT get_diagnostics: that reads Error Insight and the LSP,
 // which are an ANALYSIS. The compiler is the authority on whether an edit
@@ -1843,9 +1877,14 @@ begin
   SaveFirst := AArgs.GetValue<Boolean>('save_modified', False);
   var Max := AArgs.GetValue<Integer>('max', 200);
   if Mode = '' then Mode := 'check';
-  // cmOTACheck is the default ON PURPOSE: it answers the question without
-  // writing a single output file, so a check cannot disturb the DCUs or
-  // the BPL the user's next real build depends on.
+  // cmOTACheck is the default ON PURPOSE: it does not LINK, so it cannot
+  // replace the .bpl or .exe the user's next real build produces.
+  // MEASURED 2026-10-29, and it corrects what this comment used to claim:
+  // a check DOES write the DCUs of the active configuration (all 112 of
+  // this package, in one second), so "no output file" was only ever true
+  // of the link step. That is usually what you want - it makes the DCU
+  // output match the sources, which is what debug_consistency asks about -
+  // but it is not "nothing was touched".
   if Mode = 'check' then CompileMode := cmOTACheck
   else if Mode = 'make' then CompileMode := cmOTAMake
   else if Mode = 'build' then CompileMode := cmOTABuild
@@ -1870,6 +1909,29 @@ begin
         Exit;
       end;
       Proj := P.FileName;
+
+      // THE ONE BUILD THAT CANNOT SURVIVE ITS OWN ANSWER. Compiling a
+      // design-time package makes the IDE UNLOAD it first - and when that
+      // package is the one THIS code runs in, the unload happens while this
+      // call still sits in its main-thread trip: the MCP server's stop waits
+      // for the pipe handler, which waits for the main thread, which is
+      // inside the unload. The deadline expires, the module pins itself
+      // (PR #45) and the plugin is gone from the session, while the answer
+      // still reports success. MEASURED 2026-10-29 on this very package:
+      // pinned.log "the BPL stays mapped for the life of this process", and
+      // the reload hint "could not be unloaded completely".
+      // The MODE does not matter here: it is the unload, not the output file.
+      if ProjectIsThisPlugin(P) then
+      begin
+        Msg := 'this project builds the Refactoring Light package itself, ' +
+          'and the IDE unloads a design-time package before compiling it - ' +
+          'which would end this very call and take the plugin out of the ' +
+          'running IDE (it could then only be brought back by restarting ' +
+          'RAD Studio). Build it from outside the IDE (install.cmd, or ' +
+          'msbuild with DCC_BplOutput redirected), or use "Installieren" in ' +
+          'the IDE, which is made for exactly this.';
+        Exit;
+      end;
 
       // The compiler reads from DISK. A buffer the user has not saved is
       // therefore NOT what gets compiled, and an answer that does not say
@@ -1896,13 +1958,22 @@ begin
         Exit;
       end;
       Ran := True;
-      // Wait = False: never make the compile progress dialog wait for an
-      // OK nobody can click from here. ClearMessages = True, or the
-      // Messages window would still hold the PREVIOUS build and we would
-      // answer with messages this call did not produce.
-      Ok := PB.BuildProject(CompileMode, False, True);
+      // Wait = TRUE, and that is the whole point: with False BuildProject
+      // returns at once and ReadCompilerMessages runs BEFORE the compiler
+      // has written a single line. MEASURED 2026-10-29: the build started
+      // at 14:05:48 and its dcc32 output (112 DCUs, the .res) carries
+      // 14:05:48..50, while the tool had already answered "0 messages, the
+      // build produced no message at all" - an answer about a build that
+      // had not written anything yet. On a project that compiles for
+      // minutes rather than seconds there is no answer in it at all.
+      // The IDE is busy for the whole build either way,
+      // because the compile happens on its main thread; what False bought
+      // was not responsiveness, only a premature answer.
+      // ClearMessages = True, or the window would still hold the PREVIOUS
+      // build and we would answer with messages this call did not produce.
+      Ok := PB.BuildProject(CompileMode, True, True);
       Msgs := ReadCompilerMessages;
-    end, True, AStop, Err) then Exit(McpErr(Err));
+    end, True, AStop, Err, CompileTimeoutMs) then Exit(McpErr(Err));
   if Msg <> '' then Exit(McpErr(Msg));
   if not Ran then Exit(McpErr('the project could not be built'));
 
@@ -1978,8 +2049,9 @@ begin
         'to save them first, or this answer describes another text than ' +
         'the one on screen.');
     if Mode = 'check' then
-      Note := Trim(Note + ' mode=check writes no output file, so nothing ' +
-        'of the project''s own build artefacts was touched.');
+      Note := Trim(Note + ' mode=check did not LINK, so no .bpl or .exe ' +
+        'was written - but the DCUs of the active configuration were ' +
+        '(measured: all of them, on every check).');
     if Note <> '' then Res.AddPair('note', Note);
     Result := McpOk(Res);
   except

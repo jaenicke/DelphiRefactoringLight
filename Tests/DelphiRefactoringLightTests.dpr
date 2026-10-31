@@ -37,6 +37,7 @@ uses
   Expert.VcsBlame in '..\Source\Expert.VcsBlame.pas',
   Expert.WorkerLatch in '..\Source\Expert.WorkerLatch.pas',
   Expert.RestartHint in '..\Source\Expert.RestartHint.pas',
+  Expert.IntfVisualizer in '..\Source\Expert.IntfVisualizer.pas',
   Rename.WorkspaceEdit in '..\Source\Rename.WorkspaceEdit.pas',
   Test.LspReadiness in 'Test.LspReadiness.pas',
   Test.WithScanner in 'Test.WithScanner.pas',
@@ -91,6 +92,7 @@ uses
   Test.EventGenPlan in 'Test.EventGenPlan.pas',
   Test.ParameterRename in 'Test.ParameterRename.pas',
   Test.ReloadReport in 'Test.ReloadReport.pas',
+  Test.IntfVisualizer in 'Test.IntfVisualizer.pas',
   Test.ConstParams in 'Test.ConstParams.pas';
 
 var

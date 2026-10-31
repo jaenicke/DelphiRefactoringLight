@@ -6,6 +6,34 @@ development builds and were never released.
 
 ---
 
+## 2.13.0 - 2026-10-31
+
+**Resolving an interface reference, stage 1.** The request: a debug
+visualizer that finds the object behind an interface reference and reads the
+class hierarchy with the interfaces each level implements - resolved by name
+straight from the RTTI bytes.
+
+This version is the resolver only: pure, tested, not reachable from the IDE
+yet. It takes a memory reader as a callback, so it is exactly what a
+visualizer needs (a visualizer may read the inspected process, it may not
+run code in it) - and exactly what a test can drive.
+
+- the way back from a reference to its object is the RTL's own arithmetic,
+  `Obj = Reference - IOffset`, and every candidate is PROVEN: the pointer
+  there must be a class (its own self-pointer slot says so) and that class
+  or an ancestor must declare an entry with this reference's VTable and
+  offset. So the reference's interface is identified rather than guessed.
+- the interfaces of each level come from that level's own interface table,
+  and their NAMES from the array of type-info pointers that sits behind the
+  entries - which is where the RTL itself reads them.
+- the VMT offsets are not this plugin's own: they are tried for both
+  bitnesses and the self-pointer slot decides, because a 64-bit target's
+  offsets differ from a 32-bit one's by three pointers.
+- and what the bytes do not prove is not reported: every refusal says why,
+  and a name that does not read as an identifier is left empty.
+
+---
+
 ## 2.12.1 - 2026-10-31
 
 What the first live call of `compile` found - three defects, all of them in

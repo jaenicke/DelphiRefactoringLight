@@ -64,10 +64,11 @@ function IntfVisualizerStatus: string;
 implementation
 
 uses
-  System.SysUtils, Winapi.Windows,
+  System.SysUtils, System.IOUtils, Winapi.Windows, Winapi.Messages,
   Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Graphics, Vcl.Clipbrd,
-  ToolsAPI, Expert.PluginSettings,
+  ToolsAPI, Expert.PluginSettings, Expert.EditorHelperIntf,
+  Expert.UnitIndex, Delphi.FileEncoding,
   Expert.DialogHelper, Expert.IdeThemes;
 
 const
@@ -278,7 +279,16 @@ begin
 
   if Ref = 0 then
   begin
-    Ref := ParseEvalPointer(AEvalResult);
+    // ONLY the debugger's own text is worth parsing. With our one-line
+    // replacement active the IDE hands both surfaces OUR sentence, whose
+    // only address is the OBJECT's - resolving that proves nothing (it has
+    // no interface entry at offset 0) and would hide the real reason.
+    if not TPluginSettings.IntfVisualizerLine then
+      Ref := ParseEvalPointer(AEvalResult)
+    else
+      Result.Problem := Trim(Result.Problem + ' The value shown for this ' +
+        'expression is our own one-line replacement, so there is no ' +
+        'address left in it to fall back on.');
     if Ref <> 0 then
       Result.Route := 'the reference read out of the value the debugger ' +
         'had already shown';
@@ -327,11 +337,31 @@ type
     procedure FormDestroyed;
   end;
 
+  /// <summary>A double-click on a row that names a declaration JUMPS there
+  ///  (the user's request: expanding is what the +/- and the keyboard are
+  ///  for, and the tree opens expanded anyway). A row that names nothing -
+  ///  "declares no interface of its own", the reason of a failed
+  ///  resolution - keeps the native toggle, because there the jump would
+  ///  have nothing to offer and swallowing the click would simply make the
+  ///  double-click dead.</summary>
+  TIntfTree = class(TTreeView)
+  strict private
+    FOnJump: TNotifyEvent;
+    FCanJump: TFunc<TTreeNode, Boolean>;
+    procedure WMLButtonDblClk(var AMsg: TWMLButtonDblClk);
+      message WM_LBUTTONDBLCLK;
+  public
+    property OnJump: TNotifyEvent read FOnJump write FOnJump;
+    property CanJump: TFunc<TTreeNode, Boolean> read FCanJump write FCanJump;
+  end;
+
   TIntfViewerForm = class(TForm)
   strict private
     FUpdater: TIntfViewerUpdater;
     FHeader: TLabel;
-    FTree: TTreeView;
+    FTree: TIntfTree;
+    FTargets: TArray<TIntfJumpTarget>;
+    FBtnGoto: TButton;
     FDiag: TMemo;
     FViewerBox: TCheckBox;
     FLineBox: TCheckBox;
@@ -340,6 +370,15 @@ type
     procedure DoFormClose(Sender: TObject; var Action: TCloseAction);
     procedure DoToggle(Sender: TObject);
     procedure DoCopy(Sender: TObject);
+    procedure DoGoto(Sender: TObject);
+    procedure DoTreeChange(Sender: TObject; ANode: TTreeNode);
+    /// <summary>The row's target, or Kind = ijkNone when it names no
+    ///  declaration. The index lives in Node.Data (1-based, so nil stays
+    ///  "nothing") - never Node.Index, which a later sort would move.</summary>
+    function TargetOf(ANode: TTreeNode): TIntfJumpTarget;
+    function AddRow(AParent: TTreeNode; const AText: string;
+      const ATarget: TIntfJumpTarget): TTreeNode;
+    procedure Note(const AText: string);
     function ReportText: string;
   public
     constructor Create(AOwner: TComponent); override;
@@ -390,6 +429,18 @@ begin
   Btn.Caption := 'Copy &report';
   Btn.SetBounds(12, 8, 110, 26);
   Btn.OnClick := DoCopy;
+
+  // The double-click is the fast way and nothing announces it, so the
+  // button is what makes the feature findable at all.
+  FBtnGoto := TButton.Create(Self);
+  FBtnGoto.Parent := Bar;
+  FBtnGoto.Caption := '&Go to declaration';
+  FBtnGoto.SetBounds(130, 8, 150, 26);
+  FBtnGoto.OnClick := DoGoto;
+  FBtnGoto.Enabled := False;
+  FBtnGoto.Hint := 'Open the declaration of the selected class or ' +
+    'interface (or double-click the row).';
+  FBtnGoto.ShowHint := True;
 
   FDiag := TMemo.Create(Self);
   FDiag.Parent := Self;
@@ -443,12 +494,19 @@ begin
   FHeader.Height := 38;
   FHeader.Caption := '';
 
-  FTree := TTreeView.Create(Self);
+  FTree := TIntfTree.Create(Self);
   FTree.Parent := Self;
   FTree.Align := alClient;
   FTree.ReadOnly := True;
   FTree.HideSelection := False;
   FTree.ShowRoot := True;
+  FTree.OnJump := DoGoto;
+  FTree.OnChange := DoTreeChange;
+  FTree.CanJump :=
+    function (ANode: TTreeNode): Boolean
+    begin
+      Result := TargetOf(ANode).Kind <> ijkNone;
+    end;
 
   PrepareDialog(Self, AOwner);
   EnableThemes(Self);
@@ -493,6 +551,152 @@ begin
         ApplyIntfVisualizerSettings;
       end;
   end;
+end;
+
+function TIntfViewerForm.AddRow(AParent: TTreeNode; const AText: string;
+  const ATarget: TIntfJumpTarget): TTreeNode;
+begin
+  Result := FTree.Items.AddChild(AParent, AText);
+  if ATarget.Kind = ijkNone then Exit;
+  FTargets := FTargets + [ATarget];
+  // 1-BASED, so a row without a target keeps Data = nil.
+  Result.Data := Pointer(NativeInt(Length(FTargets)));
+end;
+
+function TIntfViewerForm.TargetOf(ANode: TTreeNode): TIntfJumpTarget;
+var
+  Idx: NativeInt;
+begin
+  Result := Default(TIntfJumpTarget);
+  if ANode = nil then Exit;
+  Idx := NativeInt(ANode.Data);
+  if (Idx >= 1) and (Idx <= Length(FTargets)) then
+    Result := FTargets[Idx - 1];
+end;
+
+procedure TIntfViewerForm.DoTreeChange(Sender: TObject; ANode: TTreeNode);
+begin
+  if FBtnGoto <> nil then
+    FBtnGoto.Enabled := TargetOf(FTree.Selected).Kind <> ijkNone;
+end;
+
+procedure TIntfViewerForm.Note(const AText: string);
+begin
+  if FDiag = nil then Exit;
+  FDiag.Lines.Insert(0, AText);
+end;
+
+procedure TIntfViewerForm.DoGoto(Sender: TObject);
+var
+  T: TIntfJumpTarget;
+  Hits: TArray<TFindUnitHit>;
+  H: TFindUnitHit;
+  Units: TArray<string>;
+  Pick, Path, Content, Seen, Why: string;
+  Line0, Col0, Len: Integer;
+begin
+  T := TargetOf(FTree.Selected);
+  if T.Kind = ijkNone then
+  begin
+    Note('Go to declaration: pick a class or interface row first.');
+    Exit;
+  end;
+  if Editor = nil then Exit;
+
+  if not TUnitIndex.Instance.Ready then
+  begin
+    Note(Format('Go to %s: the identifier index is not ready yet (%s).',
+      [T.Name, TUnitIndex.Instance.StatusLine]));
+    Exit;
+  end;
+
+  // ONE chain for both kinds. A class names its own unit in the RTTI and an
+  // interface entry does not, so the hint is worth more for a class - but
+  // the lookup is the same, and PreferredDeclaringUnit is what weighs it.
+  Hits := TUnitIndex.Instance.Lookup(T.Name);
+  if Length(Hits) = 0 then
+  begin
+    // The RTTI named the unit for a class, so say which one is missing
+    // from the index rather than only that nothing was found.
+    if T.UnitHint <> '' then
+      Why := Format(' - the RTTI says %s, which the index does not know',
+        [T.UnitHint])
+    else
+      Why := '';
+    Note(Format('Go to %s: no indexed unit declares it%s.', [T.Name, Why]));
+    Exit;
+  end;
+
+  Units := nil;
+  Seen := '|';
+  for H in Hits do
+    if Pos('|' + LowerCase(H.UnitName) + '|', Seen) = 0 then
+    begin
+      Units := Units + [H.UnitName];
+      Seen := Seen + LowerCase(H.UnitName) + '|';
+    end;
+
+  Pick := PreferredDeclaringUnit(Units, T.UnitHint);
+  if Pick = '' then
+  begin
+    if T.UnitHint = '' then
+      Why := 'and the entry names no unit of its own'
+    else
+      Why := 'and none of them is ' + T.UnitHint;
+    Note(Format('Go to %s: %d units declare that name (%s) %s - open the ' +
+      'one you mean.',
+      [T.Name, Length(Units), string.Join(', ', Units), Why]));
+    Exit;
+  end;
+
+  Path := '';
+  for H in Hits do
+    if SameText(H.UnitName, Pick) and (H.Path <> '') then
+    begin
+      Path := H.Path;
+      Break;
+    end;
+  if (Path = '') or not TFile.Exists(Path) then
+  begin
+    Note(Format('Go to %s: %s is indexed, but its file is not there (%s).',
+      [T.Name, Pick, Path]));
+    Exit;
+  end;
+
+  // The BUFFER is the truth - the unit may be open and edited.
+  Content := '';
+  if not Editor.ReadEditorContent(Path, Content) then
+    try
+      Content := TDelphiFileEncoding.ReadAll(Path);
+    except
+      Content := '';
+    end;
+  if Content = '' then
+  begin
+    Note(Format('Go to %s: %s cannot be read.', [T.Name, Path]));
+    Exit;
+  end;
+
+  if not IntfDeclarationPosition(Content, T.Name, Line0, Col0) then
+  begin
+    Note(Format('Go to %s: %s does not declare it (any more).',
+      [T.Name, Pick]));
+    Exit;
+  end;
+
+  // A column of -1 means the name does not stand on that line: go there
+  // and highlight NOTHING rather than marking the indentation.
+  Len := Length(T.Name);
+  if Col0 < 0 then
+  begin
+    Col0 := 0;
+    Len := 0;
+  end;
+  if Editor.GotoLocation(Path, Line0, Col0, Len) then
+    Note(Format('Go to %s: %s line %d.',
+      [T.Name, ExtractFileName(Path), Line0 + 1]))
+  else
+    Note(Format('Go to %s: %s could not be opened.', [T.Name, Path]));
 end;
 
 function TIntfViewerForm.ReportText: string;
@@ -553,6 +757,7 @@ var
   L: TIntfClassLevel;
   E: TIntfEntryInfo;
   S: string;
+  T: TIntfJumpTarget;
 begin
   FLast := AAttempt;
 
@@ -572,7 +777,14 @@ begin
     if AAttempt.Problem <> '' then
       FDiag.Lines.Add(AAttempt.Problem);
     if AAttempt.EvalResult <> '' then
-      FDiag.Lines.Add('The debugger itself shows: ' + AAttempt.EvalResult);
+      // NOT "the debugger shows": while the one-line replacement is on, the
+      // IDE hands us the text WE produced, and a pane that exists to be
+      // true must not read as independent evidence.
+      if TPluginSettings.IntfVisualizerLine then
+        FDiag.Lines.Add('Shown for this expression (our own one-line ' +
+          'replacement is active): ' + AAttempt.EvalResult)
+      else
+        FDiag.Lines.Add('The debugger itself shows: ' + AAttempt.EvalResult);
   finally
     FDiag.Lines.EndUpdate;
   end;
@@ -580,6 +792,7 @@ begin
   FTree.Items.BeginUpdate;
   try
     FTree.Items.Clear;
+    FTargets := nil;
     if not AAttempt.Res.Resolved then
     begin
       FHeader.Caption := Format('%s - nothing could be proven behind this ' +
@@ -590,7 +803,7 @@ begin
       S := AAttempt.Problem;
       if S = '' then S := AAttempt.Res.Reason;
       if S = '' then S := 'No reason was recorded.';
-      FTree.Items.AddChild(nil, S);
+      AddRow(nil, S, Default(TIntfJumpTarget));
       Exit;
     end;
 
@@ -608,9 +821,17 @@ begin
       S := L.ClassName;
       if L.UnitName <> '' then S := S + '   (' + L.UnitName + ')';
       S := S + Format('   %d bytes', [L.InstanceSize]);
-      Node := FTree.Items.AddChild(nil, S);
+      T := Default(TIntfJumpTarget);
+      if L.ClassName <> '' then
+      begin
+        T.Kind := ijkClass;
+        T.Name := L.ClassName;
+        T.UnitHint := L.UnitName;
+      end;
+      Node := AddRow(nil, S, T);
       if Length(L.Interfaces) = 0 then
-        FTree.Items.AddChild(Node, 'declares no interface of its own')
+        AddRow(Node, 'declares no interface of its own',
+          Default(TIntfJumpTarget))
       else
         for E in L.Interfaces do
         begin
@@ -619,13 +840,42 @@ begin
           S := S + '   ' + GUIDToString(E.IID) +
             Format('   offset %d', [E.IOffset]);
           if E.IsTheReference then S := S + '   <== the reference';
-          FTree.Items.AddChild(Node, S);
+          T := Default(TIntfJumpTarget);
+          if E.Name <> '' then
+          begin
+            T.Kind := ijkInterface;
+            T.Name := E.Name;
+            // Only a HINT: the level declares the entry, not necessarily
+            // the interface - PreferredDeclaringUnit decides what it is
+            // worth once the index has named the candidates.
+            T.UnitHint := L.UnitName;
+          end;
+          AddRow(Node, S, T);
         end;
       Node.Expand(False);
     end;
   finally
     FTree.Items.EndUpdate;
   end;
+  DoTreeChange(FTree, FTree.Selected);
+end;
+
+{ TIntfTree }
+
+procedure TIntfTree.WMLButtonDblClk(var AMsg: TWMLButtonDblClk);
+var
+  Node: TTreeNode;
+begin
+  Node := GetNodeAt(AMsg.XPos, AMsg.YPos);
+  if (Node <> nil) and Assigned(FCanJump) and FCanJump(Node) and
+     Assigned(FOnJump) then
+  begin
+    Selected := Node;
+    // NOT inherited: that is what the native control toggles on.
+    FOnJump(Self);
+    Exit;
+  end;
+  inherited;
 end;
 
 { TIntfViewerUpdater }

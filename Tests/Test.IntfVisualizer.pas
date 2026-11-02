@@ -40,6 +40,10 @@ type
     ///  session is needed for: reading an address out of an evaluator's
     ///  answer, and the one line the value replacer shows.</summary>
     [Test] procedure WhatTheDebuggerSaysAndWhatWeSayBack;
+    /// <summary>Double-click and the button both jump to a declaration, so
+    ///  the two rules that decide WHERE have to hold: which unit to open,
+    ///  and where in it the name really stands.</summary>
+    [Test] procedure ARowKnowsWhereItsDeclarationIs;
   end;
 
 implementation
@@ -347,6 +351,76 @@ begin
   finally
     Ref := nil;
   end;
+end;
+
+procedure TIntfVisualizerTests.ARowKnowsWhereItsDeclarationIs;
+const
+  // The user's own unit from the screenshot that asked for the jump.
+  CUnit =
+    'unit Unit8;'#13#10 +
+    #13#10 +
+    'interface'#13#10 +
+    #13#10 +
+    'type'#13#10 +
+    '  ITestParent = interface'#13#10 +
+    '  [''{12E3EDBE-F31C-4EE4-A2D6-AA6064EE4BCC}'']'#13#10 +
+    '  end;'#13#10 +
+    #13#10 +
+    '  TTestParent = class(TInterfacedObject, ITestParent)'#13#10 +
+    '  end;'#13#10 +
+    #13#10 +
+    '  ITestChild = interface'#13#10 +
+    '  [''{7B73911C-7A40-46AA-8636-2F480675A92B}'']'#13#10 +
+    '  end;'#13#10 +
+    #13#10 +
+    '  TTestChild = class(TTestParent, ITestChild)'#13#10 +
+    '  end;'#13#10 +
+    #13#10 +
+    'implementation'#13#10 +
+    #13#10 +
+    'end.'#13#10;
+var
+  L, C: Integer;
+begin
+  // WHICH UNIT. One candidate is the answer whatever the hint says.
+  Assert.AreEqual('Unit8',
+    PreferredDeclaringUnit(['Unit8'], ''), 'one candidate IS the answer');
+  Assert.AreEqual('Unit8',
+    PreferredDeclaringUnit(['Unit8'], 'Somewhere.Else'),
+    'and a hint that names another unit does not overrule it');
+
+  // Several: the unit the entry was found in wins - a class usually
+  // implements an interface its own unit declares.
+  Assert.AreEqual('Unit8',
+    PreferredDeclaringUnit(['Vcl.Other', 'Unit8', 'Third'], 'unit8'),
+    'the hint decides among several, case-insensitively');
+  Assert.AreEqual('',
+    PreferredDeclaringUnit(['Vcl.Other', 'Third'], 'Unit8'),
+    'but when the hint is in none of them, NOTHING is picked - a jump ' +
+    'into an unrelated declaration of the same name is worse than none');
+  Assert.AreEqual('',
+    PreferredDeclaringUnit(['Vcl.Other', 'Third'], ''),
+    'and an entry that names no unit of its own decides nothing either');
+  Assert.AreEqual('', PreferredDeclaringUnit([], 'Unit8'), 'nothing to pick');
+
+  // WHERE IN IT. The interface is declared on its own line, and the class
+  // header BELOW it merely mentions the name - the declaration form wins.
+  Assert.IsTrue(IntfDeclarationPosition(CUnit, 'ITestChild', L, C),
+    'the unit declares ITestChild');
+  Assert.AreEqual(12, L, 'the line that DECLARES it, not the class header ' +
+    'at 16 that only names it as a parent');
+  Assert.AreEqual(2, C, 'and the column of the NAME - a highlight counted ' +
+    'from column 0 would mark the indentation instead');
+
+  Assert.IsTrue(IntfDeclarationPosition(CUnit, 'TTestChild', L, C),
+    'and the class');
+  Assert.AreEqual(16, L, 'TTestChild is declared at 16');
+  Assert.AreEqual(2, C, 'at its name');
+
+  Assert.IsFalse(IntfDeclarationPosition(CUnit, 'IUnrelated', L, C),
+    'a name this unit does not declare is no jump target');
+  Assert.IsFalse(IntfDeclarationPosition('', 'ITestChild', L, C),
+    'and neither is nothing at all');
 end;
 
 initialization

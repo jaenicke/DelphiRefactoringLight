@@ -1,6 +1,6 @@
 ﻿# Delphi Refactoring Light
 
-**Version 2.14.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
+**Version 2.15.0** &mdash; the same number the IDE shows in the About box, on the splash screen and in the first row of the plugin's status window, so you can tell at a glance whether your installed build is the current one.
 
 A design-time package for **Delphi 13** (and, through contributed compatibility code, **Delphi 11 and 12** - see Requirements) that connects to the built-in Delphi Language Server (`DelphiLSP.exe`) to provide a broad set of refactoring and code-analysis features directly in the editor:
 
@@ -23,7 +23,7 @@ A design-time package for **Delphi 13** (and, through contributed compatibility 
 | `Ctrl+Shift+M`         | **Move identifier to another unit** &mdash; move a type / class / routine / const / var and update consumer `uses` clauses. One dialog settles the target: an existing project unit, or a new unit it creates and adds to the project |
 | *(menu only)*          | **Extract / extend interface** &mdash; pick members of the class under the cursor and either extract them into a new interface (in its own `Interfaces.<Name>.pas` unit) or add them to an existing interface; the class is rewritten to implement the interface and missing accessors are synthesised. The dialog also says whether the class can implement an interface **at all**: a `TObject` descendant provides no `IInterface`, so the extracted interface would be right and the class would stop compiling. Who provides it is decided from evidence &mdash; the class's own `QueryInterface` / `_AddRef` / `_Release`, then its base class up the chain (resolved through the identifier index, so a VCL or vendor base is recognised) &mdash; and the offer follows: deriving from `TInterfacedObject` is offered right there (not pre-ticked: it makes the instance reference-counted, so explicit `Free` calls have to go), while a base whose chain must stay gets the SAME offer carried out in place (QueryInterface / _AddRef / _Release and the reference counting go into the class, its ancestor stays) &mdash; both are a combo box in the dialog and arguments of the MCP tool, so the plugin does it rather than naming another command. If the target unit **already exists**, the interface is ADDED to it and its uses clause topped up (nothing is overwritten), and the new unit only ever carries the units its own members need &mdash; an interface that names nothing but built-in types gets no uses clause at all |
 | *(menu only)*          | **Add IInterface support to class** &mdash; turn a non-TInterfacedObject class (any TObject / TPersistent / TComponent descendant) into a refcount-managed class that frees itself when the last IInterface reference is dropped |
-| *(debugger)*           | **Interface visualizer** &mdash; while debugging, resolve an interface reference to the OBJECT behind it: the class, its whole hierarchy and the interfaces each level implements, with their GUIDs and offsets, read straight from the RTTI bytes of the inspected process (no code is run in it). The debugger offers it in its own list for an interface variable; a second, optional surface replaces the value shown in every tooltip, watch, local view and inspector with one line naming the class. Both are switched in the window itself and in *Tools &rarr; Options &rarr; Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the one-line replacement is off by default, because the IDE allows only one such replacement per type |
+| *(debugger)*           | **Interface visualizer** &mdash; while debugging, resolve an interface reference to the OBJECT behind it: the class, its whole hierarchy and the interfaces each level implements, with their GUIDs and offsets, read straight from the RTTI bytes of the inspected process (no code is run in it). The debugger offers it in its own list for an interface variable; a second, optional surface replaces the value shown in every tooltip, watch, local view and inspector with one line naming the class; a double-click on a row (or the *Go to declaration* button) opens that class's or interface's declaration. Both are switched in the window itself and in *Tools &rarr; Options &rarr; Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the one-line replacement is off by default, because the IDE allows only one such replacement per type |
 | *(menu only)*          | **Semantic replace** &mdash; apply project-wide find / replace rules loaded from a per-project JSON file; identifier-bounded matching, comment- and string-aware, optional local-var hoisting when a rule fires multiple times in the same routine, automatic uses-clause augmentation |
 | *(menu only)*          | **Find unit for identifier** &mdash; type an identifier, see which unit(s) declare it (from a background-maintained index over the whole search path) and add the chosen unit to the current file's `uses` clause |
 | *(automatic + menu)*   | **Live quick fixes (lightbulb)** &mdash; a VS-style lightbulb appears at the caret whenever the line has an applicable fix: add the missing `uses` entry (E2003 / H2443), *"did you mean"* typo correction against the identifier index (E2003), fix or remove a broken `uses` entry (F2613), align an implementation header with its declaration (E2037). Also reachable on demand via *Add unit for identifier at cursor* / *Resolve missing units...* (batch dialog), and by double-clicking an error in the IDE's Structure view |
@@ -320,9 +320,16 @@ Two surfaces, because the IDE has two and they are not interchangeable:
   which is a decision rather than a default. When it cannot resolve a
   reference it hands the debugger back exactly what it had.
 
-Both are switched in the window itself and in *Tools &rarr; Options &rarr;
-Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the status
-window says which of them is registered.
+A double-click on any row of the tree &mdash; or the *Go to declaration*
+button &mdash; opens the declaration of that class or interface in the
+editor. Which unit that is, is decided rather than guessed: the identifier
+index names every unit declaring it, and the unit the entry was found in
+wins among them; when neither rule decides, nothing is opened and the
+diagnosis pane names the candidates.
+
+Both surfaces are switched in the window itself and in *Tools &rarr; Options
+&rarr; Third Party &rarr; Refactoring Light &rarr; Interface visualizer*; the
+status window says which of them is registered.
 
 ### Semantic replace (menu only)
 

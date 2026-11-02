@@ -6,6 +6,30 @@ development builds and were never released.
 
 ---
 
+## 2.15.0 - 2026-11-02
+
+**The interface visualizer jumps to a declaration.** Verified live, both
+surfaces of 2.14.0 work - and the tree answered a question ("which class
+is behind this reference, and what does each level implement?") without
+offering the obvious next step.
+
+- a DOUBLE-CLICK on a row opens the declaration of that class or
+  interface. Expanding is what the +/- and the keyboard are for, and the
+  tree opens expanded anyway; a row that names no declaration keeps the
+  native toggle.
+- a *Go to declaration* BUTTON beside *Copy report*, because a
+  double-click announces itself to nobody.
+- which unit is opened is decided rather than guessed: the identifier
+  index names every unit that declares the name, and the unit the entry
+  was found in wins among them. When neither rule decides, nothing is
+  opened and the diagnosis pane says which units declare that name - a
+  jump into an unrelated declaration of the same name is worse than none.
+- and the pane stops calling our own text the debugger's: while the
+  one-line replacement is active, the value the IDE hands both surfaces
+  IS that replacement.
+
+---
+
 ## 2.14.0 - 2026-10-31
 
 **The interface visualizer, complete.** 2.13.x resolved an interface

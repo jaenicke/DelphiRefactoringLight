@@ -138,6 +138,41 @@ function IsClassVmt(AAddress: UInt64; APointerSize: Integer;
 ///  answers '' when it does not read as an identifier.</summary>
 function ReadSymbolName(AAddress: UInt64; const ARead: TDebugMemReader): string;
 
+/// <summary>What a row of the viewer's tree refers to - a CLASS level or
+///  one INTERFACE entry. The two are looked up differently: the RTTI gives
+///  a class its own unit, while an interface entry carries nothing but its
+///  name, so that one has to be found through the identifier index.</summary>
+type
+  TIntfJumpKind = (ijkNone, ijkClass, ijkInterface);
+
+  TIntfJumpTarget = record
+    Kind: TIntfJumpKind;
+    /// <summary>The class or interface name, as the RTTI spells it.</summary>
+    Name: string;
+    /// <summary>For a CLASS the declaring unit, read from its type data. For
+    ///  an INTERFACE entry the unit of the level that declares the entry -
+    ///  a hint only: a class may implement an interface from anywhere.</summary>
+    UnitHint: string;
+  end;
+
+/// <summary>Which of the candidate units to open for a name the index
+///  resolved. Exactly one candidate IS the answer; with several, the unit
+///  the entry was found in wins when it is among them - a class usually
+///  implements an interface its own unit declares, and picking any other
+///  one would jump into an unrelated declaration of the same name. When
+///  neither rule decides, '' - a jump nobody can justify is worse than
+///  none.</summary>
+function PreferredDeclaringUnit(const ACandidates: TArray<string>;
+  const AUnitHint: string): string;
+
+/// <summary>Where ANAME is declared inside ACONTENT: the 0-based line, and
+///  the 0-based column of the NAME on it (-1 when the name does not stand
+///  on that line, which means "go to the line and highlight NOTHING" -
+///  a highlight counted from column 0 marks the indentation instead of the
+///  name). False when the content declares no such name.</summary>
+function IntfDeclarationPosition(const AContent, AName: string;
+  out ALine0, ACol0: Integer): Boolean;
+
 /// <summary>The hex of the first pointer-looking value in an evaluator
 ///  result ('$0254F8C0', '(0x254f8c0)', '0254F8C0'), or 0. Pure, so the
 ///  shapes are testable without a debugger - which is the only way to
@@ -162,6 +197,11 @@ function ResolveInterfaceReference(AReference: UInt64;
   AMaxOffset: Integer = MaxIntfFieldOffset): TIntfRefResolution;
 
 implementation
+
+uses
+  // The declaration lookup the viewer's jump needs - both are pure and
+  // neither pulls ToolsAPI, so this unit stays in the DUnitX project.
+  Expert.PascalScanner, Expert.UnitIndex;
 
 procedure VmtOffsets(APointerSize: Integer; out ASelfPtr, AIntfTable,
   ATypeInfo, AClassName, AInstanceSize, AParent: Integer);
@@ -380,6 +420,36 @@ begin
   NameAddr := Info + 1 + 1 + Len;                     // start of TTypeData
   NameAddr := NameAddr + UInt64(2 * APointerSize) + 2;
   Result := ReadSymbolName(NameAddr, ARead);
+end;
+
+function PreferredDeclaringUnit(const ACandidates: TArray<string>;
+  const AUnitHint: string): string;
+var
+  U: string;
+begin
+  Result := '';
+  if Length(ACandidates) = 0 then Exit;
+  if Length(ACandidates) = 1 then Exit(ACandidates[0]);
+  if AUnitHint <> '' then
+    for U in ACandidates do
+      if SameText(U, AUnitHint) then Exit(U);
+end;
+
+function IntfDeclarationPosition(const AContent, AName: string;
+  out ALine0, ACol0: Integer): Boolean;
+var
+  Lines: TArray<string>;
+begin
+  ALine0 := -1;
+  ACol0 := -1;
+  Result := False;
+  if (AContent = '') or (AName = '') then Exit;
+  ALine0 := FindDeclarationLine(AContent, AName);
+  if ALine0 < 0 then Exit;
+  Result := True;
+  Lines := SplitEditorLines(AContent);
+  if ALine0 < Length(Lines) then
+    ACol0 := NameColumnOnLine(Lines[ALine0], AName);
 end;
 
 function ParseEvalPointer(const AText: string): UInt64;

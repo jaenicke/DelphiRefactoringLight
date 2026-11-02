@@ -17,6 +17,7 @@
 interface
 
 uses
+  Expert.PascalScanner,
   DUnitX.TestFramework;
 
 type
@@ -376,6 +377,10 @@ const
     '  TTestChild = class(TTestParent, ITestChild)'#13#10 +
     '  end;'#13#10 +
     #13#10 +
+    '  // an ALIAS: the declared name is on the LEFT, and the thing after'#13#10 +
+    '  // the dot is the type in another unit.'#13#10 +
+    '  IAppCoreLog = AppCore.IAppCoreLog;'#13#10 +
+    #13#10 +
     'implementation'#13#10 +
     #13#10 +
     'end.'#13#10;
@@ -416,6 +421,34 @@ begin
     'and the class');
   Assert.AreEqual(16, L, 'TTestChild is declared at 16');
   Assert.AreEqual(2, C, 'at its name');
+
+  // THE ALIAS (user, 2026-11-02: "bei einem Typalias wird allerdings die
+  // rechte Seite markiert"). A declaration puts its name on the left; the
+  // dot rule of NameColumnOnLine answers for a qualified HEADER and is
+  // exactly wrong here.
+  Assert.IsTrue(IntfDeclarationPosition(CUnit, 'IAppCoreLog', L, C),
+    'the alias declares IAppCoreLog');
+  Assert.AreEqual(21, L, 'on the alias line');
+  Assert.AreEqual(2, C, 'and the column of the DECLARED name - not the ' +
+    'one after the dot, which is the type in AppCore');
+
+  // The two rules on the SAME line, which is the sharpest statement of
+  // the difference: the alias names IAppCoreLog twice.
+  Assert.AreEqual(24,
+    NameColumnOnLine('  IAppCoreLog = AppCore.IAppCoreLog;', 'IAppCoreLog'),
+    'NameColumnOnLine answers with the DOTTED one - that is its job, and ' +
+    'what made the jump mark the right-hand side');
+  Assert.AreEqual(2,
+    DeclaredNameColumnOnLine('  IAppCoreLog = AppCore.IAppCoreLog;',
+      'IAppCoreLog'),
+    'and the declared-name rule with the left one');
+  // ...and the header rule must keep working, or a jump to a method
+  // implementation would land on its class instead of the method.
+  Assert.AreEqual(15, NameColumnOnLine('procedure TFoo.Bar;', 'Bar'),
+    'NameColumnOnLine still prefers the member of a qualified header');
+  Assert.AreEqual(10,
+    DeclaredNameColumnOnLine('procedure TFoo.Bar;', 'TFoo'),
+    'while the declared-name rule takes the undotted occurrence');
 
   Assert.IsFalse(IntfDeclarationPosition(CUnit, 'IUnrelated', L, C),
     'a name this unit does not declare is no jump target');

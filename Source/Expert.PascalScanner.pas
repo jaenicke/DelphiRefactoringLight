@@ -124,6 +124,19 @@ function QualifierBefore(const ALine: string; ACol0: Integer): string;
 ///  Comments are skipped. -1 when the name does not occur.</summary>
 function NameColumnOnLine(const ALine, AName: string; AHint: Integer = -1): Integer;
 
+/// <summary>The column of the name a DECLARATION line declares: the first
+///  whole-word occurrence that is NOT a member access, -1 when the name
+///  does not occur. The sibling of NameColumnOnLine, and the difference is
+///  the whole point - that one prefers the occurrence AFTER a '.', because
+///  it answers for a qualified header ("procedure TFoo.Bar"), while a
+///  declaration puts its name on the LEFT: the alias
+///  "IAppCoreLog = AppCore.IAppCoreLog;" declares the left one and the
+///  dotted one is the type in another unit (user, 2026-11-02: the
+///  visualizer's jump marked the right-hand side). Falls back to the first
+///  occurrence when every one of them is dotted, so a jump still lands on
+///  the name rather than on nothing.</summary>
+function DeclaredNameColumnOnLine(const ALine, AName: string): Integer;
+
 /// <summary>ALines with every comment, directive and string literal
 ///  character replaced by a blank - line count and line lengths are kept,
 ///  so a position in the result IS the position in the source. Block
@@ -330,17 +343,19 @@ begin
       if not IsIdentChar(S[I]) then Exit(False);
 end;
 
-function NameColumnOnLine(const ALine, AName: string; AHint: Integer): Integer;
+/// <summary>ONE scan, because the two callers differ only in which of the
+///  candidates they want. Every value is a 0-based column, or -1.</summary>
+procedure ScanNameColumns(const ALine, AName: string; AHint: Integer;
+  out AFirst, AAtHint, ADotted, AUndotted: Integer);
 var
   Code, UL, UN: string;
-  P, FirstHit, HintHit, DotHit: Integer;
+  P: Integer;
 begin
-  Result := -1;
+  AFirst := -1; AAtHint := -1; ADotted := -1; AUndotted := -1;
   if (ALine = '') or (AName = '') then Exit;
   Code := StripLineComment(ALine);   // never a name inside a trailing comment
   UL := UpperCase(Code);
   UN := UpperCase(AName);
-  FirstHit := -1; HintHit := -1; DotHit := -1;
   P := Pos(UN, UL);
   while P > 0 do
   begin
@@ -348,17 +363,38 @@ begin
     if ((P = 1) or not IsIdentChar(UL[P - 1])) and
        ((After > Length(UL)) or not IsIdentChar(UL[After])) then
     begin
-      if FirstHit < 0 then FirstHit := P - 1;
-      if (AHint >= P - 1) and (AHint < After - 1) then HintHit := P - 1;
+      if AFirst < 0 then AFirst := P - 1;
+      if (AHint >= P - 1) and (AHint < After - 1) then AAtHint := P - 1;
       // the member of a qualified header: "TFoo.Bar" or "TFoo . Bar"
       var Q := P - 1;
       while (Q >= 1) and CharInSet(UL[Q], [' ', #9]) do Dec(Q);
-      if (Q >= 1) and (UL[Q] = '.') and (DotHit < 0) then DotHit := P - 1;
+      if (Q >= 1) and (UL[Q] = '.') then
+      begin
+        if ADotted < 0 then ADotted := P - 1;
+      end
+      else if AUndotted < 0 then
+        AUndotted := P - 1;
     end;
     P := Pos(UN, UL, P + 1);
   end;
+end;
+
+function NameColumnOnLine(const ALine, AName: string; AHint: Integer): Integer;
+var
+  FirstHit, HintHit, DotHit, Undotted: Integer;
+begin
+  ScanNameColumns(ALine, AName, AHint, FirstHit, HintHit, DotHit, Undotted);
   if DotHit >= 0 then Exit(DotHit);
   if HintHit >= 0 then Exit(HintHit);
+  Result := FirstHit;
+end;
+
+function DeclaredNameColumnOnLine(const ALine, AName: string): Integer;
+var
+  FirstHit, HintHit, DotHit, Undotted: Integer;
+begin
+  ScanNameColumns(ALine, AName, -1, FirstHit, HintHit, DotHit, Undotted);
+  if Undotted >= 0 then Exit(Undotted);
   Result := FirstHit;
 end;
 

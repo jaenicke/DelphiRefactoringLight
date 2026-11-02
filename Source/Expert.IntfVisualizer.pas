@@ -449,7 +449,8 @@ begin
   Result := True;
   Lines := SplitEditorLines(AContent);
   if ALine0 < Length(Lines) then
-    ACol0 := NameColumnOnLine(Lines[ALine0], AName);
+    // the DECLARED name, never the dotted right-hand side of an alias
+    ACol0 := DeclaredNameColumnOnLine(Lines[ALine0], AName);
 end;
 
 function ParseEvalPointer(const AText: string): UInt64;

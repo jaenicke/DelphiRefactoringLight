@@ -6,6 +6,22 @@ development builds and were never released.
 
 ---
 
+## 2.15.1 - 2026-11-02
+
+**A type alias declares the name on its LEFT.** The jump of 2.15.0 marked
+`AppCore.IAppCoreLog` on the line `IAppCoreLog = AppCore.IAppCoreLog;` -
+the type in the other unit - instead of the name the line declares.
+
+The column came from `NameColumnOnLine`, which prefers the occurrence
+after a '.' on purpose: it answers for a qualified header
+(`procedure TFoo.Bar`), where the member IS what was asked about. A
+declaration is the other way round, so it has its own rule now
+(`DeclaredNameColumnOnLine`: the first occurrence that is not a member
+access), and the two share one scan so they cannot drift apart. The seven
+other callers really do ask the header question and are unchanged.
+
+---
+
 ## 2.15.0 - 2026-11-02
 
 **The interface visualizer jumps to a declaration.** Verified live, both

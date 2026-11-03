@@ -6,6 +6,32 @@ development builds and were never released.
 
 ---
 
+## 2.17.0 - 2026-11-03
+
+**Two projects of a group may hold a same-named unit, and now the asking
+file decides which one is meant.** 2.16.0 put every project of the group
+into the identifier index - which makes "every project its own Config.pas"
+a normal state. Measured what that answered: both files are indexed and
+every hit carries its own path, but the three places that resolve a unit
+NAME to a file took the first match, i.e. whatever order the scan
+produced.
+
+`IUnitSnapshot.TryGetUnitPathFor(name, askingFile)` resolves it the way the
+compiler does: the candidate whose project the asking file belongs to -
+the question `IOTAProjectGroup.FindProject` answers, precomputed from the
+group's per-project file lists so it needs no IDE call on a worker thread.
+EVIDENCE ONLY (`PreferUnitOfProject`): exactly one candidate must share a
+project with the asking file, otherwise the old first-match answer stands -
+picking on a guess is how a uses entry ends up naming the wrong file.
+
+Routed through it: the availability gate in front of every add-unit write
+(`EnsureUnitAvailable`, the quick fixes, the Find Unit dialog), the three
+MCP equivalents (`add_unit`, `apply_quick_fix`, `apply_quick_fixes`,
+`get_quick_fixes`), the uses closure of the project-wide scans and the
+unused-units check.
+
+---
+
 ## 2.16.0 - 2026-11-03
 
 **The identifier index covers every project of the group.** Its project

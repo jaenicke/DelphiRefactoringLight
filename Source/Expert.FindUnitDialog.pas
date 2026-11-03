@@ -322,7 +322,9 @@ begin
     Exit;
   end;
   // Browsing-path-only units: offer to make them project-visible first.
-  if not EnsureUnitAvailable(H.UnitName) then Exit;
+  // The hit carries the FILE it was found in, which is the one the
+  // availability question is about.
+  if not EnsureUnitAvailable(H.UnitName, FTargetFile) then Exit;
   if ASection = usInterface then SecName := 'interface' else SecName := 'implementation';
   if AddUnitToUses(FTargetFile, H.UnitName, ASection) then
     ShowThemedMessage(Format('Added "%s" to the %s uses of %s.',

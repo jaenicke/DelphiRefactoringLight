@@ -463,14 +463,17 @@ begin
     if F = Up then Exit(True);
 end;
 
-function AvailabilityName(const AUnit: string): string;
+// ACONTEXTFILE is the file that would carry the uses entry: in a project
+// group two projects can each have their own Config.pas, and only that
+// file's project decides which one "uses Config" means.
+function AvailabilityName(const AUnit, AContextFile: string): string;
 var
   Snap: IUnitSnapshot;
   Path: string;
 begin
   Result := 'unknown';
   Snap := TUnitIndex.Instance.Snapshot;
-  if (Snap = nil) or not Snap.TryGetUnitPath(AUnit, Path) then Exit;
+  if (Snap = nil) or not Snap.TryGetUnitPathFor(AUnit, AContextFile, Path) then Exit;
   case CheckUnitAvailability(AUnit, Path) of
     uaInProject: Result := 'in_project';
     uaOnSearchPath: Result := 'search_path';
@@ -815,7 +818,7 @@ begin
         begin
           for var U in Names do
             if not Avail.ContainsKey(UpperCase(U)) then
-              Avail.Add(UpperCase(U), AvailabilityName(U));
+              Avail.Add(UpperCase(U), AvailabilityName(U, Snap.FileName));
         end, True, AStop, Err);
     Result := OkResult(QuickFixesToJson(Snap.FileName, Snap.Hash, Gen, Fixes, Line1,
       function(const AUnit: string): string
@@ -915,7 +918,7 @@ begin
         // why, instead of producing a uses entry that will not compile.
         var U := Fix.UnitNames[UnitIdx];
         var Snap := TUnitIndex.Instance.Snapshot;
-        if (Snap <> nil) and Snap.TryGetUnitPath(U, Path) and
+        if (Snap <> nil) and Snap.TryGetUnitPathFor(U, F, Path) and
            (CheckUnitAvailability(U, Path) in UnitNotReachable) then
         begin
           // ...and a unit that is shipped INSIDE a package is not a question
@@ -1079,7 +1082,8 @@ begin
           if (AFix.Kind = qfAddUnit) and (Length(AFix.UnitNames) = 1) then
           begin
             var Snap := TUnitIndex.Instance.Snapshot;
-            if (Snap <> nil) and Snap.TryGetUnitPath(AFix.UnitNames[0], Path) and
+            if (Snap <> nil) and
+               Snap.TryGetUnitPathFor(AFix.UnitNames[0], F, Path) and
                (CheckUnitAvailability(AFix.UnitNames[0], Path) in UnitNotReachable) then
             begin
               var Pkg := PackageShippingUnit(Path, FindBdsRoot);

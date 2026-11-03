@@ -302,7 +302,9 @@ begin
         Exit;
       end;
       var Snap := TUnitIndex.Instance.Snapshot;
-      if (Snap <> nil) and Snap.TryGetUnitPath(U, Path) and
+      // F is the file the uses entry goes into - its project decides which
+      // of two same-named units of a group is meant.
+      if (Snap <> nil) and Snap.TryGetUnitPathFor(U, F, Path) and
          (CheckUnitAvailability(U, Path) in UnitNotReachable) then
       begin
         var Pkg := PackageShippingUnit(Path, FindBdsRoot);

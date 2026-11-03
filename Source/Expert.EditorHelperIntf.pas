@@ -56,6 +56,14 @@ type
     Reason: string;
   end;
 
+  /// <summary>One project of the IDE's project group, with the source
+  ///  files that project lists. Per project, NOT merged - see
+  ///  GetProjectGroupSources.</summary>
+  TProjectGroupSource = record
+    Dproj: string;            // its project file ('' only if the IDE has none)
+    Files: TArray<string>;    // its .pas/.dpr/.dpk, as the IDE lists them
+  end;
+
   IEditorHelper = interface
     ['{1F6F4D86-5C8D-4A6E-9B0E-7BCE2C5F0A12}']
     // ---------- Cursor / project context ----------
@@ -91,13 +99,20 @@ type
     ///  derives). With no group, or none of this outside the IDE, this is
     ///  the active project alone, i.e. exactly GetProjectSourceFiles plus
     ///  GetCurrentProjectDproj.
+    ///  PER PROJECT and not merged, because a group may hold two units of
+    ///  the SAME NAME - every project its own Config.pas - and then only
+    ///  the project a file belongs to decides which file "uses Config"
+    ///  means. That is the question IOTAProjectGroup.FindProject answers
+    ///  ("first check in the active project, then the other open ones");
+    ///  the index precomputes it from these lists instead, so the answer
+    ///  needs no ToolsAPI call on a worker thread.
     ///  WHY (user, 2026-11-03): the identifier index keyed its project
     ///  scope on the ACTIVE project, so while project 1 of a group was
     ///  active, a unit of project 2 - which one edits in parallel - was
     ///  answered from the wrong scope: find unit, "add unit", "did you
     ///  mean" and the uses cleanup did not know the units its OWN project
     ///  would have offered.</summary>
-    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
+    function GetProjectGroupSources: TArray<TProjectGroupSource>;
     /// <summary>Source files currently OPEN in the editor. Cheap (a
     ///  handful of modules) and the only place where UNSAVED changes
     ///  live - a caller that scans the project from disk must check

@@ -177,10 +177,15 @@ begin
               AExtra.Truncated := True;
               Break;
             end;
-            if not ReadContent(Queue.Dequeue, Content) then Continue;
+            var Current := Queue.Dequeue;
+            if not ReadContent(Current, Content) then Continue;
             for var E in TUsesGraphAnalyzer.ParseUsesEntries(Content) do
             begin
-              if not Snap.TryGetUnitPath(E.UnitName, Path) then Continue;
+              // Whose uses clause this is decides which file an entry
+              // means: in a project group two projects can each have
+              // their own Config.pas (user, 2026-11-03).
+              if not Snap.TryGetUnitPathFor(E.UnitName, Current, Path) then
+                Continue;
               if BelowBds(Path) then Continue;
               if Add(Path) then
               begin

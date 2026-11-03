@@ -152,17 +152,19 @@ begin
     end;
 end;
 
-function ResolveListedUnit(const AName: string;
+function ResolveListedUnit(const AName, AMainSource: string;
   out APath: string): Boolean;
 var
   Snap: IUnitSnapshot;
 begin
   // The identifier index knows the library and the project search paths,
   // which is where a unit listed without "in '<file>'" has to come from.
+  // AMAINSOURCE is the .dpr whose list this is, so a group in which two
+  // projects have a same-named unit resolves to the right one.
   APath := '';
   Snap := TUnitIndex.Instance.Snapshot;
-  Result := (Snap <> nil) and Snap.TryGetUnitPath(AName, APath) and
-    (APath <> '');
+  Result := (Snap <> nil) and Snap.TryGetUnitPathFor(AName, AMainSource, APath)
+    and (APath <> '');
 end;
 
 /// <summary>The fact that answers a name AS THE PROJECT LISTS IT, or -1.
@@ -342,7 +344,7 @@ begin
         F.InProject := True;
         // When nothing resolves the name there is nothing to read - and
         // THAT is the finding, not a reason to drop the entry.
-        if ResolveListedUnit(Listed, Path) and
+        if ResolveListedUnit(Listed, MainFile, Path) and
            not Seen.ContainsKey(LowerCase(Path)) then
         begin
           Seen.AddOrSetValue(LowerCase(Path), True);

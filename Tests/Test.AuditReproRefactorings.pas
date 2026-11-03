@@ -93,7 +93,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
-    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
+    function GetProjectGroupSources: TArray<TProjectGroupSource>;
     function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(const ADprojPath, ARootPath: string): string;
     function FindDelphiLspJson: string;
@@ -202,10 +202,8 @@ begin
   Result := nil;
 end;
 
-function TAuditFakeEditor.GetProjectGroupSources(
-  out ADprojs: TArray<string>): TArray<string>;
+function TAuditFakeEditor.GetProjectGroupSources: TArray<TProjectGroupSource>;
 begin
-  ADprojs := nil;
   Result := nil;
 end;
 

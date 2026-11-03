@@ -127,7 +127,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
-    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
+    function GetProjectGroupSources: TArray<TProjectGroupSource>;
     function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
@@ -394,15 +394,14 @@ begin
   Result := FState.SourceFiles;
 end;
 
-function TStandaloneEditorHelper.GetProjectGroupSources(
-  out ADprojs: TArray<string>): TArray<string>;
+function TStandaloneEditorHelper.GetProjectGroupSources: TArray<TProjectGroupSource>;
 begin
   // Der Standalone oeffnet EIN Projekt - das ist hier die ganze Gruppe.
-  if FState.ProjectFile <> '' then
-    ADprojs := TArray<string>.Create(FState.ProjectFile)
-  else
-    ADprojs := nil;
-  Result := FState.SourceFiles;
+  if (FState.ProjectFile = '') and (Length(FState.SourceFiles) = 0) then
+    Exit(nil);
+  SetLength(Result, 1);
+  Result[0].Dproj := FState.ProjectFile;
+  Result[0].Files := FState.SourceFiles;
 end;
 
 function TStandaloneEditorHelper.GetOpenSourceFiles: TArray<string>;

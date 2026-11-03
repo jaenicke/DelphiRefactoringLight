@@ -334,6 +334,18 @@ type
     [Test] procedure TheKeyIsTheSetOfProjects_NotTheActiveOne;
   end;
 
+  /// <summary>A project GROUP may hold two units of the SAME NAME - every
+  ///  project its own Config.pas - and then the project the ASKING file
+  ///  belongs to is the only thing that says which file a uses entry
+  ///  means. Until 2.17.0 the index answered the first one its scan had
+  ///  found, which is dictionary order.</summary>
+  [TestFixture]
+  TProjectGroupIndexTests = class
+  public
+    [Test] procedure TheAskingFilesProjectDecidesWhichUnitIsMeant;
+    [Test] procedure NothingDecidesIt_KeepsTheOldAnswer;
+  end;
+
   /// <summary>Forum: "Move to unit" moved only the FIRST line of a
   ///  routine declaration whose parameter list wraps - the declaration was
   ///  cut at the first ';', which sits inside the parameter list.</summary>
@@ -2900,6 +2912,111 @@ begin
     end;
   end;
   Assert.AreEqual(2, Found);
+end;
+
+{ TProjectGroupIndexTests }
+
+const
+  PrjA = 'C:\Work\A\App.dproj';
+  PrjB = 'C:\Work\B\Lib.dproj';
+  CfgA = 'C:\Work\A\Config.pas';
+  CfgB = 'C:\Work\B\Config.pas';
+  UseA = 'C:\Work\A\AOnly.pas';
+  UseB = 'C:\Work\B\BOnly.pas';
+
+// The group as the index builds it: two projects, each with its own
+// Config.pas, bit 0 = project A, bit 1 = project B.
+function GroupSnapshot: IUnitSnapshot;
+var
+  U: TArray<TUnitSource>;
+
+  procedure Add(const AName, APath: string; const AIdents: TArray<string>);
+  begin
+    SetLength(U, Length(U) + 1);
+    U[High(U)].UnitName := AName;
+    U[High(U)].Path := APath;
+    U[High(U)].Idents := AIdents;
+    U[High(U)].HasInit := False;
+  end;
+
+begin
+  Add('Config', CfgA, TArray<string>.Create('TAppConfig', 'TShared'));
+  Add('AOnly', UseA, TArray<string>.Create('TOnlyInA'));
+  Add('Config', CfgB, TArray<string>.Create('TBeeConfig', 'TShared'));
+  Add('BOnly', UseB, TArray<string>.Create('TOnlyInB'));
+  // ...and the library layer on top, which is what the IDE really asks.
+  Result := ComposeUnitSnapshots(
+    BuildUnitSnapshot(U, TArray<Cardinal>.Create(1, 1, 2, 2)),
+    BuildUnitSnapshot(nil));
+end;
+
+procedure TProjectGroupIndexTests.TheAskingFilesProjectDecidesWhichUnitIsMeant;
+var
+  Snap: IUnitSnapshot;
+  Path: string;
+begin
+  Snap := GroupSnapshot;
+
+  // Both are indexed - that is what 2.16.0 added - and each hit carries
+  // its own file.
+  Assert.AreEqual<Integer>(4, Snap.UnitCount, 'both Config.pas are indexed');
+  Assert.AreEqual<Integer>(2, Length(Snap.Lookup('TShared')),
+    'TShared is declared in both of them');
+
+  // THE RULE: a unit of project B asking for "Config" means B's.
+  Assert.IsTrue(Snap.TryGetUnitPathFor('Config', UseB, Path));
+  Assert.AreEqual(CfgB, Path, 'asked from a unit of B, "Config" is B''s');
+  Assert.IsTrue(Snap.TryGetUnitPathFor('Config', UseA, Path));
+  Assert.AreEqual(CfgA, Path, 'and from a unit of A it is A''s');
+
+  // The project bits themselves, since the rule stands or falls with them.
+  Assert.AreEqual<Cardinal>(1, Snap.ProjectsOfPath(UseA), 'AOnly is in A');
+  Assert.AreEqual<Cardinal>(2, Snap.ProjectsOfPath(CfgB), 'B''s Config is in B');
+  Assert.AreEqual<Cardinal>(0, Snap.ProjectsOfPath('C:\RTL\System.Classes.pas'),
+    'a library unit is in no project of the group');
+
+  // A unique name is not touched by any of this.
+  Assert.IsTrue(Snap.TryGetUnitPathFor('BOnly', UseA, Path));
+  Assert.AreEqual(UseB, Path, 'BOnly is BOnly, whoever asks');
+end;
+
+procedure TProjectGroupIndexTests.NothingDecidesIt_KeepsTheOldAnswer;
+var
+  Snap: IUnitSnapshot;
+  Path, First: string;
+begin
+  Snap := GroupSnapshot;
+  Assert.IsTrue(Snap.TryGetUnitPath('Config', First),
+    'the answer without a context: whatever the scan found first');
+
+  // A file that belongs to no project of the group cannot prefer one...
+  Assert.IsTrue(Snap.TryGetUnitPathFor('Config', 'C:\Elsewhere\Scratch.pas', Path));
+  Assert.AreEqual(First, Path, 'a file outside the group decides nothing');
+  // ...and neither does no context at all.
+  Assert.IsTrue(Snap.TryGetUnitPathFor('Config', '', Path));
+  Assert.AreEqual(First, Path, 'no context, no preference');
+
+  // The rule itself, on its own: EVIDENCE ONLY - exactly one candidate
+  // must share a project with the asking file, or the caller keeps what
+  // it had. Picking on a guess is how a uses entry names the wrong file.
+  Assert.AreEqual(1, PreferUnitOfProject(
+    TArray<string>.Create(CfgA, CfgB), TArray<Cardinal>.Create(1, 2), 2),
+    'the candidate of the asking file''s project');
+  Assert.AreEqual(-1, PreferUnitOfProject(
+    TArray<string>.Create(CfgA, CfgB), TArray<Cardinal>.Create(1, 2), 4),
+    'no candidate in that project: nothing is decided');
+  Assert.AreEqual(-1, PreferUnitOfProject(
+    TArray<string>.Create(CfgA, CfgB), TArray<Cardinal>.Create(3, 3), 1),
+    'both in it: nothing is decided either');
+  Assert.AreEqual(-1, PreferUnitOfProject(
+    TArray<string>.Create(CfgA, CfgB), TArray<Cardinal>.Create(1, 2), 0),
+    'and a file in no project cannot decide');
+  // A unit in BOTH projects (a shared unit) against one that is only in
+  // B: asked from B, only one of them is ambiguous-free... both match, so
+  // nothing is decided - the safe answer.
+  Assert.AreEqual(-1, PreferUnitOfProject(
+    TArray<string>.Create(CfgA, CfgB), TArray<Cardinal>.Create(3, 2), 2),
+    'a unit shared by both projects decides nothing');
 end;
 
 { TUnitIndexCacheTests }
@@ -8509,6 +8626,7 @@ initialization
   TDUnitX.RegisterTestFixture(TUsesGraphDepthTests);
   TDUnitX.RegisterTestFixture(THelperUsageTests);
   TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
+  TDUnitX.RegisterTestFixture(TProjectGroupIndexTests);
   TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);

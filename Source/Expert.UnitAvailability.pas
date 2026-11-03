@@ -57,7 +57,11 @@ function CheckUnitAvailability(const AUnitName, APasPath: string): TUnitAvailabi
 ///  available (add file to project / add dir to search path / just add
 ///  the uses entry). True = proceed with the uses edit; False = the user
 ///  cancelled. Units the index does not know pass through unasked.</summary>
-function EnsureUnitAvailable(const AUnitName: string): Boolean;
+///  ACONTEXTFILE is the file the uses entry goes into - it decides which
+///  of two same-named units of a project group is meant; '' answers as
+///  before (the first one the scan found).</summary>
+function EnsureUnitAvailable(const AUnitName: string;
+  const AContextFile: string = ''): Boolean;
 
 implementation
 
@@ -223,7 +227,8 @@ begin
     'Add the uses entry');
 end;
 
-function EnsureUnitAvailable(const AUnitName: string): Boolean;
+function EnsureUnitAvailable(const AUnitName: string;
+  const AContextFile: string): Boolean;
 var
   Snap: IUnitSnapshot;
   Path, Pkg: string;
@@ -231,7 +236,10 @@ begin
   Result := True;
   if (Editor = nil) or (AUnitName = '') then Exit;
   Snap := TUnitIndex.Instance.Snapshot;
-  if (Snap = nil) or not Snap.TryGetUnitPath(AUnitName, Path) then
+  // ACONTEXTFILE is the file that is about to use it: in a project group
+  // two projects may each have their own Config.pas, and only the project
+  // the asking file belongs to decides which one "uses Config" means.
+  if (Snap = nil) or not Snap.TryGetUnitPathFor(AUnitName, AContextFile, Path) then
     Exit;   // not indexed (dcu-only RTL etc.) - nothing to warn about
   var Avail := CheckUnitAvailability(AUnitName, Path);
   if not (Avail in UnitNotReachable) then

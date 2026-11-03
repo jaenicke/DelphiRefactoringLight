@@ -61,6 +61,21 @@ type
     /// <summary>Full .pas path of the indexed unit AUnitName (project
     ///  scope shadows global). False when the unit is not indexed.</summary>
     function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
+    /// <summary>The file of AUNITNAME as seen FROM ACONTEXTPATH - the
+    ///  file that is about to use it. A project GROUP may hold two units
+    ///  of the same name (every project its own Config.pas), and then
+    ///  only the project the asking file belongs to decides which one
+    ///  "uses Config" means; the plain TryGetUnitPath answers the first
+    ///  one it finds, which is whatever order the scan produced.
+    ///  Falls back to exactly that answer when nothing decides it:
+    ///  ACONTEXTPATH in no project, both candidates in the same project,
+    ///  or no candidate in it at all.</summary>
+    function TryGetUnitPathFor(const AUnitName, AContextPath: string;
+      out APath: string): Boolean;
+    /// <summary>The projects of the group that list APATH, as a bit per
+    ///  project (bit i = the i-th project the index was given). 0 = the
+    ///  file belongs to no project of the group, or is a library unit.</summary>
+    function ProjectsOfPath(const APath: string): Cardinal;
     /// <summary>True when the indexed unit has an initialization or
     ///  finalization section (load-time side effects - the uses cleanup
     ///  must never flag such a unit as removable). False for unknown
@@ -124,6 +139,11 @@ type
     FProjectDirs: TArray<string>;
     FProjectFiles: TArray<string>;
     FProjectDprojs: TArray<string>;   // the projects that scope covers
+    // The group's files PER PROJECT (same order as FProjectDprojs), so a
+    // lookup can tell two same-named units of two projects apart. Set by
+    // the main thread, read by the worker at publish time - plain arrays,
+    // never mutated after they are stored.
+    FProjectFileSets: TArray<TArray<string>>;
     FGlobalCachePath: string;
     FProjectCachePath: string;
     // Published snapshot (the reference is swapped under FLock; the object
@@ -205,8 +225,15 @@ type
 ///  sorts one flat (key, unit) array instead of growing a dictionary of
 ///  lists, so its transient memory is a few MB above the result - the
 ///  old build held two extra dictionaries of the whole identifier set.
-///  Exposed for the console tests and the memory measurement.</summary>
-function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
+///  Exposed for the console tests and the memory measurement. The
+///  optional AUNITPROJECTS carries, parallel to AUNITS, the projects of
+///  the group a unit belongs to as a bit each - what lets a lookup tell
+///  two same-named units of two projects apart. A separate array and not
+///  a field of TUnitSource on purpose: a new unmanaged record field is
+///  NOT zero-initialised in a local var, and three places build these
+///  records field by field.</summary>
+function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>;
+  const AUnitProjects: TArray<Cardinal> = nil): IUnitSnapshot;
 
 /// <summary>Test seams for the on-disk cache format (issue #16): write
 ///  AUnits through the production SaveCache, and read a file back through
@@ -400,6 +427,17 @@ function UnresolvedPathVars: string;
 ///  via browsing paths only, which the compiler cannot reach.</summary>
 function GatherCompileSearchDirs: TArray<string>;
 
+/// <summary>Which of several same-named units a file should use: the one
+///  whose project the asking file belongs to. APATHS are the candidates,
+///  AUNITPROJECTS their project bits (parallel), ACONTEXTPROJECTS the
+///  bits of the asking file. Answers an INDEX into APaths, or -1 when
+///  nothing decides it - and -1 means "keep what you had", because
+///  picking on a guess is how a uses entry ends up naming the wrong
+///  file. EVIDENCE ONLY: exactly one candidate must share a project with
+///  the asking file.</summary>
+function PreferUnitOfProject(const APaths: TArray<string>;
+  const AUnitProjects: TArray<Cardinal>; AContextProjects: Cardinal): Integer;
+
 /// <summary>The cache key of a project scope: the SET of project files
 ///  it covers, independent of WHICH of them is active. That matters for
 ///  more than tidiness - the key picks the on-disk cache file, so keying
@@ -460,6 +498,10 @@ const
   // Snapshot map entries are unit indexes with this flag bit set for
   // GENERIC declarations (MaxFiles stays far below the bit).
   GenericBit    = $40000000;
+  // One bit per project of the group in TUnitSource's project mask. A
+  // group with more projects than that gets no preference for the rest,
+  // which is simply the answer this had before (the first match wins).
+  MaxProjectBits = 32;
 
 // ---------------------------------------------------------------------------
 //  Lexical helpers
@@ -2267,6 +2309,28 @@ begin
   end;
 end;
 
+function PreferUnitOfProject(const APaths: TArray<string>;
+  const AUnitProjects: TArray<Cardinal>; AContextProjects: Cardinal): Integer;
+var
+  I, Hits: Integer;
+begin
+  Result := -1;
+  // The asking file is in no project of the group: it cannot prefer one.
+  if (AContextProjects = 0) or (Length(APaths) < 2) then Exit;
+  Hits := 0;
+  for I := 0 to High(APaths) do
+    if (I <= High(AUnitProjects)) and
+       ((AUnitProjects[I] and AContextProjects) <> 0) then
+    begin
+      Inc(Hits);
+      Result := I;
+    end;
+  // Several candidates in the same project decide nothing either - two
+  // same-named units inside ONE project do not compile anyway, so this is
+  // a scan that saw more than the compiler would.
+  if Hits <> 1 then Result := -1;
+end;
+
 function ProjectScopeKey(const ADprojs: TArray<string>): string;
 var
   Keys: TStringList;
@@ -2304,13 +2368,15 @@ type
     FUnitName: TArray<string>;
     FUnitPath: TArray<string>;
     FUnitHasInit: TArray<Boolean>;
+    FUnitProjects: TArray<Cardinal>;   // bit per project of the group
     FKeysUpper: TArray<string>;    // sorted UPPER identifiers
     FDisplay: TArray<string>;      // parallel original-case
     FMap: TDictionary<string, TArray<Integer>>;
   public
     constructor Create(const AUnitName, AUnitPath, AKeysUpper, ADisplay: TArray<string>;
       const AUnitHasInit: TArray<Boolean>;
-      AMap: TDictionary<string, TArray<Integer>>);
+      AMap: TDictionary<string, TArray<Integer>>;
+      const AUnitProjects: TArray<Cardinal> = nil);
     destructor Destroy; override;
     function Lookup(const AIdentifier: string): TArray<TFindUnitHit>;
     function Search(const ASub: string; AMax: Integer): TArray<TFindUnitHit>;
@@ -2318,6 +2384,9 @@ type
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function HasUnit(const AUnitName: string): Boolean;
     function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
+    function TryGetUnitPathFor(const AUnitName, AContextPath: string;
+      out APath: string): Boolean;
+    function ProjectsOfPath(const APath: string): Cardinal;
     function HasInitCode(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
@@ -2367,7 +2436,8 @@ end;
 
 constructor TUnitSnapshot.Create(const AUnitName, AUnitPath, AKeysUpper,
   ADisplay: TArray<string>; const AUnitHasInit: TArray<Boolean>;
-  AMap: TDictionary<string, TArray<Integer>>);
+  AMap: TDictionary<string, TArray<Integer>>;
+  const AUnitProjects: TArray<Cardinal>);
 begin
   inherited Create;
   FUnitName := AUnitName;
@@ -2376,6 +2446,7 @@ begin
   FKeysUpper := AKeysUpper;
   FDisplay := ADisplay;
   FMap := AMap;   // takes ownership
+  FUnitProjects := AUnitProjects;
 end;
 
 destructor TUnitSnapshot.Destroy;
@@ -2409,6 +2480,42 @@ begin
       APath := FUnitPath[I];
       Exit(True);
     end;
+end;
+
+function TUnitSnapshot.ProjectsOfPath(const APath: string): Cardinal;
+var
+  I: Integer;
+begin
+  Result := 0;
+  if (APath = '') or (Length(FUnitProjects) = 0) then Exit;
+  for I := 0 to High(FUnitName) do
+    if (I <= High(FUnitProjects)) and SameText(FUnitPath[I], APath) then
+      Exit(FUnitProjects[I]);
+end;
+
+function TUnitSnapshot.TryGetUnitPathFor(const AUnitName, AContextPath: string;
+  out APath: string): Boolean;
+var
+  I, Pick: Integer;
+  Paths: TArray<string>;
+  Bits: TArray<Cardinal>;
+begin
+  Result := TryGetUnitPath(AUnitName, APath);
+  // Nothing to decide without a second candidate, and nothing to decide
+  // without project bits either (a library-only layer has none).
+  if not Result or (AContextPath = '') or (Length(FUnitProjects) = 0) then Exit;
+  for I := 0 to High(FUnitName) do
+    if SameText(FUnitName[I], AUnitName) then
+    begin
+      Paths := Paths + [FUnitPath[I]];
+      if I <= High(FUnitProjects) then
+        Bits := Bits + [FUnitProjects[I]]
+      else
+        Bits := Bits + [0];
+    end;
+  if Length(Paths) < 2 then Exit;
+  Pick := PreferUnitOfProject(Paths, Bits, ProjectsOfPath(AContextPath));
+  if Pick >= 0 then APath := Paths[Pick];
 end;
 
 function TUnitSnapshot.HasInitCode(const AUnitName: string): Boolean;
@@ -2658,7 +2765,8 @@ begin
   end;
 end;
 
-function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>): IUnitSnapshot;
+function BuildUnitSnapshot(const AUnits: TArray<TUnitSource>;
+  const AUnitProjects: TArray<Cardinal>): IUnitSnapshot;
 type
   TKeyEntry = record
     Key: string;     // UPPER identifier
@@ -2758,7 +2866,7 @@ begin
     end;
     Pairs := nil;   // release the temporaries before the snapshot lives
     Result := TUnitSnapshot.Create(Names, Paths, KeysUpper, Display,
-      InitFlags, Flat);
+      InitFlags, Flat, AUnitProjects);
   except
     Flat.Free;
     raise;
@@ -2806,6 +2914,9 @@ type
     function FuzzyUnitNames(const AName: string; AMaxDist, AMax: Integer): TArray<string>;
     function HasUnit(const AUnitName: string): Boolean;
     function TryGetUnitPath(const AUnitName: string; out APath: string): Boolean;
+    function TryGetUnitPathFor(const AUnitName, AContextPath: string;
+      out APath: string): Boolean;
+    function ProjectsOfPath(const APath: string): Cardinal;
     function HasInitCode(const AUnitName: string): Boolean;
     function UnitCount: Integer;
     function IdentCount: Integer;
@@ -2980,6 +3091,25 @@ begin
     or FGlobal.TryGetUnitPath(AUnitName, APath);
 end;
 
+function TLayeredSnapshot.ProjectsOfPath(const APath: string): Cardinal;
+begin
+  // Only the project layer carries project bits; a library unit belongs
+  // to no project of the group, which is what 0 says.
+  Result := FProject.ProjectsOfPath(APath);
+  if Result = 0 then Result := FGlobal.ProjectsOfPath(APath);
+end;
+
+function TLayeredSnapshot.TryGetUnitPathFor(const AUnitName,
+  AContextPath: string; out APath: string): Boolean;
+begin
+  // The project layer is where two same-named units can live, and it
+  // shadows the global one for a name it knows - exactly as
+  // TryGetUnitPath above.
+  Result := FProject.TryGetUnitPathFor(AUnitName, AContextPath, APath);
+  if not Result then
+    Result := FGlobal.TryGetUnitPathFor(AUnitName, AContextPath, APath);
+end;
+
 function TLayeredSnapshot.HasInitCode(const AUnitName: string): Boolean;
 begin
   if FProject.HasUnit(AUnitName) then
@@ -3127,9 +3257,12 @@ end;
 
 procedure TUnitIndex.RefreshSourcesFromEditor;
 var
-  GDirs, PDirs: TStringList;
+  GDirs, PDirs, FileList: TStringList;
   Files, Dprojs: TArray<string>;
+  Group: TArray<TProjectGroupSource>;
+  Sets: TArray<TArray<string>>;
   ProjKey, GlobKey: string;
+  I: Integer;
 begin
   if Editor = nil then Exit;
   GDirs := TStringList.Create;
@@ -3148,7 +3281,22 @@ begin
     // merge into ONE layer: the index is a cache for whatever file the
     // user looks at next, so the union is exactly what it needs, and the
     // directories are sorted anyway.
-    Files := Editor.GetProjectGroupSources(Dprojs);
+    Group := Editor.GetProjectGroupSources;
+    SetLength(Dprojs, Length(Group));
+    SetLength(Sets, Length(Group));
+    FileList := TStringList.Create;
+    try
+      for I := 0 to High(Group) do
+      begin
+        Dprojs[I] := Group[I].Dproj;
+        Sets[I] := Group[I].Files;
+        for var F in Group[I].Files do
+          if FileList.IndexOf(F) < 0 then FileList.Add(F);
+      end;
+      Files := FileList.ToStringArray;
+    finally
+      FileList.Free;
+    end;
     for var Dproj in Dprojs do
     begin
       for var D in Editor.BuildSearchPathFromProject(Dproj, ExtractFilePath(Dproj))
@@ -3168,6 +3316,7 @@ begin
       FProjectDirs := PDirs.ToStringArray;
       FProjectFiles := Files;
       FProjectDprojs := Dprojs;
+      FProjectFileSets := Sets;
       FGlobalCachePath := CacheFileFor(GlobKey);
       FProjectCachePath := CacheFileFor(ProjKey);
     finally
@@ -3217,6 +3366,45 @@ procedure TUnitIndex.PublishSnapshot(ARebuildGlobal, ARebuildProject: Boolean);
     end;
   end;
 
+  // Which projects of the group list each unit, as a bit per project -
+  // what lets a lookup tell two same-named units apart (user,
+  // 2026-11-03). Derived here and NOT stored in the cache: it depends on
+  // the group, not on the file, and recomputing it costs one dictionary
+  // over the project's own files.
+  function ProjectBitsFor(const ASrc: TArray<TUnitSource>): TArray<Cardinal>;
+  var
+    Sets: TArray<TArray<string>>;
+    Bits: TDictionary<string, Cardinal>;
+    I: Integer;
+    Key: string;
+    Cur: Cardinal;
+  begin
+    SetLength(Result, Length(ASrc));
+    FLock.Enter;
+    try Sets := Copy(FProjectFileSets); finally FLock.Leave; end;
+    if Length(Sets) = 0 then Exit;
+    Bits := TDictionary<string, Cardinal>.Create;
+    try
+      for I := 0 to High(Sets) do
+      begin
+        // More projects than bits: the rest simply gets no preference,
+        // which is the same answer as before this existed.
+        if I >= MaxProjectBits then Break;
+        for var F in Sets[I] do
+        begin
+          Key := UpperCase(F);
+          Cur := 0;
+          Bits.TryGetValue(Key, Cur);
+          Bits.AddOrSetValue(Key, Cur or (Cardinal(1) shl I));
+        end;
+      end;
+      for I := 0 to High(ASrc) do
+        Bits.TryGetValue(UpperCase(ASrc[I].Path), Result[I]);
+    finally
+      Bits.Free;
+    end;
+  end;
+
 var
   Snap: IUnitSnapshot;
 begin
@@ -3250,7 +3438,7 @@ begin
   begin
     FProjectLayer := nil;
     var Src := SourcesOf(FProjectByPath);
-    FProjectLayer := BuildUnitSnapshot(Src);
+    FProjectLayer := BuildUnitSnapshot(Src, ProjectBitsFor(Src));
     PRaw := EstimateUnitSourcesBytes(Src);
     ProjectBuilt := True;
   end;

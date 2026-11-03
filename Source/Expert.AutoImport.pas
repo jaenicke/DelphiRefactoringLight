@@ -2626,7 +2626,7 @@ begin
   // compiler - offer to make them project-visible first. Saying NO there
   // is a DECISION, not a failure (audit #37, L3r): it used to be counted
   // as "already present / not written".
-  if not EnsureUnitAvailable(AUnit) then
+  if not EnsureUnitAvailable(AUnit, AFile) then
   begin
     ADeclined := True;
     Exit(False);
@@ -4348,7 +4348,7 @@ begin
     and (A.UnitChoice <= High(FFixes[A.FixIdx].UnitNames)) then
   begin
     OnDeactivate := nil;
-    if not EnsureUnitAvailable(FFixes[A.FixIdx].UnitNames[A.UnitChoice]) then
+    if not EnsureUnitAvailable(FFixes[A.FixIdx].UnitNames[A.UnitChoice], FFile) then
     begin
       Close;   // user cancelled - no message
       Exit;
@@ -4361,7 +4361,7 @@ begin
   if FFixes[A.FixIdx].FollowUpUnit <> '' then
   begin
     OnDeactivate := nil;
-    if not EnsureUnitAvailable(FFixes[A.FixIdx].FollowUpUnit) then
+    if not EnsureUnitAvailable(FFixes[A.FixIdx].FollowUpUnit, FFile) then
     begin
       Close;
       Exit;

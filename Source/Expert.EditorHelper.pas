@@ -49,7 +49,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
-    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
+    function GetProjectGroupSources: TArray<TProjectGroupSource>;
     function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
@@ -1575,27 +1575,39 @@ begin
   end;
 end;
 
-function TIDEEditorHelper.GetProjectGroupSources(
-  out ADprojs: TArray<string>): TArray<string>;
+function TIDEEditorHelper.GetProjectGroupSources: TArray<TProjectGroupSource>;
 var
   ModuleServices: IOTAModuleServices;
   Group: IOTAProjectGroup;
   Active, Proj: IOTAProject;
-  Dprojs, FileList: TStringList;
+  Seen, FileList: TStringList;
+
+  procedure AddProject(const AProject: IOTAProject);
+  begin
+    if AProject = nil then Exit;
+    // Ein Projekt zweimal zu nehmen waere nicht falsch, aber seine Bits
+    // waeren dann auf zwei Eintraege verteilt.
+    if (AProject.FileName <> '') and (Seen.IndexOf(AProject.FileName) >= 0) then
+      Exit;
+    Seen.Add(AProject.FileName);
+    FileList.Clear;
+    CollectProjectFiles(AProject, FileList);
+    SetLength(Result, Length(Result) + 1);
+    Result[High(Result)].Dproj := AProject.FileName;
+    Result[High(Result)].Files := FileList.ToStringArray;
+  end;
+
+var
   I: Integer;
 begin
-  ADprojs := nil;
-  Dprojs := TStringList.Create;
+  Result := nil;
+  Seen := TStringList.Create;
   FileList := TStringList.Create;
   try
-    // Das AKTIVE Projekt zuerst, damit der Status-Zeile und jeder Report
-    // ansehen kann, in welchem Projekt man gerade steht.
+    // Das AKTIVE Projekt zuerst - so sieht die Statuszeile (und jeder
+    // Report) an der Reihenfolge, in welchem Projekt man gerade steht.
     Active := FindActiveProject;
-    if Active <> nil then
-    begin
-      if Active.FileName <> '' then Dprojs.Add(Active.FileName);
-      CollectProjectFiles(Active, FileList);
-    end;
+    AddProject(Active);
 
     if Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     begin
@@ -1608,22 +1620,16 @@ begin
         for I := 0 to Group.ProjectCount - 1 do
           try
             Proj := Group.Projects[I];
-            if Proj = nil then Continue;
-            if (Proj.FileName <> '') and (Dprojs.IndexOf(Proj.FileName) < 0) then
-              Dprojs.Add(Proj.FileName);
-            CollectProjectFiles(Proj, FileList);
+            AddProject(Proj);
           except
             // Ein Projekt kann mitten im Aufbau sein - ueberspringen statt
             // den ganzen Scope zu verlieren (wie in GetOpenSourceFiles).
             Continue;
           end;
     end;
-
-    ADprojs := Dprojs.ToStringArray;
-    Result := FileList.ToStringArray;
   finally
     FileList.Free;
-    Dprojs.Free;
+    Seen.Free;
   end;
 end;
 

@@ -23,6 +23,21 @@ type
   ///  standalone executable installs a different implementation via
   ///  SetEditorImpl before any wizard runs.</summary>
   TIDEEditorHelper = class(TInterfacedObject, IEditorHelper, IEditorTokenEditBatch)
+  private
+    /// <summary>The project the IDE considers active, through every
+    ///  fallback the two public callers used to walk separately: the main
+    ///  project group's active project (in Delphi 11 the group need not
+    ///  occur in Modules[]), then IOTAModuleServices.GetActiveProject
+    ///  (documented to answer an unbound package project when one is open
+    ///  without a group), then a group found among the modules, then the
+    ///  first module that is a project and not a group. nil when none is
+    ///  open - never the .groupproj, which the old fallback could return
+    ///  when the last module happened to be the group.</summary>
+    function FindActiveProject: IOTAProject;
+    /// <summary>Appends AProject's own .pas/.dpr/.dpk modules and its main
+    ///  source file (the .dpr/.dpk beside the .dproj, which is no module)
+    ///  to ALIST, skipping what is already in it.</summary>
+    procedure CollectProjectFiles(const AProject: IOTAProject; AList: TStrings);
   public
     function ApplyTokenEdits(const AFilePath: string;
       const AEdits: TArray<TEditorTokenEdit>): Boolean;
@@ -34,6 +49,7 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
+    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
     function GetOpenSourceFiles: TArray<string>;
     function BuildSearchPathFromProject(
       const ADprojPath, ARootPath: string): string;
@@ -322,14 +338,14 @@ begin
   Result.IsValid := (Result.FileName <> '') and (Result.WordAtCursor <> '');
 end;
 
-function TIDEEditorHelper.GetCurrentProjectDproj: string;
+function TIDEEditorHelper.FindActiveProject: IOTAProject;
 var
   ProjectGroup: IOTAProjectGroup;
   ModuleServices: IOTAModuleServices;
-  Project: IOTAProject;
+  Candidate: IOTAProject;
   I: Integer;
 begin
-  Result := '';
+  Result := nil;
   if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
     Exit;
 
@@ -338,38 +354,36 @@ begin
   ProjectGroup := ModuleServices.MainProjectGroup;
   if ProjectGroup <> nil then
   begin
-    Project := ProjectGroup.ActiveProject;
-    if Project <> nil then Exit(Project.FileName);
+    Result := ProjectGroup.ActiveProject;
+    if Result <> nil then Exit;
   end;
-  Project := ModuleServices.GetActiveProject;
-  if Project <> nil then Exit(Project.FileName);
+  Result := ModuleServices.GetActiveProject;
+  if Result <> nil then Exit;
 
   // Aktives Projekt suchen
   for I := 0 to ModuleServices.ModuleCount - 1 do
-  begin
     if Supports(ModuleServices.Modules[I], IOTAProjectGroup, ProjectGroup) then
     begin
-      Project := ProjectGroup.ActiveProject;
-      if Project <> nil then
-      begin
-        Result := Project.FileName;
-        Exit;
-      end;
+      Result := ProjectGroup.ActiveProject;
+      if Result <> nil then Exit;
     end;
-  end;
 
-  // Fallback: Erstes Projekt nehmen
+  // Fallback: Erstes Projekt nehmen - und nur ein Projekt, nie die Gruppe
+  // selbst (die ist auch ein IOTAProject, und ihre .groupproj als
+  // "Projektdatei" zu melden hilft keinem Aufrufer).
   for I := 0 to ModuleServices.ModuleCount - 1 do
-  begin
-    if Supports(ModuleServices.Modules[I], IOTAProject, Project) then
-    begin
-      if not Supports(Project, IOTAProjectGroup) then
-      begin
-        Result := Project.FileName;
-        Exit;
-      end;
-    end;
-  end;
+    if Supports(ModuleServices.Modules[I], IOTAProject, Candidate) and
+       not Supports(Candidate, IOTAProjectGroup) then
+      Exit(Candidate);
+  Result := nil;
+end;
+
+function TIDEEditorHelper.GetCurrentProjectDproj: string;
+var
+  Project: IOTAProject;
+begin
+  Project := FindActiveProject;
+  if Project <> nil then Result := Project.FileName else Result := '';
 end;
 
 function TIDEEditorHelper.GetProjectRoot: string;
@@ -1514,86 +1528,102 @@ begin
   end;
 end;
 
-function TIDEEditorHelper.GetProjectSourceFiles: TArray<string>;
+procedure TIDEEditorHelper.CollectProjectFiles(const AProject: IOTAProject;
+  AList: TStrings);
 var
-  ModuleServices: IOTAModuleServices;
-  ProjectGroup: IOTAProjectGroup;
-  Project: IOTAProject;
   ModInfo: IOTAModuleInfo;
-  FileList: TList<string>;
-  FileName, Ext: string;
+  FileName, Ext, Main: string;
   I: Integer;
 begin
-  FileList := TList<string>.Create;
+  if (AProject = nil) or (AList = nil) then Exit;
+
+  // Alle Module des Projekts durchgehen
+  for I := 0 to AProject.GetModuleCount - 1 do
+  begin
+    ModInfo := AProject.GetModule(I);
+    if ModInfo = nil then Continue;
+    FileName := ModInfo.FileName;
+    if FileName = '' then Continue;
+
+    Ext := LowerCase(ExtractFileExt(FileName));
+    if (Ext = '.pas') or (Ext = '.dpr') or (Ext = '.dpk') then
+      if AList.IndexOf(FileName) < 0 then
+        AList.Add(FileName);
+  end;
+
+  // Auch die Hauptdatei des Projekts (.dpr/.dpk) - die ist kein Modul
+  FileName := AProject.FileName;
+  if FileName = '' then Exit;
+  Main := ChangeFileExt(FileName, '.dpr');
+  if FileExists(Main) and (AList.IndexOf(Main) < 0) then
+    AList.Add(Main);
+  Main := ChangeFileExt(FileName, '.dpk');
+  if FileExists(Main) and (AList.IndexOf(Main) < 0) then
+    AList.Add(Main);
+end;
+
+function TIDEEditorHelper.GetProjectSourceFiles: TArray<string>;
+var
+  FileList: TStringList;
+begin
+  FileList := TStringList.Create;
   try
-    if not Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
-      Exit(nil);
-
-    // Aktives Projekt finden
-    Project := ModuleServices.GetActiveProject;
-    ProjectGroup := ModuleServices.MainProjectGroup;
-    if ProjectGroup <> nil then
-      if ProjectGroup.ActiveProject <> nil then
-        Project := ProjectGroup.ActiveProject;
-    if Project = nil then
-    begin
-      for I := 0 to ModuleServices.ModuleCount - 1 do
-      begin
-        if Supports(ModuleServices.Modules[I], IOTAProjectGroup, ProjectGroup) then
-        begin
-          Project := ProjectGroup.ActiveProject;
-          Break;
-        end;
-      end;
-    end;
-
-    // Fallback: erstes Projekt
-    if Project = nil then
-    begin
-      for I := 0 to ModuleServices.ModuleCount - 1 do
-      begin
-        if Supports(ModuleServices.Modules[I], IOTAProject, Project) then
-          if not Supports(Project, IOTAProjectGroup) then
-            Break;
-      end;
-    end;
-
-    if Project = nil then
-      Exit(nil);
-
-    // Alle Module des Projekts durchgehen
-    for I := 0 to Project.GetModuleCount - 1 do
-    begin
-      ModInfo := Project.GetModule(I);
-      if ModInfo = nil then Continue;
-      FileName := ModInfo.FileName;
-      if FileName = '' then Continue;
-
-      Ext := LowerCase(ExtractFileExt(FileName));
-      if (Ext = '.pas') or (Ext = '.dpr') or (Ext = '.dpk') then
-      begin
-        if not FileList.Contains(FileName) then
-          FileList.Add(FileName);
-      end;
-    end;
-
-    // Auch die Hauptdatei des Projekts (.dpr) hinzufuegen
-    FileName := Project.FileName;
-    if FileName <> '' then
-    begin
-      // .dproj -> .dpr
-      var DprFile := ChangeFileExt(FileName, '.dpr');
-      if FileExists(DprFile) and not FileList.Contains(DprFile) then
-        FileList.Add(DprFile);
-      // Oder .dpk
-      DprFile := ChangeFileExt(FileName, '.dpk');
-      if FileExists(DprFile) and not FileList.Contains(DprFile) then
-        FileList.Add(DprFile);
-    end;
-
-    Result := FileList.ToArray;
+    CollectProjectFiles(FindActiveProject, FileList);
+    Result := FileList.ToStringArray;
   finally
     FileList.Free;
+  end;
+end;
+
+function TIDEEditorHelper.GetProjectGroupSources(
+  out ADprojs: TArray<string>): TArray<string>;
+var
+  ModuleServices: IOTAModuleServices;
+  Group: IOTAProjectGroup;
+  Active, Proj: IOTAProject;
+  Dprojs, FileList: TStringList;
+  I: Integer;
+begin
+  ADprojs := nil;
+  Dprojs := TStringList.Create;
+  FileList := TStringList.Create;
+  try
+    // Das AKTIVE Projekt zuerst, damit der Status-Zeile und jeder Report
+    // ansehen kann, in welchem Projekt man gerade steht.
+    Active := FindActiveProject;
+    if Active <> nil then
+    begin
+      if Active.FileName <> '' then Dprojs.Add(Active.FileName);
+      CollectProjectFiles(Active, FileList);
+    end;
+
+    if Supports(BorlandIDEServices, IOTAModuleServices, ModuleServices) then
+    begin
+      Group := ModuleServices.MainProjectGroup;
+      if Group = nil then
+        for I := 0 to ModuleServices.ModuleCount - 1 do
+          if Supports(ModuleServices.Modules[I], IOTAProjectGroup, Group) then
+            Break;
+      if Group <> nil then
+        for I := 0 to Group.ProjectCount - 1 do
+          try
+            Proj := Group.Projects[I];
+            if Proj = nil then Continue;
+            if (Proj.FileName <> '') and (Dprojs.IndexOf(Proj.FileName) < 0) then
+              Dprojs.Add(Proj.FileName);
+            CollectProjectFiles(Proj, FileList);
+          except
+            // Ein Projekt kann mitten im Aufbau sein - ueberspringen statt
+            // den ganzen Scope zu verlieren (wie in GetOpenSourceFiles).
+            Continue;
+          end;
+    end;
+
+    ADprojs := Dprojs.ToStringArray;
+    Result := FileList.ToStringArray;
+  finally
+    FileList.Free;
+    Dprojs.Free;
   end;
 end;
 

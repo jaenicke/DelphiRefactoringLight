@@ -84,6 +84,20 @@ type
     function GetProjectRoot: string;
     function GetProjectSearchPaths: string;
     function GetProjectSourceFiles: TArray<string>;
+    /// <summary>Every project of the IDE's main project GROUP, not only
+    ///  the active one: the source files of all of them as the result,
+    ///  their project files in ADPROJS with the active one FIRST (which
+    ///  only decides display order - the index sorts the directories it
+    ///  derives). With no group, or none of this outside the IDE, this is
+    ///  the active project alone, i.e. exactly GetProjectSourceFiles plus
+    ///  GetCurrentProjectDproj.
+    ///  WHY (user, 2026-11-03): the identifier index keyed its project
+    ///  scope on the ACTIVE project, so while project 1 of a group was
+    ///  active, a unit of project 2 - which one edits in parallel - was
+    ///  answered from the wrong scope: find unit, "add unit", "did you
+    ///  mean" and the uses cleanup did not know the units its OWN project
+    ///  would have offered.</summary>
+    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
     /// <summary>Source files currently OPEN in the editor. Cheap (a
     ///  handful of modules) and the only place where UNSAVED changes
     ///  live - a caller that scans the project from disk must check

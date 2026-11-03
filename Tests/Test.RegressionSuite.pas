@@ -331,6 +331,7 @@ type
     [Test] procedure AbsurdIdentifierCount_IsRejectedWithoutAllocating;
     [Test] procedure AbsurdStringLength_IsRejected;
     [Test] procedure TruncatedAndTrailing_AreRejected;
+    [Test] procedure TheKeyIsTheSetOfProjects_NotTheActiveOne;
   end;
 
   /// <summary>Forum: "Move to unit" moved only the FIRST line of a
@@ -2975,6 +2976,54 @@ begin
   var P := Length(B);
   SetLength(B, P + 1); B[P] := 0; // HasInit
   AppendInt64(B, 0);              // IncStamp
+end;
+
+// Since 2.16.0 the project scope covers every project of the GROUP, so the
+// key that picks its cache file has to name the SET. Keyed on the active
+// project - as it was - switching the active project inside one group
+// re-keyed the cache and re-scanned the whole project scope every time.
+procedure TUnitIndexCacheTests.TheKeyIsTheSetOfProjects_NotTheActiveOne;
+const
+  A = 'C:\Work\Group\App.dproj';
+  L = 'C:\Work\Group\Lib.dproj';
+  T = 'C:\Work\Group\Tests.dproj';
+begin
+  // Which project is ACTIVE decides the order the IDE hands them over - and
+  // nothing else. The same group must answer the same key, or every switch
+  // costs a full re-scan.
+  Assert.AreEqual(
+    ProjectScopeKey(TArray<string>.Create(A, L, T)),
+    ProjectScopeKey(TArray<string>.Create(T, A, L)),
+    'the same group, another active project: the SAME cache');
+
+  // A different group is a different scope, so it must NOT share the cache.
+  Assert.AreNotEqual(
+    ProjectScopeKey(TArray<string>.Create(A, L, T)),
+    ProjectScopeKey(TArray<string>.Create(A, L)),
+    'a group without Tests.dproj is another scope');
+
+  // ...and one project alone is neither of them.
+  Assert.AreNotEqual(
+    ProjectScopeKey(TArray<string>.Create(A)),
+    ProjectScopeKey(TArray<string>.Create(A, L)),
+    'the single project is not the group it belongs to');
+
+  // The same path in another spelling is the same project: a re-key here
+  // would throw the cache away for nothing.
+  Assert.AreEqual(
+    ProjectScopeKey(TArray<string>.Create(A, L)),
+    ProjectScopeKey(TArray<string>.Create('c:\work\group\app.DPROJ', L)),
+    'case does not make a second project');
+  Assert.AreEqual(
+    ProjectScopeKey(TArray<string>.Create(A)),
+    ProjectScopeKey(TArray<string>.Create(A, '  ', A)),
+    'a blank entry and a repeat are no projects either');
+
+  // No project at all: one shared key, not an empty one.
+  Assert.AreEqual('default', ProjectScopeKey(nil),
+    'nothing open answers "default"');
+  Assert.AreEqual('default', ProjectScopeKey(TArray<string>.Create('', '   ')),
+    'and so does nothing but blanks');
 end;
 
 procedure TUnitIndexCacheTests.RoundTrip_KeepsUnitsAndIdentifiers;

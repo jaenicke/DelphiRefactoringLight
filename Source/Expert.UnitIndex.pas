@@ -123,6 +123,7 @@ type
     FGlobalDirs: TArray<string>;
     FProjectDirs: TArray<string>;
     FProjectFiles: TArray<string>;
+    FProjectDprojs: TArray<string>;   // the projects that scope covers
     FGlobalCachePath: string;
     FProjectCachePath: string;
     // Published snapshot (the reference is swapped under FLock; the object
@@ -177,6 +178,12 @@ type
     /// <summary>Estimated memory of both scopes as of the last publish
     ///  (computed by the worker, copied under the lock - cheap).</summary>
     function MemoryInfo: TIndexMemory;
+
+    /// <summary>The project files whose scope the index currently holds -
+    ///  every project of the IDE's project group, the active one first.
+    ///  For the status window: "the index does not know my unit" used to
+    ///  mean "it only knows the ACTIVE project" and nothing said so.</summary>
+    function ProjectScopeProjects: TArray<string>;
 
     /// <summary>Number of completed worker scan cycles. Callers that just
     ///  requested a refresh (RefreshSourcesFromEditor) can wait for this
@@ -392,6 +399,15 @@ function UnresolvedPathVars: string;
 ///  the project directory itself. Used to detect units the index found
 ///  via browsing paths only, which the compiler cannot reach.</summary>
 function GatherCompileSearchDirs: TArray<string>;
+
+/// <summary>The cache key of a project scope: the SET of project files
+///  it covers, independent of WHICH of them is active. That matters for
+///  more than tidiness - the key picks the on-disk cache file, so keying
+///  it on the active project alone meant that switching the active
+///  project inside one group re-keyed and re-scanned the whole project
+///  scope every time. Sorted and upper-cased for exactly that reason;
+///  '' / nothing but blanks answers 'default'.</summary>
+function ProjectScopeKey(const ADprojs: TArray<string>): string;
 
 /// <summary>All directories the INDEX scans for the global scope: the
 ///  IDE Library path PLUS the Browsing path (browsing sources are what
@@ -1404,7 +1420,9 @@ begin
   Result := GatherIdeLibraryDirsEx(ABdsRoot, True);
 end;
 
-function GatherDprojSearchDirs: TArray<string>;
+// The DCC_UnitSearchPath entries of ONE .dproj. Taken per project since
+// the index covers every project of the group (user, 2026-11-03).
+function DprojSearchDirsOf(const ADproj: string): TArray<string>;
 var
   Dproj, Content, Inner, DprojDir, Ent, D: string;
   Dirs: TList<string>;
@@ -1412,8 +1430,7 @@ var
   P1, P2: Integer;
 begin
   Result := nil;
-  if Editor = nil then Exit;
-  Dproj := Editor.GetCurrentProjectDproj;
+  Dproj := ADproj;
   if (Dproj = '') or not TFile.Exists(Dproj) then Exit;
   DprojDir := ExtractFilePath(Dproj);
   try Content := TFile.ReadAllText(Dproj); except Exit; end;
@@ -1449,6 +1466,14 @@ begin
     EnvVars.Free;
     Dirs.Free;
   end;
+end;
+
+// The ACTIVE project's entries - what the compile-relevant answer needs
+// (the compiler compiles one project, not the group).
+function GatherDprojSearchDirs: TArray<string>;
+begin
+  if Editor = nil then Exit(nil);
+  Result := DprojSearchDirsOf(Editor.GetCurrentProjectDproj);
 end;
 
 function CodeWordLines(const ALines: TArray<string>; const AWord: string): TArray<Integer>;
@@ -2239,6 +2264,25 @@ begin
     Result := Dirs.ToArray;
   finally
     Dirs.Free;
+  end;
+end;
+
+function ProjectScopeKey(const ADprojs: TArray<string>): string;
+var
+  Keys: TStringList;
+  P: string;
+begin
+  if Length(ADprojs) = 0 then Exit('default');
+  Keys := TStringList.Create;
+  try
+    Keys.Sorted := True;          // the SET - not the order they arrived in
+    Keys.Duplicates := dupIgnore;
+    for P in ADprojs do
+      if Trim(P) <> '' then Keys.Add(UpperCase(Trim(P)));
+    if Keys.Count = 0 then Exit('default');
+    Result := string.Join(';', Keys.ToStringArray);
+  finally
+    Keys.Free;
   end;
 end;
 
@@ -3084,7 +3128,7 @@ end;
 procedure TUnitIndex.RefreshSourcesFromEditor;
 var
   GDirs, PDirs: TStringList;
-  Files: TArray<string>;
+  Files, Dprojs: TArray<string>;
   ProjKey, GlobKey: string;
 begin
   if Editor = nil then Exit;
@@ -3096,14 +3140,24 @@ begin
 
     // Global scope: IDE library/browsing paths (project-independent).
     for var D in GatherGlobalLibraryDirs(FindBdsRoot) do GDirs.Add(D);
-    // Project scope: the project's own search path + .dproj DCC search dirs.
-    for var D in Editor.GetProjectSearchPaths.Split([';'], TStringSplitOptions.ExcludeEmpty) do
-      if TDirectory.Exists(Trim(D)) then PDirs.Add(ExcludeTrailingPathDelimiter(Trim(D)));
-    for var D in GatherDprojSearchDirs do PDirs.Add(D);
-    Files := Editor.GetProjectSourceFiles;
+    // Project scope: EVERY project of the GROUP, not only the active one.
+    // In a group one works in several projects in parallel, and a unit of
+    // the non-active project was answered from the wrong scope - find
+    // unit, "add unit", "did you mean" and the uses cleanup did not know
+    // what its own project would have offered (user, 2026-11-03). They
+    // merge into ONE layer: the index is a cache for whatever file the
+    // user looks at next, so the union is exactly what it needs, and the
+    // directories are sorted anyway.
+    Files := Editor.GetProjectGroupSources(Dprojs);
+    for var Dproj in Dprojs do
+    begin
+      for var D in Editor.BuildSearchPathFromProject(Dproj, ExtractFilePath(Dproj))
+                         .Split([';'], TStringSplitOptions.ExcludeEmpty) do
+        if TDirectory.Exists(Trim(D)) then PDirs.Add(ExcludeTrailingPathDelimiter(Trim(D)));
+      for var D in DprojSearchDirsOf(Dproj) do PDirs.Add(D);
+    end;
 
-    ProjKey := UpperCase(Editor.GetCurrentProjectDproj);
-    if ProjKey = '' then ProjKey := 'default';
+    ProjKey := ProjectScopeKey(Dprojs);
     // The global cache is keyed by the SET of global dirs, so every project
     // that sees the same library paths shares one cached global index.
     GlobKey := 'global-' + HashKey(UpperCase(string.Join(';', GDirs.ToStringArray)));
@@ -3113,6 +3167,7 @@ begin
       FGlobalDirs := GDirs.ToStringArray;
       FProjectDirs := PDirs.ToStringArray;
       FProjectFiles := Files;
+      FProjectDprojs := Dprojs;
       FGlobalCachePath := CacheFileFor(GlobKey);
       FProjectCachePath := CacheFileFor(ProjKey);
     finally
@@ -3678,6 +3733,12 @@ begin
     if (FWorker <> nil) and not FWorker.Terminated then
       FWake.WaitFor(RefreshIntervalMs);
   end;
+end;
+
+function TUnitIndex.ProjectScopeProjects: TArray<string>;
+begin
+  FLock.Enter;
+  try Result := Copy(FProjectDprojs); finally FLock.Leave; end;
 end;
 
 function TUnitIndex.ScanCycle: Integer;

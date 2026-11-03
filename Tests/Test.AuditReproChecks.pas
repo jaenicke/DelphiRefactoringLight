@@ -106,6 +106,7 @@ type
     function GetProjectSearchPaths: string;
     function AddProjectSearchPath(const ADir: string): Boolean;
     function GetProjectSourceFiles: TArray<string>;
+    function GetProjectGroupSources(out ADprojs: TArray<string>): TArray<string>;
     function BuildSearchPathFromProject(const ADprojPath, ARootPath: string): string;
     function FindDelphiLspJson: string;
     function ReplaceSelection(const AFilePath: string;
@@ -282,6 +283,13 @@ end;
 
 function TFakeEditor.GetProjectSourceFiles: TArray<string>;
 begin
+  Result := nil;
+end;
+
+function TFakeEditor.GetProjectGroupSources(
+  out ADprojs: TArray<string>): TArray<string>;
+begin
+  ADprojs := nil;
   Result := nil;
 end;
 

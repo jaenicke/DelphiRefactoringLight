@@ -676,6 +676,32 @@ begin
   else
     Row('  library scope', 'building...', '');
 
+  // AND WHICH PROJECTS the project scope covers: until 2.16.0 that was the
+  // ACTIVE project alone, so in a project group the unit one was editing
+  // could be answered from another project's scope - and no row said so
+  // (the user inferred it from the behaviour, 2026-11-03).
+  var Projs := TUnitIndex.Instance.ProjectScopeProjects;
+  if Length(Projs) = 0 then
+    Row('  project scope', 'no project', 'nothing is open, or no project ' +
+      'file was found - only the library scope above answers')
+  else
+  begin
+    Detail := 'every project of the project group, the ACTIVE one first: ';
+    for var I := 0 to High(Projs) do
+    begin
+      if I > 0 then Detail := Detail + ', ';
+      Detail := Detail + ExtractFileName(Projs[I]);
+    end;
+    if Mem.ProjectUnits > 0 then
+      Row('  project scope', Format('%d unit(s), %d identifier(s) from %d project(s)',
+        [Mem.ProjectUnits, Mem.ProjectIdents, Length(Projs)]), Detail)
+    else if TUnitIndex.Instance.Ready then
+      Row('  project scope', Format('EMPTY - not one unit of %d project(s) is indexed',
+        [Length(Projs)]), Detail, slBad)
+    else
+      Row('  project scope', 'building...', Detail);
+  end;
+
   // ---- LSP session --------------------------------------------------------
   // ONE LINE IN PLAIN WORDS FIRST (user request 2026-09-30): what the
   // session means for the features, not what it consists of. The rows below

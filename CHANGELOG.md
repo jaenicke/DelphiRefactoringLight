@@ -6,6 +6,34 @@ development builds and were never released.
 
 ---
 
+## 2.16.0 - 2026-11-03
+
+**The identifier index covers every project of the group.** Its project
+scope was keyed on the ACTIVE project - its sources, its search path, its
+`DCC_UnitSearchPath` - so while project 1 of a group was active, a unit of
+project 2 (which one edits in parallel) was answered from the wrong scope:
+find unit, "add unit", "did you mean", find original symbol and the uses
+cleanup did not know the units its own project would have offered.
+
+The scope is now the union of every project the IDE's project group holds
+(`GetProjectGroupSources`), merged into the one project layer the index
+already composes - the index is a cache for whatever file is looked at
+next, so a union is what it needs. Its cache is keyed by the SET of
+projects (`ProjectScopeKey`), which also means switching the active project
+inside a group no longer re-keys and re-scans the whole project scope.
+
+The status window says which projects the scope covers ("project scope:
+N unit(s), M identifier(s) from K project(s)", the projects by name in the
+detail) - the old behaviour was invisible and had to be inferred from what
+the index did not know.
+
+Unchanged on purpose: the project-wide SCANS (rename, find references, safe
+delete, the checks) still work on the active project plus the caret's file,
+and the availability gate still answers for the project that would compile
+the unit.
+
+---
+
 ## 2.15.1 - 2026-11-02
 
 **A type alias declares the name on its LEFT.** The jump of 2.15.0 marked

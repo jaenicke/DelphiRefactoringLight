@@ -16,7 +16,7 @@ interface
 
 const
   PluginName = 'Delphi Refactoring Light';
-  PluginVersion = '2.17.2';
+  PluginVersion = '2.18.0';
   PluginCopyright = 'Copyright (c) 2026 Sebastian Jaenicke';
   PluginUrl = 'https://github.com/jaenicke/DelphiRefactoringLight';
 

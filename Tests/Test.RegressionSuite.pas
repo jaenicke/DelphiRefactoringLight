@@ -344,7 +344,8 @@ type
   TDeclareVarScopeTests = class
   public
     [Test] procedure AWordInAStringIsNoEarlierUse;
-    [Test] procedure InsideAClosureTheOuterVarSectionIsTheWrongScope;
+    [Test] procedure ALocalOfAClosureIsDeclaredInThatClosure;
+    [Test] procedure TheTypeComesFromTheUnitsOwnDeclarations;
   end;
 
   /// <summary>"Find original symbol" on "inherited Execute(...)" offered
@@ -2951,7 +2952,10 @@ begin
     'unit U;'#13#10 +                                                     // 0
     'interface'#13#10 +
     'implementation'#13#10 +
-    'function TKim.ListCards(const ACardType: string): LongBool;'#13#10 + // 3
+    'function GetCardInfo(ANode: ISuperObject): IKimCardInfo;'#13#10 +    // 3
+    'begin'#13#10 +
+    'end;'#13#10 +
+    'function TKim.ListCards(const ACardType: string): LongBool;'#13#10 + // 6
     'begin'#13#10 +
     '  Result := ExecuteRequest('#13#10 +
     '    function(var ATarget: IList; var ALogText: string): LongBool'#13#10 +
@@ -2995,35 +2999,99 @@ begin
   // without that this test would pass for the wrong reason.
   Assert.IsTrue(Src.Contains('filter by card type'), 'the fixture line');
 
-  Fixes := ResolveQuickFixes(Src, [CardDiag(12, 6)]);
+  Fixes := ResolveQuickFixes(Src, [CardDiag(15, 6)]);
   Assert.IsTrue(HasFixKind(Fixes, qfDeclareInlineVar),
     'an occurrence inside a STRING is no earlier use of Card, so the ' +
     'inline declaration is offered (the reported case gave none)');
 end;
 
-procedure TDeclareVarScopeTests.InsideAClosureTheOuterVarSectionIsTheWrongScope;
+// 2.17.2 WITHHELD the typed form inside a closure, because the plan would
+// have put it before the OUTER routine's begin, where the closure captures
+// it. The user asked for a normal local variable all the same - so it is
+// planned against the closure's OWN declaration part now (2.18.0).
+procedure TDeclareVarScopeTests.ALocalOfAClosureIsDeclaredInThatClosure;
 var
   Lines: TArray<string>;
   Fixes: TArray<TQuickFix>;
+  Hdr1: Integer;
 begin
-  // The anonymous body's own begin - 1-based, and 10 is the "begin" of
-  // the closure, not the "begin" of the function at line 5.
   Lines := CardUnit('TCardInfo.Create').Replace(#13#10, #10).Split([#10]);
-  Assert.AreEqual('    begin', Lines[9], 'the fixture line');
-  Assert.AreEqual(10, EnclosingAnonymousBodyLine(Lines, 5, 13),
+  Assert.AreEqual('    begin', Lines[12], 'the fixture line');
+  Assert.AreEqual(13, EnclosingAnonymousBodyLine(Lines, 8, 16, Hdr1),
     'the closure''s own begin, not the function''s');
-  Assert.AreEqual(0, EnclosingAnonymousBodyLine(Lines, 5, 6),
+  Assert.AreEqual(10, Hdr1, 'and its header, where its declaration part starts');
+  Assert.AreEqual(0, EnclosingAnonymousBodyLine(Lines, 8, 9),
     'a line above the closure is in none');
+  Assert.AreEqual(9, LocalDeclScopeLine(Lines, 15),
+    '0-based: a local for the use inside the closure belongs to the closure');
+  Assert.AreEqual(-1, LocalDeclScopeLine(Lines, 5),
+    'and one in the plain function to the function itself');
 
-  // A type CAN be inferred here ("TCardInfo.Create"), so without the scope
-  // rule the typed form would be offered - and PlanLocalVarDecl would put
-  // it before the FUNCTION's begin, where it is captured by the closure.
-  Fixes := ResolveQuickFixes(CardUnit('TCardInfo.Create'), [CardDiag(12, 6)]);
-  Assert.IsFalse(HasFixKind(Fixes, qfDeclareVar),
-    'no "Declare local variable" inside a closure - the enclosing ' +
-    'routine''s var section is the wrong scope');
+  Fixes := ResolveQuickFixes(CardUnit('TCardInfo.Create'), [CardDiag(15, 6)]);
+  Assert.IsTrue(HasFixKind(Fixes, qfDeclareVar),
+    'a normal local variable is offered inside a closure too');
   Assert.IsTrue(HasFixKind(Fixes, qfDeclareInlineVar),
-    'the inline form is correct there and stays');
+    'and the inline form beside it');
+
+  // WHERE it lands is the point: the closure's var section, not the
+  // function's - a declaration in the outer one would be CAPTURED.
+  var NewText: string;
+  for var F in Fixes do
+    if F.Kind = qfDeclareVar then
+    begin
+      Assert.IsTrue(PlanQuickFixText(CardUnit('TCardInfo.Create'), F, 0, NewText),
+        'the fix plans its text');
+      var NL := NewText.Replace(#13#10, #10).Split([#10]);
+      Assert.AreEqual('      CardNode: ISuperObject;', NL[11],
+        'the closure''s own var section');
+      Assert.AreEqual('      Card: TCardInfo;', NL[12],
+        '...and the new local right behind it, INSIDE the closure');
+    end;
+end;
+
+procedure TDeclareVarScopeTests.TheTypeComesFromTheUnitsOwnDeclarations;
+var
+  Src: string;
+  Lines, Masked: TArray<string>;
+  Fixes: TArray<TQuickFix>;
+begin
+  Src := CardUnit('GetCardInfo(CardNode)');
+  Lines := Src.Replace(#13#10, #10).Split([#10]);
+  Masked := MaskCommentsAndStrings(Lines);
+
+  // The call's result type, read off the declaration in this unit - the
+  // text alone says nothing about it, which is why InferAssignedType
+  // answers '' and the typed fix did not exist before 2.18.0.
+  Assert.AreEqual('', InferAssignedType('GetCardInfo(CardNode)'),
+    'the text alone cannot tell');
+  Assert.AreEqual('IKimCardInfo',
+    InferAssignedTypeIn(Src, Lines, Masked, 15, 'GetCardInfo(CardNode)'),
+    'the declaration in this unit can');
+  // A BARE identifier is NOT answered, and this fixture is why: the
+  // routine around the line is the OUTER one, so DeclaredTypeOfIdentifier
+  // does not see the closure's var section and its fallback reads
+  // "CardNode := Json.AsArray.O[0]" as a type - "Card: Json;" does not
+  // compile. A wrong type here is written into the code.
+  Assert.AreEqual('',
+    InferAssignedTypeIn(Src, Lines, Masked, 15, 'CardNode'),
+    'a plain identifier is not guessed at');
+  // A QUALIFIED call is left alone for the same reason: what "X.Y(...)"
+  // returns needs X's type.
+  Assert.AreEqual('',
+    InferAssignedTypeIn(Src, Lines, Masked, 15, 'Json.GetCardInfo(CardNode)'),
+    'a qualified call is not guessed at');
+  Assert.AreEqual('',
+    InferAssignedTypeIn(Src, Lines, Masked, 15, 'NoSuchRoutine(X)'),
+    'and neither is an unknown name');
+
+  // So BOTH forms are offered now, and the inline one states the type.
+  Fixes := ResolveQuickFixes(Src, [CardDiag(15, 6)]);
+  Assert.IsTrue(HasFixKind(Fixes, qfDeclareVar),
+    'the normal local variable the user asked for');
+  for var F in Fixes do
+    if F.Kind = qfDeclareInlineVar then
+      Assert.Contains(F.Caption, 'var Card: IKimCardInfo :=',
+        'the inline form carries the type too');
 end;
 
 { TInheritedCallTests }

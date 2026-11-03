@@ -6,6 +6,35 @@ development builds and were never released.
 
 ---
 
+## 2.18.0 - 2026-11-03
+
+**A normal local variable, and a type in the inline one.** 2.17.2 made the
+declare-variable fix appear again, but for `Card := GetCardInfo(CardNode);`
+the only form was the inferred `var Card := ...` - and an inline variable
+whose type nobody states has drawbacks the user did not want to be stuck
+with.
+
+Both forms need the same thing: the TYPE. `InferAssignedTypeIn` reads it
+off the unit's own declarations - the result type of an unqualified call
+("what does GetCardInfo return?"), as a method of the enclosing type or as
+a routine of the unit. So the popup now offers
+
+* `Declare local variable "Card: IKimCardInfo"` and
+* `Declare inline variable "var Card: IKimCardInfo := ..."`
+
+and the inline fix writes that type into the code. Nothing is guessed at:
+a qualified call (`X.Y(...)`) and a bare identifier are left alone, because
+a wrong type here is written into a declaration and does not compile.
+
+And the normal local variable is declared where it belongs: INSIDE the
+closure when the assignment is inside one. 2.17.2 withheld it there
+because the plan would have put it in the enclosing routine's var section,
+where the closure captures it - it is planned against the closure's own
+declaration part now, and the resolver and the applier ask the same
+`LocalDeclScopeLine` so a preview and the write cannot disagree.
+
+---
+
 ## 2.17.2 - 2026-11-03
 
 **An undeclared `Card` offered "Add unit for Card" instead of declaring

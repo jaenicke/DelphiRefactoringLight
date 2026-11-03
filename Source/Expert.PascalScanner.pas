@@ -122,7 +122,14 @@ function InheritedBefore(const ALine: string; ACol0: Integer): Boolean;
 ///  enclosing routine's, and a declaration put there would be CAPTURED,
 ///  i.e. shared by every invocation of the closure. Pure.</summary>
 function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
-  ABodyBeginLine1, ALine1: Integer): Integer;
+  ABodyBeginLine1, ALine1: Integer): Integer; overload;
+
+/// <summary>Same, and AHEADERLINE1 receives the 1-based line the
+///  closure's own "procedure" / "function" keyword stands on - the start
+///  of ITS declaration part, where its locals are declared. 0/0 when the
+///  line is in no anonymous method.</summary>
+function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer; out AHeaderLine1: Integer): Integer; overload;
 
 /// <summary>The qualifier directly before the identifier at the 0-based
 ///  column ACol0: for "lMyClassA.Init" with the caret on Init this is
@@ -435,26 +442,38 @@ end;
 
 function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
   ABodyBeginLine1, ALine1: Integer): Integer;
+var
+  Dummy: Integer;
+begin
+  Result := EnclosingAnonymousBodyLine(ALines, ABodyBeginLine1, ALine1, Dummy);
+end;
+
+function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer; out AHeaderLine1: Integer): Integer;
 type
   TOpenBlock = record
     IsAnon: Boolean;
     Line1: Integer;           // the line its BEGIN stands on
+    Header1: Integer;         // ...and the one its keyword stands on
   end;
 var
   Masked: TArray<string>;
   Stack: TArray<TOpenBlock>;  // one entry per open block
   AnonPending, ExpectName, IsIdent: Boolean;
-  ParenDepth, L, P, Q: Integer;
+  ParenDepth, L, P, Q, AnonHeader: Integer;
   Line, W: string;
 
-  function MakeBlock(AIsAnon: Boolean; ALine1: Integer): TOpenBlock;
+  function MakeBlock(AIsAnon: Boolean; ALine1, AHeader1: Integer): TOpenBlock;
   begin
     Result.IsAnon := AIsAnon;
     Result.Line1 := ALine1;
+    Result.Header1 := AHeader1;
   end;
 
 begin
   Result := 0;
+  AHeaderLine1 := 0;
+  AnonHeader := 0;
   if (ABodyBeginLine1 < 1) or (ALine1 <= ABodyBeginLine1) then Exit;
   if ALine1 > Length(ALines) then Exit;
   Masked := MaskCommentsAndStrings(ALines);
@@ -513,15 +532,16 @@ begin
       if (W = 'PROCEDURE') or (W = 'FUNCTION') then
       begin
         AnonPending := True;
+        AnonHeader := L + 1;
         ExpectName := True;
       end
       else if W = 'BEGIN' then
       begin
-        Stack := Stack + [MakeBlock(AnonPending, L + 1)];
+        Stack := Stack + [MakeBlock(AnonPending, L + 1, AnonHeader)];
         AnonPending := False;
       end
       else if (W = 'TRY') or (W = 'CASE') or (W = 'ASM') then
-        Stack := Stack + [MakeBlock(False, L + 1)]
+        Stack := Stack + [MakeBlock(False, L + 1, 0)]
       else if W = 'END' then
       begin
         if Length(Stack) > 0 then SetLength(Stack, Length(Stack) - 1);
@@ -531,7 +551,11 @@ begin
   // The INNERMOST anonymous body wins - a closure inside a closure
   // declares into its own scope.
   for var I := High(Stack) downto 0 do
-    if Stack[I].IsAnon then Exit(Stack[I].Line1);
+    if Stack[I].IsAnon then
+    begin
+      AHeaderLine1 := Stack[I].Header1;
+      Exit(Stack[I].Line1);
+    end;
 end;
 
 function QualifierBefore(const ALine: string; ACol0: Integer): string;

@@ -129,6 +129,31 @@ function GenericUseTokens(const ALine: string; out ACols: TArray<Integer>): TArr
 
 function InferAssignedType(const ARhs: string): string;
 
+/// <summary>The type an assignment gives away when the unit's own text
+///  may be consulted: InferAssignedType's rules first (a constructor
+///  call, a literal), then the DECLARATION the right-hand side names -
+///  the result type of an unqualified call ("Card := GetCardInfo(X);" ->
+///  what GetCardInfo returns) and the declared type of a bare identifier
+///  ("Card := FCurrent;"). A method of the enclosing type counts, and so
+///  does a routine declared at the unit's own level; anything else
+///  answers ''.
+///  Deliberately THIS UNIT ONLY - no index, no file reads - so it stays
+///  as cheap as the rest of the resolver and safe on its worker
+///  thread.</summary>
+function InferAssignedTypeIn(const AContent: string;
+  const ALines, AMasked: TArray<string>; AUseLine0: Integer;
+  const ARhs: string): string;
+
+/// <summary>The declaration part a local for a use at AUSELINE0 belongs
+///  to, as the 0-based line its header stands on: the enclosing
+///  CLOSURE's when the use is inside an anonymous method - its locals
+///  are not the outer routine's, and one declared there would be
+///  CAPTURED, i.e. shared by every invocation - and -1 for the enclosing
+///  routine itself. The resolver and the applier ask THIS, so a preview
+///  and the write that follows it cannot disagree.</summary>
+function LocalDeclScopeLine(const ALines: TArray<string>;
+  AUseLine0: Integer): Integer;
+
 /// <summary>Where a local declaration "AIdent: AType;" for a use at
 ///  AUseLine0 goes: before the enclosing routine's 'begin', inside its
 ///  var section, or with a new 'var' line when the last section is none
@@ -138,7 +163,13 @@ function InferAssignedType(const ARhs: string): string;
 ///  then goes after it, which Delphi allows in any order).</summary>
 function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
   const AIdent, AType: string; out AInsertLine0: Integer;
-  out AText: string): Boolean;
+  out AText: string): Boolean; overload;
+
+/// <summary>Same, into the scope ASCOPEFIRST0 names (see
+///  LocalDeclScopeLine); -1 is the enclosing routine.</summary>
+function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
+  AScopeFirst0: Integer; const AIdent, AType: string;
+  out AInsertLine0: Integer; out AText: string): Boolean; overload;
 
 /// <summary>The same for ANY declaration section of the enclosing routine:
 ///  AKeyword is 'var' / 'const' / 'type', ABody the declaration itself
@@ -1313,21 +1344,131 @@ begin
   Result := T;
 end;
 
+// Same as PlanLocalDecl, but the declaration part may be a CLOSURE's own
+// (AScopeFirst0 = its header line, -1 = the enclosing routine).
+function PlanLocalDeclIn(const ALines: TArray<string>; AUseLine0: Integer;
+  AScopeFirst0: Integer; const AKeyword, ABody: string;
+  out AInsertLine0: Integer; out AText: string): Boolean; forward;
+
+function InferAssignedTypeIn(const AContent: string;
+  const ALines, AMasked: TArray<string>; AUseLine0: Integer;
+  const ARhs: string): string;
+var
+  Name, T, Kind, Hdr, Q, Pr, Rt: string;
+  IsCls: Boolean;
+  P, E, First, Last: Integer;
+
+  // Result type of the routine header starting at ALine0, or ''.
+  function RetTypeAt(ALine0: Integer): string;
+  var
+    K, H, QQ, PP, RR: string;
+    Cls: Boolean;
+    Fin: Integer;
+  begin
+    Result := '';
+    if (ALine0 < 0) or (ALine0 > High(ALines)) then Exit;
+    if not IsHeaderLine(Trim(ALines[ALine0]), K, Cls) then Exit;
+    if not SameText(K, 'function') then Exit;   // only a function has one
+    H := CollectHeader(ALines, ALine0, Fin);
+    if H = '' then Exit;
+    if not ParseHeader(H, K, QQ, PP, RR) then Exit;
+    Result := Trim(RR);
+  end;
+
+begin
+  Result := InferAssignedType(ARhs);
+  if Result <> '' then Exit;
+  T := Trim(ARhs);
+  while T.EndsWith(';') do T := Trim(Copy(T, 1, Length(T) - 1));
+  if T = '' then Exit;
+
+  // "GetCardInfo(CardNode)" -> the name before the bracket; a bare
+  // identifier is the whole right-hand side. A QUALIFIED one is left
+  // alone: deciding what "Foo.Bar(...)" returns needs Foo's type, which
+  // is a different question (and a wrong type does not compile).
+  P := Pos('(', T);
+  if P > 0 then Name := Trim(Copy(T, 1, P - 1)) else Name := T;
+  if (Name = '') or not IsIdentifier(Name) then Exit;
+
+  // A BARE identifier is deliberately not answered. DeclaredTypeOfIdentifier
+  // exists for member resolution, where a wrong answer merely fails to
+  // resolve - here it would be written into a declaration. MEASURED on the
+  // fixture of this round: for "CardNode" it answers 'Json', because the
+  // routine around the line is the OUTER one (the closure's var section is
+  // not its) and the fallback then reads "CardNode := Json.AsArray.O[0]"
+  // as a type. "Card: Json;" does not compile.
+  if P = 0 then Exit;
+
+  // A member of the type the call stands in...
+  if FindEnclosingRoutineRangeIn(ALines, AUseLine0, First, Last) then
+  begin
+    Q := OwnerTypeOfImplHeader(ALines[First]);
+    if Q <> '' then
+      for var L in FindMemberDeclarationLines(AContent, Q, Name) do
+      begin
+        Result := RetTypeAt(L);
+        if Result <> '' then Exit;
+      end;
+  end;
+
+  // ...or a routine of the unit itself. Only an UNINDENTED header counts:
+  // a member of some other class would be a guess, and this answer ends
+  // up in a declaration that has to compile.
+  for var L := 0 to High(ALines) do
+  begin
+    if (ALines[L] = '') or CharInSet(ALines[L][1], [' ', #9]) then Continue;
+    if not IsHeaderLine(ALines[L], Kind, IsCls) then Continue;
+    Hdr := CollectHeader(ALines, L, E);
+    if (Hdr = '') or not ParseHeader(Hdr, Kind, Q, Pr, Rt) then Continue;
+    if Pos('.', Q) > 0 then Continue;        // a method implementation
+    if not SameText(Trim(Q), Name) then Continue;
+    Rt := Trim(Rt);
+    if Rt <> '' then Exit(Rt);
+  end;
+end;
+
+function LocalDeclScopeLine(const ALines: TArray<string>;
+  AUseLine0: Integer): Integer;
+var
+  First, Last, Hdr1: Integer;
+begin
+  Result := -1;
+  if not FindEnclosingRoutineRangeIn(ALines, AUseLine0, First, Last) then Exit;
+  if EnclosingAnonymousBodyLine(ALines, First + 1, AUseLine0 + 1, Hdr1) > 0 then
+    if (Hdr1 > 0) and (Hdr1 - 1 > First) then Result := Hdr1 - 1;
+end;
+
 function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
   const AIdent, AType: string; out AInsertLine0: Integer;
   out AText: string): Boolean;
+begin
+  Result := PlanLocalVarDecl(ALines, AUseLine0, -1, AIdent, AType,
+    AInsertLine0, AText);
+end;
+
+function PlanLocalVarDecl(const ALines: TArray<string>; AUseLine0: Integer;
+  AScopeFirst0: Integer; const AIdent, AType: string;
+  out AInsertLine0: Integer; out AText: string): Boolean;
 begin
   Result := False;
   AInsertLine0 := -1;
   AText := '';
   if (AIdent = '') or (AType = '') then Exit;
-  Result := PlanLocalDecl(ALines, AUseLine0, 'var', AIdent + ': ' + AType,
-    AInsertLine0, AText);
+  Result := PlanLocalDeclIn(ALines, AUseLine0, AScopeFirst0, 'var',
+    AIdent + ': ' + AType, AInsertLine0, AText);
 end;
 
 function PlanLocalDecl(const ALines: TArray<string>; AUseLine0: Integer;
   const AKeyword, ABody: string; out AInsertLine0: Integer;
   out AText: string): Boolean;
+begin
+  Result := PlanLocalDeclIn(ALines, AUseLine0, -1, AKeyword, ABody,
+    AInsertLine0, AText);
+end;
+
+function PlanLocalDeclIn(const ALines: TArray<string>; AUseLine0: Integer;
+  AScopeFirst0: Integer; const AKeyword, ABody: string;
+  out AInsertLine0: Integer; out AText: string): Boolean;
 var
   First, Last, HdrEnd, BeginLine, Bal, I: Integer;
   T, U, Indent, LastSect, Want: string;
@@ -1339,6 +1480,13 @@ begin
   Want := UpperCase(AKeyword);
   if (AUseLine0 < 0) or (AUseLine0 > High(ALines)) then Exit;
   if not FindEnclosingRoutineRangeIn(ALines, AUseLine0, First, Last) then Exit;
+  // An ANONYMOUS method has its own declaration part, and that is where
+  // its locals belong: the enclosing routine's var section would be
+  // CAPTURED, i.e. one variable for every invocation of the closure
+  // (audit #41, H13 found that shape in the with-rewriter). The caller
+  // passes the closure's header line; -1 means the routine itself.
+  if (AScopeFirst0 >= 0) and (AScopeFirst0 > First) and (AScopeFirst0 <= AUseLine0) then
+    First := AScopeFirst0;
   // the header may wrap its parameter list - a "var X: Integer" parameter
   // line must not read as the routine's var section
   HdrEnd := First;
@@ -1536,10 +1684,17 @@ var
     // of the closure (audit #41, H13 found the same shape in the
     // with-rewriter). The anonymous body's own BEGIN is where this
     // identifier's scope starts.
-    var AnonBegin := EnclosingAnonymousBodyLine(Lines, First + 1, ALine0 + 1);
+    var ScopeLine := LocalDeclScopeLine(Lines, ALine0);
     var ScopeFirst := First;
-    if AnonBegin > 0 then ScopeFirst := AnonBegin - 1;
-    TypeText := InferAssignedType(Copy(Rest, 3, MaxInt));
+    if ScopeLine >= 0 then ScopeFirst := ScopeLine;
+    // The TYPE is what makes a normal local variable possible at all, and
+    // what lets the inline form carry one ("var Card: T := ..."), which
+    // is what the user asked for after 2.17.2: a bare "var Card := ..."
+    // has the drawbacks of inferred inline variables. InferAssignedTypeIn
+    // also reads the unit's own declarations - a call's result type, the
+    // declared type of a plain identifier.
+    TypeText := InferAssignedTypeIn(AContent, Lines, MaskedLines, ALine0,
+      Copy(Rest, 3, MaxInt));
     var Sect := SectionFor(ALine0);
 
     FollowUp := '';
@@ -1569,11 +1724,9 @@ var
       end;
     end;
 
-    // PlanLocalVarDecl inserts before the enclosing ROUTINE's begin, which
-    // inside a closure is the wrong scope (see above) - there the inline
-    // form below is the only correct one, and it is offered either way.
-    if (TypeText <> '') and (AnonBegin = 0)
-      and PlanLocalVarDecl(Lines, ALine0, AIdent, TypeText, InsLine, DeclText) then
+    if (TypeText <> '')
+      and PlanLocalVarDecl(Lines, ALine0, ScopeLine, AIdent, TypeText,
+            InsLine, DeclText) then
     begin
       F := Default(TQuickFix);
       F.Kind := qfDeclareVar;
@@ -1619,7 +1772,11 @@ var
     F.NewText := TypeText;
     F.Section := Sect;
     F.FollowUpUnit := FollowUp;
-    F.Caption := Format('Declare inline variable "var %s := ..."', [AIdent]);
+    if TypeText <> '' then
+      F.Caption := Format('Declare inline variable "var %s: %s := ..."',
+        [AIdent, TypeText])
+    else
+      F.Caption := Format('Declare inline variable "var %s := ..."', [AIdent]);
     if FollowUp <> '' then
       F.Caption := F.Caption + Format('  (+ uses %s)', [FollowUp]);
     Res.Add(F);
@@ -3859,13 +4016,20 @@ begin
         if not TrimLeft(Copy(DS, AFix.Col + AFix.TokenLen + 1, MaxInt)).StartsWith(':=') then Exit;
         if AFix.Kind = qfDeclareInlineVar then
         begin
-          if not ReplaceToken(AFix.Line, AFix.Col, AFix.TokenLen, 'var ' + DIdent) then Exit;
+          // With a known type the inline form states it - an inferred
+          // "var X := ..." is what the user asked NOT to be the only
+          // option (2.18.0).
+          var INew := 'var ' + DIdent;
+          if Trim(AFix.NewText) <> '' then
+            INew := INew + ': ' + Trim(AFix.NewText);
+          if not ReplaceToken(AFix.Line, AFix.Col, AFix.TokenLen, INew) then Exit;
         end
         else
         begin
           var InsLine: Integer;
           var DText: string;
-          if not PlanLocalVarDecl(Lines, AFix.Line, DIdent, AFix.NewText,
+          if not PlanLocalVarDecl(Lines, AFix.Line,
+            LocalDeclScopeLine(Lines, AFix.Line), DIdent, AFix.NewText,
             InsLine, DText) then Exit;
           InsertText(InsLine, DText);
         end;

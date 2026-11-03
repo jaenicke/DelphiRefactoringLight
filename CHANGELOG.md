@@ -6,6 +6,25 @@ development builds and were never released.
 
 ---
 
+## 2.17.2 - 2026-11-03
+
+**An undeclared `Card` offered "Add unit for Card" instead of declaring
+it.** The declare-variable fix of 1.12.0 was suppressed because the inline
+form is offered only at the FIRST use of the identifier in the routine -
+and that scan cut `//` comments but not STRINGS, so the earlier
+`'..., filter by card type = '` counted as a use of "Card". It runs over
+the masked text now, where a word inside a string is not a use.
+
+Found with it, in the same shape: inside an ANONYMOUS METHOD the enclosing
+routine is the outer one, so the scan looked across the whole outer
+function - and a typed declaration would have been inserted before the
+OUTER begin, where the closure captures it and every invocation shares one
+variable. The new `EnclosingAnonymousBodyLine` (the line a closure's own
+`begin` stands on) bounds the scan to that closure and withholds the typed
+form there; the inline form is correct inside a closure and stays.
+
+---
+
 ## 2.17.1 - 2026-11-03
 
 **"Find original symbol" on `inherited Execute(...)` offered two unrelated

@@ -114,6 +114,16 @@ function StripLineComment(const ALine: string): string;
 ///  occurrence is no keyword.</summary>
 function InheritedBefore(const ALine: string; ACol0: Integer): Boolean;
 
+/// <summary>The 1-based line of the BEGIN that opens the INNERMOST
+///  anonymous method body containing ALINE1, or 0 when the line is in
+///  none. Same walk as InsideAnonymousMethod - which is this answer
+///  reduced to a Boolean - and the line a caller needs when the
+///  anonymous method's own scope is what matters: its locals are not the
+///  enclosing routine's, and a declaration put there would be CAPTURED,
+///  i.e. shared by every invocation of the closure. Pure.</summary>
+function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer): Integer;
+
 /// <summary>The qualifier directly before the identifier at the 0-based
 ///  column ACol0: for "lMyClassA.Init" with the caret on Init this is
 ///  'lMyClassA'. '' when the use site is not dot-qualified. Whitespace
@@ -421,6 +431,107 @@ begin
   // "&inherited" is an escaped identifier and "X.inherited" a member -
   // neither is the keyword.
   Result := (I = 0) or ((ALine[I] <> '.') and (ALine[I] <> '&'));
+end;
+
+function EnclosingAnonymousBodyLine(const ALines: TArray<string>;
+  ABodyBeginLine1, ALine1: Integer): Integer;
+type
+  TOpenBlock = record
+    IsAnon: Boolean;
+    Line1: Integer;           // the line its BEGIN stands on
+  end;
+var
+  Masked: TArray<string>;
+  Stack: TArray<TOpenBlock>;  // one entry per open block
+  AnonPending, ExpectName, IsIdent: Boolean;
+  ParenDepth, L, P, Q: Integer;
+  Line, W: string;
+
+  function MakeBlock(AIsAnon: Boolean; ALine1: Integer): TOpenBlock;
+  begin
+    Result.IsAnon := AIsAnon;
+    Result.Line1 := ALine1;
+  end;
+
+begin
+  Result := 0;
+  if (ABodyBeginLine1 < 1) or (ALine1 <= ABodyBeginLine1) then Exit;
+  if ALine1 > Length(ALines) then Exit;
+  Masked := MaskCommentsAndStrings(ALines);
+  AnonPending := False;
+  ExpectName := False;
+  ParenDepth := 0;
+  for L := ABodyBeginLine1 - 1 to ALine1 - 2 do    // 0-based, up to the line BEFORE
+  begin
+    if (L < 0) or (L > High(Masked)) then Continue;
+    Line := Masked[L];
+    P := 1;
+    while P <= Length(Line) do
+    begin
+      if Line[P] <= ' ' then begin Inc(P); Continue; end;
+      if IsIdentStart(Line[P]) then
+      begin
+        Q := P;
+        while (Q <= Length(Line)) and IsIdentChar(Line[Q]) do Inc(Q);
+        W := UpperCase(Copy(Line, P, Q - P));
+        P := Q;
+        IsIdent := True;
+      end
+      else
+      begin
+        W := Line[P];
+        Inc(P);
+        IsIdent := False;
+      end;
+
+      // ONLY the token directly after procedure/function decides. A NAME
+      // means a nested named routine; '(' / ':' / 'begin' mean there is
+      // none, so it is anonymous. (Checking every identifier was wrong:
+      // the first PARAMETER name cleared the flag again.)
+      if ExpectName then
+      begin
+        ExpectName := False;
+        if IsIdent and (W <> 'BEGIN') then AnonPending := False;
+      end;
+
+      if not IsIdent then
+      begin
+        if W = '(' then
+          Inc(ParenDepth)
+        else if W = ')' then
+        begin
+          if ParenDepth > 0 then Dec(ParenDepth);
+        end
+        // A ';' OUTSIDE brackets ends a declaration, so "var P: procedure;"
+        // never arms the flag; inside a parameter list it separates
+        // parameters and must not clear it.
+        else if (W = ';') and (ParenDepth = 0) then
+          AnonPending := False;
+        Continue;
+      end;
+
+      if (W = 'PROCEDURE') or (W = 'FUNCTION') then
+      begin
+        AnonPending := True;
+        ExpectName := True;
+      end
+      else if W = 'BEGIN' then
+      begin
+        Stack := Stack + [MakeBlock(AnonPending, L + 1)];
+        AnonPending := False;
+      end
+      else if (W = 'TRY') or (W = 'CASE') or (W = 'ASM') then
+        Stack := Stack + [MakeBlock(False, L + 1)]
+      else if W = 'END' then
+      begin
+        if Length(Stack) > 0 then SetLength(Stack, Length(Stack) - 1);
+      end;
+    end;
+  end;
+  // The INNERMOST anonymous body wins - a closure inside a closure
+  // declares into its own scope.
+  for var I := High(Stack) downto 0 do
+    if Stack[I].IsAnon then Exit(Stack[I].Line1);
 end;
 
 function QualifierBefore(const ALine: string; ACol0: Integer): string;

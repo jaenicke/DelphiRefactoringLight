@@ -851,90 +851,10 @@ end;
 
 function InsideAnonymousMethod(const ALines: TArray<string>;
   ABodyBeginLine1, ALine1: Integer): Boolean;
-var
-  Masked: TArray<string>;
-  Stack: TArray<Boolean>;     // one entry per open block: is it an anon body?
-  AnonPending, ExpectName, IsIdent: Boolean;
-  ParenDepth, L, P, Q: Integer;
-  Line, W: string;
 begin
-  Result := False;
-  if (ABodyBeginLine1 < 1) or (ALine1 <= ABodyBeginLine1) then Exit;
-  if ALine1 > Length(ALines) then Exit;
-  Masked := MaskCommentsAndStrings(ALines);
-  AnonPending := False;
-  ExpectName := False;
-  ParenDepth := 0;
-  for L := ABodyBeginLine1 - 1 to ALine1 - 2 do    // 0-based, up to the line BEFORE
-  begin
-    if (L < 0) or (L > High(Masked)) then Continue;
-    Line := Masked[L];
-    P := 1;
-    while P <= Length(Line) do
-    begin
-      if Line[P] <= ' ' then begin Inc(P); Continue; end;
-      if IsIdentStart(Line[P]) then
-      begin
-        Q := P;
-        while (Q <= Length(Line)) and IsIdentChar(Line[Q]) do Inc(Q);
-        W := UpperCase(Copy(Line, P, Q - P));
-        P := Q;
-        IsIdent := True;
-      end
-      else
-      begin
-        W := Line[P];
-        Inc(P);
-        IsIdent := False;
-      end;
-
-      // ONLY the token directly after procedure/function decides. A NAME
-      // means a nested named routine; '(' / ':' / 'begin' mean there is
-      // none, so it is anonymous. (Checking every identifier was wrong:
-      // the first PARAMETER name cleared the flag again.)
-      if ExpectName then
-      begin
-        ExpectName := False;
-        if IsIdent and (W <> 'BEGIN') then AnonPending := False;
-      end;
-
-      if not IsIdent then
-      begin
-        if W = '(' then
-          Inc(ParenDepth)
-        else if W = ')' then
-        begin
-          if ParenDepth > 0 then Dec(ParenDepth);
-        end
-        // A ';' OUTSIDE brackets ends a declaration, so "var P: procedure;"
-        // never arms the flag; inside a parameter list it separates
-        // parameters and must not clear it.
-        else if (W = ';') and (ParenDepth = 0) then
-          AnonPending := False;
-        Continue;
-      end;
-
-      if (W = 'PROCEDURE') or (W = 'FUNCTION') then
-      begin
-        AnonPending := True;
-        ExpectName := True;
-      end
-      else if W = 'BEGIN' then
-      begin
-        Stack := Stack + [AnonPending];
-        AnonPending := False;
-      end
-      else if (W = 'TRY') or (W = 'CASE') or (W = 'ASM') then
-        Stack := Stack + [False]
-      else if W = 'END' then
-      begin
-        if Length(Stack) > 0 then SetLength(Stack, Length(Stack) - 1);
-      end;
-    end;
-  end;
-  for var B in Stack do
-    if B then Exit(True);
+  Result := EnclosingAnonymousBodyLine(ALines, ABodyBeginLine1, ALine1) > 0;
 end;
+
 
 function TextMatchesAt(const AContent: string; ALine1, ACol1: Integer;
   const AOld: string): Boolean;

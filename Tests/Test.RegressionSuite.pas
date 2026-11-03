@@ -334,6 +334,19 @@ type
     [Test] procedure TheKeyIsTheSetOfProjects_NotTheActiveOne;
   end;
 
+  /// <summary>The only fix offered for an undeclared "Card" in
+  ///  "Card := GetCardInfo(CardNode);" was "Add unit for Card" - the
+  ///  declare-variable fix of 1.12.0 was suppressed because the word
+  ///  "card" occurs EARLIER in a string literal ("filter by card type"),
+  ///  and the scan that looks for an earlier use cut only '//' comments
+  ///  (user screenshot, 2026-11-03).</summary>
+  [TestFixture]
+  TDeclareVarScopeTests = class
+  public
+    [Test] procedure AWordInAStringIsNoEarlierUse;
+    [Test] procedure InsideAClosureTheOuterVarSectionIsTheWrongScope;
+  end;
+
   /// <summary>"Find original symbol" on "inherited Execute(...)" offered
   ///  two unrelated units that declare SOMETHING called Execute, both at
   ///  line 1 - the member resolution ran for a DOTTED qualifier only, so
@@ -2925,6 +2938,92 @@ begin
     end;
   end;
   Assert.AreEqual(2, Found);
+end;
+
+{ TDeclareVarScopeTests }
+
+// The reported shape, shortened: an anonymous method with its own var
+// section, a string literal that contains the word "card", and the
+// undeclared Card on line 12.
+function CardUnit(const ARhs: string): string;
+begin
+  Result :=
+    'unit U;'#13#10 +                                                     // 0
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'function TKim.ListCards(const ACardType: string): LongBool;'#13#10 + // 3
+    'begin'#13#10 +
+    '  Result := ExecuteRequest('#13#10 +
+    '    function(var ATarget: IList; var ALogText: string): LongBool'#13#10 +
+    '    var'#13#10 +
+    '      CardNode: ISuperObject;'#13#10 +
+    '    begin'#13#10 +                                                   // 9
+    '      ALogText := ''Konnektor, filter by card type = '' + ACardType;'#13#10 +
+    '      CardNode := Json.AsArray.O[0];'#13#10 +
+    '      Card := ' + ARhs + ';'#13#10 +                                 // 12
+    '      ATarget.Add(Card);'#13#10 +
+    '    end);'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+end;
+
+function CardDiag(ALine0, ACol0: Integer): TLspErrorDiag;
+begin
+  Result := Default(TLspErrorDiag);
+  Result.Code := 'E2003';
+  Result.Severity := 1;
+  Result.Message := 'Undeclared identifier: ''Card''';
+  Result.Range.Start.Line := ALine0;
+  Result.Range.Start.Character := ACol0;
+  Result.Range.End_ := Result.Range.Start;
+end;
+
+function HasFixKind(const AFixes: TArray<TQuickFix>; AKind: TQuickFixKind): Boolean;
+begin
+  Result := False;
+  for var F in AFixes do
+    if F.Kind = AKind then Exit(True);
+end;
+
+procedure TDeclareVarScopeTests.AWordInAStringIsNoEarlierUse;
+var
+  Src: string;
+  Fixes: TArray<TQuickFix>;
+begin
+  Src := CardUnit('GetCardInfo(CardNode)');
+  // The fixture really does carry the word in a string ABOVE the use -
+  // without that this test would pass for the wrong reason.
+  Assert.IsTrue(Src.Contains('filter by card type'), 'the fixture line');
+
+  Fixes := ResolveQuickFixes(Src, [CardDiag(12, 6)]);
+  Assert.IsTrue(HasFixKind(Fixes, qfDeclareInlineVar),
+    'an occurrence inside a STRING is no earlier use of Card, so the ' +
+    'inline declaration is offered (the reported case gave none)');
+end;
+
+procedure TDeclareVarScopeTests.InsideAClosureTheOuterVarSectionIsTheWrongScope;
+var
+  Lines: TArray<string>;
+  Fixes: TArray<TQuickFix>;
+begin
+  // The anonymous body's own begin - 1-based, and 10 is the "begin" of
+  // the closure, not the "begin" of the function at line 5.
+  Lines := CardUnit('TCardInfo.Create').Replace(#13#10, #10).Split([#10]);
+  Assert.AreEqual('    begin', Lines[9], 'the fixture line');
+  Assert.AreEqual(10, EnclosingAnonymousBodyLine(Lines, 5, 13),
+    'the closure''s own begin, not the function''s');
+  Assert.AreEqual(0, EnclosingAnonymousBodyLine(Lines, 5, 6),
+    'a line above the closure is in none');
+
+  // A type CAN be inferred here ("TCardInfo.Create"), so without the scope
+  // rule the typed form would be offered - and PlanLocalVarDecl would put
+  // it before the FUNCTION's begin, where it is captured by the closure.
+  Fixes := ResolveQuickFixes(CardUnit('TCardInfo.Create'), [CardDiag(12, 6)]);
+  Assert.IsFalse(HasFixKind(Fixes, qfDeclareVar),
+    'no "Declare local variable" inside a closure - the enclosing ' +
+    'routine''s var section is the wrong scope');
+  Assert.IsTrue(HasFixKind(Fixes, qfDeclareInlineVar),
+    'the inline form is correct there and stays');
 end;
 
 { TInheritedCallTests }
@@ -8745,6 +8844,7 @@ initialization
   TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
   TDUnitX.RegisterTestFixture(TProjectGroupIndexTests);
   TDUnitX.RegisterTestFixture(TInheritedCallTests);
+  TDUnitX.RegisterTestFixture(TDeclareVarScopeTests);
   TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);

@@ -1410,6 +1410,18 @@ var
   Seen: TDictionary<string, Boolean>;
   FuzzyCache: TDictionary<string, TArray<TFindUnitHit>>;
   Snap: IUnitSnapshot;
+  MaskedCache: TArray<string>;
+
+  // Comments AND strings blanked, positions kept. Built once per call -
+  // a provider that scans for an identifier must not count one inside a
+  // string literal (that is what cost the declare-variable fix the whole
+  // report of 2026-11-03).
+  function MaskedLines: TArray<string>;
+  begin
+    if (Length(MaskedCache) = 0) and (Length(Lines) > 0) then
+      MaskedCache := MaskCommentsAndStrings(Lines);
+    Result := MaskedCache;
+  end;
 
   function SectionFor(ALine0: Integer): TUsesSection;
   begin
@@ -1518,6 +1530,15 @@ var
     Rest := TrimLeft(Copy(S, ACol0 + ALen + 1, MaxInt));
     if not Rest.StartsWith(':=') then Exit;
     if not FindEnclosingRoutineRange(AContent, ALine0, First, Last) then Exit;
+    // INSIDE AN ANONYMOUS METHOD the enclosing ROUTINE is the outer one,
+    // and its scope is not the one that matters here: its locals are
+    // captured, so a declaration put there is shared by every invocation
+    // of the closure (audit #41, H13 found the same shape in the
+    // with-rewriter). The anonymous body's own BEGIN is where this
+    // identifier's scope starts.
+    var AnonBegin := EnclosingAnonymousBodyLine(Lines, First + 1, ALine0 + 1);
+    var ScopeFirst := First;
+    if AnonBegin > 0 then ScopeFirst := AnonBegin - 1;
     TypeText := InferAssignedType(Copy(Rest, 3, MaxInt));
     var Sect := SectionFor(ALine0);
 
@@ -1548,7 +1569,10 @@ var
       end;
     end;
 
-    if (TypeText <> '')
+    // PlanLocalVarDecl inserts before the enclosing ROUTINE's begin, which
+    // inside a closure is the wrong scope (see above) - there the inline
+    // form below is the only correct one, and it is offered either way.
+    if (TypeText <> '') and (AnonBegin = 0)
       and PlanLocalVarDecl(Lines, ALine0, AIdent, TypeText, InsLine, DeclText) then
     begin
       F := Default(TQuickFix);
@@ -1567,12 +1591,18 @@ var
       Result := True;
     end;
 
-    // inline form: only at the FIRST use inside the routine, and never as
+    // inline form: only at the FIRST use inside the SCOPE, and never as
     // the lone statement of a then/do/else ("if A then var X := 1;" does
-    // not compile)
-    for var I := First to ALine0 - 1 do
-      if HasWord(DvStripComment(Lines[I])) then Exit;
-    for var I := ALine0 - 1 downto First do
+    // not compile).
+    // THE SCAN RUNS OVER THE MASKED TEXT: an occurrence inside a STRING
+    // is no use of the identifier. "ALogText := '..., filter by card type
+    // = ' + ..." earlier in the method counted as a first use of "Card"
+    // and left the user with nothing but "Add unit for Card" (user
+    // screenshot, 2026-11-03).
+    var Mask := MaskedLines;
+    for var I := ScopeFirst to ALine0 - 1 do
+      if (I >= 0) and (I <= High(Mask)) and HasWord(Mask[I]) then Exit;
+    for var I := ALine0 - 1 downto ScopeFirst do
     begin
       var P := UpperCase(Trim(DvStripComment(Lines[I])));
       if P = '' then Continue;

@@ -176,6 +176,41 @@ var
       if SameText(S, AUnit) then Exit(True);
   end;
 
+  // A row that does not carry the DECLARATION's line is no answer: it
+  // sends the user to line 1 of the unit, and the preview then shows the
+  // unit header. That is what the ambiguous branch below used to do -
+  // it set Line := 0 and never looked (user screenshot, 2026-11-03).
+  function HitInFile(const APath, AVia: string): TOriginalSymbolHit;
+  var
+    Text: string;
+    Line: Integer;
+  begin
+    Result := Default(TOriginalSymbolHit);
+    Result.FilePath := APath;
+    Result.Line := 0;
+    Result.Col := 0;
+    Result.Via := AVia;
+    if not ReadBuffer(APath, Text) then
+    begin
+      Result.Via := AVia + ' - file not readable';
+      Exit;
+    end;
+    Line := FindDeclarationLine(Text, AIdent);
+    if Line < 0 then
+    begin
+      // Say it on the row rather than pointing at line 1 in silence.
+      Result.Via := AVia + ' - declaration not located';
+      Exit;
+    end;
+    Result.Line := Line;
+    var FLines := Text.Replace(#13#10, #10).Replace(#13, #10).Split([#10]);
+    if Line <= High(FLines) then
+    begin
+      Result.Col := FindWholeWord(FLines[Line], AIdent);
+      if Result.Col < 0 then Result.Col := 0;
+    end;
+  end;
+
 begin
   Result := False;
   AHits := nil;
@@ -204,13 +239,8 @@ begin
   begin
     for var H in Hits do
       if not AlreadySeen2(AHits, H.Path) then
-      begin
-        var Amb := Default(TOriginalSymbolHit);
-        Amb.FilePath := H.Path;
-        Amb.Line := 0;
-        Amb.Via := 'identifier index (several declaring units)';
-        AHits := AHits + [Amb];
-      end;
+        AHits := AHits
+          + [HitInFile(H.Path, 'identifier index (several declaring units)')];
     Exit(Length(AHits) > 1);
   end;
 
@@ -339,19 +369,37 @@ begin
         // included. Since Delphi 13.1 this is the ONLY way for a
         // private/public overload pair - DelphiLSP answers nothing at all
         // for those (RSS-5463), not even hover or completion.
-        if Qual <> '' then
+        //
+        // AND FOR A USE SITE WITHOUT A DOT, which is why this no longer
+        // sits inside "if Qual <> ''": "inherited Execute(...)" and a bare
+        // "Execute(...)" inside a method both name a MEMBER, and both used
+        // to fall through to a name-only index lookup that offered two
+        // unrelated units declaring something called Execute (user
+        // screenshot, 2026-11-03).
         begin
           var Graph := TTypeGraph.Create([AFile], EditorOrDiskReader());
           try
             var Link: TMemberLink;
-            if ResolveMemberUse(Graph, AFile, Content, ALine0, C0, AIdent,
-              Link) <> murNone then
+            var Found: Boolean;
+            var Via := 'type member';
+            if InheritedBefore(Lines[ALine0], C0) then
+            begin
+              // "inherited X" is the ANCESTOR's X - never the enclosing
+              // type's own, which is what an unqualified X would mean.
+              Found := ResolveInheritedMember(Graph, AFile, Content, ALine0,
+                AIdent, Link);
+              Via := 'inherited member';
+            end
+            else
+              Found := ResolveMemberUse(Graph, AFile, Content, ALine0, C0,
+                AIdent, Link) <> murNone;
+            if Found then
             begin
               var MHit := Default(TOriginalSymbolHit);
               MHit.FilePath := Link.FilePath;
               MHit.Line := Link.Line;
               MHit.Col := Link.Col;
-              MHit.Via := 'type member';
+              MHit.Via := Via;
               MHit.TypeName := Link.TypeName;
               AHits := [MHit];
               Exit(True);

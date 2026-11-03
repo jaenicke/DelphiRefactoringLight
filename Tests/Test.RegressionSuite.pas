@@ -334,6 +334,18 @@ type
     [Test] procedure TheKeyIsTheSetOfProjects_NotTheActiveOne;
   end;
 
+  /// <summary>"Find original symbol" on "inherited Execute(...)" offered
+  ///  two unrelated units that declare SOMETHING called Execute, both at
+  ///  line 1 - the member resolution ran for a DOTTED qualifier only, so
+  ///  an inherited call fell through to a name-only index lookup (user
+  ///  screenshot, 2026-11-03).</summary>
+  [TestFixture]
+  TInheritedCallTests = class
+  public
+    [Test] procedure InheritedNamesTheAncestorsMember;
+    [Test] procedure WhatIsNotAnInheritedCall;
+  end;
+
   /// <summary>A project GROUP may hold two units of the SAME NAME - every
   ///  project its own Config.pas - and then the project the ASKING file
   ///  belongs to is the only thing that says which file a uses entry
@@ -991,6 +1003,7 @@ uses
   Expert.MoveToUnit, Expert.SafeDeletePlan, Expert.McpTools, Expert.WithRewriter,
   Expert.SemanticReplace, Expert.SelectionValidator, Expert.ExtractMethod,
   Expert.SignatureEdit, Expert.MethodEdit, System.StrUtils,
+  Expert.InterfaceLinks, Expert.IncludeExpansion,
   Expert.DebugConsistency, DIH.Types, DIH.Placeholders, DIH.FileOps, DIH.Builder,
   // Generics.Collections: TJSONObject.GetPair is inline and the
   // doubled-note test calls it (H2443 without this entry).
@@ -2912,6 +2925,110 @@ begin
     end;
   end;
   Assert.AreEqual(2, Found);
+end;
+
+{ TInheritedCallTests }
+
+// The reported shape: a base class with Execute, a descendant that calls
+// "inherited Execute(...)" from a method of its own - and, so the rule can
+// be told from an unqualified call at all, a descendant that OVERRIDES
+// Execute. There "Execute(...)" means its own and "inherited Execute(...)"
+// the ancestor's.
+const
+  InhBaseUnit =
+    'unit Base;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TBase = class(TObject)'#10 +
+    '    procedure Execute(const APath: string); virtual;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TBase.Execute(const APath: string);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10;
+  InhChildUnit =
+    'unit Child;'#10 +
+    'interface'#10 +
+    'uses Base;'#10 +
+    'type'#10 +
+    '  TChild = class(TBase)'#10 +
+    '    procedure Execute(const APath: string); override;'#10 +
+    '    procedure ExecuteJson(const APath: string);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TChild.Execute(const APath: string);'#10 +
+    'begin'#10 +
+    '  inherited Execute(APath);'#10 +      // line 11 (0-based)
+    'end;'#10 +
+    'procedure TChild.ExecuteJson(const APath: string);'#10 +
+    'begin'#10 +
+    '  Execute(APath);'#10 +                // line 15 (0-based)
+    'end;'#10 +
+    'end.'#10;
+
+function InhReader: TIncludeReader;
+begin
+  Result :=
+    function(const APath: string; out AContent: string): Boolean
+    begin
+      AContent := '';
+      if SameText(APath, 'Base.pas') then AContent := InhBaseUnit
+      else if SameText(APath, 'Child.pas') then AContent := InhChildUnit;
+      Result := AContent <> '';
+    end;
+end;
+
+procedure TInheritedCallTests.InheritedNamesTheAncestorsMember;
+var
+  Graph: TTypeGraph;
+  Link: TMemberLink;
+  Lines: TArray<string>;
+begin
+  Lines := InhChildUnit.Split([#10]);
+  Assert.AreEqual('  inherited Execute(APath);', Lines[11], 'the fixture line');
+
+  Graph := TTypeGraph.Create(['Base.pas', 'Child.pas'], InhReader(), False);
+  try
+    // THE RULE: "inherited Execute" is TBase's Execute, although TChild
+    // declares one itself - that is what tells it from an unqualified call.
+    Assert.IsTrue(ResolveInheritedMember(Graph, 'Child.pas', InhChildUnit,
+      11, 'Execute', Link), 'the ancestor declares Execute');
+    Assert.AreEqual('TBase', Link.TypeName,
+      'inherited Execute is the ANCESTOR''s, not TChild''s own');
+    Assert.AreEqual('Base.pas', Link.FilePath);
+
+    // ...while the unqualified call in the other method means TChild's.
+    Assert.IsTrue(ResolveMemberUse(Graph, 'Child.pas', InhChildUnit,
+      15, 2, 'Execute', Link) <> murNone, 'the unqualified call resolves');
+    Assert.AreEqual('TChild', Link.TypeName,
+      'a bare Execute(...) is the enclosing type''s');
+
+    // A member no ancestor has is not invented.
+    Assert.IsFalse(ResolveInheritedMember(Graph, 'Child.pas', InhChildUnit,
+      11, 'NoSuchThing', Link), 'nothing to find, nothing answered');
+  finally
+    Graph.Free;
+  end;
+end;
+
+procedure TInheritedCallTests.WhatIsNotAnInheritedCall;
+begin
+  // The caret column is 0-based, so it is the 1-based index of the char
+  // BEFORE the name - which is what the keyword has to end at.
+  Assert.IsTrue(InheritedBefore('  inherited Execute(APath);', 12),
+    'the reported line');
+  Assert.IsTrue(InheritedBefore('    INHERITED  Execute;', 15),
+    'case and spacing do not matter');
+  Assert.IsFalse(InheritedBefore('  Execute(APath);', 2),
+    'an unqualified call is no inherited one');
+  Assert.IsFalse(InheritedBefore('  Self.Execute(APath);', 7),
+    'and neither is a qualified one');
+  Assert.IsFalse(InheritedBefore('  FNotInherited Execute;', 16),
+    'a name that ENDS in "inherited" is not the keyword');
+  Assert.IsFalse(InheritedBefore('  X.inherited Execute;', 14),
+    'a member called inherited is not the keyword either');
+  Assert.IsFalse(InheritedBefore('inherited', 0), 'nothing before column 0');
 end;
 
 { TProjectGroupIndexTests }
@@ -8627,6 +8744,7 @@ initialization
   TDUnitX.RegisterTestFixture(THelperUsageTests);
   TDUnitX.RegisterTestFixture(TUnitIndexCacheTests);
   TDUnitX.RegisterTestFixture(TProjectGroupIndexTests);
+  TDUnitX.RegisterTestFixture(TInheritedCallTests);
   TDUnitX.RegisterTestFixture(TMoveDeclarationRangeTests);
   TDUnitX.RegisterTestFixture(TRenameGuardTests);
   TDUnitX.RegisterTestFixture(TQuickFixPreviewTests);

@@ -107,6 +107,13 @@ function IsIdentifier(const S: string): Boolean;
 ///  one was cut). A '//' inside a string literal stays.</summary>
 function StripLineComment(const ALine: string): string;
 
+/// <summary>True when the identifier at ACOL0 (0-based) is preceded by
+///  the keyword INHERITED - "inherited Execute(...)". Such a call does
+///  not mean the enclosing type's member but the nearest ANCESTOR's, so
+///  a resolver has to start one level up. A dotted or '&amp;'-escaped
+///  occurrence is no keyword.</summary>
+function InheritedBefore(const ALine: string; ACol0: Integer): Boolean;
+
 /// <summary>The qualifier directly before the identifier at the 0-based
 ///  column ACol0: for "lMyClassA.Init" with the caret on Init this is
 ///  'lMyClassA'. '' when the use site is not dot-qualified. Whitespace
@@ -396,6 +403,24 @@ begin
   ScanNameColumns(ALine, AName, -1, FirstHit, HintHit, DotHit, Undotted);
   if Undotted >= 0 then Exit(Undotted);
   Result := FirstHit;
+end;
+
+function InheritedBefore(const ALine: string; ACol0: Integer): Boolean;
+var
+  I, E: Integer;
+begin
+  Result := False;
+  if (ACol0 <= 0) or (ACol0 > Length(ALine)) then Exit;
+  I := ACol0;            // the 1-based index of the char BEFORE the name
+  while (I > 0) and CharInSet(ALine[I], [' ', #9]) do Dec(I);
+  if I = 0 then Exit;
+  E := I;
+  while (I > 0) and IsIdentChar(ALine[I]) do Dec(I);
+  if E - I <> Length('inherited') then Exit;
+  if not SameText(Copy(ALine, I + 1, E - I), 'inherited') then Exit;
+  // "&inherited" is an escaped identifier and "X.inherited" a member -
+  // neither is the keyword.
+  Result := (I = 0) or ((ALine[I] <> '.') and (ALine[I] <> '&'));
 end;
 
 function QualifierBefore(const ALine: string; ACol0: Integer): string;

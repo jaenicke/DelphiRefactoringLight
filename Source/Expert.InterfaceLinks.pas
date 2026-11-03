@@ -208,6 +208,16 @@ type
   ///  decided from the text.</summary>
   TUnansweredUse = (uuUnknown, uuOurs, uuOtherSymbol, uuOverloaded);
 
+/// <summary>The member an "inherited X(...)" call reaches: X as declared
+///  by the nearest ANCESTOR of the type the call stands in - never the
+///  type's own declaration, which is what makes it different from an
+///  unqualified call (inside an override, both forms name the same
+///  member and mean different declarations). False when the enclosing
+///  type, its ancestor or the member cannot be resolved from the
+///  sources.</summary>
+function ResolveInheritedMember(AGraph: TTypeGraph; const AFile, AContent: string;
+  ALine0: Integer; const AMember: string; out ALink: TMemberLink): Boolean;
+
 /// <summary>Classifies an occurrence DelphiLSP did not resolve, using the
 ///  declared type of its qualifier (see ResolveMemberUse). AIsTargetLine
 ///  answers whether a position is one of the searched symbol's
@@ -850,6 +860,41 @@ begin
     end;
   end;
   Result := murAmbiguous;
+end;
+
+function ResolveInheritedMember(AGraph: TTypeGraph; const AFile, AContent: string;
+  ALine0: Integer; const AMember: string; out ALink: TMemberLink): Boolean;
+var
+  Lines: TArray<string>;
+  First, Last: Integer;
+  TypeName, Parent: string;
+  Decl, PDecl: TTypeDecl;
+  Ambiguous: Boolean;
+begin
+  Result := False;
+  ALink := Default(TMemberLink);
+  if (AGraph = nil) or (AContent = '') or (AMember = '') then Exit;
+  Lines := SplitContentLinesLocal(AContent);
+  if (ALine0 < 0) or (ALine0 > High(Lines)) then Exit;
+  // The call stands in a method body, and its header names the type.
+  if not FindEnclosingRoutineRangeIn(Lines, ALine0, First, Last) then Exit;
+  TypeName := OwnerTypeOfImplHeader(Lines[First]);
+  if TypeName = '' then Exit;
+  if not AGraph.FindType(TypeName, Decl) then Exit;
+  // The ANCESTOR is the first parent that is a class; the others are the
+  // interfaces the class implements, and "inherited" never means those.
+  Parent := '';
+  for var P in Decl.Parents do
+    if AGraph.FindType(P, PDecl) then
+    begin
+      if PDecl.IsInterface then Continue;
+      Parent := PDecl.Name;
+      Break;
+    end
+    else if Parent = '' then
+      Parent := P;   // unknown to the graph: the first one is the ancestor
+  if Parent = '' then Exit;
+  Result := AGraph.FindMember(Parent, AMember, ALink, Ambiguous);
 end;
 
 function ClassifyUnansweredUse(AGraph: TTypeGraph; const AFile, AContent: string;

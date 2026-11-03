@@ -6,6 +6,28 @@ development builds and were never released.
 
 ---
 
+## 2.17.1 - 2026-11-03
+
+**"Find original symbol" on `inherited Execute(...)` offered two unrelated
+units.** Both rows pointed at line 1, because the window showed what the
+identifier INDEX knows about the name "Execute" - and class members are not
+in that index, so those two units declare something else entirely.
+
+Two defects in one screenshot:
+* the member resolution through the type graph ran only for a DOTTED
+  qualifier, so an `inherited X` (and a bare `X(...)` inside a method)
+  never reached it. It runs for those now, and `inherited` resolves
+  against the nearest ANCESTOR - which is what tells it from an
+  unqualified call: inside an override both name the same member and mean
+  different declarations.
+* and the ambiguous branch of the index fallback set the line to 0 without
+  ever looking for the declaration, so every such row sent the user to the
+  unit header. Each row now carries its real declaration line, and one
+  whose declaration cannot be located says so instead of pointing at line
+  1 in silence.
+
+---
+
 ## 2.17.0 - 2026-11-03
 
 **Two projects of a group may hold a same-named unit, and now the asking

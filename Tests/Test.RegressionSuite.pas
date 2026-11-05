@@ -709,6 +709,18 @@ type
     [Test] procedure EnterLooksFirstAndWritesSecond;
   end;
 
+  /// <summary>The compiler's own messages are the third diagnostics
+  ///  source, and until now only the ACTIVE buffer was fed from them - so
+  ///  a W1058 the user could read in the Messages window was in no
+  ///  answer of get_diagnostics unless that very file happened to be on
+  ///  top. Feeding every file the build names needs one thing first: the
+  ///  path to store it under, because the store is asked BY path and a
+  ///  message may carry only a base name.</summary>
+  TCompilerMessageFeedTests = class
+  public
+    [Test] procedure AMessageIsStoredUnderThePathItMeans;
+  end;
+
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
   ///  own event types - and compared their parameter types as text. cxTL's
   ///  OnGetNodeImageIndex says "var AIndex: TcxImageIndex", the handler the
@@ -8957,6 +8969,59 @@ begin
     'an open drop-down (the scope combo) answers Enter itself');
 end;
 
+{ TCompilerMessageFeedTests }
+
+procedure TCompilerMessageFeedTests.AMessageIsStoredUnderThePathItMeans;
+const
+  Proj: TArray<string> = ['C:\Proj\UGTILibFunc.Global.pas',
+                          'C:\Proj\Sub\Other.pas',
+                          'C:\Proj\Main.dpr'];
+  Twice: TArray<string> = ['C:\Proj\A\Utils.pas', 'C:\Proj\B\Utils.pas'];
+begin
+  // The reported shape: "UGTILibFunc.Global.pas(412): W1058 ..." - a bare
+  // name, resolved against the files the project really has.
+  Assert.AreEqual('C:\Proj\UGTILibFunc.Global.pas',
+    ResolveCompilerMessageFile('UGTILibFunc.Global.pas', Proj),
+    'the reported case: a bare name the project has exactly once');
+  Assert.AreEqual('C:\Proj\Sub\Other.pas',
+    ResolveCompilerMessageFile('OTHER.PAS', Proj),
+    'Pascal file names are case-insensitive');
+
+  // A full path IS the answer - including one the project does not list
+  // (the compiler really did warn about that unit, and refusing it would
+  // drop a message the user can read in the window).
+  Assert.AreEqual('C:\Vendor\Lib\Grid.pas',
+    ResolveCompilerMessageFile('C:\Vendor\Lib\Grid.pas', Proj),
+    'a path the compiler named is taken as given');
+
+  // Two Utils.pas in two folders: the store is keyed BY PATH, so a guess
+  // would put the warning on the wrong file. No answer is the answer.
+  Assert.AreEqual('', ResolveCompilerMessageFile('Utils.pas', Twice),
+    'two files of that name: no answer, not the first one');
+  Assert.AreEqual('C:\Proj\A\Utils.pas',
+    ResolveCompilerMessageFile('Utils.pas', ['C:\Proj\A\Utils.pas']),
+    'but one of them is an answer');
+  // The candidates are the project's sources PLUS the open files, so the
+  // ACTIVE unit is in there twice - and that is not ambiguity. Counting
+  // occurrences instead of distinct paths would have skipped exactly the
+  // file the user is looking at.
+  Assert.AreEqual('C:\Proj\Main.pas',
+    ResolveCompilerMessageFile('Main.pas',
+      ['C:\Proj\Main.pas', 'C:\Proj\Main.pas']),
+    'the same file twice is ONE file');
+  Assert.AreEqual('C:\Proj\Main.pas',
+    ResolveCompilerMessageFile('Main.pas',
+      ['C:\Proj\Main.pas', 'c:\proj\MAIN.PAS']),
+    'and so is the same file spelled differently');
+
+  // Nothing to resolve against, and nothing to resolve.
+  Assert.AreEqual('', ResolveCompilerMessageFile('Ghost.pas', Proj),
+    'a name the project does not have');
+  Assert.AreEqual('', ResolveCompilerMessageFile('', Proj), 'no name');
+  Assert.AreEqual('', ResolveCompilerMessageFile('Any.pas', nil),
+    'no candidates');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -8999,5 +9064,6 @@ initialization
   TDUnitX.RegisterTestFixture(TCheckScopeTests);
   TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
   TDUnitX.RegisterTestFixture(TRenameEnterKeyTests);
+  TDUnitX.RegisterTestFixture(TCompilerMessageFeedTests);
 
 end.

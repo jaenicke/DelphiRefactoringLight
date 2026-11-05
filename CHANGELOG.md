@@ -6,6 +6,30 @@ development builds and were never released.
 
 ---
 
+## 2.19.1 - 2026-11-05
+
+**The compiler's messages reach every file, and the reader says what it
+saw.** A W1058 warning stood in the Messages window while `get_diagnostics`
+for that very file reported nothing, and the status row said "0 line(s)
+readable" without a word about why. Two independent causes.
+
+The feed only ever looked at the ACTIVE buffer, so a message about any
+other file was in no answer unless that file happened to be on top. Every
+file a build names is now fed - errors first, so the bound on how many can
+never drop an error while keeping a hint, and what it dropped is named.
+The quick fixes follow for free: of the user's own three messages, H2077
+already had a provider.
+
+And the reader's walk through the IDE's message model had three silent
+exits, so a count of 0 could not be told from "I could not read it". It
+now records what it saw level by level - how many buffers, what they are
+called, how many lines each holds - and cross-checks it against the
+message groups the IDE itself reports through the documented ToolsAPI.
+That trace is in the status window and in `get_status`. The cause of the
+0 is NOT fixed by this: it is now measurable, which it was not.
+
+---
+
 ## 2.19.0 - 2026-11-05
 
 **Rename, confirmed by Enter** (issue #56, stepand76): type the new name,

@@ -104,8 +104,23 @@ type
       out AReason: string): Boolean;
   end;
 
+const
+  /// <summary>How many FILES of one build are fed. The store costs a hash
+  ///  per file, the CONTENT read is the expensive half, and this runs on
+  ///  the main thread in AfterCompile - so a full first build of a large
+  ///  project cannot stand the IDE still. Errors are fed first, so the
+  ///  bound can never drop an error while keeping a hint, and what it
+  ///  dropped is named in CompilerFeedStatus.</summary>
+  MaxCompilerFeedFiles = 200;
+
 var
   LspPrewarmerInstance: TLspPrewarmer;
+
+/// <summary>What the last build's compiler messages did: how many files
+///  were fed, and what could not be. '' before the first compile. The
+///  status window shows it, because a feed that silently skips a file is
+///  a diagnostics source that is quietly wrong.</summary>
+function CompilerFeedStatus: string;
 
 implementation
 
@@ -113,7 +128,11 @@ uses
   System.SysUtils, System.IOUtils, Winapi.Windows, Lsp.Protocol,
   Expert.PluginSettings, Expert.EditorHelperIntf, Expert.LspManager,
   Expert.UnitIndex, Expert.AutoImport, Expert.MessagesReader,
-  Expert.WorkerLatch;
+  Expert.WorkerLatch, Expert.DiagStore, Expert.DebugConsistency,
+  System.Generics.Collections, System.Generics.Defaults;
+
+var
+  GFeedStatus: string;
 
 { TPrewarmIdeNotifier }
 
@@ -191,27 +210,158 @@ end;
 // live quick-fix pipeline (same entry point the Structure view uses).
 procedure TPrewarmIdeNotifier.FeedCompilerMessages;
 var
-  FileName, Content: string;
-  Diags: TArray<TLspErrorDiag>;
+  Msgs: TArray<TCompilerMessage>;
+  M: TCompilerMessage;
+  Cands, Files, Ordered: TStringList;
+  Diags: TDictionary<string, TList<TLspErrorDiag>>;
+  Worst: TDictionary<string, Integer>;
+  Active, FileName, Content: string;
+  D: TLspErrorDiag;
+  Lst: TList<TLspErrorDiag>;
+  I, Pass, Fed, Unresolved, NoLine, Sev: Integer;
 begin
+  GFeedStatus := '';
   try
     if Editor = nil then Exit;
+    // ONE walk of the model for the whole build, not one per file.
+    Msgs := ReadCompilerMessages;
+    if Length(Msgs) = 0 then
+    begin
+      if MessagesReaderProblem <> '' then
+        GFeedStatus := 'nothing fed: ' + MessagesReaderProblem;
+      Exit;
+    end;
+
     // Cheap getter - never GetCurrentContext here (it moves the caret).
-    FileName := Editor.GetActiveFileName;
-    if FileName = '' then Exit;
-    Diags := ReadCompilerDiagnosticsFor(FileName);
-    if Length(Diags) = 0 then Exit;
-    if not Editor.ReadEditorContent(FileName, Content) then
-      try
-        Content := TFile.ReadAllText(FileName);
-      except
-        Exit;
+    Active := Editor.GetActiveFileName;
+
+    Cands := TStringList.Create;
+    Files := TStringList.Create;
+    Ordered := TStringList.Create;
+    Diags := TObjectDictionary<string, TList<TLspErrorDiag>>.Create([doOwnsValues]);
+    Worst := TDictionary<string, Integer>.Create;
+    try
+      // Duplicates are expected here (a project source that is also
+      // open) and harmless: ResolveCompilerMessageFile counts distinct
+      // PATHS. TStringList.Duplicates would need Sorted anyway.
+      Cands.AddStrings(Editor.GetProjectSourceFiles);
+      Cands.AddStrings(Editor.GetOpenSourceFiles);
+      Files.CaseSensitive := False;
+      Files.Duplicates := dupIgnore;
+      Files.Sorted := False;
+
+      Unresolved := 0;
+      NoLine := 0;
+      for M in Msgs do
+      begin
+        // A message without a line number cannot be placed, and that is
+        // not a defect: the "Erfolg" line and the command line are
+        // messages too.
+        if M.Line <= 0 then
+        begin
+          Inc(NoLine);
+          Continue;
+        end;
+        FileName := ResolveCompilerMessageFile(M.FileName,
+          Cands.ToStringArray);
+        if FileName = '' then
+        begin
+          Inc(Unresolved);
+          Continue;
+        end;
+        if not Diags.TryGetValue(FileName, Lst) then
+        begin
+          Lst := TList<TLspErrorDiag>.Create;
+          Diags.Add(FileName, Lst);
+          Files.Add(FileName);
+          Worst.Add(FileName, 9);
+        end;
+        D := Default(TLspErrorDiag);
+        D.Code := M.Code;
+        D.Message := M.Text;
+        D.Severity := M.Severity;
+        D.Range.Start.Line := M.Line - 1;             // 0-based
+        if M.Col > 0 then D.Range.Start.Character := M.Col - 1
+        else D.Range.Start.Character := 0;
+        D.Range.End_ := D.Range.Start;
+        Lst.Add(D);
+        if Worst.TryGetValue(FileName, Sev) and (M.Severity < Sev) then
+          Worst[FileName] := M.Severity;
       end;
-    if Content = '' then Exit;
-    LiveReportErrorDiags(FileName, Content, Diags, SrcCompiler);
+
+      // Errors first, so the bound can never drop an error while keeping
+      // a hint - the same rule the compile tool's answer follows. Three
+      // passes over the insertion order rather than a comparer:
+      // TStringList.CustomSort takes a plain function POINTER, which
+      // cannot capture Worst - and passes are stable by construction.
+      for Pass := 0 to 2 do
+        for I := 0 to Files.Count - 1 do
+        begin
+          if not Worst.TryGetValue(Files[I], Sev) then Sev := 9;
+          case Pass of
+            0: if Sev > 1 then Continue;      // errors
+            1: if Sev <> 2 then Continue;     // warnings
+          else
+            if Sev <= 2 then Continue;        // hints and the rest
+          end;
+          Ordered.Add(Files[I]);
+        end;
+
+      Fed := 0;
+      for I := 0 to Ordered.Count - 1 do
+      begin
+        if Fed >= MaxCompilerFeedFiles then Break;
+        FileName := Ordered[I];
+        // The buffer first: it is what every later hash comparison uses.
+        // The compiler read the DISK, so for a modified buffer the entry
+        // is the honest "stale" the merge then reports.
+        if not Editor.ReadEditorContent(FileName, Content) then
+          try
+            Content := TFile.ReadAllText(FileName);
+          except
+            Continue;
+          end;
+        if Content = '' then Continue;
+        if not Diags.TryGetValue(FileName, Lst) then Continue;
+        if SameText(FileName, Active) then
+          // The ACTIVE buffer additionally goes to the live checker, whose
+          // fix resolution is a single slot - feeding every file there
+          // would make the payloads overwrite each other, and the user's
+          // own buffer would lose.
+          LiveReportErrorDiags(FileName, Content, Lst.ToArray, SrcCompiler)
+        else
+          StoreDiagnostics(FileName, SrcCompiler, Content, Lst.ToArray);
+        Inc(Fed);
+      end;
+
+      GFeedStatus := Format('%d of %d file(s) fed', [Fed, Files.Count]);
+      if Files.Count > Fed then
+        GFeedStatus := GFeedStatus + Format(' (%d over the bound of %d)',
+          [Files.Count - Fed, MaxCompilerFeedFiles]);
+      if Unresolved > 0 then
+        GFeedStatus := GFeedStatus + Format(', %d message(s) name a file '
+          + 'this project does not have (or two of them)', [Unresolved]);
+      if NoLine > 0 then
+        GFeedStatus := GFeedStatus + Format(', %d without a line number',
+          [NoLine]);
+    finally
+      Worst.Free;
+      Diags.Free;
+      Ordered.Free;
+      Files.Free;
+      Cands.Free;
+    end;
   except
-    // a diagnostics source must never disturb a build
+    on E: Exception do
+      // a diagnostics source must never disturb a build - but it must not
+      // go quiet either
+      GFeedStatus := 'failed: ' + E.ClassName + ': ' + E.Message;
   end;
+end;
+
+function CompilerFeedStatus: string;
+begin
+  Result := GFeedStatus;
 end;
 
 { TLspPrewarmer }

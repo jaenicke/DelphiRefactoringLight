@@ -164,6 +164,7 @@ uses
   Expert.AutoImport, Expert.ContextMenu, Expert.DialogHelper,   // IdeThemes: interface uses
   Expert.BlameGutter, Expert.BlameDialogs, Expert.VcsBlame,
   Expert.MessagesReader, Expert.StructureErrors, Expert.McpServer, Lsp.Client,
+  Expert.LspPrewarmer,
   Expert.Version, Expert.ListViewSort, Mcp.Protocol, Expert.DebugConsistency,
   System.JSON, System.StrUtils, Vcl.StdCtrls, Winapi.Windows;
 
@@ -194,6 +195,8 @@ type
     FTicks: Integer;
     FMsgCount: Integer;    // last compiler-message count (see Collect)
     FMsgCountTick: Integer;
+    FMsgProblem: string;   // both read from the SAME walk as FMsgCount
+    FMsgTrace: string;
     FResSample: TResourceSample;   // refreshed every 5th tick (VA walk)
     FResValid: Boolean;
     FMemText, FMemDetail: string;  // refreshed every 10th tick (walks caches)
@@ -1087,23 +1090,36 @@ begin
   // few seconds from exactly this path (TTimer -> DoTick -> Collect ->
   // WalkMessageLines). It is a diagnostic number, so a 10 s refresh is
   // plenty; the compile path (FeedCompilerMessages) reads it for real.
-  S := MessagesReaderProblem;
-  if S <> '' then
-    Row('Compiler messages', 'unavailable', S)
-  else
+  // The walk sets both the problem and the trace, so it has to run BEFORE
+  // either is read - the old order showed the PREVIOUS walk's problem, and
+  // on the first tick none at all.
+  if (FMsgCountTick = 0) or (FTicks - FMsgCountTick >= 10) then
   begin
-    if (FMsgCountTick = 0) or (FTicks - FMsgCountTick >= 10) then
-    begin
-      FMsgCountTick := FTicks;
-      try
-        FMsgCount := CompilerMessageCount;
-      except
-        FMsgCount := 0;
-      end;
+    FMsgCountTick := FTicks;
+    try
+      FMsgCount := CompilerMessageCount;
+    except
+      FMsgCount := 0;
     end;
-    Row('Compiler messages', Format('%d line(s) readable', [FMsgCount]),
-      'read from the Messages window after each compile');
+    FMsgProblem := MessagesReaderProblem;
+    FMsgTrace := MessagesReaderTrace;
   end;
+  S := FMsgTrace;
+  if S = '' then S := 'read from the Messages window after each compile';
+  if FMsgCount > 0 then
+    Row('Compiler messages', Format('%d line(s) readable', [FMsgCount]),
+      S, slGood)
+  else if FMsgProblem <> '' then
+    // 0 lines and a reason: that is the honest shape. It need not be a
+    // defect - an empty window reads the same - so the reason says what
+    // was seen rather than what it means.
+    Row('Compiler messages', '0 line(s) - ' + FMsgProblem, S, slWait)
+  else
+    Row('Compiler messages', '0 line(s)', S);
+  S := CompilerFeedStatus;
+  if S <> '' then
+    Row('  last build fed', S, 'the diagnostics every get_diagnostics / '
+      + 'get_quick_fixes for those files answers from');
 
   // ---- live blame ---------------------------------------------------------
   if BlameEnabled then

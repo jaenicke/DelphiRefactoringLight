@@ -80,6 +80,15 @@ function CompilerMessageCount: Integer;
 /// <summary>Why the reader is not working, '' when it is.</summary>
 function MessagesReaderProblem: string;
 
+/// <summary>What the last walk SAW, level by level: how many buffers the
+///  model reports, what they are called, how many lines each holds and how
+///  many were really readable - plus, as a cross-check, the message groups
+///  the IDE itself reports through the documented IOTAMessageServices.
+///  Without this a count of 0 cannot be told from "I could not read it",
+///  which is exactly what cost a diagnosis once (a W1058 stood in the
+///  window while this reader answered 0 and said nothing).</summary>
+function MessagesReaderTrace: string;
+
 /// <summary>Diagnostic dump of all three read paths to
 ///  %TEMP%\RefactoringLight-messages.log.</summary>
 procedure DumpMessagesWindow;
@@ -110,6 +119,15 @@ const
   SymMsgFile   = '_ZN8Msglines16TFileMessageLine11GetFileNameEv';
   SymMsgLine   = '_ZN8Msglines16TFileMessageLine7GetLineEv';
   SymMsgCol    = '_ZN8Msglines16TFileMessageLine9GetColumnEv';
+  // Read out of bin64\coreide370.bpl with the recipe in CLAUDE.md, not
+  // from memory - the two IDEs mangle their exports completely
+  // differently.
+  SymListName  = '_ZN8Msglines15TLineBufferList7GetNameEi';
+  SymBufGroup  = '_ZN8Msglines11TLineBuffer12GetGroupNameEv';
+  SymBufErrors = '_ZN8Msglines11TLineBuffer13GetErrorCountEv';
+  SymSaveStr   = '_ZN11Msgviewform16TMessageViewForm14GetSaveStringsEPN6Sys'
+               + 'tem7Classes8TStringsENS1_15DelphiInterfaceIN12Msglinesint'
+               + 'f13IMessageGroupEEEi';
 {$ELSE}
 const
   CoreIdeDll = 'coreide370.bpl';
@@ -124,14 +142,26 @@ const
   SymMsgFile   = '@Msglines@TFileMessageLine@GetFileName$qqrv';
   SymMsgLine   = '@Msglines@TFileMessageLine@GetLine$qqrv';
   SymMsgCol    = '@Msglines@TFileMessageLine@GetColumn$qqrv';
+  SymListName  = '@Msglines@TLineBufferList@GetName$qqri';
+  SymBufGroup  = '@Msglines@TLineBuffer@GetGroupName$qqrv';
+  SymBufErrors = '@Msglines@TLineBuffer@GetErrorCount$qqrv';
+  SymSaveStr   = '@Msgviewform@TMessageViewForm@GetSaveStrings$qqrp23System'
+               + '@Classes@TStrings53System@%DelphiInterface$26Msglinesintf'
+               + '@IMessageGroup%i';
 {$ENDIF}
 
 var
   GProblem: string;
+  GTrace: string;
 
 function MessagesReaderProblem: string;
 begin
   Result := GProblem;
+end;
+
+function MessagesReaderTrace: string;
+begin
+  Result := GTrace;
 end;
 
 // The global TLineBufferList instance, or nil.
@@ -229,6 +259,11 @@ type
   TIntGetter = function(Self: Pointer): Integer; register;
   TItemGetter = function(Self: Pointer; AIndex: Integer): Pointer; register;
   TStrGetter = procedure(Self: Pointer; var ARes: string); register;
+  // function GetName(AIndex: Integer): string - the hidden result
+  // parameter is appended AFTER the declared ones, so register puts
+  // Self, AIndex, Result in that order.
+  TStrAtGetter = procedure(Self: Pointer; AIndex: Integer;
+    var ARes: string); register;
 
 function Sym(const AName: string): Pointer;
 var
@@ -282,6 +317,21 @@ begin
     Result := TObject(TItemGetter(P)(AObj, AIndex));
   except
     Result := nil;
+  end;
+end;
+
+function ExpStrAt(AObj: TObject; const ASym: string;
+  AIndex: Integer): string;
+var
+  P: Pointer;
+begin
+  Result := '';
+  P := Sym(ASym);
+  if (P = nil) or (AObj = nil) then Exit;
+  try
+    TStrAtGetter(P)(AObj, AIndex, Result);
+  except
+    Result := '';
   end;
 end;
 
@@ -425,35 +475,129 @@ end;
 type
   TLineVisitor = reference to procedure(ALine: TObject);
 
-// Walks every message line of every tab. Returns the number visited.
+// The name a buffer goes by in the window - the LIST knows it per index,
+// the buffer itself knows its group. Either is enough to recognise the
+// Build tab in the trace.
+function BufferLabel(AList, ABuf: TObject; AIndex: Integer): string;
+begin
+  Result := ExpStrAt(AList, SymListName, AIndex);
+  if Result = '' then Result := CallStr(ABuf, 'GetGroupName');
+  if Result = '' then Result := ExpStr(ABuf, SymBufGroup);
+  if Result = '' then Result := '#' + IntToStr(AIndex);
+end;
+
+// The DOCUMENTED cross-check (IOTAMessageServices): the groups the IDE
+// itself reports. When it names a tab that the model above does not have,
+// the window's lines are not where this reader looks - and that is a
+// statement no walk of the model alone can make.
+function IdeMessageGroupNames: string;
+var
+  Svc: IOTAMessageServices;
+  I: Integer;
+  G: IOTAMessageGroup;
+begin
+  Result := '';
+  // ToolsAPI is main thread only, and the status tick is not the only
+  // caller of the walk.
+  if TThread.CurrentThread.ThreadID <> MainThreadID then Exit('not asked');
+  try
+    if not Supports(BorlandIDEServices, IOTAMessageServices, Svc) then
+      Exit('no IOTAMessageServices');
+    for I := 0 to Svc.GetMessageGroupCount - 1 do
+    begin
+      G := Svc.GetMessageGroup(I);
+      if G = nil then Continue;
+      if Result <> '' then Result := Result + ', ';
+      Result := Result + G.Name;
+    end;
+    if Result = '' then Result := 'none';
+  except
+    on E: Exception do Result := E.ClassName;
+  end;
+end;
+
+// Walks every message line of every tab. Returns the number visited - and
+// records what it saw on the way, because a 0 that explains itself is the
+// difference between "the window is empty" and "I cannot read it".
 function WalkMessageLines(const AVisit: TLineVisitor): Integer;
 var
   List, Buf, Ln: TObject;
-  Bufs, Lines, I, J: Integer;
+  Bufs, Lines, Reported, Unreadable, NoLine, I, J: Integer;
+  Detail: string;
 begin
   Result := 0;
   GProblem := '';
+  GTrace := '';
   List := LineBufferList;
-  if List = nil then Exit;
+  if List = nil then
+  begin
+    GTrace := 'the model itself is not reachable: ' + GProblem;
+    Exit;
+  end;
 
   if not GetIntOf(List, 'GetCount', SymListCount, Bufs) then
   begin
     GProblem := 'neither RTTI nor the export ' + SymListCount + ' works';
+    GTrace := GProblem;
     Exit;
   end;
+
+  Reported := 0;
+  Unreadable := 0;
+  NoLine := 0;
+  Detail := '';
   for I := 0 to Bufs - 1 do
   begin
     Buf := GetObjOf(List, 'GetItem', SymListItem, I);
-    if Buf = nil then Continue;
-    if not GetIntOf(Buf, 'GetCount', SymBufCount, Lines) then Continue;
+    if Buf = nil then
+    begin
+      Inc(Unreadable);
+      Continue;
+    end;
+    if not GetIntOf(Buf, 'GetCount', SymBufCount, Lines) then
+    begin
+      Inc(Unreadable);
+      Continue;
+    end;
+    Inc(Reported, Lines);
+    if Detail <> '' then Detail := Detail + ', ';
+    Detail := Detail + BufferLabel(List, Buf, I) + '=' + IntToStr(Lines);
     for J := 0 to Lines - 1 do
     begin
       Ln := GetObjOf(Buf, 'GetLines', SymBufLines, J);
-      if Ln = nil then Continue;
+      if Ln = nil then
+      begin
+        Inc(NoLine);
+        Continue;
+      end;
       Inc(Result);
       if Assigned(AVisit) then AVisit(Ln);
     end;
   end;
+
+  GTrace := Format('%d buffer(s)', [Bufs]);
+  if Detail <> '' then GTrace := GTrace + ' (' + Detail + ')';
+  GTrace := GTrace + Format(', %d line(s) read', [Result]);
+  if Unreadable > 0 then
+    GTrace := GTrace + Format(', %d buffer(s) unreadable', [Unreadable]);
+  if NoLine > 0 then
+    GTrace := GTrace + Format(', %d line(s) unreadable', [NoLine]);
+  GTrace := GTrace + ' | IDE groups: ' + IdeMessageGroupNames;
+
+  // Name the two shapes that used to be silent. Neither is certainly a
+  // defect - the window really can be empty - so the sentence says what
+  // was seen and leaves the reading to whoever looks at it.
+  if Unreadable > 0 then
+    GProblem := Format('%d of %d buffer(s) could not be read', [Unreadable, Bufs])
+  else if Bufs = 0 then
+    GProblem := 'the model reports no buffer at all - either the window is '
+      + 'empty or its lines do not live in Msglines.LineBufferList on this IDE'
+  else if Reported = 0 then
+    GProblem := Format('%d buffer(s) (%s), every one of them empty',
+      [Bufs, Detail])
+  else if Result < Reported then
+    GProblem := Format('%d of %d line(s) could not be read',
+      [Reported - Result, Reported]);
 end;
 
 function CompilerMessageCount: Integer;
@@ -638,7 +782,71 @@ begin
           [ALine.ClassName, LineNo, LineFile(ALine), Text]));
       end);
     Log(Format('total message lines: %d', [N]));
+    Log('trace: ' + GTrace);
     if GProblem <> '' then Log('PROBLEM: ' + GProblem);
+  except
+    on E: Exception do Log('EX: ' + E.ClassName + ': ' + E.Message);
+  end;
+end;
+
+type
+  // procedure GetSaveStrings(AStrings: TStrings;
+  //   const AGroup: IMessageGroup; AFlags: Integer)
+  TSaveStringsProc = procedure(Self, AStrings, AGroup: Pointer;
+    AFlags: Integer); register;
+
+// The SECOND route, as a diagnostic only: the "Save Messages" text dump of
+// the message view form. Worth probing because it is what the window shows
+// rather than what the model holds - so if the model is empty and this is
+// not, the lines live somewhere else on this IDE.
+// DELIBERATELY only in this dump: it calls an internal IDE method on an
+// object whose lifetime we do not control, which CLAUDE.md allows as an
+// occasional diagnostic and nothing more (once a second it cost this
+// plugin an access violation per tick).
+procedure DumpSaveStrings;
+var
+  P: Pointer;
+  Form: TForm;
+  I: Integer;
+  SL: TStringList;
+begin
+  Log('--- TMessageViewForm.GetSaveStrings (the second route) ---');
+  try
+    P := Sym(SymSaveStr);
+    if P = nil then
+    begin
+      Log('export not found: ' + SymSaveStr);
+      Exit;
+    end;
+    // By CLASS NAME out of Screen.Forms: no second exported global, and
+    // the object proves what it is.
+    Form := nil;
+    for I := 0 to Screen.FormCount - 1 do
+      if SameText(Screen.Forms[I].ClassName, 'TMessageViewForm') then
+      begin
+        Form := Screen.Forms[I];
+        Break;
+      end;
+    if Form = nil then
+    begin
+      Log('no TMessageViewForm among the ' + IntToStr(Screen.FormCount)
+        + ' forms on screen (is the Messages window open?)');
+      Exit;
+    end;
+    SL := TStringList.Create;
+    try
+      // nil group = every group, if the method reads it that way. An
+      // exception here is an answer too, and it is caught.
+      TSaveStringsProc(P)(Form, SL, nil, 0);
+      Log(Format('%d line(s)', [SL.Count]));
+      for I := 0 to SL.Count - 1 do
+      begin
+        if I >= 40 then begin Log('  ... (capped)'); Break; end;
+        Log('  ' + SL[I]);
+      end;
+    finally
+      SL.Free;
+    end;
   except
     on E: Exception do Log('EX: ' + E.ClassName + ': ' + E.Message);
   end;
@@ -705,6 +913,7 @@ begin
       Log('RefactoringLight messages probe  ' + DateTimeToStr(Now));
       DumpModuleErrors;
       DumpMessagesModel;
+      DumpSaveStrings;
       DumpCoreIdeExports;
       GLog.SaveToFile(TPath.Combine(TPath.GetTempPath,
         'RefactoringLight-messages.log'));

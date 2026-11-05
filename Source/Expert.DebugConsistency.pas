@@ -167,6 +167,18 @@ function MoveDcuAside(const AFile, AAsideDir: string;
 ///  never mix.</summary>
 function DcuAsideFolder(const ADcuDir: string): string;
 
+/// <summary>What file a compiler message means, as a path the
+///  diagnostics store can be asked with. A message carries either the full
+///  path - then that IS the answer - or only the base name, and then only
+///  an UNAMBIGUOUS match among the project's own files is one: two
+///  Utils.pas in two folders answer '' rather than a guess, because the
+///  store is keyed by path and a wrong key puts a warning on the wrong
+///  file. ACANDIDATES are the project's source files (plus whatever is
+///  open). No disk access: a path the compiler named is taken as given,
+///  and a file that cannot be read drops out when its content is read.</summary>
+function ResolveCompilerMessageFile(const AName: string;
+  const ACandidates: TArray<string>): string;
+
 /// <summary>An id for one finding: its kind and its file, so an apply can
 ///  name a finding instead of an index (the rule every check here
 ///  follows).</summary>
@@ -698,6 +710,29 @@ begin
       ATarget := '';
     end;
   end;
+end;
+
+function ResolveCompilerMessageFile(const AName: string;
+  const ACandidates: TArray<string>): string;
+var
+  Base, F, Full: string;
+begin
+  Result := '';
+  if AName = '' then Exit;
+  if ExtractFilePath(AName) <> '' then Exit(ExpandFileName(AName));
+  Base := AName;
+  for F in ACandidates do
+    if SameText(ExtractFileName(F), Base) then
+    begin
+      // DISTINCT paths, not occurrences: the candidates are the project's
+      // sources PLUS the open files, so the active unit is legitimately
+      // in there twice - counting occurrences would have skipped exactly
+      // the file that matters.
+      Full := ExpandFileName(F);
+      if (Result <> '') and not SameText(Result, Full) then
+        Exit('');   // two Utils.pas: no answer is the answer
+      Result := Full;
+    end;
 end;
 
 function DebugIssueId(const AIssue: TDebugIssue): string;

@@ -695,6 +695,20 @@ type
     [Test] procedure AGeneratedParameterNameIsNoReservedWord;
   end;
 
+  /// <summary>Issue #56 (stepand76): "It would be great that Rename can be
+  ///  confirmed by the Enter key. Just type new name and press Enter. Then,
+  ///  once preview is done, press the Enter again to perform rename."
+  ///  The second half already worked (the Rename button was the default
+  ///  one); what was missing is the first, and what must never happen is
+  ///  ONE keystroke doing both - the preview nobody saw would be
+  ///  pointless, and audit #41's M40e is the same lesson from the
+  ///  Remove-with dialog ("a button that writes code must be
+  ///  clicked").</summary>
+  TRenameEnterKeyTests = class
+  public
+    [Test] procedure EnterLooksFirstAndWritesSecond;
+  end;
+
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
   ///  own event types - and compared their parameter types as text. cxTL's
   ///  OnGetNodeImageIndex says "var AIndex: TcxImageIndex", the handler the
@@ -1019,6 +1033,7 @@ uses
   Expert.SignatureEdit, Expert.MethodEdit, System.StrUtils,
   Expert.InterfaceLinks, Expert.IncludeExpansion,
   Expert.DebugConsistency, DIH.Types, DIH.Placeholders, DIH.FileOps, DIH.Builder,
+  Expert.DialogHelper,
   // Generics.Collections: TJSONObject.GetPair is inline and the
   // doubled-note test calls it (H2443 without this entry).
   System.DateUtils, System.Generics.Collections;
@@ -8894,6 +8909,54 @@ begin
     'and an empty text has no clause either');
 end;
 
+{ TRenameEnterKeyTests }
+
+procedure TRenameEnterKeyTests.EnterLooksFirstAndWritesSecond;
+begin
+  // The reported flow, in the order the user types it.
+  Assert.AreEqual(deaLook,
+    EnterKeyAction(False, False, False, False, False),
+    'type a name, press Enter: the PREVIEW runs');
+  Assert.AreEqual(deaWrite,
+    EnterKeyAction(False, False, False, True, False),
+    'preview is done, press Enter again: the rename is applied');
+
+  // ...and the one thing a single keystroke must not do: both. The scan
+  // takes seconds and pumps messages, so a HELD Enter auto-repeats - and
+  // the repeat arriving after the result was published would apply a
+  // preview nobody has looked at.
+  Assert.AreEqual(deaSwallow,
+    EnterKeyAction(False, False, False, True, True),
+    'the press that started the preview is still down - not the fresh ' +
+    'second press the user is asked for');
+  // While it is still running, Enter means nothing at all: the scan runs
+  // INSIDE the Preview click handler, so a second Enter must neither
+  // re-enter it nor reach a button that became enabled meanwhile.
+  Assert.AreEqual(deaSwallow,
+    EnterKeyAction(False, False, True, False, False), 'busy: nothing');
+  Assert.AreEqual(deaSwallow,
+    EnterKeyAction(False, False, True, True, False),
+    'busy beats a result that is already there');
+
+  // Looking writes nothing, so it is offered whatever the key state is -
+  // the guard above is about the WRITE.
+  Assert.AreEqual(deaLook,
+    EnterKeyAction(False, False, False, False, True),
+    'a held Enter may still start a preview');
+
+  // The focus beats everything, busy included: during the scan Cancel IS
+  // the Stop button, and Enter on it has to stop the scan.
+  Assert.AreEqual(deaLeaveIt,
+    EnterKeyAction(True, False, True, False, False),
+    'a focused button answers Enter itself - Stop during a scan');
+  Assert.AreEqual(deaLeaveIt,
+    EnterKeyAction(True, False, False, True, False),
+    'and so does the Rename button when it has the focus');
+  Assert.AreEqual(deaLeaveIt,
+    EnterKeyAction(False, True, False, False, False),
+    'an open drop-down (the scope combo) answers Enter itself');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -8935,5 +8998,6 @@ initialization
   TDUnitX.RegisterTestFixture(TUnitFromPackageTests);
   TDUnitX.RegisterTestFixture(TCheckScopeTests);
   TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
+  TDUnitX.RegisterTestFixture(TRenameEnterKeyTests);
 
 end.

@@ -58,6 +58,9 @@ type
     FSelectedUnits: TArray<string>;
     FBusy: Boolean;          // a scan is running inside the click handler
     FScanCancelled: Boolean; // user pressed Stop / tried to close
+    /// <summary>The Enter that started the preview was still down when
+    ///  the result arrived - see DoKeyDown (issue #56).</summary>
+    FEnterHeld: Boolean;
     FProgressBar: TProgressBar;
     FLblStatus: TLabel;
     FPanelBottom: TPanel;
@@ -83,6 +86,9 @@ type
     procedure DoBtnStopClick(Sender: TObject);
     procedure DoCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure DoNewNameChange(Sender: TObject);
+    procedure DoKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure DoKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure SetRenameEnabled(AEnabled: Boolean);
     procedure DoCheckTimer(Sender: TObject);
     procedure RunIdentifierCheck;
     function CommonPathPrefix(const AItems: TRenamePreviewItems): string;
@@ -325,7 +331,7 @@ begin
   FBtnRename.Caption := 'Rename';
   FBtnRename.ModalResult := mrOk;
   FBtnRename.Enabled := False;
-  FBtnRename.Default := True;
+  FBtnRename.Hint := 'Applies the preview (Enter)';
 
   FBtnPreview := TButton.Create(Self);
   FBtnPreview.Parent := FPanelTop;
@@ -336,6 +342,12 @@ begin
   FBtnPreview.Left := FBtnRename.Left - FBtnPreview.Width - 6;
   FBtnPreview.Caption := 'Preview';
   FBtnPreview.OnClick := DoBtnPreviewClick;
+  // The DEFAULT button is what Windows shows as "this is what Enter
+  // does", and in this dialog that moves: first the preview, then the
+  // rename (SetRenameEnabled). The handler below is what really acts -
+  // the emphasis is the hint that goes with it.
+  FBtnPreview.Default := True;
+  FBtnPreview.Hint := 'Shows what would change (Enter)';
 
   // --- Bottom panel (status + progress) ---
   FPanelBottom := TPanel.Create(Self);
@@ -420,6 +432,14 @@ begin
 
   FPageControl.ActivePage := FTabChanges;
   OnCloseQuery := DoCloseQuery;
+  // Issue #56: "Just type new name and press Enter. Then, once preview is
+  // done, press the Enter again to perform rename." KeyPreview puts that
+  // decision in ONE place (DoKeyDown) instead of leaving it to whichever
+  // button happens to be the default.
+  KeyPreview := True;
+  OnKeyDown := DoKeyDown;
+  OnKeyUp := DoKeyUp;
+  ShowHint := True;
   Expert.IdeThemes.EnableThemes(Self);
 
   FIndex := TProjectTextIndex.Create;
@@ -450,7 +470,7 @@ procedure TRenameDialog.DoNewNameChange(Sender: TObject);
 begin
   FListView.Clear;
   FMemoDetails.Clear;
-  FBtnRename.Enabled := False;
+  SetRenameEnabled(False);
   FLblStatus.Caption := 'Ready.';
 
   // Debounce the live identifier check
@@ -587,7 +607,7 @@ begin
     FListView.Items.EndUpdate;
   end;
 
-  FBtnRename.Enabled := Length(AItems) > 0;
+  SetRenameEnabled(Length(AItems) > 0);
 end;
 
 procedure TRenameDialog.SetDetailsText(const AText: string);
@@ -616,7 +636,57 @@ end;
 
 procedure TRenameDialog.EnableRename(AEnabled: Boolean);
 begin
+  SetRenameEnabled(AEnabled);
+end;
+
+procedure TRenameDialog.SetRenameEnabled(AEnabled: Boolean);
+begin
   FBtnRename.Enabled := AEnabled;
+  // Exactly one default button at a time: two of them are both "active"
+  // and would both be clicked.
+  FBtnPreview.Default := not AEnabled;
+  FBtnRename.Default := AEnabled;
+  // A result arriving while Enter is still DOWN is the press that started
+  // the preview: its auto-repeat would apply what nobody has looked at.
+  FEnterHeld := AEnabled and EnterKeyIsDown;
+end;
+
+procedure TRenameDialog.DoKeyDown(Sender: TObject; var Key: Word;
+  Shift: TShiftState);
+begin
+  if Key <> vkReturn then
+  begin
+    // Any other key proves the user is not holding Enter any more - and
+    // without this, a key-up we never saw (the focus left the dialog
+    // while the scan ran) would leave Enter dead for good.
+    FEnterHeld := False;
+    Exit;
+  end;
+  if Shift <> [] then Exit;   // Ctrl+Enter & co belong to the control
+  case EnterKeyAction(ActiveControl is TCustomButton,
+         (FCmbScope <> nil) and (ActiveControl = FCmbScope) and FCmbScope.DroppedDown,
+         FBusy, FBtnRename.Enabled, FEnterHeld) of
+    deaLeaveIt: ;   // the focused button / the open drop-down answers it
+    deaSwallow: Key := 0;
+    deaLook:
+      begin
+        Key := 0;
+        DoBtnPreviewClick(FBtnPreview);
+      end;
+    deaWrite:
+      begin
+        Key := 0;
+        FBtnRename.Click;   // mrOk, like the click
+      end;
+  end;
+end;
+
+procedure TRenameDialog.DoKeyUp(Sender: TObject; var Key: Word;
+  Shift: TShiftState);
+begin
+  // Released: the next Enter is a fresh press. Any key-up does, because
+  // holding Enter produces key-DOWNs only.
+  FEnterHeld := False;
 end;
 
 function TRenameDialog.Scope: TRenameScope;
@@ -745,7 +815,7 @@ begin
   if ABusy then FScanCancelled := False;
   FBtnPreview.Enabled := not ABusy;
   if ABusy then
-    FBtnRename.Enabled := False;
+    SetRenameEnabled(False);
   FEdtNewName.Enabled := not ABusy;
   FCmbScope.Enabled := not ABusy;
   FBtnPickUnits.Enabled := not ABusy;

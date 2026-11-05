@@ -161,6 +161,36 @@ function WorkAreaAt(const APt: TPoint): TRect;
 function FitPopup(const AWorkArea: TRect; const APt: TPoint;
   AWidth, AHeight, AFlipTop: Integer): TPoint;
 
+type
+  /// <summary>What the Enter key means in a dialog that LOOKS first and
+  ///  WRITES second - type a name, Enter runs the preview, Enter again
+  ///  applies what it shows (issue #56).</summary>
+  TDialogEnterAction = (
+    deaLeaveIt,   // not ours: a focused button, an open drop-down
+    deaSwallow,   // ours, and the answer is "not now"
+    deaLook,      // run the step that only SHOWS what would happen
+    deaWrite);    // apply what the user has now seen
+
+/// <summary>What Enter does in such a dialog, as a rule rather than as a
+///  Default button - because the one thing it must NEVER do is both steps
+///  in one keystroke, which would make the preview nobody saw pointless.
+///  AONBUTTON / ADROPDOWNOPEN: the focus is somewhere that answers Enter
+///  itself. ABUSY: the look is still running (it runs inside its own
+///  click handler and pumps messages, so a second Enter must neither
+///  re-enter it nor reach a button that became enabled meanwhile).
+///  AHASRESULT: there is something to apply. AKEYSTILLDOWN: the Enter
+///  that STARTED the look has not been released - its auto-repeat must
+///  not apply the result, the second press the user is asked for is a
+///  fresh one.</summary>
+function EnterKeyAction(AOnButton, ADropDownOpen, ABusy, AHasResult,
+  AKeyStillDown: Boolean): TDialogEnterAction;
+
+/// <summary>Is the Enter key physically down at this moment? The
+///  REAL-TIME state on purpose: GetKeyState answers for the message being
+///  processed, while the question here is whether the user is still
+///  holding the key that started the preview.</summary>
+function EnterKeyIsDown: Boolean;
+
 implementation
 
 uses
@@ -779,6 +809,24 @@ begin
     Result := M.WorkareaRect
   else
     Result := Screen.WorkAreaRect;
+end;
+
+function EnterKeyAction(AOnButton, ADropDownOpen, ABusy, AHasResult,
+  AKeyStillDown: Boolean): TDialogEnterAction;
+begin
+  // A button that has the focus was aimed at, and a dropped-down combo
+  // answers Enter itself: both belong to the VCL, not to us.
+  if AOnButton or ADropDownOpen then Exit(deaLeaveIt);
+  if ABusy then Exit(deaSwallow);
+  // Looking writes nothing, so it needs no guard of any kind.
+  if not AHasResult then Exit(deaLook);
+  if AKeyStillDown then Exit(deaSwallow);
+  Result := deaWrite;
+end;
+
+function EnterKeyIsDown: Boolean;
+begin
+  Result := GetAsyncKeyState(VK_RETURN) < 0;
 end;
 
 function FitPopup(const AWorkArea: TRect; const APt: TPoint;

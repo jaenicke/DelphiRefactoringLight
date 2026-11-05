@@ -6,6 +6,29 @@ development builds and were never released.
 
 ---
 
+## 2.19.0 - 2026-11-05
+
+**Rename, confirmed by Enter** (issue #56, stepand76): type the new name,
+press Enter for the preview, press Enter again to apply it. The second
+half already worked - the Rename button was the dialog's default one -
+what was missing is the first, and the Preview button is the default one
+until there is something to apply, so the dialog shows which step Enter
+is on.
+
+What a single keystroke must NOT do is both: the scan takes seconds and
+pumps messages, so a HELD Enter auto-repeats, and a repeat arriving after
+the result was published would apply a preview nobody looked at. An Enter
+that is still down when the result arrives is therefore ignored - the
+second press the issue asks for is a fresh one. Enter on a focused button
+still belongs to that button (Stop during a scan, for one), and an open
+drop-down answers it itself.
+
+The rule is one pure function (`EnterKeyAction`), so the dialog that
+adopts it next does not get a second reading of "what does Enter mean
+here".
+
+---
+
 ## 2.18.0 - 2026-11-03
 
 **A normal local variable, and a type in the inline one.** 2.17.2 made the

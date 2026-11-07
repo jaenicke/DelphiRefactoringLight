@@ -721,6 +721,18 @@ type
     [Test] procedure AMessageIsStoredUnderThePathItMeans;
   end;
 
+  /// <summary>W1058 - the compiler converted a string expression into a
+  ///  narrower type and may lose characters. The fix makes the conversion
+  ///  explicit, which is what silences it; where the cast would have to go
+  ///  around ONE OPERAND of a comparison, it refuses instead. Every shape
+  ///  and every position in here was measured against the IDE's own
+  ///  DelphiLSP first.</summary>
+  TStringCastFixTests = class
+  public
+    [Test] procedure TheSpanIsDelimitedFromTheTokenAfterIt;
+    [Test] procedure TheCastIsWrittenAroundTheWholeExpression;
+  end;
+
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
   ///  own event types - and compared their parameter types as text. cxTL's
   ///  OnGetNodeImageIndex says "var AIndex: TcxImageIndex", the handler the
@@ -9022,6 +9034,192 @@ begin
     'no candidates');
 end;
 
+{ TStringCastFixTests }
+
+// The shapes below are the ones MEASURED against the IDE's own DelphiLSP
+// (three scratch_analyze probes, 2026-11-07), and so are the positions:
+// the compiler points at the token AFTER the enclosing expression context.
+function CastProbeLines: TArray<string>;
+begin
+  Result := ['unit Probe;',
+    '',
+    'interface',
+    '',
+    'implementation',
+    '',
+    'uses System.SysUtils;',
+    '',
+    'procedure TakesAnsi(const A: AnsiString);',
+    'begin',
+    '  Writeln(Length(A));',
+    'end;',
+    '',
+    'procedure TakesTwo(const A: AnsiString; N: Integer);',
+    'begin',
+    '  Writeln(A, N);',
+    'end;',
+    '',
+    'procedure Shapes;',
+    'var',
+    '  U: string;',
+    '  A: AnsiString;',
+    '  B: Boolean;',
+    'begin',
+    '  TakesAnsi(U);',
+    '  TakesAnsi(U + ''a'' +',
+    '    U + ''b'' +',
+    '    U + ''c'');',
+    '  A := U;',
+    '  TakesTwo(U, 1);',
+    '  TakesAnsi(Copy(U, 1, 3));',
+    '  A := A + U;',
+    '  TakesAnsi(''a'' + U);',
+    '  B := A = U;',
+    '  if A = U then',
+    '    Writeln(''eq'');',
+    '  Writeln(B);',
+    'end;',
+    '',
+    'end.'];
+end;
+
+function W58Diag(ALine0, ACol0: Integer): TLspErrorDiag;
+begin
+  Result := Default(TLspErrorDiag);
+  Result.Code := 'W1058';
+  Result.Severity := 2;
+  // the German IDE's own wording, which is what the rule has to read
+  Result.Message := 'W1058 Implizite String-Umwandlung mit potenziellem '
+    + 'Datenverlust von ''string'' zu ''AnsiString''';
+  Result.Range.Start.Line := ALine0;
+  Result.Range.Start.Character := ACol0;
+  Result.Range.End_ := Result.Range.Start;
+end;
+
+procedure TStringCastFixTests.TheSpanIsDelimitedFromTheTokenAfterIt;
+var
+  Lines, Masked: TArray<string>;
+  Span: TStringCastSpan;
+  Why: string;
+
+  procedure Spans(ADiagLine, ADiagCol, ASL, ASC, AEL, AEC: Integer;
+    const AText, AWhat: string);
+  begin
+    Assert.IsTrue(PlanStringCastSpan(Lines, Masked, ADiagLine, ADiagCol,
+      Span, Why), AWhat + ': delimited (' + Why + ')');
+    Assert.AreEqual(ASL, Span.StartLine, AWhat + ': start line');
+    Assert.AreEqual(ASC, Span.StartCol, AWhat + ': start column');
+    Assert.AreEqual(AEL, Span.EndLine, AWhat + ': end line');
+    Assert.AreEqual(AEC, Span.EndCol, AWhat + ': end column');
+    // and the span really IS that expression, not just the right numbers
+    if ASL = AEL then
+      Assert.AreEqual(AText, Copy(Lines[ASL], ASC + 1, AEC - ASC + 1),
+        AWhat + ': the text');
+  end;
+
+begin
+  Lines := CastProbeLines;
+  Masked := MaskCommentsAndStrings(Lines);
+
+  // The argument of a call - the position is its ')'
+  Spans(24, 13, 24, 12, 24, 12, 'U', 'one-line argument');
+  // ...the FIRST of two, where the position is the ','
+  Spans(29, 12, 29, 11, 29, 11, 'U', 'first of two arguments');
+  // ...a nested call: the whole argument, not the inner one
+  Spans(30, 25, 30, 12, 30, 24, 'Copy(U, 1, 3)', 'nested call');
+  // ...and one that STARTS with a string literal, which the mask blanks -
+  // so both ends have to come from the raw line
+  Spans(32, 19, 32, 12, 32, 18, '''a'' + U', 'literal first');
+  // The right-hand side of an assignment - the position is the ';'
+  Spans(28, 8, 28, 7, 28, 7, 'U', 'assignment');
+  Spans(31, 12, 31, 7, 31, 11, 'A + U', 'concatenation');
+  // The reported case: an argument over several lines
+  Spans(27, 11, 25, 12, 27, 10, '', 'argument over three lines');
+  Assert.AreEqual('U + ''a'' +', Copy(Lines[25], 13, MaxInt),
+    'the multi-line span starts at the first operand');
+
+  // A comparison is NOT ours: the converted value is one operand, and the
+  // message does not say which - so this refuses instead of casting the
+  // whole Boolean expression.
+  Assert.IsFalse(PlanStringCastSpan(Lines, Masked, 33, 12, Span, Why),
+    'B := A = U; is refused');
+  Assert.IsTrue(Why.Contains('comparison'), 'and it says why: ' + Why);
+  // A condition reports at its "then", which is no terminator we delimit
+  Assert.IsFalse(PlanStringCastSpan(Lines, Masked, 34, 11, Span, Why),
+    'if A = U then is refused');
+  Assert.IsTrue(Why.Contains('"then"'), 'and it names the shape: ' + Why);
+  // A line the unit does not have
+  Assert.IsFalse(PlanStringCastSpan(Lines, Masked, 9999, 0, Span, Why), 'no line');
+
+  // The target type is the LAST quoted name, in either language
+  Assert.AreEqual('AnsiString', StringCastTargetType(
+    'W1058 Implizite String-Umwandlung mit potenziellem Datenverlust von '
+    + '''string'' zu ''AnsiString'''), 'the German wording');
+  Assert.AreEqual('AnsiString', StringCastTargetType(
+    'W1058 Implicit string cast with potential data loss from ''string'' '
+    + 'to ''AnsiString'''), 'the English wording');
+  Assert.AreEqual('', StringCastTargetType('W1058 nothing quoted here'),
+    'no quoted name');
+  Assert.AreEqual('', StringCastTargetType('from ''a'' to ''not a type'''),
+    'a quoted part that is no identifier');
+end;
+
+procedure TStringCastFixTests.TheCastIsWrittenAroundTheWholeExpression;
+var
+  Src, NewText: string;
+  Fixes: TArray<TQuickFix>;
+  F: TQuickFix;
+begin
+  Src := string.Join(#13#10, CastProbeLines);
+
+  // The provider answers the code, and the caption says what a cast does
+  // and does not do.
+  Fixes := ResolveQuickFixes(Src, [W58Diag(24, 13)]);
+  Assert.AreEqual(1, Integer(Length(Fixes)), 'one fix for the W1058');
+  Assert.AreEqual(QuickFixKindText(qfStringCast), 'Make the string cast explicit');
+  Assert.IsTrue(Fixes[0].Caption.Contains('AnsiString'), 'it names the type');
+  Assert.IsTrue(Fixes[0].Caption.Contains('data loss stays'),
+    'and does not pretend the loss is gone: ' + Fixes[0].Caption);
+
+  // One line: the cast goes around the argument and nothing else moves.
+  Assert.IsTrue(PlanQuickFixText(Src, Fixes[0], 0, NewText), 'planned');
+  Assert.IsTrue(NewText.Contains('  TakesAnsi(AnsiString(U));'),
+    'the argument is wrapped');
+  var Old := Src.Split([#13#10]);
+  var New := NewText.Split([#13#10]);
+  Assert.AreEqual(Length(Old), Length(New), 'no line added');
+  var Differs := 0;
+  for var I := 0 to High(Old) do
+    if Old[I] <> New[I] then Inc(Differs);
+  Assert.AreEqual(1, Differs, 'exactly one line differs');
+
+  // Several lines: the opening goes to the first, the ')' to the last.
+  Fixes := ResolveQuickFixes(Src, [W58Diag(27, 11)]);
+  Assert.AreEqual(1, Integer(Length(Fixes)), 'one fix for the wrapped argument');
+  Assert.IsTrue(PlanQuickFixText(Src, Fixes[0], 0, NewText), 'planned');
+  Assert.IsTrue(NewText.Contains('  TakesAnsi(AnsiString(U + ''a'' +'),
+    'the cast opens at the first operand');
+  Assert.IsTrue(NewText.Contains('    U + ''c''));'),
+    'and closes behind the last one');
+
+  // A refused shape produces no fix at all - and says so in the decline
+  // note rather than silently.
+  Fixes := ResolveQuickFixes(Src, [W58Diag(33, 12)]);
+  Assert.AreEqual(0, Integer(Length(Fixes)), 'the comparison gets no fix');
+
+  // The write re-derives the span from the DIAGNOSTIC, so a fix whose
+  // shape is gone refuses instead of writing somewhere else.
+  F := Default(TQuickFix);
+  F.Kind := qfStringCast;
+  F.NewText := 'AnsiString';
+  F.DiagLine := 24;
+  F.DiagCol := 13;
+  Assert.IsTrue(PlanQuickFixText(Src, F, 0, NewText), 'the shape is there');
+  F.DiagCol := 4;                       // points into the name, not at ')'
+  Assert.IsFalse(PlanQuickFixText(Src, F, 0, NewText),
+    'a position that is no terminator writes nothing');
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TFileEncodingRegressionTests);
   TDUnitX.RegisterTestFixture(TUsesClauseRegressionTests);
@@ -9065,5 +9263,6 @@ initialization
   TDUnitX.RegisterTestFixture(TExtractAndCompletionTests);
   TDUnitX.RegisterTestFixture(TRenameEnterKeyTests);
   TDUnitX.RegisterTestFixture(TCompilerMessageFeedTests);
+  TDUnitX.RegisterTestFixture(TStringCastFixTests);
 
 end.

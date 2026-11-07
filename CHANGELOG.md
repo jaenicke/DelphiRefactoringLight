@@ -6,6 +6,27 @@ development builds and were never released.
 
 ---
 
+## 2.20.0 - 2026-11-07
+
+**A quick fix for W1058: make the implicit string cast explicit.** Where
+the compiler converts a string expression into a narrower type and may
+lose characters, the fix puts the conversion the compiler was doing
+silently into the code - which is what silences the warning. The caption
+says what it does NOT do: a cast makes the conversion explicit, the
+possible data loss stays.
+
+It needs no compile: the IDE's own DelphiLSP reports W1058 with a
+position, so the fix appears like the other quick fixes while you type.
+
+Where the cast would have to go around ONE OPERAND - a comparison, where
+the message does not say which side was converted - the fix refuses and
+says so instead of casting the whole expression. The expression is
+delimited backwards from the position the compiler reports, which is the
+token AFTER the enclosing context and not the end of the converted value;
+an argument that runs over several lines is wrapped across them.
+
+---
+
 ## 2.19.3 - 2026-11-07
 
 **The hidden result parameter is not in the same place on both

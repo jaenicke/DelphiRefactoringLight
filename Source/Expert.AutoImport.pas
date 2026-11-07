@@ -45,7 +45,13 @@ type
     qfAlignHeader, qfRemoveVar, qfInsertSemi, qfInitVar, qfRemoveAssign,
     qfAddReintroduce, qfImplStub, qfClassStub, qfRemoveToken,
     qfRemovePrivate, qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod,
-    qfAlignDeclToImpl);
+    qfAlignDeclToImpl, qfStringCast);
+
+  /// <summary>The span a string cast has to go around. 0-based lines, and
+  ///  0-based columns where EndCol is INCLUSIVE.</summary>
+  TStringCastSpan = record
+    StartLine, StartCol, EndLine, EndCol: Integer;
+  end;
 
   /// <summary>One concrete, applicable fix action derived from a compiler
   ///  diagnostic. See ResolveQuickFixes for the providers.</summary>
@@ -193,6 +199,34 @@ function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
 ///  2026-09-24). False when the kind generates code from elsewhere in the
 ///  file (implementation stub, interface method, align header) or when the
 ///  buffer no longer matches what the fix was resolved for.</summary>
+/// <summary>The type a W1058/W1057 says the value was converted TO: the
+///  LAST quoted name of the message, which is where the German ("von 'X'
+///  zu 'Y'") and the English ("from 'X' to 'Y'") wording both put it - so
+///  this keys on the position and not on a word. '' when the message has
+///  no two quoted parts or the name is no identifier.</summary>
+function StringCastTargetType(const AMessage: string): string;
+
+/// <summary>Delimits the expression a W1058 refers to, so a cast can be
+///  put around it.
+///  MEASURED (three scratch_analyze probes against the IDE's own DelphiLSP,
+///  2026-11-07): the position the compiler reports is the token that
+///  FOLLOWS the enclosing expression context - the ';' of the statement,
+///  or the ')' / ',' of an argument list - and NOT the end of the converted
+///  sub-expression. "B := A = U;" reports at the ';', not behind the 'A'
+///  that was converted, and "if A = U then" reports at the 'then'.
+///  So the span runs BACKWARDS from there to the boundary that opened the
+///  context, and the walk may only cross what a string expression is made
+///  of at depth 0: names, literals, bracket groups, '.', '^' and '+' (the
+///  only string-valued operator). Everything else is REFUSED with its
+///  reason - above all a comparison, where the converted value is ONE
+///  OPERAND and the message does not say which.
+///  AMASKED is ALINES through MaskCommentsAndStrings; the boundaries are
+///  read from it so a ';' inside a string or a comment cannot end an
+///  expression, while both ends of the span come from the raw line.</summary>
+function PlanStringCastSpan(const ALines, AMasked: TArray<string>;
+  ADiagLine, ADiagCol: Integer; out ASpan: TStringCastSpan;
+  out AWhy: string): Boolean;
+
 function PlanQuickFixText(const AContent: string; const AFix: TQuickFix;
   AUnitChoice: Integer; out ANewContent: string): Boolean;
 
@@ -2544,6 +2578,52 @@ var
   // at the CLASS header: copy the method's declaration from the interface
   // (this unit, or the unit the index knows for it) into the class and
   // create the empty implementation. Class Completion does NOT do this.
+  // W1058: the compiler converted a string expression into a narrower
+  // type and may lose characters doing it. The fix makes the conversion
+  // EXPLICIT - which is what silences the warning (measured: the very same
+  // expression with a cast produces none) - and it deliberately does not
+  // claim to remove the loss, which is why the caption says so.
+  procedure AddW1058(const D: TLspErrorDiag);
+  var
+    Span: TStringCastSpan;
+    Why, Target: string;
+    F: TQuickFix;
+  begin
+    if Seen.ContainsKey('W58|' + IntToStr(D.Range.Start.Line) + '|'
+      + IntToStr(D.Range.Start.Character)) then Exit;
+    Seen.Add('W58|' + IntToStr(D.Range.Start.Line) + '|'
+      + IntToStr(D.Range.Start.Character), True);
+
+    Target := StringCastTargetType(D.Message);
+    if Target = '' then
+    begin
+      Decline('W1058', '', 'the message does not name the type it converted to');
+      Exit;
+    end;
+    if not PlanStringCastSpan(Lines, MaskedLines, D.Range.Start.Line,
+      D.Range.Start.Character, Span, Why) then
+    begin
+      Decline('W1058', Target, Why);
+      Exit;
+    end;
+
+    F := Default(TQuickFix);
+    F.Kind := qfStringCast;
+    F.Line := Span.StartLine;
+    F.Col := Span.StartCol;
+    // the marker underlines the part on the START line; a span may run over
+    // several lines, and the write re-derives both ends anyway
+    if Span.EndLine = Span.StartLine then
+      F.TokenLen := Span.EndCol - Span.StartCol + 1
+    else
+      F.TokenLen := Length(Lines[Span.StartLine]) - Span.StartCol;
+    F.Identifier := Target;
+    F.NewText := Target;
+    F.Caption := Format('Cast to %s (explicit - the possible data loss stays)',
+      [Target]);
+    Res.Add(F);
+  end;
+
   procedure AddE2291(const D: TLspErrorDiag);
   var
     Intf, Meth, IntfBare, ClassName, Decl, IntfContent: string;
@@ -2676,7 +2756,8 @@ begin
       else if SameText(D.Code, 'H2077') then AddH2077(D)
       else if SameText(D.Code, 'W1010') then AddW1010(D)
       else if SameText(D.Code, 'E2065') then AddE2065(D)
-      else if SameText(D.Code, 'E2291') then AddE2291(D);
+      else if SameText(D.Code, 'E2291') then AddE2291(D)
+      else if SameText(D.Code, 'W1058') then AddW1058(D);
       // whatever the providers added for THIS diagnostic carries it
       for var I := BeforeCount to Res.Count - 1 do
       begin
@@ -3836,6 +3917,243 @@ begin
   Result := CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']);
 end;
 
+function StringCastTargetType(const AMessage: string): string;
+var
+  I, E: Integer;
+begin
+  Result := '';
+  E := 0;
+  for I := Length(AMessage) downto 1 do
+    if AMessage[I] = '''' then
+      if E = 0 then E := I
+      else
+      begin
+        Result := Copy(AMessage, I + 1, E - I - 1);
+        Break;
+      end;
+  if Result = '' then Exit;
+  // A type NAME, or we would write into the code whatever the message said.
+  for var Part in Result.Split(['.']) do
+    if not IsIdentifier(Part) then Exit('');
+end;
+
+function PlanStringCastSpan(const ALines, AMasked: TArray<string>;
+  ADiagLine, ADiagCol: Integer; out ASpan: TStringCastSpan;
+  out AWhy: string): Boolean;
+const
+  // Letter operators and context keywords: a string expression contains
+  // none of them, so one at depth 0 means the walk crossed a boundary it
+  // cannot see as a character.
+  Stoppers: array[0..17] of string = ('AND', 'OR', 'NOT', 'XOR', 'DIV',
+    'MOD', 'SHL', 'SHR', 'IN', 'IS', 'AS', 'THEN', 'DO', 'ELSE', 'BEGIN',
+    'OF', 'TO', 'DOWNTO');
+var
+  L, C, Depth: Integer;
+  Ch: Char;
+
+  // The masked character at a position; the line break reads as a blank,
+  // which is what lets a span run over several lines (the reported case
+  // was five).
+  function At(ALine, ACol: Integer): Char;
+  begin
+    if (ALine < 0) or (ALine > High(AMasked)) or (ACol < 0) then Exit(#0);
+    if ACol >= Length(AMasked[ALine]) then Exit(' ');
+    Result := AMasked[ALine][ACol + 1];
+  end;
+
+  function StepBack(var ALine, ACol: Integer): Boolean;
+  begin
+    Dec(ACol);
+    while ACol < 0 do
+    begin
+      Dec(ALine);
+      if ALine < 0 then Exit(False);
+      ACol := Length(AMasked[ALine]);        // the line break itself
+    end;
+    Result := True;
+  end;
+
+  function RawAt(ALine, ACol: Integer): Char;
+  begin
+    if (ALine < 0) or (ALine > High(ALines)) or (ACol < 0)
+      or (ACol >= Length(ALines[ALine])) then Exit(' ');
+    Result := ALines[ALine][ACol + 1];
+  end;
+
+  // The first / last position of the span, taken from the RAW line: a
+  // string literal is blank in the mask, so the mask cannot say where an
+  // expression that starts with one begins.
+  function SkipBlanksForward(var ALine, ACol: Integer; AStopL, AStopC: Integer): Boolean;
+  begin
+    while (ALine < AStopL) or ((ALine = AStopL) and (ACol <= AStopC)) do
+    begin
+      if not CharInSet(RawAt(ALine, ACol), [' ', #9]) then Exit(True);
+      Inc(ACol);
+      if ACol >= Length(ALines[ALine]) then
+      begin
+        Inc(ALine);
+        ACol := 0;
+      end;
+    end;
+    Result := False;
+  end;
+
+  function WordsAreClean: Boolean;
+  var
+    W: string;
+    D, I: Integer;
+  begin
+    Result := True;
+    W := '';
+    D := 0;
+    var Li := ASpan.StartLine;
+    var Co := ASpan.StartCol;
+    while (Li < ASpan.EndLine) or ((Li = ASpan.EndLine) and (Co <= ASpan.EndCol)) do
+    begin
+      var K := At(Li, Co);
+      if IsIdentChar(K) then W := W + K
+      else
+      begin
+        if W <> '' then
+        begin
+          if D = 0 then
+            for I := Low(Stoppers) to High(Stoppers) do
+              if SameText(W, Stoppers[I]) then
+              begin
+                AWhy := 'the expression contains "' + W + '" - a cast around '
+                  + 'all of it would change what it means';
+                Exit(False);
+              end;
+          W := '';
+        end;
+        if CharInSet(K, ['(', '[']) then Inc(D)
+        else if CharInSet(K, [')', ']']) then Dec(D);
+      end;
+      Inc(Co);
+      if Co > Length(AMasked[Li]) then
+      begin
+        Inc(Li);
+        Co := 0;
+      end;
+    end;
+    if (W <> '') and (D = 0) then
+      for I := Low(Stoppers) to High(Stoppers) do
+        if SameText(W, Stoppers[I]) then
+        begin
+          AWhy := 'the expression contains "' + W + '"';
+          Exit(False);
+        end;
+  end;
+
+begin
+  Result := False;
+  ASpan := Default(TStringCastSpan);
+  AWhy := '';
+  if Length(AMasked) <> Length(ALines) then
+  begin
+    AWhy := 'the masked copy does not belong to these lines';
+    Exit;
+  end;
+  if (ADiagLine < 0) or (ADiagLine > High(ALines)) then
+  begin
+    AWhy := 'the diagnostic names a line this unit does not have';
+    Exit;
+  end;
+
+  // The terminator is what the measurement says it is. A condition reports
+  // at its "then" / "do", and there the cast belongs around one operand -
+  // which the message does not identify, so those are not ours.
+  Ch := At(ADiagLine, ADiagCol);
+  if not CharInSet(Ch, [';', ')', ',']) then
+  begin
+    AWhy := 'the diagnostic does not point at the end of an expression this '
+      + 'fix can delimit (a condition reports at its "then" or "do", where '
+      + 'the cast would have to go around one operand)';
+    Exit;
+  end;
+
+  L := ADiagLine;
+  C := ADiagCol;
+  Depth := 0;
+  while True do
+  begin
+    if not StepBack(L, C) then
+    begin
+      AWhy := 'nothing bounds the expression in front of it';
+      Exit;
+    end;
+    Ch := At(L, C);
+    if CharInSet(Ch, [')', ']']) then Inc(Depth)
+    else if CharInSet(Ch, ['(', '[']) then
+    begin
+      if Depth = 0 then Break;                  // the list / paren opens here
+      Dec(Depth);
+    end
+    else if Depth > 0 then Continue             // inside brackets: anything
+    else if CharInSet(Ch, [';', ',']) then Break
+    else if Ch = '=' then
+    begin
+      // ':=' opens an assignment, a bare '=' is a comparison
+      var PL := L;
+      var PC := C;
+      // the boundary is the '=' itself - the span starts behind it, not
+      // behind the ':' (which would take the '=' into the expression)
+      if StepBack(PL, PC) and (At(PL, PC) = ':') then Break;
+      AWhy := 'the value is one side of a comparison - the cast belongs '
+        + 'around that operand, and the message does not say which one';
+      Exit;
+    end
+    else if IsIdentChar(Ch) or CharInSet(Ch, ['+', '.', '^', '#', '$', ' ', #9]) then
+      Continue
+    else
+    begin
+      AWhy := 'an operator this fix does not read as part of a string '
+        + 'expression: "' + Ch + '"';
+      Exit;
+    end;
+  end;
+
+  // (L, C) is the boundary - the span is what follows it, trimmed.
+  ASpan.StartLine := L;
+  ASpan.StartCol := C + 1;
+  if ASpan.StartCol > Length(ALines[L]) then
+  begin
+    ASpan.StartLine := L + 1;
+    ASpan.StartCol := 0;
+  end;
+  var EL := ADiagLine;
+  var EC := ADiagCol - 1;
+  while (EC < 0) or CharInSet(RawAt(EL, EC), [' ', #9]) do
+  begin
+    Dec(EC);
+    while EC < 0 do
+    begin
+      Dec(EL);
+      if (EL < 0) or (EL < ASpan.StartLine) then
+      begin
+        AWhy := 'the expression is empty';
+        Exit;
+      end;
+      EC := Length(ALines[EL]) - 1;
+    end;
+  end;
+  if not SkipBlanksForward(ASpan.StartLine, ASpan.StartCol, EL, EC) then
+  begin
+    AWhy := 'the expression is empty';
+    Exit;
+  end;
+  ASpan.EndLine := EL;
+  ASpan.EndCol := EC;
+  if (ASpan.EndLine < ASpan.StartLine)
+    or ((ASpan.EndLine = ASpan.StartLine) and (ASpan.EndCol < ASpan.StartCol)) then
+  begin
+    AWhy := 'the expression is empty';
+    Exit;
+  end;
+  if not WordsAreClean then Exit;
+  Result := True;
+end;
+
 function PlanQuickFixText(const AContent: string; const AFix: TQuickFix;
   AUnitChoice: Integer; out ANewContent: string): Boolean;
 var
@@ -4005,6 +4323,30 @@ begin
         Lines[AFix.Line] := Copy(RL, 1, SemiP) + ' reintroduce;' +
           Copy(RL, SemiP + 1, MaxInt);
       end;
+    qfStringCast:
+      begin
+        // The span is RE-DERIVED from the diagnostic against the buffer as
+        // it is NOW, never stored: a line that moved cannot make this write
+        // somewhere else, and a shape that no longer fits simply refuses.
+        if AFix.NewText = '' then Exit;
+        var Span: TStringCastSpan;
+        var Why: string;
+        if not PlanStringCastSpan(Lines, MaskCommentsAndStrings(Lines),
+          AFix.DiagLine, AFix.DiagCol, Span, Why) then Exit;
+        // the closing paren FIRST: on one line it sits behind the start, so
+        // the start position stays valid either way
+        var EL := Lines[Span.EndLine];
+        if Span.EndCol + 1 > Length(EL) then Exit;
+        Lines[Span.EndLine] := Copy(EL, 1, Span.EndCol + 1) + ')'
+          + Copy(EL, Span.EndCol + 2, MaxInt);
+        var SL := Lines[Span.StartLine];
+        if Span.StartCol > Length(SL) then Exit;
+        Lines[Span.StartLine] := Copy(SL, 1, Span.StartCol) + AFix.NewText
+          + '(' + Copy(SL, Span.StartCol + 1, MaxInt);
+        ANewContent := Joined;
+        Result := True;
+        Exit;
+      end;
     qfDeclareVar, qfDeclareInlineVar:
       begin
         if (AFix.Line < 0) or (AFix.Line > High(Lines)) then Exit;
@@ -4079,7 +4421,7 @@ const
   // everything PlanQuickFixText can express as text - one read, one write
   PlannedFixKinds = [qfRenameIdent, qfFixUsesName, qfInsertSemi, qfInitVar,
     qfRemoveAssign, qfRemoveToken, qfRemoveVar, qfAddReintroduce,
-    qfDeclareVar, qfDeclareInlineVar, qfAlignDeclToImpl];
+    qfDeclareVar, qfDeclareInlineVar, qfAlignDeclToImpl, qfStringCast];
 
 function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
   AUnitChoice: Integer): Boolean;
@@ -4148,7 +4490,7 @@ const
     'Remove dead assignment', 'Add reintroduce', 'Create implementation stub',
     'Create class stub', 'Remove stray token', 'Remove unused private member',
     'Declare variable', 'Declare inline variable', 'Implement interface method',
-    'Align declaration with implementation');
+    'Align declaration with implementation', 'Make the string cast explicit');
 begin
   Result := Texts[AKind];
 end;
@@ -5328,9 +5670,10 @@ end;
 
 function IsHandledDiagCode(const ACode: string): Boolean;
 const
-  Handled: array[0..13] of string = (
+  Handled: array[0..14] of string = (
     'E2003', 'F2613', 'F2063', 'E2037', 'H2443', 'H2164',
-    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065', 'H2219', 'E2291');
+    'E2029', 'E2066', 'W1036', 'H2077', 'W1010', 'E2065', 'H2219', 'E2291',
+    'W1058');
 begin
   Result := False;
   for var C in Handled do

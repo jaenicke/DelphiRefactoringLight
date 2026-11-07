@@ -6,6 +6,20 @@ development builds and were never released.
 
 ---
 
+## 2.20.1 - 2026-11-07
+
+**The new quick fix was shown and could not be picked.** The hint marked
+the line, the popup opened - and listed nothing. Its rows came from a case
+over every fix kind with no `else`, and the kind added in 2.20.0 was the
+one it did not name.
+
+The rows are built from a rule now instead of an enumeration: a kind with
+no special caption answers with the one its provider wrote, which is what
+every provider fills in anyway. A test walks the whole enum, so the next
+kind cannot repeat this.
+
+---
+
 ## 2.20.0 - 2026-11-07
 
 **A quick fix for W1058: make the implicit string cast explicit.** Where

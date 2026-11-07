@@ -199,6 +199,21 @@ function ApplyQuickFix(const AFile: string; const AFix: TQuickFix;
 ///  2026-09-24). False when the kind generates code from elsewhere in the
 ///  file (implementation stub, interface method, align header) or when the
 ///  buffer no longer matches what the fix was resolved for.</summary>
+/// <summary>How many rows one fix contributes to the quick-fix popup:
+///  one per candidate unit for an add-unit fix, one for every other kind.
+///  NEVER zero for a kind that carries a caption - a fix the resolver
+///  produced has to be offerable, and a popup that lists nothing is what a
+///  missing case branch looked like: the hint said a fix was there and the
+///  list was empty (reported with a screenshot, 2.20.1).</summary>
+function QuickFixActionCount(const AFix: TQuickFix): Integer;
+
+/// <summary>The text of ONE row of the quick-fix popup. AUNITCHOICE picks
+///  the candidate unit of an add-unit fix and is -1 for every other kind;
+///  those answer with the caption the RESOLVER wrote, which is why a new
+///  kind needs nothing here.</summary>
+function QuickFixActionCaption(const AFix: TQuickFix; AUnitChoice: Integer;
+  ASection: TUsesSection): string;
+
 /// <summary>The type a W1058/W1057 says the value was converted TO: the
 ///  LAST quoted name of the message, which is where the German ("von 'X'
 ///  zu 'Y'") and the English ("from 'X' to 'Y'") wording both put it - so
@@ -3917,6 +3932,42 @@ begin
   Result := CharInSet(T[1], ['A'..'Z', 'a'..'z', '_']);
 end;
 
+function QuickFixActionCount(const AFix: TQuickFix): Integer;
+begin
+  if AFix.Kind = qfAddUnit then Result := Length(AFix.UnitNames)
+  else Result := 1;
+end;
+
+function QuickFixActionCaption(const AFix: TQuickFix; AUnitChoice: Integer;
+  ASection: TUsesSection): string;
+begin
+  case AFix.Kind of
+    qfAddUnit:
+      if (AUnitChoice >= 0) and (AUnitChoice <= High(AFix.UnitNames)) then
+        Result := Format('Add %s to %s uses',
+          [AFix.UnitNames[AUnitChoice], SectionName(ASection)])
+      else
+        Result := '';
+    qfRenameIdent:
+      begin
+        Result := Format('Change to "%s"', [AFix.NewText]);
+        if AFix.FollowUpUnit <> '' then
+          Result := Result + Format('  (+ uses %s)', [AFix.FollowUpUnit]);
+      end;
+    qfFixUsesName: Result := Format('Change unit name to "%s"', [AFix.NewText]);
+    qfRemoveUses: Result := Format('Remove "%s" from uses', [AFix.OldUnit]);
+    qfRemoveVar: Result := Format('Remove unused variable "%s"', [AFix.Identifier]);
+    qfAlignHeader, qfAlignDeclToImpl:
+      if AFix.Caption <> '' then Result := AFix.Caption
+      else Result := 'Align implementation header with declaration';
+  else
+    // Every other kind carries an action-ready caption from the resolver -
+    // and this is the ELSE on purpose: with a list of kinds here, the next
+    // one added anywhere else in this unit silently gets no row.
+    Result := AFix.Caption;
+  end;
+end;
+
 function StringCastTargetType(const AMessage: string): string;
 var
   I, E: Integer;
@@ -3944,6 +3995,10 @@ const
   // Letter operators and context keywords: a string expression contains
   // none of them, so one at depth 0 means the walk crossed a boundary it
   // cannot see as a character.
+  // How far back the walk may look for the boundary. The reported case
+  // spans five lines; this is a bound against a position that makes no
+  // sense, not a limit anybody meets.
+  MaxCastSpanLines = 200;
   Stoppers: array[0..17] of string = ('AND', 'OR', 'NOT', 'XOR', 'DIV',
     'MOD', 'SHL', 'SHR', 'IN', 'IS', 'AS', 'THEN', 'DO', 'ELSE', 'BEGIN',
     'OF', 'TO', 'DOWNTO');
@@ -4080,6 +4135,14 @@ begin
     if not StepBack(L, C) then
     begin
       AWhy := 'nothing bounds the expression in front of it';
+      Exit;
+    end;
+    // An expression this long is no longer one somebody wants wrapped in a
+    // cast, and an odd position must not walk a whole unit backwards.
+    if ADiagLine - L > MaxCastSpanLines then
+    begin
+      AWhy := Format('no boundary within %d lines before it',
+        [MaxCastSpanLines]);
       Exit;
     end;
     Ch := At(L, C);
@@ -4773,73 +4836,14 @@ begin
   try
     FList.Items.Clear;
     for I := 0 to High(FFixes) do
-      case FFixes[I].Kind of
-        qfAddUnit:
-          for U := 0 to High(FFixes[I].UnitNames) do
-          begin
-            A.Caption := Format('Add %s to %s uses',
-              [FFixes[I].UnitNames[U], SectionName(FSection)]);
-            A.FixIdx := I;
-            A.UnitChoice := U;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfRenameIdent:
-          begin
-            A.Caption := Format('Change to "%s"', [FFixes[I].NewText]);
-            if FFixes[I].FollowUpUnit <> '' then
-              A.Caption := A.Caption + Format('  (+ uses %s)', [FFixes[I].FollowUpUnit]);
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfFixUsesName:
-          begin
-            A.Caption := Format('Change unit name to "%s"', [FFixes[I].NewText]);
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfRemoveUses:
-          begin
-            A.Caption := Format('Remove "%s" from uses', [FFixes[I].OldUnit]);
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfAlignHeader, qfAlignDeclToImpl:
-          begin
-            if FFixes[I].Caption <> '' then
-              A.Caption := FFixes[I].Caption
-            else
-              A.Caption := 'Align implementation header with declaration';
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfRemoveVar:
-          begin
-            A.Caption := Format('Remove unused variable "%s"', [FFixes[I].Identifier]);
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
-        qfInsertSemi, qfInitVar, qfRemoveAssign, qfAddReintroduce,
-        qfImplStub, qfClassStub, qfRemoveToken, qfRemovePrivate,
-        qfDeclareVar, qfDeclareInlineVar, qfImplIntfMethod:
-          begin
-            // These carry an action-ready caption from the resolver.
-            A.Caption := FFixes[I].Caption;
-            A.FixIdx := I;
-            A.UnitChoice := -1;
-            FActions := FActions + [A];
-            FList.Items.Add(A.Caption);
-          end;
+      for U := 0 to QuickFixActionCount(FFixes[I]) - 1 do
+      begin
+        if FFixes[I].Kind = qfAddUnit then A.UnitChoice := U
+        else A.UnitChoice := -1;
+        A.Caption := QuickFixActionCaption(FFixes[I], A.UnitChoice, FSection);
+        A.FixIdx := I;
+        FActions := FActions + [A];
+        FList.Items.Add(A.Caption);
       end;
   finally
     FList.Items.EndUpdate;

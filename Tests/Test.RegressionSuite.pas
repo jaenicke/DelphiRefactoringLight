@@ -731,6 +731,12 @@ type
   public
     [Test] procedure TheSpanIsDelimitedFromTheTokenAfterIt;
     [Test] procedure TheCastIsWrittenAroundTheWholeExpression;
+    /// <summary>Reported with a screenshot: the hint said a quick fix was
+    ///  there and the popup listed NOTHING. Its rows came from a case over
+    ///  every kind with no else, so the kind added last fell through in
+    ///  silence. The rule is exhaustive now - and this walks the whole
+    ///  enum, so the next kind cannot repeat it.</summary>
+    [Test] procedure EveryFixKindBecomesARowInThePopup;
   end;
 
   /// <summary>Since L3c resolves $(DXVCL), the DFM check reads DevExpress's
@@ -9094,6 +9100,54 @@ begin
   Result.Range.Start.Line := ALine0;
   Result.Range.Start.Character := ACol0;
   Result.Range.End_ := Result.Range.Start;
+end;
+
+procedure TStringCastFixTests.EveryFixKindBecomesARowInThePopup;
+var
+  F: TQuickFix;
+  K: TQuickFixKind;
+  U, N: Integer;
+begin
+  for K := Low(TQuickFixKind) to High(TQuickFixKind) do
+  begin
+    F := Default(TQuickFix);
+    F.Kind := K;
+    // what EVERY provider fills in: the fields the special captions read,
+    // and the caption the resolver writes for all the others
+    F.Caption := 'what the resolver wrote';
+    F.NewText := 'NewName';
+    F.Identifier := 'Ident';
+    F.OldUnit := 'Old.Unit';
+    F.UnitNames := ['Some.Unit'];
+    N := QuickFixActionCount(F);
+    Assert.IsTrue(N >= 1, 'every kind contributes a row: '
+      + QuickFixKindText(K));
+    for U := 0 to N - 1 do
+    begin
+      if K = qfAddUnit then
+        Assert.AreNotEqual('', QuickFixActionCaption(F, U, usInterface),
+          'the row of ' + QuickFixKindText(K) + ' has a text')
+      else
+        Assert.AreNotEqual('', QuickFixActionCaption(F, -1, usInterface),
+          'the row of ' + QuickFixKindText(K) + ' has a text');
+    end;
+  end;
+
+  // one row per candidate unit, and the section is named
+  F := Default(TQuickFix);
+  F.Kind := qfAddUnit;
+  F.UnitNames := ['A.Unit', 'B.Unit'];
+  Assert.AreEqual(2, QuickFixActionCount(F), 'one row per candidate');
+  Assert.AreEqual('Add B.Unit to implementation uses',
+    QuickFixActionCaption(F, 1, usImplementation), 'the second candidate');
+
+  // The reported case: a kind with no branch of its own answers with the
+  // caption its provider wrote.
+  F := Default(TQuickFix);
+  F.Kind := qfStringCast;
+  F.Caption := 'Cast to AnsiString (explicit - the possible data loss stays)';
+  Assert.AreEqual(F.Caption, QuickFixActionCaption(F, -1, usInterface),
+    'the reported case: the popup offers what the resolver wrote');
 end;
 
 procedure TStringCastFixTests.TheSpanIsDelimitedFromTheTokenAfterIt;

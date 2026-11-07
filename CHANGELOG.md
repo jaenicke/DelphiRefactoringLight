@@ -6,6 +6,25 @@ development builds and were never released.
 
 ---
 
+## 2.19.3 - 2026-11-07
+
+**The hidden result parameter is not in the same place on both
+platforms.** 2.19.2 fixed the 32-bit ABI of the buffer getter after
+measuring it; the 64-bit binary was not measured, and it answers
+differently: x86 appends a managed result after the declared arguments,
+x64 passes it in RDX - before them. So the indexed getters are declared
+per bitness now, which also corrects a string getter that has had the
+wrong order on the 64-bit IDE all along.
+
+Measured in both shipped binaries rather than reasoned from one: a getter
+WITHOUT declared arguments has the same shape on both, an indexed one does
+not. A repository test keeps the two branches apart, because merging them
+would pass an index where a result pointer belongs - on x86 a write
+through a wild address, which is what cost this reader its first three
+versions.
+
+---
+
 ## 2.19.2 - 2026-11-07
 
 **The Messages reader reads again - and it was writing through a wild

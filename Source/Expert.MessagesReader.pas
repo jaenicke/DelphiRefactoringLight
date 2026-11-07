@@ -265,21 +265,42 @@ type
   // right for it (and NOT for TLineBufferList.GetItem, below).
   TItemGetter = function(Self: Pointer; AIndex: Integer): Pointer; register;
   // function GetItem(AIndex: Integer): <interface> - MEASURED in the
-  // binary: the body stores ECX into a local and ends in a typeinfo-driven
-  // assignment helper through it, and its sibling GetName clears that local
-  // with System.@IntfClear. So the result is a MANAGED one, returned
-  // through a hidden var parameter appended after the declared arguments.
-  // Declaring it as a Pointer result left ECX holding whatever the caller
-  // happened to have there, and the callee assigned THROUGH it: a write to
-  // a wild address, four times per walk, which the except swallowed.
+  // binary: the body stores the result slot into a local and ends in a
+  // typeinfo-driven assignment helper through it, and its sibling GetName
+  // clears such a local with System.@IntfClear. So the result is a MANAGED
+  // one and goes through the hidden parameter above.
+  // Declaring it as a Pointer result left that slot holding whatever the
+  // caller happened to have there, and the callee assigned THROUGH it:
+  // on x86 a write to a wild address (the real corruption risk), on x64 a
+  // write at the index itself, 0..3, which simply faults. Four times per
+  // walk, and the except swallowed both.
+{$IFDEF WIN64}
+  TIntfAtGetter = procedure(Self: Pointer; var ARes: IInterface;
+    AIndex: Integer); register;
+{$ELSE}
   TIntfAtGetter = procedure(Self: Pointer; AIndex: Integer;
     var ARes: IInterface); register;
+{$ENDIF}
+  // A MANAGED result (string, interface) is returned through a hidden
+  // parameter, and WHICH slot that is differs per platform - MEASURED in
+  // both shipped binaries, because this is the one thing that must not be
+  // reasoned about:
+  //   x86  EAX = Self, then the declared arguments, the hidden result LAST
+  //        (GetName: mov [ebp-4],ecx / mov esi,edx / mov ebx,eax)
+  //   x64  RCX = Self, RDX = the hidden result, the declared arguments from
+  //        R8 on (GetGroupName dereferences RCX: mov rdx,[rcx+50h], and
+  //        GetName/GetItem home RCX and RDX as pointers but R8 as a 32-BIT
+  //        value, which is what identifies the index)
+  // So a getter WITHOUT declared arguments has the same shape on both and
+  // an INDEXED one does not.
   TStrGetter = procedure(Self: Pointer; var ARes: string); register;
-  // function GetName(AIndex: Integer): string - the hidden result
-  // parameter is appended AFTER the declared ones, so register puts
-  // Self, AIndex, Result in that order.
+{$IFDEF WIN64}
+  TStrAtGetter = procedure(Self: Pointer; var ARes: string;
+    AIndex: Integer); register;
+{$ELSE}
   TStrAtGetter = procedure(Self: Pointer; AIndex: Integer;
     var ARes: string); register;
+{$ENDIF}
 
 function Sym(const AName: string): Pointer;
 var
@@ -345,7 +366,11 @@ begin
   P := Sym(ASym);
   if (P = nil) or (AObj = nil) then Exit;
   try
+  {$IFDEF WIN64}
+    TStrAtGetter(P)(AObj, Result, AIndex);
+  {$ELSE}
     TStrAtGetter(P)(AObj, AIndex, Result);
+  {$ENDIF}
   except
     Result := '';
   end;
@@ -420,7 +445,11 @@ begin
     P := Sym(ASym);
     if P <> nil then
       try
+      {$IFDEF WIN64}
+        TIntfAtGetter(P)(AObj, AIntf, AIndex);
+      {$ELSE}
         TIntfAtGetter(P)(AObj, AIndex, AIntf);
+      {$ENDIF}
         if AIntf <> nil then ARoute := 'export';
       except
         AIntf := nil;

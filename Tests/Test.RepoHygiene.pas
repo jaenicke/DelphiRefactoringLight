@@ -150,6 +150,16 @@ type
     ///  "bin64<BS>ds.exe" where it meant bin64\bds.exe. Nothing a user
     ///  reads may carry such a byte, and nothing but this notices.</summary>
     [Test] procedure NoShippedFileCarriesAControlCharacter;
+    /// <summary>The Messages reader calls IDE methods through raw exported
+    ///  addresses, and a MANAGED result travels in a hidden parameter whose
+    ///  SLOT differs per platform - measured in both shipped binaries:
+    ///  x86 appends it after the declared arguments, x64 puts it in RDX,
+    ///  i.e. BEFORE them. So the indexed getters must be declared per
+    ///  bitness, and merging the two branches would silently pass an index
+    ///  where a result pointer belongs: on x86 a write through a wild
+    ///  address, which is what cost the reader its first three
+    ///  versions.</summary>
+    [Test] procedure TheHiddenResultSlotIsDeclaredPerBitness;
   end;
 
 implementation
@@ -1079,6 +1089,40 @@ begin
   finally
     Offenders.Free;
   end;
+end;
+
+procedure TRepoHygieneTests.TheHiddenResultSlotIsDeclaredPerBitness;
+begin
+  var F := TPath.Combine(RepoRoot, 'Source\Expert.MessagesReader.pas');
+  Assert.IsTrue(TFile.Exists(F), 'the messages reader is there: ' + F);
+  var S := TFile.ReadAllText(F).Replace(#13, '', [rfReplaceAll]);
+
+  // Both indexed managed getters, both branches, and the orders must
+  // DIFFER - that difference IS the measurement.
+  for var Decl in ['TStrAtGetter', 'TIntfAtGetter'] do
+  begin
+    var I := S.IndexOf('{$IFDEF WIN64}'#10'  ' + Decl);
+    Assert.IsTrue(I > 0, Decl + ' is declared inside a {$IFDEF WIN64}, '
+      + 'because its hidden result slot is not the same on both platforms');
+    var J := S.IndexOf('{$ELSE}', I);
+    var K := S.IndexOf('{$ENDIF}', J);
+    Assert.IsTrue((J > I) and (K > J), Decl + ' has both branches');
+    var Win64 := S.Substring(I, J - I);
+    var Win32 := S.Substring(J, K - J);
+    // x64: the result BEFORE the index. x86: after it.
+    Assert.IsTrue(Win64.IndexOf('var ARes') < Win64.IndexOf('AIndex'),
+      Decl + ' on x64: the hidden result comes BEFORE the index (RDX)');
+    Assert.IsTrue(Win32.IndexOf('AIndex') < Win32.IndexOf('var ARes'),
+      Decl + ' on x86: the hidden result is appended AFTER the index');
+  end;
+
+  // And the call sites have to follow, or the declaration is decoration.
+  Assert.IsTrue(S.Contains('TStrAtGetter(P)(AObj, Result, AIndex)')
+    and S.Contains('TStrAtGetter(P)(AObj, AIndex, Result)'),
+    'the string getter is CALLED in both orders');
+  Assert.IsTrue(S.Contains('TIntfAtGetter(P)(AObj, AIntf, AIndex)')
+    and S.Contains('TIntfAtGetter(P)(AObj, AIndex, AIntf)'),
+    'the interface getter is CALLED in both orders');
 end;
 
 initialization

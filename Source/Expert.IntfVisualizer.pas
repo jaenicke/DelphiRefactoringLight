@@ -196,12 +196,44 @@ function ResolveInterfaceReference(AReference: UInt64;
   const ARead: TDebugMemReader;
   AMaxOffset: Integer = MaxIntfFieldOffset): TIntfRefResolution;
 
+/// <summary>A reader for OUR OWN process, guarded by VirtualQuery. It must
+///  be guarded: the resolver walks the addresses before a reference looking
+///  for the object, so it WILL ask for memory that is not ours - an
+///  unreadable address is a normal answer here, never an exception, which
+///  is exactly how the debugger's own ReadProcessMemory behaves. Used by
+///  the tests and by whatever has an interface reference in hand and wants
+///  the object behind it.</summary>
+function OwnProcessReader: TDebugMemReader;
+
 implementation
 
 uses
   // The declaration lookup the viewer's jump needs - both are pure and
   // neither pulls ToolsAPI, so this unit stays in the DUnitX project.
-  Expert.PascalScanner, Expert.UnitIndex;
+  Winapi.Windows, Expert.PascalScanner, Expert.UnitIndex;
+
+function OwnProcessReader: TDebugMemReader;
+begin
+  Result :=
+    function (AAddress: UInt64; ACount: Integer; ABuffer: Pointer): Boolean
+    var
+      Info: TMemoryBasicInformation;
+      Last: UInt64;
+    begin
+      Result := False;
+      if (AAddress = 0) or (ACount <= 0) or (ABuffer = nil) then Exit;
+      if AAddress > High(NativeUInt) - UInt64(ACount) then Exit;
+      if VirtualQuery(Pointer(NativeUInt(AAddress)), Info,
+        SizeOf(Info)) <> SizeOf(Info) then Exit;
+      if Info.State <> MEM_COMMIT then Exit;
+      if (Info.Protect and (PAGE_NOACCESS or PAGE_GUARD)) <> 0 then Exit;
+      // the read must not leave the region VirtualQuery just described
+      Last := UInt64(NativeUInt(Info.BaseAddress)) + Info.RegionSize;
+      if AAddress + UInt64(ACount) > Last then Exit;
+      Move(Pointer(NativeUInt(AAddress))^, ABuffer^, ACount);
+      Result := True;
+    end;
+end;
 
 procedure VmtOffsets(APointerSize: Integer; out ASelfPtr, AIntfTable,
   ATypeInfo, AClassName, AInstanceSize, AParent: Integer);

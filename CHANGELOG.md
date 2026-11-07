@@ -6,6 +6,31 @@ development builds and were never released.
 
 ---
 
+## 2.19.2 - 2026-11-07
+
+**The Messages reader reads again - and it was writing through a wild
+pointer.** 2.19.1 made the reader say what it saw, and on the first
+measurement it said it: four message buffers found, four unreadable. The
+instrumentation did its job, and what it pointed at is worse than a failed
+read.
+
+`TLineBufferList.GetItem` was called as if it returned a plain pointer in
+EAX. Measured in the IDE's own binary, it returns a MANAGED value - an
+interface - through a hidden result pointer in ECX, and its sibling clears
+exactly such a local with `System.@IntfClear`. So every call handed the
+callee whatever happened to be in ECX as the destination of an interface
+assignment, four times per walk. The access violation that followed was the
+lucky outcome; our `except` swallowed it, which is why this stayed
+invisible.
+
+The ABI is now the measured one, the object behind the interface is found
+with the plugin's own interface resolver - which NAMES the class, so the
+step proves itself instead of assuming - and the trace says which route
+answered. Every other getter of the chain was measured too: `GetItem` was
+the only wrong one.
+
+---
+
 ## 2.19.1 - 2026-11-05
 
 **The compiler's messages reach every file, and the reader says what it

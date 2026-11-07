@@ -97,8 +97,11 @@ implementation
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Rtti,
-  System.Character, System.Generics.Collections,
-  Winapi.Windows, Vcl.Forms, Vcl.Controls, ToolsAPI;
+  System.Character, System.Generics.Collections, System.TypInfo,
+  Winapi.Windows, Vcl.Forms, Vcl.Controls, ToolsAPI,
+  // The buffer list hands out interfaces; this is what finds the object
+  // behind one, and its guarded in-process reader.
+  Expert.IntfVisualizer;
 
 // The two IDEs mangle their exports COMPLETELY differently (measured on
 // the 64-bit IDE, which reported "export @Msglines@LineBufferList not
@@ -257,7 +260,20 @@ end;
 
 type
   TIntGetter = function(Self: Pointer): Integer; register;
+  // MEASURED: TLineBuffer.GetLines returns its result in EAX - no stack
+  // frame, no third register argument, one direct call. So this shape is
+  // right for it (and NOT for TLineBufferList.GetItem, below).
   TItemGetter = function(Self: Pointer; AIndex: Integer): Pointer; register;
+  // function GetItem(AIndex: Integer): <interface> - MEASURED in the
+  // binary: the body stores ECX into a local and ends in a typeinfo-driven
+  // assignment helper through it, and its sibling GetName clears that local
+  // with System.@IntfClear. So the result is a MANAGED one, returned
+  // through a hidden var parameter appended after the declared arguments.
+  // Declaring it as a Pointer result left ECX holding whatever the caller
+  // happened to have there, and the callee assigned THROUGH it: a write to
+  // a wild address, four times per walk, which the except swallowed.
+  TIntfAtGetter = procedure(Self: Pointer; AIndex: Integer;
+    var ARes: IInterface); register;
   TStrGetter = procedure(Self: Pointer; var ARes: string); register;
   // function GetName(AIndex: Integer): string - the hidden result
   // parameter is appended AFTER the declared ones, so register puts
@@ -363,6 +379,97 @@ function GetObjOf(AObj: TObject; const AMethod, ASym: string;
 begin
   Result := CallObj(AObj, AMethod, AIndex);
   if Result = nil then Result := ExpItem(AObj, ASym, AIndex);
+end;
+
+// An indexed getter whose result is an INTERFACE. RTTI first and by
+// preference: it knows the signature, so the hidden result parameter is
+// none of our business there. The export is the fallback, with the ABI
+// measured in the binary rather than assumed.
+function GetIntfAt(AObj: TObject; const AMethod, ASym: string;
+  AIndex: Integer; out AIntf: IInterface; out ARoute: string): Boolean;
+var
+  Ctx: TRttiContext;
+  T: TRttiType;
+  M: TRttiMethod;
+  V: TValue;
+  P: Pointer;
+begin
+  AIntf := nil;
+  ARoute := '';
+  if AObj = nil then Exit(False);
+  try
+    T := Ctx.GetType(AObj.ClassType);
+    if T <> nil then
+    begin
+      M := T.GetMethod(AMethod);
+      if M <> nil then
+      begin
+        V := M.Invoke(AObj, [AIndex]);
+        if V.Kind = tkInterface then
+        begin
+          AIntf := V.AsInterface;
+          ARoute := 'rtti';
+        end;
+      end;
+    end;
+  except
+    AIntf := nil;
+  end;
+  if AIntf = nil then
+  begin
+    P := Sym(ASym);
+    if P <> nil then
+      try
+        TIntfAtGetter(P)(AObj, AIndex, AIntf);
+        if AIntf <> nil then ARoute := 'export';
+      except
+        AIntf := nil;
+      end;
+  end;
+  Result := AIntf <> nil;
+end;
+
+// One buffer of the window. The list holds INTERFACES, so the object has
+// to be found behind the reference - which is what our own resolver does,
+// and it NAMES the class, so this step proves itself instead of assuming
+// it. ANOTE says what happened either way: the exported getters below are
+// TLineBuffer's and read its fields at fixed offsets, so a reference that
+// leads anywhere else is reported rather than read.
+// AINTF goes OUT and must be held by the caller for as long as it uses the
+// object: the address was found behind that reference, and dropping the
+// last reference to it may be what frees the object.
+function BufferAt(AList: TObject; AIndex: Integer; out AIntf: IInterface;
+  out ANote: string): TObject;
+var
+  Route: string;
+  Res: TIntfRefResolution;
+  L: TIntfClassLevel;
+  Known: Boolean;
+begin
+  Result := nil;
+  if not GetIntfAt(AList, 'GetItem', SymListItem, AIndex, AIntf, Route) then
+  begin
+    ANote := 'no item (neither RTTI nor ' + SymListItem + ')';
+    Exit;
+  end;
+  Res := ResolveInterfaceReference(UInt64(NativeUInt(Pointer(AIntf))),
+    OwnProcessReader());
+  if (not Res.Resolved) or (Length(Res.Levels) = 0) then
+  begin
+    ANote := Route + ', but no object behind it: ' + Res.Reason;
+    Exit;
+  end;
+  Known := False;
+  for L in Res.Levels do
+    if SameText(L.ClassName, 'TLineBuffer') then Known := True;
+  if not Known then
+  begin
+    ANote := Route + ' -> ' + Res.Levels[0].ClassName
+      + ', which is no TLineBuffer';
+    Exit;
+  end;
+  ANote := Res.Levels[0].ClassName;
+  Result := TObject(Pointer(NativeUInt(Res.ObjectAddr)));
 end;
 
 function LineText(AObj: TObject): string;
@@ -522,8 +629,9 @@ end;
 function WalkMessageLines(const AVisit: TLineVisitor): Integer;
 var
   List, Buf, Ln: TObject;
+  BufIntf: IInterface;
   Bufs, Lines, Reported, Unreadable, NoLine, I, J: Integer;
-  Detail: string;
+  Detail, Note: string;
 begin
   Result := 0;
   GProblem := '';
@@ -548,19 +656,26 @@ begin
   Detail := '';
   for I := 0 to Bufs - 1 do
   begin
-    Buf := GetObjOf(List, 'GetItem', SymListItem, I);
+    if Detail <> '' then Detail := Detail + ', ';
+    // BufIntf keeps the buffer alive while this iteration reads it; the
+    // previous one is released here, when nothing uses it any more.
+    Buf := BufferAt(List, I, BufIntf, Note);
     if Buf = nil then
     begin
       Inc(Unreadable);
+      // The NAME is a method of the LIST, so it answers even when the
+      // buffer behind that index does not - which is what tells "the Build
+      // tab is there and I cannot read it" from "there is no Build tab".
+      Detail := Detail + BufferLabel(List, nil, I) + ': ' + Note;
       Continue;
     end;
     if not GetIntOf(Buf, 'GetCount', SymBufCount, Lines) then
     begin
       Inc(Unreadable);
+      Detail := Detail + BufferLabel(List, Buf, I) + ': no count';
       Continue;
     end;
     Inc(Reported, Lines);
-    if Detail <> '' then Detail := Detail + ', ';
     Detail := Detail + BufferLabel(List, Buf, I) + '=' + IntToStr(Lines);
     for J := 0 to Lines - 1 do
     begin

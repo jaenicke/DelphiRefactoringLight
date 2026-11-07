@@ -103,33 +103,10 @@ procedure TVisBase.One; begin end;
 procedure TVisMiddle.Two; begin end;
 procedure TVisLeaf.Three; begin end;
 
-{ A reader for this process. It must be GUARDED: the resolver walks
-  addresses before the reference looking for the object, so it will ask for
-  memory that is not ours. An unreadable address is a normal answer here,
-  never an exception - which is exactly how the debugger's own
-  ReadProcessMemory behaves. }
-function OwnProcessReader: TDebugMemReader;
-begin
-  Result :=
-    function (AAddress: UInt64; ACount: Integer; ABuffer: Pointer): Boolean
-    var
-      Info: TMemoryBasicInformation;
-      Last: UInt64;
-    begin
-      Result := False;
-      if (AAddress = 0) or (ACount <= 0) or (ABuffer = nil) then Exit;
-      if AAddress > High(NativeUInt) - UInt64(ACount) then Exit;
-      if VirtualQuery(Pointer(NativeUInt(AAddress)), Info,
-        SizeOf(Info)) <> SizeOf(Info) then Exit;
-      if Info.State <> MEM_COMMIT then Exit;
-      if (Info.Protect and (PAGE_NOACCESS or PAGE_GUARD)) <> 0 then Exit;
-      // the read must not leave the region VirtualQuery just described
-      Last := UInt64(NativeUInt(Info.BaseAddress)) + Info.RegionSize;
-      if AAddress + UInt64(ACount) > Last then Exit;
-      Move(Pointer(NativeUInt(AAddress))^, ABuffer^, ACount);
-      Result := True;
-    end;
-end;
+{ The reader for this process lives in the production unit now
+  (Expert.IntfVisualizer.OwnProcessReader) - the messages reader needs the
+  same one, and two copies of a guarded read is how they drift apart. These
+  four resolutions are therefore also the test for it. }
 
 function LevelNamed(const ARes: TIntfRefResolution;
   const AClass: string): Integer;

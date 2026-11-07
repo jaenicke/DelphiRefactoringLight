@@ -8,15 +8,116 @@ development builds and were never released.
 
 ## 2.20.1 - 2026-11-07
 
-**The new quick fix was shown and could not be picked.** The hint marked
-the line, the popup opened - and listed nothing. Its rows came from a case
-over every fix kind with no `else`, and the kind added in 2.20.0 was the
-one it did not name.
+The first release since 2.11.1, so it carries everything from 2.12.0 on.
+The notes below cover the whole span; the per-version entries are in
+[CHANGELOG.md](https://github.com/jaenicke/DelphiRefactoringLight/blob/2.20.1/CHANGELOG.md).
 
-The rows are built from a rule now instead of an enumeration: a kind with
-no special caption answers with the one its provider wrote, which is what
-every provider fills in anyway. A test walks the whole enum, so the next
-kind cannot repeat this.
+Note: The binaries are for Delphi 13.2.
+
+**What is new since 2.11.1**
+
+- **A debug visualizer for interface references**: while debugging, it
+  resolves a reference to the object behind it and shows the class
+  hierarchy with the interfaces each level implements - the names read
+  straight out of the RTTI bytes. Two surfaces, both switchable: a viewer
+  window (on by default) and a one-line replacement in watches and
+  tooltips (off by default). A double-click or the button jumps to the
+  declaration.
+- **A quick fix for W1058** ("implicit string cast with potential data
+  loss"): it writes the conversion the compiler was doing silently into
+  the code, which is what silences the warning. The caption says what it
+  does NOT do - the possible data loss stays.
+- **The compiler's own messages really arrive now.** The reader for the
+  Messages window had never read a line since it shipped in September: it
+  called an IDE getter with the wrong calling convention and wrote through
+  an uninitialised pointer. And every file a build names is fed into the
+  diagnostics, not only the one on top.
+- **The identifier index covers every project of a project group**, and a
+  unit name two projects share is resolved for the file that asks.
+- **"Declare variable" is offered again** where the identifier also occurs
+  inside a string somewhere above - and now as a normal local variable
+  WITH its type, not only as an inferred inline one.
+- **Rename can be confirmed with Enter** (issue #56, stepand76): Enter for
+  the preview, Enter again to apply it.
+- **New MCP tool `compile`**: the IDE's own build with the compiler's
+  messages - the authority on whether an edit broke a unit. And a project
+  check now says how much it LOOKED at, so "nothing found" can no longer
+  be confused with "nothing examined".
+- **"Find original symbol" on `inherited X`** resolves through the
+  ancestor instead of asking the identifier index about the bare name.
+
+### The debug visualizer for interface references
+
+An interface reference tells the debugger almost nothing: it points at a
+vtable, and which class is behind it is what one wants to know. The
+visualizer finds the object (the reference minus the entry's offset,
+proven by the class's own VMT), walks the hierarchy and lists the
+interfaces each level declares, with their GUIDs and offsets and a mark on
+the entry the reference really points at. A reference it cannot prove -
+a delegating implementation, a COM object, a stale pointer - says so
+instead of guessing.
+
+Where the bytes cannot decide, the window says that too: one vtable can
+satisfy an interface and a descendant of it, and then every name that slot
+serves is listed rather than one of them picked.
+
+### The compiler's own messages
+
+A W1058 stood in the Messages window while the diagnostics for that very
+file reported nothing. Two independent causes, both fixed: only the ACTIVE
+buffer was ever fed from a build (so a message about any other file was in
+no answer), and the reader that walks the IDE's message model had never
+worked at all.
+
+The second one was a defect from the day it shipped. The getter that hands
+out one message buffer returns an INTERFACE through a hidden result
+pointer; it was declared as returning a plain pointer, so every call
+handed the IDE whatever happened to be in that register as the destination
+of an interface assignment - four times per walk. The access violation
+that followed was caught, which is why it looked like "reads nothing"; it
+was recorded in September and treated by calling the walk less often.
+Measured in the IDE's own binaries for both bitnesses this time, because
+the hidden result does not sit in the same place on x86 and x64.
+
+Result on a real session: 158 lines read where it read 0, with the tabs
+named and counted.
+
+### The quick fix for W1058
+
+It needs no compile - the IDE's DelphiLSP reports the warning with a
+position, so the fix appears like the other quick fixes while you type.
+Measured over nine shapes: the position the compiler reports is the token
+AFTER the enclosing expression, not the end of the converted value, so the
+expression is delimited backwards from there and an argument that runs
+over several lines is wrapped across them.
+
+Where the cast would have to go around ONE OPERAND - a comparison, where
+the message does not say which side was converted - the fix refuses and
+says so rather than casting the whole expression.
+
+### A project group
+
+The identifier index was keyed on the ACTIVE project, so while project 1
+of a group was active, a unit of project 2 got project 1's scope: find
+unit, add-unit, "did you mean" and the uses cleanup only knew units that
+project does not compile - and nothing said so. The index now covers every
+project of the group, with a status row that names them; where two
+projects hold a same-named unit, the file that ASKS decides which one is
+meant, and only when exactly one candidate shares a project with it.
+
+### Smaller things
+
+- A type alias declares the name on its LEFT: the jump marks that one, not
+  the type on the right-hand side.
+- The quick-fix popup builds its rows from a rule instead of a list of fix
+  kinds - the kind added last was shown as a hint and could not be picked.
+- "Declare variable" plans into the enclosing anonymous method when the
+  use is inside one, where the variable belongs.
+- The parameter of a routine is renamed in BOTH headers, and a call from
+  another unit is no longer taken for it.
+- Several answers of the MCP tools say more precisely what happened: an
+  apply that matched nothing says so first, a check reports what it
+  examined, and an empty LSP answer names the cause it really has.
 
 ---
 

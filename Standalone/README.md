@@ -23,7 +23,7 @@ differs.
 to optimize:
 
 ```cmd
-cd C:\Beispiele\DelphiRefactoringLight\Standalone
+cd Standalone
 build.bat               REM Debug
 build.bat Release       REM Release
 ```
